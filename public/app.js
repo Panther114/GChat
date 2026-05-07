@@ -145,6 +145,13 @@ function clearGroupKey(groupId) {
 const LOCAL_CACHE_PREFIX = 'gchat:cache:group:';
 const LOCAL_SETTINGS_KEY = 'gchat:local-settings';
 const DEFAULT_WALLPAPER = "url('gchat_wallpaper.jpg')";
+const DEFAULT_WALLPAPER_PREVIEW_SRC = 'gchat_wallpaper.jpg';
+const WALLPAPER_SELECT_FIRST_MSG = 'Please choose an image first';
+const WALLPAPER_INVALID_TYPE_MSG = 'Please choose an image file';
+const WALLPAPER_TOO_LARGE_MSG = 'Wallpaper too large (max 10MB)';
+const WALLPAPER_READ_FAIL_MSG = 'Unable to read image';
+const WALLPAPER_SAVE_SYNC_FAIL_MSG = 'Wallpaper saved locally but could not sync to server. Changes may not appear on other devices.';
+const WALLPAPER_RESET_SYNC_FAIL_MSG = 'Wallpaper reset locally but could not sync to server. Changes may not appear on other devices.';
 
 function readLocalGroupCache(groupId) {
   try {
@@ -267,23 +274,24 @@ function applyWallpaperFromSettings() {
   const wallpaper = appLocalSettings.wallpaperDataUrl;
   document.documentElement.style.setProperty('--chat-wallpaper', wallpaper ? `url('${wallpaper}')` : DEFAULT_WALLPAPER);
   const preview = $('wallpaper-current-preview');
-  if (preview) preview.src = wallpaper || 'gchat_wallpaper.jpg';
+  if (preview) preview.src = wallpaper || DEFAULT_WALLPAPER_PREVIEW_SRC;
 }
 
 async function saveSettingsToServer() {
-  if (!currentUser) return;
+  if (!currentUser) return false;
   const payload = {
     wallpaperDataUrl: appLocalSettings.wallpaperDataUrl || null,
     hideProfileDot: !!appLocalSettings.hideProfileDot,
   };
   try {
-    await fetch('/api/auth/settings', {
+    const res = await fetch('/api/auth/settings', {
       method: 'PATCH',
       headers: apiHeaders(),
       body: JSON.stringify(payload),
     });
+    return res.ok;
   } catch {
-    // best effort only
+    return false;
   }
 }
 
@@ -584,6 +592,7 @@ const appLocalSettings = {
   wallpaperDataUrl: null,
   hideProfileDot: true,
 };
+let pendingWallpaperDataUrl = null;
 
 function renderCurrentUserAvatar(user = currentUser) {
   const avatar = $('user-avatar');
@@ -1778,11 +1787,69 @@ async function copyAttachmentToClipboard(msg) {
       return;
     }
 
-    await navigator.clipboard.writeText(data.filename);
-    showToast('Filename copied to clipboard', 'success');
+    if (typeof navigator.clipboard?.writeText === 'function') {
+      await navigator.clipboard.writeText(data.filename);
+      showToast('Filename copied to clipboard', 'success');
+      return;
+    }
+
+    const fallback = document.createElement('textarea');
+    fallback.value = data.filename;
+    fallback.setAttribute('readonly', '');
+    fallback.style.position = 'fixed';
+    fallback.style.left = '-9999px';
+    document.body.appendChild(fallback);
+    fallback.select();
+    console.warn('Using deprecated execCommand clipboard fallback');
+    const copied = typeof document.execCommand === 'function' && document.execCommand('copy');
+    document.body.removeChild(fallback);
+    if (copied) {
+      showToast('Filename copied to clipboard', 'success');
+      return;
+    }
+
+    showToast('Failed to copy file to clipboard', 'error');
+    return;
   } catch (err) {
     console.error('copyAttachmentToClipboard error:', err);
     showToast('Failed to copy file to clipboard', 'error');
+  }
+}
+
+function setWallpaperSaveState(enabled) {
+  const saveBtn = $('wallpaper-save-btn');
+  if (!saveBtn) return;
+  saveBtn.disabled = !enabled;
+}
+
+function resetWallpaperDraft() {
+  pendingWallpaperDataUrl = null;
+  $('wallpaper-error').textContent = '';
+  $('wallpaper-input').value = '';
+  setWallpaperSaveState(false);
+  applyWallpaperFromSettings();
+}
+
+async function saveWallpaperDraft() {
+  if (!pendingWallpaperDataUrl) {
+    $('wallpaper-error').textContent = WALLPAPER_SELECT_FIRST_MSG;
+    return;
+  }
+  appLocalSettings.wallpaperDataUrl = pendingWallpaperDataUrl;
+  applyWallpaperFromSettings();
+  writeLocalSettings(appLocalSettings);
+  const saved = await saveSettingsToServer();
+  if (!saved) {
+    showToast(WALLPAPER_SAVE_SYNC_FAIL_MSG, 'info');
+  }
+  $('wallpaper-modal').hidden = true;
+  resetWallpaperDraft();
+}
+
+function applyWallpaperDraftPreview(dataUrl) {
+  const preview = $('wallpaper-current-preview');
+  if (preview) {
+    preview.src = dataUrl || appLocalSettings.wallpaperDataUrl || DEFAULT_WALLPAPER_PREVIEW_SRC;
   }
 }
 
@@ -2128,6 +2195,7 @@ async function handleFileUpload(file) {
       loadedBytes: totalBytes,
       totalBytes,
     });
+    removePendingAttachment(uploadId);
   } catch(err) {
     console.error('File upload error:', err);
     removePendingAttachment(uploadId);
@@ -2709,37 +2777,50 @@ function setupEventListeners() {
   });
   $('wallpaper-btn').addEventListener('click', (e) => {
     e.stopPropagation();
-    $('wallpaper-error').textContent = '';
-    $('wallpaper-input').value = '';
+    resetWallpaperDraft();
     applyWallpaperFromSettings();
     $('wallpaper-modal').hidden = false;
   });
-  $('wallpaper-close-btn').addEventListener('click', () => { $('wallpaper-modal').hidden = true; });
+  $('wallpaper-close-btn').addEventListener('click', () => {
+    $('wallpaper-modal').hidden = true;
+    resetWallpaperDraft();
+  });
+  $('wallpaper-save-btn').addEventListener('click', saveWallpaperDraft);
   $('wallpaper-reset-btn').addEventListener('click', async () => {
     appLocalSettings.wallpaperDataUrl = null;
     applyWallpaperFromSettings();
     writeLocalSettings(appLocalSettings);
-    await saveSettingsToServer();
+    const saved = await saveSettingsToServer();
+    if (!saved) {
+      showToast(WALLPAPER_RESET_SYNC_FAIL_MSG, 'info');
+    }
     $('wallpaper-modal').hidden = true;
+    resetWallpaperDraft();
   });
   $('wallpaper-input').addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (!file) return;
+    $('wallpaper-error').textContent = '';
     if (!file.type.startsWith('image/')) {
-      $('wallpaper-error').textContent = 'Please choose an image file';
+      $('wallpaper-error').textContent = WALLPAPER_INVALID_TYPE_MSG;
+      setWallpaperSaveState(false);
       return;
     }
     if (file.size > 10 * 1024 * 1024) {
-      $('wallpaper-error').textContent = 'Wallpaper too large (max 10MB)';
+      $('wallpaper-error').textContent = WALLPAPER_TOO_LARGE_MSG;
+      setWallpaperSaveState(false);
       return;
     }
     const reader = new FileReader();
-    reader.onload = async (ev) => {
-      appLocalSettings.wallpaperDataUrl = String(ev.target.result || '');
-      applyWallpaperFromSettings();
-      writeLocalSettings(appLocalSettings);
-      await saveSettingsToServer();
-      $('wallpaper-modal').hidden = true;
+    reader.onload = (ev) => {
+      pendingWallpaperDataUrl = String(ev.target.result || '');
+      if (!pendingWallpaperDataUrl) {
+        $('wallpaper-error').textContent = WALLPAPER_READ_FAIL_MSG;
+        setWallpaperSaveState(false);
+        return;
+      }
+      applyWallpaperDraftPreview(pendingWallpaperDataUrl);
+      setWallpaperSaveState(true);
     };
     reader.readAsDataURL(file);
   });
