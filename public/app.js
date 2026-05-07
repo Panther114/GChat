@@ -362,8 +362,8 @@ async function loadSettingsFromServer() {
   }
 }
 
-function loadMergedLocalSettings() {
-  const local = readLocalSettings();
+function loadMergedLocalSettings(userId = currentUser && currentUser.id) {
+  const local = readLocalSettings(userId);
   if (typeof local.wallpaperDataUrl === 'string') appLocalSettings.wallpaperDataUrl = local.wallpaperDataUrl || null;
   if (typeof local.hideProfileDot === 'boolean') appLocalSettings.hideProfileDot = local.hideProfileDot;
   applyWallpaperFromSettings();
@@ -1108,7 +1108,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   migrateLegacyLocalSettings(currentUser.id);
   $('user-username').textContent = currentUser.username;
   renderCurrentUserAvatar(currentUser);
-  loadMergedLocalSettings();
+  loadMergedLocalSettings(currentUser.id);
   await loadSettingsFromServer();
   applyWallpaperFromSettings();
   writeLocalSettings(appLocalSettings, currentUser.id);
