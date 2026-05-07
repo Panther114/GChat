@@ -117,7 +117,7 @@ async function compressImage(file) {
 
 // ── CSRF ──────────────────────────────────────────────────────────────────────
 let csrfToken = null;
-let appVersionLabel = 'v1.0.2';
+let appVersionLabel = 'v—';
 async function fetchCsrfToken() {
   try {
     const r = await fetch('/api/auth/csrf');
@@ -187,6 +187,11 @@ function writeLocalSettings(settings) {
   }
 }
 
+function createUploadId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  return `upload-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 function escapeHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -246,6 +251,7 @@ function renderAvatarElement(target, userLike = {}) {
 
 function formatBytes(bytes) {
   const size = Math.max(0, Number(bytes) || 0);
+  if (size === 0) return '0 B';
   if (size < 1024) return `${size} B`;
   const units = ['KB', 'MB', 'GB', 'TB'];
   let value = size / 1024;
@@ -1076,7 +1082,7 @@ function buildGroupItem(g) {
   badge.id = 'badge-' + g.id;
   const cnt = unreadCounts[g.id] || 0;
   badge.textContent = '';
-  badge.hidden = appLocalSettings.hideProfileDot ? true : cnt === 0;
+  badge.hidden = appLocalSettings.hideProfileDot || cnt === 0;
 
   item.append(av, info, badge);
   item.addEventListener('click', () => selectGroup(g.id));
@@ -1179,7 +1185,7 @@ function updateUnreadBadge(groupId, count) {
   const badge = $('badge-' + groupId);
   if (!badge) return;
   badge.textContent = '';
-  badge.hidden = appLocalSettings.hideProfileDot ? true : count === 0;
+  badge.hidden = appLocalSettings.hideProfileDot || count === 0;
 }
 
 function updateGroupUnseenCount(groupId, messages = []) {
@@ -2060,7 +2066,7 @@ async function handleFileUpload(file) {
     showToast('Set group key first', 'error');
     return;
   }
-  const uploadId = crypto.randomUUID();
+  const uploadId = createUploadId();
 
   const MAX_RAW = 25 * 1024 * 1024 * 1024; // 25GB
 

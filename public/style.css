@@ -403,7 +403,7 @@ body.chat-body {
   background-image: var(--chat-wallpaper);
   background-position: center center;
   background-repeat: no-repeat;
-  background-size: cover;
+  background-size: contain;
   z-index: 0;
 }
 

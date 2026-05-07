@@ -19,7 +19,7 @@ const packageJson = require('./package.json');
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const MAX_ENCRYPTED_CONTENT_LENGTH = 34_000_000_000; // ~25GB + base64 overhead (25GB * 1.37)
-const APP_VERSION = packageJson.version || '1.0.2';
+const APP_VERSION = packageJson.version || '0.0.0';
 
 // ── App & Server ──────────────────────────────────────────────────────────────
 const app = express();
