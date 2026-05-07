@@ -25,6 +25,7 @@ const {
   shell,
   dialog,
   Notification,
+  clipboard,
 } = require('electron');
 const fs = require('fs');
 const path = require('path');
@@ -61,12 +62,28 @@ let lastLoadError = null;
 
 // ── Resolve icon path ─────────────────────────────────────────────────────────
 function getIconPath() {
-  const candidates = [
-    path.join(__dirname, '..', 'public', 'gchat_icon.png'),
-    path.join(__dirname, '..', 'build', 'icon.ico'),
-    path.join(process.resourcesPath, 'public', 'gchat_icon.png'),
-    path.join(process.resourcesPath, 'icon.ico'),
-  ];
+  const windows = process.platform === 'win32';
+  const mac = process.platform === 'darwin';
+  const candidates = windows
+    ? [
+        path.join(__dirname, '..', 'build', 'icon.ico'),
+        path.join(process.resourcesPath, 'icon.ico'),
+        path.join(__dirname, '..', 'public', 'gchat_icon.png'),
+        path.join(process.resourcesPath, 'public', 'gchat_icon.png'),
+      ]
+    : mac
+      ? [
+          path.join(__dirname, '..', 'build', 'icon.icns'),
+          path.join(process.resourcesPath, 'icon.icns'),
+          path.join(__dirname, '..', 'public', 'gchat_icon.png'),
+          path.join(process.resourcesPath, 'public', 'gchat_icon.png'),
+        ]
+      : [
+          path.join(__dirname, '..', 'build', 'icons', '512x512.png'),
+          path.join(process.resourcesPath, 'build', 'icons', '512x512.png'),
+          path.join(__dirname, '..', 'public', 'gchat_icon.png'),
+          path.join(process.resourcesPath, 'public', 'gchat_icon.png'),
+        ];
 
   for (const candidate of candidates) {
     if (!candidate) continue;
@@ -147,6 +164,9 @@ async function createWindow() {
 
   const iconPath = getIconPath();
   const icon = nativeImage.createFromPath(iconPath);
+  if (process.platform === 'darwin' && app.dock && !icon.isEmpty()) {
+    app.dock.setIcon(icon);
+  }
 
   mainWindow = new BrowserWindow({
     width,
@@ -385,6 +405,30 @@ ipcMain.handle('get-connection-context', async () => ({
   serverUrl: OFFICIAL_SERVER_URL,
   lastLoadError,
 }));
+
+ipcMain.handle('copy-binary-to-clipboard', async (_event, payload = {}) => {
+  try {
+    const base64 = typeof payload.base64 === 'string' ? payload.base64 : '';
+    const mimeType = typeof payload.mimeType === 'string' ? payload.mimeType : 'application/octet-stream';
+    const filename = typeof payload.filename === 'string' ? payload.filename : 'file';
+    const buffer = Buffer.from(base64, 'base64');
+    if (mimeType.startsWith('image/')) {
+      const image = nativeImage.createFromBuffer(buffer);
+      if (!image.isEmpty()) {
+        clipboard.writeImage(image);
+        return true;
+      }
+    }
+    clipboard.write({
+      text: filename,
+      bookmark: filename,
+    });
+    clipboard.writeBuffer('application/octet-stream', buffer);
+    return true;
+  } catch {
+    return false;
+  }
+});
 
 // ── Badge icon helper ─────────────────────────────────────────────────────────
 function createBadgeIcon(count) {

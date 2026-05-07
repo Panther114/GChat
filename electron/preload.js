@@ -102,4 +102,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getConnectionContext() {
     return ipcRenderer.invoke('get-connection-context');
   },
+
+  copyBinaryToClipboard(payload) {
+    return ipcRenderer.invoke('copy-binary-to-clipboard', payload);
+  },
 });
