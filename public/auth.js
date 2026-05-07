@@ -14,7 +14,7 @@ function readStoredSettings(key) {
 
 function toWallpaperCssValue(dataUrl) {
   if (!dataUrl) return "url('gchat_wallpaper.jpg')";
-  return `url("${String(dataUrl).replace(/"/g, '\\"')}")`;
+  return `url(${JSON.stringify(String(dataUrl))})`;
 }
 
 function applyAuthWallpaperFromStorage() {

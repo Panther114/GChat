@@ -320,7 +320,7 @@ function formatBytes(bytes) {
 
 function wallpaperCssValue(dataUrl) {
   if (!dataUrl) return DEFAULT_WALLPAPER;
-  return `url("${String(dataUrl).replace(/"/g, '\\"')}")`;
+  return `url(${JSON.stringify(String(dataUrl))})`;
 }
 
 function applyWallpaperFromSettings() {
