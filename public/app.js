@@ -145,6 +145,13 @@ function clearGroupKey(groupId) {
 const LOCAL_CACHE_PREFIX = 'gchat:cache:group:';
 const LOCAL_SETTINGS_KEY = 'gchat:local-settings';
 const DEFAULT_WALLPAPER = "url('gchat_wallpaper.jpg')";
+const DEFAULT_WALLPAPER_PREVIEW_SRC = 'gchat_wallpaper.jpg';
+const WALLPAPER_SELECT_FIRST_MSG = 'Please choose an image first';
+const WALLPAPER_INVALID_TYPE_MSG = 'Please choose an image file';
+const WALLPAPER_TOO_LARGE_MSG = 'Wallpaper too large (max 10MB)';
+const WALLPAPER_READ_FAIL_MSG = 'Unable to read image';
+const WALLPAPER_SAVE_SYNC_FAIL_MSG = 'Wallpaper saved locally but could not sync to server. Changes may not appear on other devices.';
+const WALLPAPER_RESET_SYNC_FAIL_MSG = 'Wallpaper reset locally but could not sync to server. Changes may not appear on other devices.';
 
 function readLocalGroupCache(groupId) {
   try {
@@ -267,23 +274,24 @@ function applyWallpaperFromSettings() {
   const wallpaper = appLocalSettings.wallpaperDataUrl;
   document.documentElement.style.setProperty('--chat-wallpaper', wallpaper ? `url('${wallpaper}')` : DEFAULT_WALLPAPER);
   const preview = $('wallpaper-current-preview');
-  if (preview) preview.src = wallpaper || 'gchat_wallpaper.jpg';
+  if (preview) preview.src = wallpaper || DEFAULT_WALLPAPER_PREVIEW_SRC;
 }
 
 async function saveSettingsToServer() {
-  if (!currentUser) return;
+  if (!currentUser) return false;
   const payload = {
     wallpaperDataUrl: appLocalSettings.wallpaperDataUrl || null,
     hideProfileDot: !!appLocalSettings.hideProfileDot,
   };
   try {
-    await fetch('/api/auth/settings', {
+    const res = await fetch('/api/auth/settings', {
       method: 'PATCH',
       headers: apiHeaders(),
       body: JSON.stringify(payload),
     });
+    return res.ok;
   } catch {
-    // best effort only
+    return false;
   }
 }
 
@@ -1779,7 +1787,7 @@ async function copyAttachmentToClipboard(msg) {
       return;
     }
 
-    if (navigator.clipboard?.writeText) {
+    if (typeof navigator.clipboard?.writeText === 'function') {
       await navigator.clipboard.writeText(data.filename);
       showToast('Filename copied to clipboard', 'success');
       return;
@@ -1792,14 +1800,16 @@ async function copyAttachmentToClipboard(msg) {
     fallback.style.left = '-9999px';
     document.body.appendChild(fallback);
     fallback.select();
-    const copied = document.execCommand('copy');
+    console.warn('Using deprecated execCommand clipboard fallback');
+    const copied = typeof document.execCommand === 'function' && document.execCommand('copy');
     document.body.removeChild(fallback);
     if (copied) {
       showToast('Filename copied to clipboard', 'success');
       return;
     }
 
-    throw new Error('Clipboard API unavailable');
+    showToast('Failed to copy file to clipboard', 'error');
+    return;
   } catch (err) {
     console.error('copyAttachmentToClipboard error:', err);
     showToast('Failed to copy file to clipboard', 'error');
@@ -1822,13 +1832,16 @@ function resetWallpaperDraft() {
 
 async function saveWallpaperDraft() {
   if (!pendingWallpaperDataUrl) {
-    $('wallpaper-error').textContent = 'Please choose an image first';
+    $('wallpaper-error').textContent = WALLPAPER_SELECT_FIRST_MSG;
     return;
   }
   appLocalSettings.wallpaperDataUrl = pendingWallpaperDataUrl;
   applyWallpaperFromSettings();
   writeLocalSettings(appLocalSettings);
-  await saveSettingsToServer();
+  const saved = await saveSettingsToServer();
+  if (!saved) {
+    showToast(WALLPAPER_SAVE_SYNC_FAIL_MSG, 'info');
+  }
   $('wallpaper-modal').hidden = true;
   resetWallpaperDraft();
 }
@@ -1836,7 +1849,7 @@ async function saveWallpaperDraft() {
 function applyWallpaperDraftPreview(dataUrl) {
   const preview = $('wallpaper-current-preview');
   if (preview) {
-    preview.src = dataUrl || appLocalSettings.wallpaperDataUrl || 'gchat_wallpaper.jpg';
+    preview.src = dataUrl || appLocalSettings.wallpaperDataUrl || DEFAULT_WALLPAPER_PREVIEW_SRC;
   }
 }
 
@@ -2777,7 +2790,10 @@ function setupEventListeners() {
     appLocalSettings.wallpaperDataUrl = null;
     applyWallpaperFromSettings();
     writeLocalSettings(appLocalSettings);
-    await saveSettingsToServer();
+    const saved = await saveSettingsToServer();
+    if (!saved) {
+      showToast(WALLPAPER_RESET_SYNC_FAIL_MSG, 'info');
+    }
     $('wallpaper-modal').hidden = true;
     resetWallpaperDraft();
   });
@@ -2786,12 +2802,12 @@ function setupEventListeners() {
     if (!file) return;
     $('wallpaper-error').textContent = '';
     if (!file.type.startsWith('image/')) {
-      $('wallpaper-error').textContent = 'Please choose an image file';
+      $('wallpaper-error').textContent = WALLPAPER_INVALID_TYPE_MSG;
       setWallpaperSaveState(false);
       return;
     }
     if (file.size > 10 * 1024 * 1024) {
-      $('wallpaper-error').textContent = 'Wallpaper too large (max 10MB)';
+      $('wallpaper-error').textContent = WALLPAPER_TOO_LARGE_MSG;
       setWallpaperSaveState(false);
       return;
     }
@@ -2799,7 +2815,7 @@ function setupEventListeners() {
     reader.onload = (ev) => {
       pendingWallpaperDataUrl = String(ev.target.result || '');
       if (!pendingWallpaperDataUrl) {
-        $('wallpaper-error').textContent = 'Unable to read image';
+        $('wallpaper-error').textContent = WALLPAPER_READ_FAIL_MSG;
         setWallpaperSaveState(false);
         return;
       }
