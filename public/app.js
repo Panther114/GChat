@@ -117,6 +117,7 @@ async function compressImage(file) {
 
 // ── CSRF ──────────────────────────────────────────────────────────────────────
 let csrfToken = null;
+let appVersionLabel = 'v—';
 async function fetchCsrfToken() {
   try {
     const r = await fetch('/api/auth/csrf');
@@ -139,6 +140,56 @@ function clearGroupKey(groupId) {
   const old = localStorage.getItem('gk:' + groupId);
   if (old) derivedKeyCache.delete(old + '\x00' + groupId);
   localStorage.removeItem('gk:' + groupId);
+}
+
+const LOCAL_CACHE_PREFIX = 'gchat:cache:group:';
+const LOCAL_SETTINGS_KEY = 'gchat:local-settings';
+const DEFAULT_WALLPAPER = "url('gchat_wallpaper.jpg')";
+
+function readLocalGroupCache(groupId) {
+  try {
+    const raw = localStorage.getItem(LOCAL_CACHE_PREFIX + groupId);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function writeLocalGroupCache(groupId, cache) {
+  try {
+    localStorage.setItem(LOCAL_CACHE_PREFIX + groupId, JSON.stringify({
+      messages: cache.messages || [],
+      members: cache.members || [],
+      oldestMessageId: cache.oldestMessageId || null,
+      updatedAt: Date.now(),
+    }));
+  } catch {
+    // best effort only
+  }
+}
+
+function readLocalSettings() {
+  try {
+    const raw = localStorage.getItem(LOCAL_SETTINGS_KEY);
+    if (!raw) return {};
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+function writeLocalSettings(settings) {
+  try {
+    localStorage.setItem(LOCAL_SETTINGS_KEY, JSON.stringify(settings));
+  } catch {
+    // best effort only
+  }
+}
+
+function createUploadId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  return `upload-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -196,6 +247,63 @@ function renderAvatarElement(target, userLike = {}) {
   }
   target.style.background = userLike.iconColor || userLike.senderColor || '#4A90D9';
   target.textContent = username[0].toUpperCase();
+}
+
+function formatBytes(bytes) {
+  const size = Math.max(0, Number(bytes) || 0);
+  if (size === 0) return '0 B';
+  if (size < 1024) return `${size} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let value = size / 1024;
+  let idx = 0;
+  while (value >= 1024 && idx < units.length - 1) {
+    value /= 1024;
+    idx += 1;
+  }
+  return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[idx]}`;
+}
+
+function applyWallpaperFromSettings() {
+  const wallpaper = appLocalSettings.wallpaperDataUrl;
+  document.documentElement.style.setProperty('--chat-wallpaper', wallpaper ? `url('${wallpaper}')` : DEFAULT_WALLPAPER);
+  const preview = $('wallpaper-current-preview');
+  if (preview) preview.src = wallpaper || 'gchat_wallpaper.jpg';
+}
+
+async function saveSettingsToServer() {
+  if (!currentUser) return;
+  const payload = {
+    wallpaperDataUrl: appLocalSettings.wallpaperDataUrl || null,
+    hideProfileDot: !!appLocalSettings.hideProfileDot,
+  };
+  try {
+    await fetch('/api/auth/settings', {
+      method: 'PATCH',
+      headers: apiHeaders(),
+      body: JSON.stringify(payload),
+    });
+  } catch {
+    // best effort only
+  }
+}
+
+async function loadSettingsFromServer() {
+  try {
+    const res = await fetch('/api/auth/settings');
+    if (!res.ok) return;
+    const data = await res.json();
+    if (typeof data.wallpaperDataUrl === 'string') appLocalSettings.wallpaperDataUrl = data.wallpaperDataUrl || null;
+    if (typeof data.hideProfileDot === 'boolean') appLocalSettings.hideProfileDot = data.hideProfileDot;
+  } catch {
+    // ignore and use local settings
+  }
+}
+
+function loadMergedLocalSettings() {
+  const local = readLocalSettings();
+  if (typeof local.wallpaperDataUrl === 'string') appLocalSettings.wallpaperDataUrl = local.wallpaperDataUrl || null;
+  if (typeof local.hideProfileDot === 'boolean') appLocalSettings.hideProfileDot = local.hideProfileDot;
+  applyWallpaperFromSettings();
 }
 
 function normalizeDeliveryCounts(totalRecipients, readCount) {
@@ -386,6 +494,8 @@ function showImageViewer(imageUrl) {
   const modal = $('image-viewer-modal');
   const img = $('image-viewer-img');
   img.src = imageUrl;
+  imageViewerZoom = 1;
+  img.style.transform = 'scale(1)';
   modal.hidden = false;
 }
 
@@ -394,6 +504,15 @@ function hideImageViewer() {
   const img = $('image-viewer-img');
   modal.hidden = true;
   img.src = '';
+  img.style.transform = 'scale(1)';
+  imageViewerZoom = 1;
+}
+
+function updateImageViewerZoom(nextZoom) {
+  const img = $('image-viewer-img');
+  imageViewerZoom = Math.max(1, Math.min(6, nextZoom));
+  img.style.transform = `scale(${imageViewerZoom})`;
+  img.style.cursor = imageViewerZoom > 1 ? 'zoom-out' : 'zoom-in';
 }
 
 function isMessagesPinnedToBottom() {
@@ -459,7 +578,12 @@ let pendingReadMessageIds = new Set();
 let pendingReadTimers = new Map();
 const groupDataCache = new Map();
 const groupPreloadPromises = new Map();
-let activeUploadToken = 0;
+const pendingAttachmentRows = new Map();
+let imageViewerZoom = 1;
+const appLocalSettings = {
+  wallpaperDataUrl: null,
+  hideProfileDot: true,
+};
 
 function renderCurrentUserAvatar(user = currentUser) {
   const avatar = $('user-avatar');
@@ -469,12 +593,13 @@ function renderCurrentUserAvatar(user = currentUser) {
 
 function ensureGroupCacheEntry(groupId) {
   if (!groupDataCache.has(groupId)) {
+    const local = readLocalGroupCache(groupId);
     groupDataCache.set(groupId, {
-      messages: null,
+      messages: local?.messages || null,
       messageRows: null,
-      members: null,
-      oldestMessageId: null,
-      rowsDirty: false,
+      members: local?.members || null,
+      oldestMessageId: local?.oldestMessageId || null,
+      rowsDirty: !!local?.messages,
     });
   }
   return groupDataCache.get(groupId);
@@ -720,6 +845,11 @@ const ICON_SPECS = {
     ['path', { d: 'M20 21a8 8 0 0 0-16 0' }],
     ['circle', { cx: '12', cy: '7', r: '4' }],
   ],
+  image: [
+    ['rect', { x: '3', y: '5', width: '18', height: '14', rx: '2' }],
+    ['circle', { cx: '9', cy: '10', r: '1.5' }],
+    ['path', { d: 'm21 15-5-5L5 21' }],
+  ],
   reply: [
     ['polyline', { points: '9 17 4 12 9 7' }],
     ['path', { d: 'M20 18v-2a4 4 0 0 0-4-4H4' }],
@@ -822,6 +952,7 @@ function toggleRightPanel() {
 // ── Init ──────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
   applyStaticIcons();
+  loadMergedLocalSettings();
   await fetchCsrfToken();
   try {
     const res = await fetch('/api/auth/me');
@@ -835,6 +966,19 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Set user display
   $('user-username').textContent = currentUser.username;
   renderCurrentUserAvatar(currentUser);
+  await loadSettingsFromServer();
+  applyWallpaperFromSettings();
+  writeLocalSettings(appLocalSettings);
+  try {
+    const versionRes = await fetch('/api/meta/version');
+    if (versionRes.ok) {
+      const info = await versionRes.json();
+      if (info && typeof info.version === 'string') appVersionLabel = 'v' + info.version;
+    }
+  } catch {
+    // keep fallback
+  }
+  $('app-version-label').textContent = appVersionLabel;
 
   await loadGroups();
   preloadAllGroups();
@@ -855,7 +999,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (window.electronAPI) {
     window.electronAPI.onFocusGroup((groupId) => {
       const target = groups.find(g => g.id === groupId);
-      if (target) selectGroup(target);
+      if (target) selectGroup(target.id);
     });
   }
 
@@ -876,6 +1020,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       $('right-panel').classList.remove('open');
     }
     updateMobilePanelOverlay();
+  });
+  window.addEventListener('storage', (event) => {
+    if (event.key !== LOCAL_SETTINGS_KEY) return;
+    loadMergedLocalSettings();
+    renderGroupList();
   });
 });
 
@@ -933,7 +1082,7 @@ function buildGroupItem(g) {
   badge.id = 'badge-' + g.id;
   const cnt = unreadCounts[g.id] || 0;
   badge.textContent = '';
-  badge.hidden = cnt === 0;
+  badge.hidden = appLocalSettings.hideProfileDot || cnt === 0;
 
   item.append(av, info, badge);
   item.addEventListener('click', () => selectGroup(g.id));
@@ -1036,7 +1185,7 @@ function updateUnreadBadge(groupId, count) {
   const badge = $('badge-' + groupId);
   if (!badge) return;
   badge.textContent = '';
-  badge.hidden = count === 0;
+  badge.hidden = appLocalSettings.hideProfileDot || count === 0;
 }
 
 function updateGroupUnseenCount(groupId, messages = []) {
@@ -1053,6 +1202,7 @@ async function selectGroup(groupId) {
   currentGroupId = groupId;
   currentGroupData = groups.find(g => g.id === groupId) || null;
   replyingTo = null;
+  pendingAttachmentRows.clear();
   whisperRecipients = [];
   messageMode = 'normal';
   updateWhisperBtn();
@@ -1146,6 +1296,7 @@ async function loadMessages(groupId, before) {
       cache.messageRows = await buildMessageRows(msgs, groupId);
       cache.oldestMessageId = msgs.length > 0 ? msgs[0].id : null;
       cache.rowsDirty = false;
+      writeLocalGroupCache(groupId, cache);
       updateGroupUnseenCount(groupId, msgs);
       await updateGroupPreviewFromMessage(groupId, msgs.length ? msgs[msgs.length - 1] : null);
     } else {
@@ -1172,6 +1323,7 @@ async function loadMessages(groupId, before) {
       cache.messageRows = [...rows, ...(cache.messageRows || [])];
       cache.oldestMessageId = msgs[0].id;
       cache.rowsDirty = false;
+      writeLocalGroupCache(groupId, cache);
       // Restore scroll position
       area.scrollTop = area.scrollHeight - prevScrollHeight;
     }
@@ -1187,7 +1339,9 @@ async function loadMembers(groupId) {
   try {
     const res = await fetch(`/api/groups/${groupId}/members`);
     if (!res.ok) return;
-    ensureGroupCacheEntry(groupId).members = await res.json();
+    const cache = ensureGroupCacheEntry(groupId);
+    cache.members = await res.json();
+    writeLocalGroupCache(groupId, cache);
   } catch(err) { console.error('loadMembers error:', err); }
 }
 
@@ -1502,6 +1656,7 @@ async function appendMessageBubble(msg, scroll, groupId = currentGroupId) {
   cache.messageRows.push(row);
   cache.oldestMessageId = allMessages.length ? allMessages[0].id : null;
   cache.rowsDirty = false;
+  writeLocalGroupCache(groupId, cache);
 
   // Scroll behavior
   if (scroll !== false) {
@@ -1551,7 +1706,7 @@ function showContextMenu(e, msg, text) {
   ctxMsg = msg; ctxText = text;
   const menu = $('ctx-menu');
   const isAttachment = msg.type === 'image' || msg.type === 'file';
-  $('ctx-reply').hidden = isAttachment;
+  $('ctx-reply').hidden = false;
   $('ctx-download').hidden = !isAttachment;
   setElementIcon($('ctx-copy'), 'copy', { label: isAttachment ? 'Copy' : 'Copy Text' });
   menu.hidden = false;
@@ -1593,14 +1748,38 @@ async function getAttachmentData(msg) {
 async function copyAttachmentToClipboard(msg) {
   const data = await getAttachmentData(msg);
   if (!data) return;
-  if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
-    showToast('Clipboard file copy is not supported here. Please download instead.', 'error');
-    return;
-  }
   try {
-    const item = new ClipboardItem({ [data.mimeType]: data.blob });
-    await navigator.clipboard.write([item]);
-    showToast('Copied to clipboard', 'success');
+    if (window.electronAPI?.copyBinaryToClipboard) {
+      const ab = await data.blob.arrayBuffer();
+      const bytes = new Uint8Array(ab);
+      let binary = '';
+      const step = 32768;
+      for (let i = 0; i < bytes.length; i += step) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + step));
+      }
+      const ok = await window.electronAPI.copyBinaryToClipboard({
+        base64: btoa(binary),
+        mimeType: data.mimeType,
+        filename: data.filename,
+      });
+      if (ok) {
+        showToast('Copied to clipboard', 'success');
+        return;
+      }
+    }
+
+    if (navigator.clipboard?.write && typeof ClipboardItem !== 'undefined') {
+      const item = new ClipboardItem({
+        [data.mimeType]: data.blob,
+        'text/plain': new Blob([data.filename], { type: 'text/plain' }),
+      });
+      await navigator.clipboard.write([item]);
+      showToast('Copied to clipboard', 'success');
+      return;
+    }
+
+    await navigator.clipboard.writeText(data.filename);
+    showToast('Filename copied to clipboard', 'success');
   } catch (err) {
     console.error('copyAttachmentToClipboard error:', err);
     showToast('Failed to copy file to clipboard', 'error');
@@ -1777,44 +1956,86 @@ function showToast(msg, type = 'info') {
 }
 
 // ── File / Image upload ───────────────────────────────────────────────────────
-function beginUploadProgress() {
-  activeUploadToken += 1;
-  const token = activeUploadToken;
-  const track = $('upload-progress-track');
-  const bar = $('upload-progress-bar');
-  if (!track || !bar) return token;
-  track.hidden = false;
-  track.classList.add('indeterminate');
-  bar.style.transform = 'scaleX(0)';
-  return token;
-}
+function ensurePendingAttachmentRow(payload) {
+  const { uploadId, senderId, senderName, senderColor, type, filename, totalBytes } = payload;
+  if (!uploadId || pendingAttachmentRows.has(uploadId) || payload.groupId !== currentGroupId) return;
 
-function setUploadProgress(token, value) {
-  if (token !== activeUploadToken) return;
-  const track = $('upload-progress-track');
-  const bar = $('upload-progress-bar');
-  if (!track || !bar) return;
-  const clamped = Math.max(0, Math.min(1, Number(value) || 0));
-  track.hidden = false;
-  track.classList.remove('indeterminate');
-  bar.style.transform = `scaleX(${clamped})`;
-}
+  const isOwn = senderId === currentUser.id;
+  const row = document.createElement('div');
+  row.className = 'msg-row pending' + (isOwn ? ' own' : '');
+  row.dataset.uploadId = uploadId;
 
-function endUploadProgress(token, ok) {
-  if (token !== activeUploadToken) return;
-  const track = $('upload-progress-track');
-  const bar = $('upload-progress-bar');
-  if (!track || !bar) return;
-  if (ok) {
-    track.classList.remove('indeterminate');
-    bar.style.transform = 'scaleX(1)';
+  const content = document.createElement('div');
+  content.className = 'msg-content';
+  if (!isOwn) {
+    const nameEl = document.createElement('div');
+    nameEl.className = 'msg-sender-name';
+    nameEl.textContent = senderName || 'Unknown';
+    content.appendChild(nameEl);
   }
-  setTimeout(() => {
-    if (token !== activeUploadToken) return;
-    track.hidden = true;
-    track.classList.remove('indeterminate');
-    bar.style.transform = 'scaleX(0)';
-  }, ok ? 240 : 0);
+
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble';
+  const progressWrap = document.createElement('div');
+  progressWrap.className = 'msg-attachment-progress';
+  const progressTrack = document.createElement('div');
+  progressTrack.className = 'msg-attachment-progress-track';
+  const progressFill = document.createElement('div');
+  progressFill.className = 'msg-attachment-progress-fill';
+  const progressLabel = document.createElement('span');
+  progressLabel.className = 'msg-attachment-progress-label';
+  progressLabel.textContent = `0 B / ${formatBytes(totalBytes)}`;
+  progressTrack.appendChild(progressFill);
+  progressWrap.append(progressTrack, progressLabel);
+  bubble.appendChild(progressWrap);
+
+  if (type === 'image') {
+    const locked = document.createElement('div');
+    locked.className = 'msg-image-locked';
+    locked.appendChild(createIcon('image'));
+    bubble.appendChild(locked);
+  } else {
+    const text = document.createElement('span');
+    text.className = 'msg-text';
+    text.textContent = filename || 'file';
+    bubble.appendChild(text);
+  }
+
+  const meta = document.createElement('span');
+  meta.className = 'msg-meta';
+  meta.textContent = 'Uploading…';
+  bubble.appendChild(meta);
+  content.appendChild(bubble);
+
+  if (isOwn) {
+    row.append(content);
+  } else {
+    const avatar = document.createElement('div');
+    avatar.className = 'msg-avatar';
+    renderAvatarElement(avatar, { username: senderName, iconColor: senderColor });
+    row.append(avatar, content);
+  }
+  messagesArea().appendChild(row);
+  pendingAttachmentRows.set(uploadId, row);
+  pinMessagesToBottom(true);
+}
+
+function updatePendingAttachmentProgress(uploadId, loadedBytes, totalBytes) {
+  const row = pendingAttachmentRows.get(uploadId);
+  if (!row) return;
+  const fill = row.querySelector('.msg-attachment-progress-fill');
+  const label = row.querySelector('.msg-attachment-progress-label');
+  const total = Math.max(1, Number(totalBytes) || 1);
+  const loaded = Math.max(0, Math.min(total, Number(loadedBytes) || 0));
+  if (fill) fill.style.width = `${(loaded / total) * 100}%`;
+  if (label) label.textContent = `${formatBytes(loaded)} / ${formatBytes(total)}`;
+}
+
+function removePendingAttachment(uploadId) {
+  const row = pendingAttachmentRows.get(uploadId);
+  if (!row) return;
+  row.remove();
+  pendingAttachmentRows.delete(uploadId);
 }
 
 function uploadEncryptedAttachment(groupId, body, onProgress) {
@@ -1825,7 +2046,7 @@ function uploadEncryptedAttachment(groupId, body, onProgress) {
     for (const [key, val] of Object.entries(headers)) xhr.setRequestHeader(key, val);
     xhr.upload.onprogress = (evt) => {
       if (!evt.lengthComputable || typeof onProgress !== 'function') return;
-      onProgress(evt.loaded / evt.total);
+      onProgress(evt.loaded, evt.total);
     };
     xhr.onerror = () => reject(new Error('Upload failed'));
     xhr.onload = () => {
@@ -1840,13 +2061,12 @@ function uploadEncryptedAttachment(groupId, body, onProgress) {
 
 async function handleFileUpload(file) {
   if (!currentGroupId || !socket) return;
-  const uploadToken = beginUploadProgress();
   const key = getGroupKey(currentGroupId);
   if (!key) {
-    endUploadProgress(uploadToken, false);
     showToast('Set group key first', 'error');
     return;
   }
+  const uploadId = createUploadId();
 
   const MAX_RAW = 25 * 1024 * 1024 * 1024; // 25GB
 
@@ -1856,40 +2076,62 @@ async function handleFileUpload(file) {
   if (isImage) {
     processedFile = await compressImage(file);
     if (processedFile.size > MAX_RAW) {
-      endUploadProgress(uploadToken, false);
       showToast('Image too large (max 25GB after compression)', 'error');
       return;
     }
   } else {
     if (file.size > MAX_RAW) {
-      endUploadProgress(uploadToken, false);
       showToast('File too large (max 25GB)', 'error');
       return;
     }
   }
 
   try {
-    setUploadProgress(uploadToken, 0.25);
-    const buffer = await processedFile.arrayBuffer();
-    setUploadProgress(uploadToken, 0.5);
-    const { encryptedContent, iv } = await encryptBytes(buffer, key, currentGroupId);
-    setUploadProgress(uploadToken, 0.6);
+    const totalBytes = processedFile.size;
+    const progressPayload = {
+      groupId: currentGroupId,
+      uploadId,
+      type: isImage ? 'image' : 'file',
+      filename: file.name,
+      totalBytes,
+      loadedBytes: 0,
+      senderId: currentUser.id,
+      senderName: currentUser.username,
+      senderColor: currentUser.iconColor,
+    };
+    ensurePendingAttachmentRow(progressPayload);
+    socket.emit('attachment_upload_progress', progressPayload);
 
-    const body = { encryptedContent, iv, type: isImage ? 'image' : 'file', filename: file.name };
-    const res = await uploadEncryptedAttachment(currentGroupId, body, (ratio) => {
-      setUploadProgress(uploadToken, 0.6 + ratio * 0.4);
+    const buffer = await processedFile.arrayBuffer();
+    const { encryptedContent, iv } = await encryptBytes(buffer, key, currentGroupId);
+
+    const body = { encryptedContent, iv, type: isImage ? 'image' : 'file', filename: file.name, clientUploadId: uploadId };
+    const res = await uploadEncryptedAttachment(currentGroupId, body, (loaded, total) => {
+      updatePendingAttachmentProgress(uploadId, loaded, total);
+      socket.emit('attachment_upload_progress', {
+        ...progressPayload,
+        loadedBytes: loaded,
+        totalBytes: total || totalBytes,
+      });
     });
 
     if (!res.ok) {
-      endUploadProgress(uploadToken, false);
+      removePendingAttachment(uploadId);
+      socket.emit('attachment_upload_failed', { groupId: currentGroupId, uploadId });
       const d = res.data || {};
       showToast(d.error || 'Upload failed', 'error');
       return;
     }
-    endUploadProgress(uploadToken, true);
+    updatePendingAttachmentProgress(uploadId, totalBytes, totalBytes);
+    socket.emit('attachment_upload_progress', {
+      ...progressPayload,
+      loadedBytes: totalBytes,
+      totalBytes,
+    });
   } catch(err) {
     console.error('File upload error:', err);
-    endUploadProgress(uploadToken, false);
+    removePendingAttachment(uploadId);
+    socket.emit('attachment_upload_failed', { groupId: currentGroupId, uploadId });
     showToast('Upload failed', 'error');
   }
 }
@@ -1916,7 +2158,19 @@ function initSocket() {
     $('conn-label').textContent = 'Connection error';
   });
 
+  socket.on('attachment_upload_progress', (payload) => {
+    if (!payload || payload.groupId !== currentGroupId) return;
+    ensurePendingAttachmentRow(payload);
+    updatePendingAttachmentProgress(payload.uploadId, payload.loadedBytes, payload.totalBytes);
+  });
+
+  socket.on('attachment_upload_failed', ({ groupId, uploadId }) => {
+    if (groupId !== currentGroupId) return;
+    removePendingAttachment(uploadId);
+  });
+
   socket.on('new_message', async (msg) => {
+    if (msg.clientUploadId) removePendingAttachment(msg.clientUploadId);
     // Increment page title notification if document is not focused
     if (!document.hasFocus() && msg.senderId !== currentUser.id) {
       unreadNotificationCount++;
@@ -1929,6 +2183,7 @@ function initSocket() {
       if (cache.messages) {
         cache.messages.push(msg);
         cache.oldestMessageId = cache.messages.length ? cache.messages[0].id : null;
+        writeLocalGroupCache(msg.groupId, cache);
       }
       if (cache.messageRows && !cache.rowsDirty) {
         const prevMsg = cache.messages && cache.messages.length > 1 ? cache.messages[cache.messages.length - 2] : null;
@@ -2002,6 +2257,7 @@ function initSocket() {
         cache.rowsDirty = true;
       }
       cache.oldestMessageId = cache.messages.length ? cache.messages[0].id : null;
+      writeLocalGroupCache(groupId, cache);
       if (groupId === currentGroupId) {
         allMessages = cache.messages;
       }
@@ -2051,6 +2307,7 @@ function initSocket() {
       stored.editedAt = editedAt;
       if (groupId !== currentGroupId) cache.rowsDirty = true;
       if (groupId === currentGroupId) allMessages = cache.messages;
+      writeLocalGroupCache(groupId, cache);
       break;
     }
   });
@@ -2062,6 +2319,7 @@ function initSocket() {
     cache.members = cache.members || [];
     cache.oldestMessageId = null;
     cache.rowsDirty = false;
+    writeLocalGroupCache(groupId, cache);
     if (groupId !== currentGroupId) return;
     renderGroupFromCache(groupId);
     addSystemMessage('Chat history was cleared');
@@ -2112,6 +2370,7 @@ function initSocket() {
     const cache = ensureGroupCacheEntry(groupId);
     if (cache.members && !cache.members.find(m => m.id === userId)) {
       cache.members.push({ id: userId, username, iconColor, profilePicture: profilePicture || null });
+      writeLocalGroupCache(groupId, cache);
     }
     if (groupId !== currentGroupId) return;
     addSystemMessage(username + ' joined the group');
@@ -2123,7 +2382,10 @@ function initSocket() {
 
   socket.on('member_left', ({ userId, username, groupId }) => {
     const cache = ensureGroupCacheEntry(groupId);
-    if (cache.members) cache.members = cache.members.filter((member) => member.id !== userId);
+    if (cache.members) {
+      cache.members = cache.members.filter((member) => member.id !== userId);
+      writeLocalGroupCache(groupId, cache);
+    }
     if (groupId !== currentGroupId) return;
     addSystemMessage(username + ' left the group');
     members = cache.members || members.filter(m => m.id !== userId);
@@ -2444,6 +2706,42 @@ function setupEventListeners() {
     e.stopPropagation();
     await fetch('/api/auth/logout', { method: 'POST', headers: apiHeaders() });
     window.location.href = 'index.html';
+  });
+  $('wallpaper-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    $('wallpaper-error').textContent = '';
+    $('wallpaper-input').value = '';
+    applyWallpaperFromSettings();
+    $('wallpaper-modal').hidden = false;
+  });
+  $('wallpaper-close-btn').addEventListener('click', () => { $('wallpaper-modal').hidden = true; });
+  $('wallpaper-reset-btn').addEventListener('click', async () => {
+    appLocalSettings.wallpaperDataUrl = null;
+    applyWallpaperFromSettings();
+    writeLocalSettings(appLocalSettings);
+    await saveSettingsToServer();
+    $('wallpaper-modal').hidden = true;
+  });
+  $('wallpaper-input').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      $('wallpaper-error').textContent = 'Please choose an image file';
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      $('wallpaper-error').textContent = 'Wallpaper too large (max 10MB)';
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = async (ev) => {
+      appLocalSettings.wallpaperDataUrl = String(ev.target.result || '');
+      applyWallpaperFromSettings();
+      writeLocalSettings(appLocalSettings);
+      await saveSettingsToServer();
+      $('wallpaper-modal').hidden = true;
+    };
+    reader.readAsDataURL(file);
   });
 
   // Profile modal
@@ -2958,9 +3256,14 @@ function setupEventListeners() {
   });
 
   // Image viewer
-  $('image-viewer-close').addEventListener('click', hideImageViewer);
   $('image-viewer-overlay').addEventListener('click', hideImageViewer);
-  $('image-viewer-img').addEventListener('click', hideImageViewer);
+  $('image-viewer-img').addEventListener('click', () => {
+    updateImageViewerZoom(imageViewerZoom > 1 ? 1 : imageViewerZoom + 1);
+  });
+  $('image-viewer-img').addEventListener('wheel', (e) => {
+    e.preventDefault();
+    updateImageViewerZoom(imageViewerZoom + (e.deltaY < 0 ? 0.2 : -0.2));
+  }, { passive: false });
 }
 
 async function loadOlderMessages() {
@@ -3010,6 +3313,7 @@ async function loadOlderMessages() {
     cache.messageRows = [...rows, ...(cache.messageRows || [])];
     cache.oldestMessageId = oldestMessageId;
     cache.rowsDirty = false;
+    writeLocalGroupCache(currentGroupId, cache);
 
     // Restore scroll position in one step
     area.scrollTop = area.scrollHeight - prevScrollHeight;

@@ -15,9 +15,11 @@ const bcrypt = require('bcrypt');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const crypto = require('crypto');
+const packageJson = require('./package.json');
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const MAX_ENCRYPTED_CONTENT_LENGTH = 34_000_000_000; // ~25GB + base64 overhead (25GB * 1.37)
+const APP_VERSION = packageJson.version || '0.0.0';
 
 // ── App & Server ──────────────────────────────────────────────────────────────
 const app = express();
@@ -144,6 +146,7 @@ const migrations = [
   "ALTER TABLE group_chats ADD COLUMN group_color TEXT",
   "CREATE TABLE IF NOT EXISTS _config (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
   "ALTER TABLE users ADD COLUMN profile_picture TEXT",
+  "ALTER TABLE users ADD COLUMN client_settings TEXT NOT NULL DEFAULT '{}'",
   "ALTER TABLE messages ADD COLUMN edited_at TEXT",
   "CREATE INDEX IF NOT EXISTS idx_message_reads_message_id ON message_reads (message_id)",
   // Composite index to support efficient pagination ORDER BY (created_at DESC, id DESC)
@@ -183,6 +186,7 @@ const stmts = {
   updateUser: db.prepare(
     'UPDATE users SET username = COALESCE(?, username), icon_color = COALESCE(?, icon_color), profile_picture = COALESCE(?, profile_picture) WHERE id = ?'
   ),
+  updateUserSettings: db.prepare('UPDATE users SET client_settings = ? WHERE id = ?'),
   deleteUser: db.prepare('DELETE FROM users WHERE id = ?'),
   deleteUserMemberships: db.prepare('DELETE FROM group_members WHERE user_id = ?'),
 
@@ -351,6 +355,7 @@ const UNPROTECTED = [
   '/auth/login',
   '/auth/me',
   '/auth/csrf',
+  '/meta/version',
 ];
 
 function requireAuth(req, res, next) {
@@ -363,9 +368,21 @@ function requireAuth(req, res, next) {
 
 app.use('/api', requireAuth);
 
+app.get('/api/meta/version', (_req, res) => {
+  res.json({ version: APP_VERSION });
+});
+
 // ── Helper: format objects ────────────────────────────────────────────────────
 function formatUser(user) {
-  return { id: user.id, username: user.username, iconColor: user.icon_color, profilePicture: user.profile_picture || null };
+  let clientSettings = {};
+  try { clientSettings = JSON.parse(user.client_settings || '{}'); } catch { clientSettings = {}; }
+  return {
+    id: user.id,
+    username: user.username,
+    iconColor: user.icon_color,
+    profilePicture: user.profile_picture || null,
+    clientSettings,
+  };
 }
 
 function formatMessage(m) {
@@ -416,6 +433,45 @@ app.get('/api/auth/me', (req, res) => {
     return res.status(401).json({ error: 'Not authenticated' });
   }
   res.json(formatUser(user));
+});
+
+app.get('/api/auth/settings', (req, res) => {
+  const user = stmts.findUserById.get(req.session.userId);
+  if (!user) return res.status(401).json({ error: 'Not authenticated' });
+  let settings = {};
+  try { settings = JSON.parse(user.client_settings || '{}'); } catch { settings = {}; }
+  res.json(settings);
+});
+
+app.patch('/api/auth/settings', (req, res) => {
+  const userId = req.session.userId;
+  const current = stmts.findUserById.get(userId);
+  if (!current) return res.status(401).json({ error: 'Not authenticated' });
+  let settings = {};
+  try { settings = JSON.parse(current.client_settings || '{}'); } catch { settings = {}; }
+
+  const next = { ...settings };
+  if (req.body.wallpaperDataUrl !== undefined) {
+    const value = req.body.wallpaperDataUrl;
+    if (value !== null && (typeof value !== 'string' || !value.startsWith('data:image/'))) {
+      return res.status(400).json({ error: 'Invalid wallpaper format' });
+    }
+    if (typeof value === 'string' && value.length > 10 * 1024 * 1024 * 1.4) {
+      return res.status(400).json({ error: 'Wallpaper too large (max 10MB)' });
+    }
+    next.wallpaperDataUrl = value || null;
+  }
+  if (req.body.hideProfileDot !== undefined) {
+    next.hideProfileDot = !!req.body.hideProfileDot;
+  }
+
+  try {
+    stmts.updateUserSettings.run(JSON.stringify(next), userId);
+    res.json(next);
+  } catch (err) {
+    console.error('Settings update error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.post('/api/auth/register', async (req, res) => {
@@ -863,7 +919,7 @@ app.post('/api/groups/:groupId/upload', (req, res) => {
     return res.status(403).json({ error: 'Not a member of this group' });
   }
 
-  const { encryptedContent, iv, type, filename } = req.body;
+  const { encryptedContent, iv, type, filename, clientUploadId } = req.body;
   if (!encryptedContent || typeof encryptedContent !== 'string' || !iv || typeof iv !== 'string') {
     return res.status(400).json({ error: 'encryptedContent and iv are required' });
   }
@@ -909,6 +965,7 @@ app.post('/api/groups/:groupId/upload', (req, res) => {
     editedAt: null,
     totalRecipients,
     readCount: 0,
+    clientUploadId: typeof clientUploadId === 'string' ? clientUploadId.slice(0, 128) : null,
   };
 
   io.to(groupId).emit('new_message', payload);
@@ -1067,6 +1124,34 @@ io.on('connection', (socket) => {
     io.to(groupId).emit('presence_update', { groupId, onlineUserIds: [...onlineUserIds] });
 
     console.log(`${socket.username} joined room ${groupId}`);
+  });
+
+  socket.on('attachment_upload_progress', ({ groupId, uploadId, type, filename, totalBytes, loadedBytes }) => {
+    if (!groupId || !uploadId) return;
+    const member = stmts.isMember.get(groupId, socket.userId);
+    if (!member) return;
+    io.to(groupId).emit('attachment_upload_progress', {
+      groupId,
+      uploadId: String(uploadId).slice(0, 128),
+      type: type === 'file' ? 'file' : 'image',
+      filename: typeof filename === 'string' ? filename.slice(0, 255) : null,
+      totalBytes: Math.max(1, Number(totalBytes) || 1),
+      loadedBytes: Math.max(0, Number(loadedBytes) || 0),
+      senderId: socket.userId,
+      senderName: socket.username,
+      senderColor: socket.iconColor,
+    });
+  });
+
+  socket.on('attachment_upload_failed', ({ groupId, uploadId }) => {
+    if (!groupId || !uploadId) return;
+    const member = stmts.isMember.get(groupId, socket.userId);
+    if (!member) return;
+    io.to(groupId).emit('attachment_upload_failed', {
+      groupId,
+      uploadId: String(uploadId).slice(0, 128),
+      senderId: socket.userId,
+    });
   });
 
   // ── send_message ──────────────────────────────────────────────────────────

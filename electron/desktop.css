@@ -1,15 +1,15 @@
 :root {
   color-scheme: dark;
-  --bg: #07111f;
-  --panel: rgba(13, 23, 43, 0.82);
-  --panel-border: rgba(148, 163, 184, 0.18);
-  --text: #e5eefc;
-  --muted: #9fb0cf;
-  --accent: #55a3ff;
-  --accent-strong: #3b82f6;
-  --success: #34d399;
-  --danger: #f87171;
-  --warning: #fbbf24;
+  --bg: #000000;
+  --panel: rgba(18, 18, 18, 0.92);
+  --panel-border: rgba(255, 255, 255, 0.16);
+  --text: #f5f5f5;
+  --muted: #b5b5b5;
+  --accent: #ffffff;
+  --accent-strong: #dcdcdc;
+  --success: #e6e6e6;
+  --danger: #c2c2c2;
+  --warning: #d6d6d6;
   --shadow: 0 28px 60px rgba(0, 0, 0, 0.4);
 }
 
@@ -21,11 +21,9 @@ body {
   margin: 0;
   font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   color: var(--text);
-  background:
-    radial-gradient(circle at top left, rgba(85, 163, 255, 0.2), transparent 34%),
-    radial-gradient(circle at top right, rgba(168, 85, 247, 0.16), transparent 30%),
-    linear-gradient(160deg, #08101d 0%, #111b33 54%, #0a1326 100%);
+  background: linear-gradient(160deg, #020202 0%, #090909 54%, #000000 100%);
   min-height: 100vh;
+  font-size: 85%;
 }
 
 button,
@@ -38,14 +36,14 @@ input {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 32px;
+  padding: 27px;
 }
 
 .desktop-card {
   width: min(1100px, 100%);
   background: var(--panel);
   border: 1px solid var(--panel-border);
-  border-radius: 28px;
+  border-radius: 24px;
   box-shadow: var(--shadow);
   backdrop-filter: blur(20px);
   overflow: hidden;
@@ -54,7 +52,7 @@ input {
 .wizard-layout {
   display: grid;
   grid-template-columns: 280px 1fr;
-  min-height: 720px;
+  min-height: 612px;
 }
 
 .wizard-sidebar {
@@ -117,8 +115,8 @@ input {
 
 .step-item.active {
   color: var(--text);
-  background: rgba(85, 163, 255, 0.12);
-  border-color: rgba(85, 163, 255, 0.28);
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.28);
 }
 
 .step-item.complete .step-index {
@@ -150,7 +148,7 @@ input {
 }
 
 .wizard-content {
-  padding: 40px;
+  padding: 34px;
   display: flex;
   flex-direction: column;
 }
@@ -170,14 +168,14 @@ input {
   gap: 8px;
   padding: 8px 12px;
   border-radius: 999px;
-  background: rgba(85, 163, 255, 0.12);
-  color: #cfe0ff;
+  background: rgba(255, 255, 255, 0.12);
+  color: #f1f1f1;
   font-size: 13px;
   font-weight: 600;
 }
 
 .step-title {
-  font-size: 38px;
+  font-size: 32px;
   line-height: 1.1;
   margin: 18px 0 12px;
 }
@@ -304,7 +302,7 @@ input {
 
 .btn-primary {
   background: linear-gradient(135deg, var(--accent), var(--accent-strong));
-  color: white;
+  color: #050505;
   font-weight: 700;
 }
 
@@ -423,7 +421,7 @@ input {
 }
 
 .offline-title {
-  font-size: 42px;
+  font-size: 36px;
   margin: 18px 0 10px;
 }
 

@@ -13,6 +13,7 @@
     <div class="sidebar-brand">
       <img class="brand-icon" src="gchat_icon.png" alt="GChat logo" />
       <span class="brand-name">GChat</span>
+      <span class="brand-version" id="app-version-label">v—</span>
     </div>
     <div class="conn-status" id="conn-status">
       <span class="conn-dot" id="conn-dot"></span>
@@ -25,11 +26,12 @@
       <button class="btn-action" id="new-group-btn" data-icon="plus">New Group</button>
       <button class="btn-action" id="join-group-btn" data-icon="log-in">Join Group</button>
     </div>
-    <div class="sidebar-user" id="sidebar-user-btn">
-      <div class="avatar" id="user-avatar" style="background:#4A90D9"></div>
-      <span class="sidebar-username" id="user-username">Loading…</span>
-      <button class="btn-icon logout-btn" id="logout-btn" title="Logout" aria-label="Logout" data-icon="log-out" data-icon-only="true"></button>
-    </div>
+      <div class="sidebar-user" id="sidebar-user-btn">
+        <div class="avatar" id="user-avatar" style="background:#4A90D9"></div>
+        <span class="sidebar-username" id="user-username">Loading…</span>
+        <button class="btn-icon wallpaper-btn" id="wallpaper-btn" title="Chat wallpaper" aria-label="Chat wallpaper" data-icon="image" data-icon-only="true"></button>
+        <button class="btn-icon logout-btn" id="logout-btn" title="Logout" aria-label="Logout" data-icon="log-out" data-icon-only="true"></button>
+      </div>
   </aside>
 
   <main class="chat-panel" id="chat-panel">
@@ -77,9 +79,6 @@
       </div>
 
       <div class="message-input-bar" id="message-input-bar">
-        <div class="upload-progress-track" id="upload-progress-track" hidden>
-          <div class="upload-progress-bar" id="upload-progress-bar"></div>
-        </div>
         <button class="btn-icon btn-whisper-mode" id="whisper-mode-btn" title="Message mode" aria-label="Message mode"></button>
         <button class="btn-icon btn-emoji" id="emoji-btn" title="Emoji" aria-label="Emoji" data-icon="smile" data-icon-only="true"></button>
         <label class="btn-icon btn-attach" title="Attach file">
@@ -303,8 +302,26 @@
   <div class="image-viewer-modal" id="image-viewer-modal" hidden>
     <div class="image-viewer-overlay" id="image-viewer-overlay"></div>
     <div class="image-viewer-container">
-      <button class="image-viewer-close" id="image-viewer-close" aria-label="Close image viewer" data-icon="x" data-icon-only="true"></button>
       <img class="image-viewer-img" id="image-viewer-img" src="" alt="Full size image" />
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="wallpaper-modal" hidden>
+    <div class="modal">
+      <h2 data-icon="image">Chat Wallpaper</h2>
+      <div class="form-group">
+        <label>Current wallpaper</label>
+        <img id="wallpaper-current-preview" alt="Current wallpaper preview" style="width:100%;max-height:180px;object-fit:cover;border-radius:10px;border:1px solid #2a2a3e;" />
+      </div>
+      <div class="form-group">
+        <label>Upload custom background</label>
+        <input type="file" id="wallpaper-input" accept="image/*" />
+      </div>
+      <p class="form-error" id="wallpaper-error"></p>
+      <div class="modal-actions">
+        <button class="btn-secondary" id="wallpaper-reset-btn">Reset</button>
+        <button class="btn-secondary" id="wallpaper-close-btn">Close</button>
+      </div>
     </div>
   </div>
 
