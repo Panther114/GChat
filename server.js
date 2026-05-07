@@ -306,6 +306,7 @@ const sessionMiddleware = session({
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json({ limit: '30gb' }));
 app.use(sessionMiddleware);
+const uploadRawBodyParser = express.raw({ type: 'application/octet-stream', limit: '30gb' });
 
 // ── CSRF Protection ───────────────────────────────────────────────────────────
 // Double-submit token pattern: token stored in session, sent as X-CSRF-Token header.
@@ -910,7 +911,7 @@ app.get('/api/groups/:groupId/members', (req, res) => {
 });
 
 // POST /api/groups/:groupId/upload — upload encrypted file or image
-app.post('/api/groups/:groupId/upload', (req, res) => {
+app.post('/api/groups/:groupId/upload', uploadRawBodyParser, (req, res) => {
   const { groupId } = req.params;
   const userId = req.session.userId;
 
@@ -919,7 +920,29 @@ app.post('/api/groups/:groupId/upload', (req, res) => {
     return res.status(403).json({ error: 'Not a member of this group' });
   }
 
-  const { encryptedContent, iv, type, filename, clientUploadId } = req.body;
+  const isBinaryUpload = Buffer.isBuffer(req.body);
+  let encryptedContent = null;
+  let iv = null;
+  let type = null;
+  let filename = null;
+  let clientUploadId = null;
+
+  if (isBinaryUpload) {
+    encryptedContent = req.body.toString('base64');
+    iv = typeof req.headers['x-upload-iv'] === 'string' ? req.headers['x-upload-iv'] : null;
+    type = typeof req.headers['x-upload-type'] === 'string' ? req.headers['x-upload-type'] : null;
+    clientUploadId = typeof req.headers['x-client-upload-id'] === 'string' ? req.headers['x-client-upload-id'] : null;
+    if (typeof req.headers['x-upload-filename'] === 'string') {
+      try {
+        filename = decodeURIComponent(req.headers['x-upload-filename']);
+      } catch {
+        filename = req.headers['x-upload-filename'];
+      }
+    }
+  } else {
+    ({ encryptedContent, iv, type, filename, clientUploadId } = req.body || {});
+  }
+
   if (!encryptedContent || typeof encryptedContent !== 'string' || !iv || typeof iv !== 'string') {
     return res.status(400).json({ error: 'encryptedContent and iv are required' });
   }

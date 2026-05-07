@@ -68,6 +68,16 @@ async function encryptBytes(buffer, passphrase, groupId) {
   };
 }
 
+async function encryptBytesRaw(buffer, passphrase, groupId) {
+  const key = await deriveKey(passphrase, groupId);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, buffer);
+  return {
+    encryptedBytes: new Uint8Array(encrypted),
+    iv: uint8ToBase64(iv),
+  };
+}
+
 async function decryptBytes(encryptedContent, ivB64, passphrase, groupId) {
   try {
     const key = await deriveKey(passphrase, groupId);
@@ -143,7 +153,9 @@ function clearGroupKey(groupId) {
 }
 
 const LOCAL_CACHE_PREFIX = 'gchat:cache:group:';
-const LOCAL_SETTINGS_KEY = 'gchat:local-settings';
+const LEGACY_LOCAL_SETTINGS_KEY = 'gchat:local-settings';
+const ACTIVE_LOCAL_SETTINGS_KEY = 'gchat:active-local-settings';
+const LOCAL_SETTINGS_KEY_PREFIX = 'gchat:local-settings:user:';
 const DEFAULT_WALLPAPER = "url('gchat_wallpaper.jpg')";
 const DEFAULT_WALLPAPER_PREVIEW_SRC = 'gchat_wallpaper.jpg';
 const WALLPAPER_SELECT_FIRST_MSG = 'Please choose an image first';
@@ -152,6 +164,13 @@ const WALLPAPER_TOO_LARGE_MSG = 'Wallpaper too large (max 10MB)';
 const WALLPAPER_READ_FAIL_MSG = 'Unable to read image';
 const WALLPAPER_SAVE_SYNC_FAIL_MSG = 'Wallpaper saved locally but could not sync to server. Changes may not appear on other devices.';
 const WALLPAPER_RESET_SYNC_FAIL_MSG = 'Wallpaper reset locally but could not sync to server. Changes may not appear on other devices.';
+const WALLPAPER_SAVE_SUCCESS_MSG = 'Wallpaper saved';
+const WALLPAPER_RESET_SUCCESS_MSG = 'Wallpaper reset';
+const DESKTOP_SIDEBAR_WIDTH_STORAGE_KEY = 'gchat:desktop-sidebar-width';
+const DESKTOP_RIGHT_PANEL_STORAGE_KEY = 'gchat:desktop-right-panel-expanded';
+const DESKTOP_DEFAULT_SIDEBAR_WIDTH = 260;
+const DESKTOP_MIN_SIDEBAR_WIDTH = 220;
+const DESKTOP_COMPACT_SIDEBAR_WIDTH = 236;
 
 function readLocalGroupCache(groupId) {
   try {
@@ -176,9 +195,9 @@ function writeLocalGroupCache(groupId, cache) {
   }
 }
 
-function readLocalSettings() {
+function readStoredJson(key) {
   try {
-    const raw = localStorage.getItem(LOCAL_SETTINGS_KEY);
+    const raw = localStorage.getItem(key);
     if (!raw) return {};
     return JSON.parse(raw);
   } catch {
@@ -186,12 +205,41 @@ function readLocalSettings() {
   }
 }
 
-function writeLocalSettings(settings) {
+function getUserSettingsStorageKey(userId = currentUser && currentUser.id) {
+  return userId ? `${LOCAL_SETTINGS_KEY_PREFIX}${userId}` : null;
+}
+
+function readLocalSettings(userId = currentUser && currentUser.id) {
+  const userKey = getUserSettingsStorageKey(userId);
+  if (userKey) {
+    const scoped = readStoredJson(userKey);
+    if (Object.keys(scoped).length > 0) return scoped;
+  }
+  const active = readStoredJson(ACTIVE_LOCAL_SETTINGS_KEY);
+  if (Object.keys(active).length > 0) return active;
+  return readStoredJson(LEGACY_LOCAL_SETTINGS_KEY);
+}
+
+function writeLocalSettings(settings, userId = currentUser && currentUser.id) {
+  const payload = JSON.stringify(settings);
   try {
-    localStorage.setItem(LOCAL_SETTINGS_KEY, JSON.stringify(settings));
+    const userKey = getUserSettingsStorageKey(userId);
+    if (userKey) localStorage.setItem(userKey, payload);
+    localStorage.setItem(ACTIVE_LOCAL_SETTINGS_KEY, payload);
+    localStorage.removeItem(LEGACY_LOCAL_SETTINGS_KEY);
   } catch {
     // best effort only
   }
+}
+
+function migrateLegacyLocalSettings(userId = currentUser && currentUser.id) {
+  const userKey = getUserSettingsStorageKey(userId);
+  if (!userKey) return;
+  const legacy = readStoredJson(LEGACY_LOCAL_SETTINGS_KEY);
+  if (Object.keys(legacy).length === 0) return;
+  const existing = readStoredJson(userKey);
+  const next = Object.keys(existing).length > 0 ? existing : legacy;
+  writeLocalSettings(next, userId);
 }
 
 function createUploadId() {
@@ -270,9 +318,16 @@ function formatBytes(bytes) {
   return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[idx]}`;
 }
 
+function wallpaperCssValue(dataUrl) {
+  if (!dataUrl) return DEFAULT_WALLPAPER;
+  return `url("${String(dataUrl).replace(/"/g, '\\"')}")`;
+}
+
 function applyWallpaperFromSettings() {
   const wallpaper = appLocalSettings.wallpaperDataUrl;
-  document.documentElement.style.setProperty('--chat-wallpaper', wallpaper ? `url('${wallpaper}')` : DEFAULT_WALLPAPER);
+  const cssValue = wallpaperCssValue(wallpaper);
+  document.documentElement.style.setProperty('--chat-wallpaper', cssValue);
+  document.documentElement.style.setProperty('--auth-wallpaper', cssValue);
   const preview = $('wallpaper-current-preview');
   if (preview) preview.src = wallpaper || DEFAULT_WALLPAPER_PREVIEW_SRC;
 }
@@ -593,6 +648,8 @@ const appLocalSettings = {
   hideProfileDot: true,
 };
 let pendingWallpaperDataUrl = null;
+let desktopSidebarWidth = DESKTOP_DEFAULT_SIDEBAR_WIDTH;
+let desktopRightPanelExpanded = true;
 
 function renderCurrentUserAvatar(user = currentUser) {
   const avatar = $('user-avatar');
@@ -920,9 +977,75 @@ function isMobileLayout() {
   return window.innerWidth <= MOBILE_BREAKPOINT;
 }
 
+function desktopSidebarBounds() {
+  const maxWidth = Math.max(DESKTOP_MIN_SIDEBAR_WIDTH, Math.floor(window.innerWidth / 3));
+  return {
+    min: DESKTOP_MIN_SIDEBAR_WIDTH,
+    max: maxWidth,
+  };
+}
+
+function readDesktopSidebarWidth() {
+  const stored = Number(localStorage.getItem(DESKTOP_SIDEBAR_WIDTH_STORAGE_KEY));
+  return Number.isFinite(stored) && stored > 0 ? stored : DESKTOP_DEFAULT_SIDEBAR_WIDTH;
+}
+
+function applyDesktopSidebarState() {
+  if (isMobileLayout()) {
+    document.body.classList.remove('sidebar-compact', 'sidebar-resizing');
+    document.documentElement.style.setProperty('--sidebar-width', `${DESKTOP_DEFAULT_SIDEBAR_WIDTH}px`);
+    return;
+  }
+  const { min, max } = desktopSidebarBounds();
+  desktopSidebarWidth = Math.min(max, Math.max(min, Math.round(desktopSidebarWidth || DESKTOP_DEFAULT_SIDEBAR_WIDTH)));
+  document.documentElement.style.setProperty('--sidebar-width', `${desktopSidebarWidth}px`);
+  document.body.classList.toggle('sidebar-compact', desktopSidebarWidth <= DESKTOP_COMPACT_SIDEBAR_WIDTH);
+  localStorage.setItem(DESKTOP_SIDEBAR_WIDTH_STORAGE_KEY, String(desktopSidebarWidth));
+}
+
+function updateRightPanelToggleButtons() {
+  const expanded = isMobileLayout()
+    ? $('right-panel').classList.contains('open')
+    : desktopRightPanelExpanded;
+  ['right-panel-toggle', 'right-panel-toggle-empty'].forEach((id) => {
+    const button = $(id);
+    if (!button) return;
+    button.classList.toggle('active', expanded);
+    button.setAttribute('aria-pressed', expanded ? 'true' : 'false');
+  });
+}
+
+function applyDesktopRightPanelState() {
+  const panel = $('right-panel');
+  if (!panel) return;
+  panel.classList.toggle('desktop-collapsed', !desktopRightPanelExpanded && !isMobileLayout());
+  updateRightPanelToggleButtons();
+}
+
+function startSidebarResize(event) {
+  if (isMobileLayout()) return;
+  event.preventDefault();
+  document.body.classList.add('sidebar-resizing');
+
+  const onMove = (moveEvent) => {
+    desktopSidebarWidth = moveEvent.clientX;
+    applyDesktopSidebarState();
+  };
+
+  const onUp = () => {
+    document.body.classList.remove('sidebar-resizing');
+    window.removeEventListener('mousemove', onMove);
+    window.removeEventListener('mouseup', onUp);
+  };
+
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('mouseup', onUp);
+}
+
 function updateMobilePanelOverlay() {
   const isOpen = $('sidebar').classList.contains('open') || $('right-panel').classList.contains('open');
   $('sidebar-overlay').hidden = !isMobileLayout() || !isOpen;
+  updateRightPanelToggleButtons();
 }
 
 function closeSidebar() {
@@ -950,7 +1073,12 @@ function toggleSidebar() {
 }
 
 function toggleRightPanel() {
-  if (!isMobileLayout()) return;
+  if (!isMobileLayout()) {
+    desktopRightPanelExpanded = !desktopRightPanelExpanded;
+    localStorage.setItem(DESKTOP_RIGHT_PANEL_STORAGE_KEY, desktopRightPanelExpanded ? '1' : '0');
+    applyDesktopRightPanelState();
+    return;
+  }
   const panel = $('right-panel');
   const opening = !panel.classList.contains('open');
   closeSidebar();
@@ -961,7 +1089,11 @@ function toggleRightPanel() {
 // ── Init ──────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
   applyStaticIcons();
+  desktopSidebarWidth = readDesktopSidebarWidth();
+  desktopRightPanelExpanded = localStorage.getItem(DESKTOP_RIGHT_PANEL_STORAGE_KEY) !== '0';
   loadMergedLocalSettings();
+  applyDesktopSidebarState();
+  applyDesktopRightPanelState();
   await fetchCsrfToken();
   try {
     const res = await fetch('/api/auth/me');
@@ -973,11 +1105,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Set user display
+  migrateLegacyLocalSettings(currentUser.id);
   $('user-username').textContent = currentUser.username;
   renderCurrentUserAvatar(currentUser);
+  loadMergedLocalSettings();
   await loadSettingsFromServer();
   applyWallpaperFromSettings();
-  writeLocalSettings(appLocalSettings);
+  writeLocalSettings(appLocalSettings, currentUser.id);
   try {
     const versionRes = await fetch('/api/meta/version');
     if (versionRes.ok) {
@@ -999,6 +1133,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   updateWhisperBtn();
   toggleEncryptionButton();
   updateMobilePanelOverlay();
+  applyDesktopSidebarState();
+  applyDesktopRightPanelState();
 
   // Request permission to show native OS notifications
   requestNotificationPermission();
@@ -1029,9 +1165,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       $('right-panel').classList.remove('open');
     }
     updateMobilePanelOverlay();
+    applyDesktopSidebarState();
+    applyDesktopRightPanelState();
   });
   window.addEventListener('storage', (event) => {
-    if (event.key !== LOCAL_SETTINGS_KEY) return;
+    const userKey = getUserSettingsStorageKey(currentUser && currentUser.id);
+    if (event.key !== ACTIVE_LOCAL_SETTINGS_KEY && event.key !== LEGACY_LOCAL_SETTINGS_KEY && event.key !== userKey) return;
     loadMergedLocalSettings();
     renderGroupList();
   });
@@ -1717,7 +1856,8 @@ function showContextMenu(e, msg, text) {
   const isAttachment = msg.type === 'image' || msg.type === 'file';
   $('ctx-reply').hidden = false;
   $('ctx-download').hidden = !isAttachment;
-  setElementIcon($('ctx-copy'), 'copy', { label: isAttachment ? 'Copy' : 'Copy Text' });
+  $('ctx-copy').hidden = isAttachment;
+  setElementIcon($('ctx-copy'), 'copy', { label: 'Copy Text' });
   menu.hidden = false;
   if (e) {
     menu.style.left = Math.min(e.clientX, window.innerWidth - 160) + 'px';
@@ -1837,13 +1977,14 @@ async function saveWallpaperDraft() {
   }
   appLocalSettings.wallpaperDataUrl = pendingWallpaperDataUrl;
   applyWallpaperFromSettings();
-  writeLocalSettings(appLocalSettings);
+  writeLocalSettings(appLocalSettings, currentUser && currentUser.id);
   const saved = await saveSettingsToServer();
   if (!saved) {
     showToast(WALLPAPER_SAVE_SYNC_FAIL_MSG, 'info');
   }
   $('wallpaper-modal').hidden = true;
   resetWallpaperDraft();
+  showToast(WALLPAPER_SAVE_SUCCESS_MSG, 'success');
 }
 
 function applyWallpaperDraftPreview(dataUrl) {
@@ -2070,7 +2211,7 @@ function ensurePendingAttachmentRow(payload) {
 
   const meta = document.createElement('span');
   meta.className = 'msg-meta';
-  meta.textContent = 'Uploading…';
+  meta.textContent = 'Preparing…';
   bubble.appendChild(meta);
   content.appendChild(bubble);
 
@@ -2098,6 +2239,13 @@ function updatePendingAttachmentProgress(uploadId, loadedBytes, totalBytes) {
   if (label) label.textContent = `${formatBytes(loaded)} / ${formatBytes(total)}`;
 }
 
+function setPendingAttachmentStatus(uploadId, statusText) {
+  const row = pendingAttachmentRows.get(uploadId);
+  if (!row) return;
+  const meta = row.querySelector('.msg-meta');
+  if (meta) meta.textContent = statusText;
+}
+
 function removePendingAttachment(uploadId) {
   const row = pendingAttachmentRows.get(uploadId);
   if (!row) return;
@@ -2122,6 +2270,15 @@ function uploadEncryptedAttachment(groupId, body, onProgress) {
       try { data = JSON.parse(raw); } catch { /* ignore parse errors */ }
       resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, data });
     };
+    if (body && body.encryptedBytes instanceof Uint8Array) {
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+      xhr.setRequestHeader('X-Upload-IV', body.iv);
+      xhr.setRequestHeader('X-Upload-Type', body.type);
+      xhr.setRequestHeader('X-Upload-Filename', encodeURIComponent(body.filename || 'file'));
+      xhr.setRequestHeader('X-Client-Upload-Id', body.clientUploadId || '');
+      xhr.send(body.encryptedBytes);
+      return;
+    }
     xhr.send(JSON.stringify(body));
   });
 }
@@ -2168,18 +2325,37 @@ async function handleFileUpload(file) {
     };
     ensurePendingAttachmentRow(progressPayload);
     socket.emit('attachment_upload_progress', progressPayload);
+    setPendingAttachmentStatus(uploadId, 'Preparing…');
 
     const buffer = await processedFile.arrayBuffer();
-    const { encryptedContent, iv } = await encryptBytes(buffer, key, currentGroupId);
+    updatePendingAttachmentProgress(uploadId, Math.max(1, Math.round(totalBytes * 0.2)), totalBytes);
+    setPendingAttachmentStatus(uploadId, 'Encrypting…');
+    const { encryptedBytes, iv } = await encryptBytesRaw(buffer, key, currentGroupId);
 
-    const body = { encryptedContent, iv, type: isImage ? 'image' : 'file', filename: file.name, clientUploadId: uploadId };
-    const res = await uploadEncryptedAttachment(currentGroupId, body, (loaded, total) => {
-      updatePendingAttachmentProgress(uploadId, loaded, total);
+    let lastBroadcastLoaded = 0;
+    let lastBroadcastAt = 0;
+    const emitProgress = (loaded, total, force = false) => {
+      const now = Date.now();
+      const shouldEmit = force
+        || loaded === 0
+        || loaded >= total
+        || now - lastBroadcastAt >= 120
+        || loaded - lastBroadcastLoaded >= Math.max(32768, total * 0.05);
+      if (!shouldEmit) return;
+      lastBroadcastLoaded = loaded;
+      lastBroadcastAt = now;
       socket.emit('attachment_upload_progress', {
         ...progressPayload,
         loadedBytes: loaded,
-        totalBytes: total || totalBytes,
+        totalBytes: total,
       });
+    };
+
+    const body = { encryptedBytes, iv, type: isImage ? 'image' : 'file', filename: file.name, clientUploadId: uploadId };
+    const res = await uploadEncryptedAttachment(currentGroupId, body, (loaded, total) => {
+      updatePendingAttachmentProgress(uploadId, loaded, total);
+      setPendingAttachmentStatus(uploadId, 'Uploading…');
+      emitProgress(loaded, total || totalBytes);
     });
 
     if (!res.ok) {
@@ -2190,12 +2366,8 @@ async function handleFileUpload(file) {
       return;
     }
     updatePendingAttachmentProgress(uploadId, totalBytes, totalBytes);
-    socket.emit('attachment_upload_progress', {
-      ...progressPayload,
-      loadedBytes: totalBytes,
-      totalBytes,
-    });
-    removePendingAttachment(uploadId);
+    setPendingAttachmentStatus(uploadId, 'Finalizing…');
+    emitProgress(totalBytes, totalBytes, true);
   } catch(err) {
     console.error('File upload error:', err);
     removePendingAttachment(uploadId);
@@ -2567,7 +2739,7 @@ function addSystemMessage(text) {
 
 // ── Emoji picker ──────────────────────────────────────────────────────────────
 function setupEmojiPicker() {
-  const emojis = ['😀','😂','🥰','😍','😎','🤩','🥳','😭','😤','🤔','😏','😇','🙄','😴','🤗','🥺','😱','😜','🤪','😝','🤑','😈','👹','💀','💩','��','👻','👾','🙈','🐶','🐱','🐭','🐰','🦊','🐻','🐼','🐨','🐯','🦁','🐮','🐷','🐸','🐙','🦋','🌺','🌸','🍎','🍕','🎂','🎉','🎊','🎁','❤️','🧡','💛','💚','💙','💜','🖤','💔','✨','⭐','🌟','🔥','💫','🌈','☀️','🌙','❄️','🎵','🎶','🏆','👑','💎','🗝️','🔑','🌍','🚀','🎭','👋','🤝','👍','👎','🙏','💪','✌️','🤞','🤟','👆','👇','👈','👉'];
+  const emojis = ['😀','😂','🥰','😍','😎','🤩','🥳','😭','😤','🤔','😏','😇','🙄','😴','🤗','🥺','😱','😜','🤪','😝','🤑','😈','👹','💀','💩','👽','👻','👾','🙈','🐶','🐱','🐭','🐰','🦊','🐻','🐼','🐨','🐯','🦁','🐮','🐷','🐸','🐙','🦋','🌺','🌸','🍎','🍕','🎂','🎉','🎊','🎁','❤️','🧡','💛','💚','💙','💜','🖤','💔','✨','⭐','🌟','🔥','💫','🌈','☀️','🌙','❄️','🎵','🎶','🏆','👑','💎','🗝️','🔑','🌍','🚀','🎭','👋','🤝','👍','👎','🙏','💪','✌️','🤞','🤟','👆','👇','👈','👉'];
   const picker = $('emoji-picker');
   for (const em of emojis) {
     const btn = document.createElement('button');
@@ -2789,13 +2961,14 @@ function setupEventListeners() {
   $('wallpaper-reset-btn').addEventListener('click', async () => {
     appLocalSettings.wallpaperDataUrl = null;
     applyWallpaperFromSettings();
-    writeLocalSettings(appLocalSettings);
+    writeLocalSettings(appLocalSettings, currentUser && currentUser.id);
     const saved = await saveSettingsToServer();
     if (!saved) {
       showToast(WALLPAPER_RESET_SYNC_FAIL_MSG, 'info');
     }
     $('wallpaper-modal').hidden = true;
     resetWallpaperDraft();
+    showToast(WALLPAPER_RESET_SUCCESS_MSG, 'success');
   });
   $('wallpaper-input').addEventListener('change', (e) => {
     const file = e.target.files[0];
@@ -3205,9 +3378,7 @@ function setupEventListeners() {
   });
 
   $('ctx-copy').addEventListener('click', () => {
-    if (ctxMsg && (ctxMsg.type === 'image' || ctxMsg.type === 'file')) {
-      copyAttachmentToClipboard(ctxMsg);
-    } else if (ctxText) {
+    if (ctxText) {
       navigator.clipboard.writeText(ctxText).catch(() => {});
     }
     hideContextMenu();
@@ -3310,7 +3481,9 @@ function setupEventListeners() {
     }
   });
 
-  // Right panel toggle (mobile)
+  $('sidebar-resizer').addEventListener('mousedown', startSidebarResize);
+
+  // Right panel toggle
   $('right-panel-toggle').addEventListener('click', toggleRightPanel);
 
   // Mobile empty state toggles

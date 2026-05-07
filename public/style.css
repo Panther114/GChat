@@ -31,6 +31,8 @@
   --bubble-text: #142033;
   --bubble-meta: #5f7188;
   --chat-wallpaper: url('gchat_wallpaper.jpg');
+  --auth-wallpaper: url('gchat_wallpaper.jpg');
+  --sidebar-width: 260px;
 }
 
 html, body { height: 100%; }
@@ -55,10 +57,10 @@ body.auth-body {
   justify-content: center;
   min-height: 100vh;
   background-color: var(--bg);
-  background-image: url('gchat_wallpaper.jpg');
+  background-image: var(--auth-wallpaper);
   background-position: center center;
   background-repeat: no-repeat;
-  background-size: auto;
+  background-size: cover;
 }
 
 .auth-card {
@@ -211,8 +213,8 @@ body.chat-body {
 
 /* ── Sidebar ────────────────────────────────────────────────────────── */
 .sidebar {
-  width: 260px;
-  min-width: 260px;
+  width: var(--sidebar-width);
+  min-width: var(--sidebar-width);
   background: var(--sidebar-bg);
   border-right: 1px solid #1a1a2e;
   display: flex;
@@ -220,6 +222,34 @@ body.chat-body {
   overflow: hidden;
   transition: transform .3s;
   z-index: 100;
+}
+
+.sidebar-resizer {
+  width: 8px;
+  flex-shrink: 0;
+  position: relative;
+  cursor: col-resize;
+  background: transparent;
+}
+.sidebar-resizer::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 2px;
+  border-radius: 999px;
+  background: rgba(255,255,255,.06);
+  transition: background .15s;
+}
+.sidebar-resizer:hover::before,
+body.sidebar-resizing .sidebar-resizer::before {
+  background: rgba(108,99,255,.6);
+}
+body.sidebar-resizing,
+body.sidebar-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 
 .sidebar-brand {
@@ -403,7 +433,7 @@ body.chat-body {
   background-image: var(--chat-wallpaper);
   background-position: center center;
   background-repeat: no-repeat;
-  background-size: contain;
+  background-size: cover;
   z-index: 0;
 }
 
@@ -864,11 +894,18 @@ body.chat-body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  transition: transform .3s;
+  transition: width .25s ease, min-width .25s ease, opacity .2s ease, border-color .2s ease, transform .3s;
   position: relative;
 }
 
 .right-panel.collapsed { transform: translateX(100%); }
+.right-panel.desktop-collapsed {
+  width: 0;
+  min-width: 0;
+  opacity: 0;
+  border-left-color: transparent;
+  pointer-events: none;
+}
 
 .right-panel-inner {
   padding: 16px 14px;
@@ -1119,6 +1156,32 @@ kbd { background: #1a1a2e; border: 1px solid #333355; border-radius: 4px; paddin
 }
 .sidebar-overlay[hidden] { display: none; }
 .sidebar-toggle { display: none; }
+.right-panel-toggle.active {
+  color: var(--text-primary);
+  background: rgba(255,255,255,.08);
+}
+
+body.sidebar-compact .group-item {
+  justify-content: center;
+  padding-left: 10px;
+  padding-right: 10px;
+}
+body.sidebar-compact .group-item-info,
+body.sidebar-compact .sidebar-username,
+body.sidebar-compact .sidebar-actions .icon-label {
+  display: none;
+}
+body.sidebar-compact .sidebar-actions .btn-action {
+  justify-content: center;
+  padding-left: 10px;
+  padding-right: 10px;
+}
+body.sidebar-compact .sidebar-actions .btn-action .ui-icon {
+  margin-right: 0;
+}
+body.sidebar-compact .sidebar-user {
+  justify-content: center;
+}
 
 /* ── Image Viewer Modal ─────────────────────────────────────────────── */
 .image-viewer-modal {
@@ -1195,10 +1258,12 @@ kbd { background: #1a1a2e; border: 1px solid #333355; border-radius: 4px; paddin
 
 /* ── Responsive ─────────────────────────────────────────────────────── */
 @media (max-width: 768px) {
-  .sidebar { position: fixed; left: 0; top: 0; height: 100%; z-index: 100; transform: translateX(-100%); }
+  .sidebar { position: fixed; left: 0; top: 0; width: min(280px, 86vw); min-width: min(280px, 86vw); height: 100%; z-index: 100; transform: translateX(-100%); }
   .sidebar.open { transform: translateX(0); }
+  .sidebar-resizer { display: none; }
   .sidebar-toggle { display: flex; }
   .right-panel { position: fixed; right: 0; top: 0; height: 100%; z-index: 100; transform: translateX(100%); }
+  .right-panel.desktop-collapsed { width: 240px; min-width: 240px; opacity: 1; border-left-color: #1a1a2e; pointer-events: auto; }
   .right-panel.open { transform: translateX(0); }
   .right-panel-inner,
   .right-panel-empty { padding-top: 56px; }
