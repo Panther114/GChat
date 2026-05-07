@@ -584,6 +584,7 @@ const appLocalSettings = {
   wallpaperDataUrl: null,
   hideProfileDot: true,
 };
+let pendingWallpaperDataUrl = null;
 
 function renderCurrentUserAvatar(user = currentUser) {
   const avatar = $('user-avatar');
@@ -1778,11 +1779,64 @@ async function copyAttachmentToClipboard(msg) {
       return;
     }
 
-    await navigator.clipboard.writeText(data.filename);
-    showToast('Filename copied to clipboard', 'success');
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(data.filename);
+      showToast('Filename copied to clipboard', 'success');
+      return;
+    }
+
+    const fallback = document.createElement('textarea');
+    fallback.value = data.filename;
+    fallback.setAttribute('readonly', '');
+    fallback.style.position = 'fixed';
+    fallback.style.left = '-9999px';
+    document.body.appendChild(fallback);
+    fallback.select();
+    const copied = document.execCommand('copy');
+    document.body.removeChild(fallback);
+    if (copied) {
+      showToast('Filename copied to clipboard', 'success');
+      return;
+    }
+
+    throw new Error('Clipboard API unavailable');
   } catch (err) {
     console.error('copyAttachmentToClipboard error:', err);
     showToast('Failed to copy file to clipboard', 'error');
+  }
+}
+
+function setWallpaperSaveState(enabled) {
+  const saveBtn = $('wallpaper-save-btn');
+  if (!saveBtn) return;
+  saveBtn.disabled = !enabled;
+}
+
+function resetWallpaperDraft() {
+  pendingWallpaperDataUrl = null;
+  $('wallpaper-error').textContent = '';
+  $('wallpaper-input').value = '';
+  setWallpaperSaveState(false);
+  applyWallpaperFromSettings();
+}
+
+async function saveWallpaperDraft() {
+  if (!pendingWallpaperDataUrl) {
+    $('wallpaper-error').textContent = 'Please choose an image first';
+    return;
+  }
+  appLocalSettings.wallpaperDataUrl = pendingWallpaperDataUrl;
+  applyWallpaperFromSettings();
+  writeLocalSettings(appLocalSettings);
+  await saveSettingsToServer();
+  $('wallpaper-modal').hidden = true;
+  resetWallpaperDraft();
+}
+
+function applyWallpaperDraftPreview(dataUrl) {
+  const preview = $('wallpaper-current-preview');
+  if (preview) {
+    preview.src = dataUrl || appLocalSettings.wallpaperDataUrl || 'gchat_wallpaper.jpg';
   }
 }
 
@@ -2128,6 +2182,7 @@ async function handleFileUpload(file) {
       loadedBytes: totalBytes,
       totalBytes,
     });
+    removePendingAttachment(uploadId);
   } catch(err) {
     console.error('File upload error:', err);
     removePendingAttachment(uploadId);
@@ -2709,37 +2764,47 @@ function setupEventListeners() {
   });
   $('wallpaper-btn').addEventListener('click', (e) => {
     e.stopPropagation();
-    $('wallpaper-error').textContent = '';
-    $('wallpaper-input').value = '';
+    resetWallpaperDraft();
     applyWallpaperFromSettings();
     $('wallpaper-modal').hidden = false;
   });
-  $('wallpaper-close-btn').addEventListener('click', () => { $('wallpaper-modal').hidden = true; });
+  $('wallpaper-close-btn').addEventListener('click', () => {
+    $('wallpaper-modal').hidden = true;
+    resetWallpaperDraft();
+  });
+  $('wallpaper-save-btn').addEventListener('click', saveWallpaperDraft);
   $('wallpaper-reset-btn').addEventListener('click', async () => {
     appLocalSettings.wallpaperDataUrl = null;
     applyWallpaperFromSettings();
     writeLocalSettings(appLocalSettings);
     await saveSettingsToServer();
     $('wallpaper-modal').hidden = true;
+    resetWallpaperDraft();
   });
   $('wallpaper-input').addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (!file) return;
+    $('wallpaper-error').textContent = '';
     if (!file.type.startsWith('image/')) {
       $('wallpaper-error').textContent = 'Please choose an image file';
+      setWallpaperSaveState(false);
       return;
     }
     if (file.size > 10 * 1024 * 1024) {
       $('wallpaper-error').textContent = 'Wallpaper too large (max 10MB)';
+      setWallpaperSaveState(false);
       return;
     }
     const reader = new FileReader();
-    reader.onload = async (ev) => {
-      appLocalSettings.wallpaperDataUrl = String(ev.target.result || '');
-      applyWallpaperFromSettings();
-      writeLocalSettings(appLocalSettings);
-      await saveSettingsToServer();
-      $('wallpaper-modal').hidden = true;
+    reader.onload = (ev) => {
+      pendingWallpaperDataUrl = String(ev.target.result || '');
+      if (!pendingWallpaperDataUrl) {
+        $('wallpaper-error').textContent = 'Unable to read image';
+        setWallpaperSaveState(false);
+        return;
+      }
+      applyWallpaperDraftPreview(pendingWallpaperDataUrl);
+      setWallpaperSaveState(true);
     };
     reader.readAsDataURL(file);
   });
