@@ -362,14 +362,15 @@ ipcMain.handle('check-server-connectivity', async () => {
   try {
     const controller = new AbortController();
     timeout = setTimeout(() => controller.abort(), 8000);
-    const response = await fetch(OFFICIAL_SERVER_URL + '/api/auth/csrf', {
+    const response = await fetch(OFFICIAL_SERVER_URL + '/api/health', {
       method: 'GET',
       signal: controller.signal,
       headers: { Accept: 'application/json' },
     });
     clearTimeout(timeout);
+    const data = await response.json().catch(() => ({}));
     return {
-      ok: response.ok,
+      ok: response.ok && data.ok === true,
       status: response.status,
       url: OFFICIAL_SERVER_URL,
       checkedAt: new Date().toISOString(),

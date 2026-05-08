@@ -103,6 +103,7 @@ Important limitations:
 - Group keys are user-managed.
 - Lost group keys cannot be recovered by the server.
 - Metadata such as usernames, group membership, timestamps, and message ownership is still visible to the server.
+- Short repeated-message spam detection hashes normalized short messages server-side, which can reveal when two short messages are identical even though the server still does not receive plaintext.
 - This is application-layer encryption, not a replacement for audited secure messaging infrastructure.
 
 ---
@@ -184,6 +185,28 @@ Railway uses `railway.json` for deployment. The server entry point is:
 ```bash
 node server.js
 ```
+
+The recommended healthcheck endpoint is:
+
+```txt
+/api/health
+```
+
+It verifies that the Express process is running and that SQLite is responding before Railway marks the deployment healthy.
+
+---
+
+## Scaling Limits of the Current Architecture
+
+The current hosted app is designed for a single Node.js instance with local SQLite storage.
+
+That is acceptable for a small MVP, but it is **not** globally scalable yet. Multi-instance or multi-region deployment would require:
+
+- a shared database such as PostgreSQL instead of local SQLite
+- a Socket.IO adapter such as Redis so events and presence are shared across instances
+- sticky sessions or a WebSocket-only deployment strategy for consistent realtime connections
+- a shared session store instead of per-node local session files
+- object storage for encrypted attachments instead of storing large blobs in SQLite
 
 ---
 

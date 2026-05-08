@@ -18,14 +18,25 @@ const crypto = require('crypto');
 const packageJson = require('./package.json');
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const MAX_ENCRYPTED_CONTENT_LENGTH = 34_000_000_000; // ~25GB + base64 overhead (25GB * 1.37)
+const MAX_JSON_BODY_BYTES = 16 * 1024 * 1024; // total JSON payload budget for wallpaper base64 overhead + other API bodies
+const MAX_WALLPAPER_BYTES = 10 * 1024 * 1024;
+const MAX_PROFILE_PICTURE_BYTES = 2 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024;
+const MAX_ATTACHMENT_BODY_BYTES = 16 * 1024 * 1024;
+const MAX_TEXT_MESSAGE_BYTES = 64 * 1024;
+const MAX_REPLY_PREVIEW_LENGTH = 240;
+const MAX_SOCKET_PAYLOAD_BYTES = 256 * 1024;
+const IV_BYTES = 12;
+const SAFE_IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const APP_VERSION = packageJson.version || '0.0.0';
 
 // ── App & Server ──────────────────────────────────────────────────────────────
 const app = express();
 app.set('trust proxy', 1);
 const server = http.createServer(app);
-const io = new Server(server);
+const io = new Server(server, {
+  maxHttpBufferSize: MAX_SOCKET_PAYLOAD_BYTES,
+});
 
 // ── Content Security Policy + HSTS ───────────────────────────────────────────
 app.use((req, res, next) => {
@@ -40,19 +51,141 @@ app.use((req, res, next) => {
   next();
 });
 
+function toMiB(bytes) {
+  return Math.round((bytes / (1024 * 1024)) * 10) / 10;
+}
+
+function estimateBase64Bytes(value) {
+  if (typeof value !== 'string') return 0;
+  const normalized = value.trim();
+  if (!normalized) return 0;
+  const padding = normalized.endsWith('==') ? 2 : normalized.endsWith('=') ? 1 : 0;
+  return Math.max(0, Math.floor((normalized.length * 3) / 4) - padding);
+}
+
+function isValidBase64(value) {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length % 4 === 0
+    && /^[A-Za-z0-9+/]+={0,2}$/.test(value);
+}
+
+function isValidIv(value) {
+  return isValidBase64(value) && estimateBase64Bytes(value) === IV_BYTES;
+}
+
+function normalizeHexColor(value, fallback = null) {
+  if (value == null || value === '') return fallback;
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return /^#[0-9A-Fa-f]{6}$/.test(trimmed) ? trimmed : null;
+}
+
+function sanitizeFilename(value) {
+  if (value == null || value === '') return null;
+  if (typeof value !== 'string') return null;
+  const trimmed = path.basename(value).replace(/[\u0000-\u001F\u007F]/g, '').trim();
+  if (!trimmed || trimmed === '.' || trimmed === '..') return null;
+  return trimmed.slice(0, 255);
+}
+
+function parseImageDataUrl(value, maxBytes, { allowNull = false } = {}) {
+  if (value == null) {
+    return allowNull ? { ok: true, dataUrl: null } : { ok: false, error: 'Image is required' };
+  }
+  if (typeof value !== 'string') {
+    return { ok: false, reason: 'invalid_format', error: 'Invalid image format' };
+  }
+  const match = /^data:(image\/[A-Za-z0-9.+-]+);base64,([A-Za-z0-9+/]+={0,2})$/.exec(value);
+  if (!match) {
+    return { ok: false, reason: 'invalid_format', error: 'Invalid image format' };
+  }
+  const mime = match[1].toLowerCase();
+  const base64 = match[2];
+  if (!SAFE_IMAGE_MIME_TYPES.has(mime) || !isValidBase64(base64)) {
+    return { ok: false, reason: 'invalid_format', error: 'Invalid image format. Only JPEG, PNG, GIF, and WebP are allowed.' };
+  }
+  if (estimateBase64Bytes(base64) > maxBytes) {
+    return { ok: false, reason: 'too_large', error: `Image too large (max ${toMiB(maxBytes)}MB)` };
+  }
+  return { ok: true, dataUrl: value, mime };
+}
+
+function validateEncryptedTextPayload(encryptedContent, iv) {
+  if (typeof encryptedContent !== 'string' || typeof iv !== 'string' || !encryptedContent || !iv) {
+    return { ok: false, error: 'encryptedContent and iv are required' };
+  }
+  if (!isValidIv(iv)) {
+    return { ok: false, error: 'Invalid encryption metadata' };
+  }
+  if (!isValidBase64(encryptedContent)) {
+    return { ok: false, error: 'Invalid encrypted content' };
+  }
+  if (estimateBase64Bytes(encryptedContent) > MAX_TEXT_MESSAGE_BYTES) {
+    return { ok: false, error: 'Message too large (max 64KB encrypted)' };
+  }
+  return { ok: true };
+}
+
+function normalizeReplyPayload(replyTo, groupId) {
+  if (replyTo == null || replyTo === '') return { ok: true, value: null };
+  if (typeof replyTo !== 'string' || replyTo.length > 2000) {
+    return { ok: false, error: 'Invalid reply target' };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(replyTo);
+  } catch {
+    return { ok: false, error: 'Invalid reply target' };
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    return { ok: false, error: 'Invalid reply target' };
+  }
+  const id = typeof parsed.id === 'string' ? parsed.id.trim() : '';
+  const senderName = typeof parsed.senderName === 'string' ? parsed.senderName.trim() : '';
+  const preview = typeof parsed.preview === 'string' ? parsed.preview.trim() : '';
+  if (!id || !senderName || !preview || senderName.length > 64 || preview.length > MAX_REPLY_PREVIEW_LENGTH) {
+    return { ok: false, error: 'Invalid reply target' };
+  }
+  const message = stmts.findMessageById.get(id);
+  if (!message || message.group_id !== groupId) {
+    return { ok: false, error: 'Reply target not found' };
+  }
+  return {
+    ok: true,
+    value: JSON.stringify({
+      id,
+      senderName: senderName.slice(0, 64),
+      preview: preview.slice(0, MAX_REPLY_PREVIEW_LENGTH),
+    }),
+  };
+}
+
 // ── Login brute-force protection ──────────────────────────────────────────────
 // Track failed login attempts per IP. 10 failures within a 15-minute window
 // locks the IP for the remainder of that window.
 const LOGIN_ATTEMPT_WINDOW = 15 * 60 * 1000; // 15 minutes
 const LOGIN_MAX_ATTEMPTS   = 10;
+const REGISTER_ATTEMPT_WINDOW = 15 * 60 * 1000; // 15 minutes
+const REGISTER_MAX_ATTEMPTS = 5;
+const SETTINGS_UPDATE_WINDOW = 60 * 1000; // 1 minute
+const SETTINGS_UPDATE_MAX = 20;
 const REMEMBER_ME_MAX_AGE = 30 * 24 * 60 * 60 * 1000;
 const loginAttempts = new Map(); // ip -> { count, windowStart }
+const registerAttempts = new Map(); // ip -> { count, windowStart }
+const settingsUpdateAttempts = new Map(); // userId -> { count, windowStart }
 
 // Periodically prune stale entries so the map doesn't grow unboundedly.
 setInterval(() => {
   const now = Date.now();
   for (const [ip, data] of loginAttempts) {
     if (now - data.windowStart > LOGIN_ATTEMPT_WINDOW) loginAttempts.delete(ip);
+  }
+  for (const [ip, data] of registerAttempts) {
+    if (now - data.windowStart > REGISTER_ATTEMPT_WINDOW) registerAttempts.delete(ip);
+  }
+  for (const [userId, data] of settingsUpdateAttempts) {
+    if (now - data.windowStart > SETTINGS_UPDATE_WINDOW) settingsUpdateAttempts.delete(userId);
   }
 }, 5 * 60 * 1000); // every 5 minutes
 
@@ -76,6 +209,74 @@ function isLoginBlocked(ip) {
 
 function clearLoginAttempts(ip) {
   loginAttempts.delete(ip);
+}
+
+function recordRegisterAttempt(ip) {
+  const now = Date.now();
+  const data = registerAttempts.get(ip);
+  if (!data || now - data.windowStart > REGISTER_ATTEMPT_WINDOW) {
+    registerAttempts.set(ip, { count: 1, windowStart: now });
+    return;
+  }
+  data.count++;
+}
+
+function isRegisterBlocked(ip) {
+  const now = Date.now();
+  const data = registerAttempts.get(ip);
+  if (!data) return false;
+  if (now - data.windowStart > REGISTER_ATTEMPT_WINDOW) {
+    registerAttempts.delete(ip);
+    return false;
+  }
+  return data.count >= REGISTER_MAX_ATTEMPTS;
+}
+
+function clearRegisterAttempts(ip) {
+  registerAttempts.delete(ip);
+}
+
+function recordSettingsUpdate(userId) {
+  const now = Date.now();
+  const data = settingsUpdateAttempts.get(userId);
+  if (!data || now - data.windowStart > SETTINGS_UPDATE_WINDOW) {
+    settingsUpdateAttempts.set(userId, { count: 1, windowStart: now });
+    return;
+  }
+  data.count++;
+}
+
+function isSettingsUpdateBlocked(userId) {
+  const now = Date.now();
+  const data = settingsUpdateAttempts.get(userId);
+  if (!data) return false;
+  if (now - data.windowStart > SETTINGS_UPDATE_WINDOW) {
+    settingsUpdateAttempts.delete(userId);
+    return false;
+  }
+  return data.count >= SETTINGS_UPDATE_MAX;
+}
+
+function getWallpaperValidationError(parsedWallpaper) {
+  if (parsedWallpaper.reason === 'too_large') {
+    return 'Wallpaper too large (max 10MB)';
+  }
+  if (parsedWallpaper.reason === 'invalid_format') {
+    return 'Invalid wallpaper format. Only JPEG, PNG, GIF, and WebP are allowed.';
+  }
+  return 'Invalid wallpaper format';
+}
+
+function getProfilePictureValidationError(parsedPicture) {
+  if (parsedPicture.reason === 'too_large') {
+    return 'Profile picture too large (max 2MB)';
+  }
+  return 'Invalid profile picture format. Only JPEG, PNG, GIF, and WebP are allowed.';
+}
+
+function normalizeWhisperRecipients(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map((entry) => String(entry || '').trim()).filter(Boolean))];
 }
 
 // ── Database ──────────────────────────────────────────────────────────────────
@@ -149,6 +350,8 @@ const migrations = [
   "ALTER TABLE users ADD COLUMN client_settings TEXT NOT NULL DEFAULT '{}'",
   "ALTER TABLE messages ADD COLUMN edited_at TEXT",
   "CREATE INDEX IF NOT EXISTS idx_message_reads_message_id ON message_reads (message_id)",
+  "CREATE INDEX IF NOT EXISTS idx_group_members_user_group ON group_members (user_id, group_id)",
+  "CREATE INDEX IF NOT EXISTS idx_group_members_group_joined_at ON group_members (group_id, joined_at ASC, user_id)",
   // Composite index to support efficient pagination ORDER BY (created_at DESC, id DESC)
   "CREATE INDEX IF NOT EXISTS idx_messages_group_pagination ON messages (group_id, created_at DESC, id DESC)",
 ];
@@ -183,9 +386,17 @@ const stmts = {
   insertUser: db.prepare(
     'INSERT INTO users (id, username, password_hash, icon_color) VALUES (?, ?, ?, ?)'
   ),
-  updateUser: db.prepare(
-    'UPDATE users SET username = COALESCE(?, username), icon_color = COALESCE(?, icon_color), profile_picture = COALESCE(?, profile_picture) WHERE id = ?'
-  ),
+  updateUser: db.prepare(`
+    UPDATE users
+    SET
+      username = COALESCE(@username, username),
+      icon_color = COALESCE(@iconColor, icon_color),
+      profile_picture = CASE
+        WHEN @hasProfilePicture = 1 THEN @profilePicture
+        ELSE profile_picture
+      END
+    WHERE id = @userId
+  `),
   updateUserSettings: db.prepare('UPDATE users SET client_settings = ? WHERE id = ?'),
   deleteUser: db.prepare('DELETE FROM users WHERE id = ?'),
   deleteUserMemberships: db.prepare('DELETE FROM group_members WHERE user_id = ?'),
@@ -303,10 +514,25 @@ const sessionMiddleware = session({
 });
 
 // ── Express Middleware ────────────────────────────────────────────────────────
-app.use(express.static(path.join(__dirname, 'public')));
-app.use(express.json({ limit: '30gb' }));
+app.use(express.static(path.join(__dirname, 'public'), {
+  etag: true,
+  lastModified: true,
+  setHeaders(res, filePath) {
+    const ext = path.extname(filePath).toLowerCase();
+    if (ext === '.html') {
+      res.setHeader('Cache-Control', 'no-cache');
+      return;
+    }
+    if (ext === '.js' || ext === '.css') {
+      res.setHeader('Cache-Control', 'public, max-age=300, must-revalidate');
+      return;
+    }
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+  },
+}));
+app.use(express.json({ limit: MAX_JSON_BODY_BYTES, strict: true }));
 app.use(sessionMiddleware);
-const uploadRawBodyParser = express.raw({ type: 'application/octet-stream', limit: '30gb' });
+const uploadRawBodyParser = express.raw({ type: 'application/octet-stream', limit: MAX_ATTACHMENT_BODY_BYTES });
 
 // ── CSRF Protection ───────────────────────────────────────────────────────────
 // Double-submit token pattern: token stored in session, sent as X-CSRF-Token header.
@@ -356,6 +582,7 @@ const UNPROTECTED = [
   '/auth/login',
   '/auth/me',
   '/auth/csrf',
+  '/health',
   '/meta/version',
 ];
 
@@ -371,6 +598,29 @@ app.use('/api', requireAuth);
 
 app.get('/api/meta/version', (_req, res) => {
   res.json({ version: APP_VERSION });
+});
+
+app.get('/api/health', (_req, res) => {
+  try {
+    const dbCheck = db.prepare('SELECT 1 AS ok').get();
+    const ok = !!dbCheck && dbCheck.ok === 1;
+    res.status(ok ? 200 : 503).json({
+      ok,
+      version: APP_VERSION,
+      uptimeSec: Math.floor(process.uptime()),
+      checkedAt: new Date().toISOString(),
+      database: ok ? 'ok' : 'error',
+    });
+  } catch (err) {
+    console.error('Healthcheck failed:', err);
+    res.status(503).json({
+      ok: false,
+      version: APP_VERSION,
+      uptimeSec: Math.floor(process.uptime()),
+      checkedAt: new Date().toISOString(),
+      database: 'error',
+    });
+  }
 });
 
 // ── Helper: format objects ────────────────────────────────────────────────────
@@ -446,6 +696,10 @@ app.get('/api/auth/settings', (req, res) => {
 
 app.patch('/api/auth/settings', (req, res) => {
   const userId = req.session.userId;
+  if (isSettingsUpdateBlocked(userId)) {
+    return res.status(429).json({ error: 'Too many settings updates. Please slow down.' });
+  }
+  recordSettingsUpdate(userId);
   const current = stmts.findUserById.get(userId);
   if (!current) return res.status(401).json({ error: 'Not authenticated' });
   let settings = {};
@@ -453,14 +707,11 @@ app.patch('/api/auth/settings', (req, res) => {
 
   const next = { ...settings };
   if (req.body.wallpaperDataUrl !== undefined) {
-    const value = req.body.wallpaperDataUrl;
-    if (value !== null && (typeof value !== 'string' || !value.startsWith('data:image/'))) {
-      return res.status(400).json({ error: 'Invalid wallpaper format' });
+    const parsedWallpaper = parseImageDataUrl(req.body.wallpaperDataUrl, MAX_WALLPAPER_BYTES, { allowNull: true });
+    if (!parsedWallpaper.ok) {
+      return res.status(400).json({ error: getWallpaperValidationError(parsedWallpaper) });
     }
-    if (typeof value === 'string' && value.length > 10 * 1024 * 1024 * 1.4) {
-      return res.status(400).json({ error: 'Wallpaper too large (max 10MB)' });
-    }
-    next.wallpaperDataUrl = value || null;
+    next.wallpaperDataUrl = parsedWallpaper.dataUrl;
   }
   if (req.body.hideProfileDot !== undefined) {
     next.hideProfileDot = !!req.body.hideProfileDot;
@@ -476,7 +727,12 @@ app.patch('/api/auth/settings', (req, res) => {
 });
 
 app.post('/api/auth/register', async (req, res) => {
-  const { username, password, iconColor } = req.body;
+  const username = typeof req.body.username === 'string' ? req.body.username.trim() : '';
+  const password = typeof req.body.password === 'string' ? req.body.password : '';
+  const iconColor = (req.body.iconColor == null || req.body.iconColor === '')
+    ? '#4A90D9'
+    : normalizeHexColor(req.body.iconColor);
+  const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
 
   if (!username || !password) {
     return res.status(400).json({ error: 'Username and password are required' });
@@ -487,6 +743,13 @@ app.post('/api/auth/register', async (req, res) => {
   if (password.length < 6) {
     return res.status(400).json({ error: 'Password must be at least 6 characters' });
   }
+  if (!iconColor) {
+    return res.status(400).json({ error: 'Invalid icon color format' });
+  }
+  if (isRegisterBlocked(clientIp)) {
+    return res.status(429).json({ error: 'Too many registration attempts. Please try again later.' });
+  }
+  recordRegisterAttempt(clientIp);
 
   const existing = stmts.findUserByUsername.get(username);
   if (existing) {
@@ -500,6 +763,7 @@ app.post('/api/auth/register', async (req, res) => {
 
     stmts.insertUser.run(id, username, passwordHash, color);
 
+    clearRegisterAttempts(clientIp);
     req.session.userId = id;
     req.session.save(() => {
       const user = stmts.findUserById.get(id);
@@ -512,7 +776,9 @@ app.post('/api/auth/register', async (req, res) => {
 });
 
 app.post('/api/auth/login', async (req, res) => {
-  const { username, password, rememberMe } = req.body;
+  const username = typeof req.body.username === 'string' ? req.body.username.trim() : '';
+  const password = typeof req.body.password === 'string' ? req.body.password : '';
+  const { rememberMe } = req.body;
 
   if (!username || !password) {
     return res.status(400).json({ error: 'Username and password are required' });
@@ -558,7 +824,14 @@ app.post('/api/auth/logout', (req, res) => {
 // PATCH /api/auth/profile — update username / iconColor / profilePicture
 app.patch('/api/auth/profile', (req, res) => {
   const userId = req.session.userId;
-  const { username, iconColor, profilePicture } = req.body;
+  if (isSettingsUpdateBlocked(userId)) {
+    return res.status(429).json({ error: 'Too many profile updates. Please slow down.' });
+  }
+  recordSettingsUpdate(userId);
+  const hasProfilePictureUpdate = Object.prototype.hasOwnProperty.call(req.body, 'profilePicture');
+  const { profilePicture } = req.body;
+  const username = req.body.username === undefined ? undefined : String(req.body.username).trim();
+  const iconColor = req.body.iconColor === undefined ? undefined : normalizeHexColor(req.body.iconColor);
 
   if (username !== undefined) {
     if (typeof username !== 'string' || username.length < 2 || username.length > 32) {
@@ -570,29 +843,25 @@ app.patch('/api/auth/profile', (req, res) => {
     }
   }
 
+  if (iconColor !== undefined && !iconColor) {
+    return res.status(400).json({ error: 'Invalid icon color format' });
+  }
+
   if (profilePicture !== undefined && profilePicture !== null) {
-    // Only allow safe raster image MIME types — reject SVG and other types
-    // that could carry embedded scripts.
-    const ALLOWED_PIC_PREFIXES = [
-      'data:image/jpeg;base64,',
-      'data:image/png;base64,',
-      'data:image/gif;base64,',
-      'data:image/webp;base64,',
-    ];
-    if (
-      typeof profilePicture !== 'string' ||
-      !ALLOWED_PIC_PREFIXES.some(p => profilePicture.startsWith(p))
-    ) {
-      return res.status(400).json({ error: 'Invalid profile picture format. Only JPEG, PNG, GIF, and WebP are allowed.' });
-    }
-    // Base64 encoded 2MB max
-    if (profilePicture.length > 2 * 1024 * 1024 * 1.4) {
-      return res.status(400).json({ error: 'Profile picture too large (max 2MB)' });
+    const parsedPicture = parseImageDataUrl(profilePicture, MAX_PROFILE_PICTURE_BYTES);
+    if (!parsedPicture.ok) {
+      return res.status(400).json({ error: getProfilePictureValidationError(parsedPicture) });
     }
   }
 
   try {
-    stmts.updateUser.run(username || null, iconColor || null, profilePicture !== undefined ? profilePicture : null, userId);
+    stmts.updateUser.run({
+      username: username || null,
+      iconColor: iconColor || null,
+      profilePicture: hasProfilePictureUpdate ? profilePicture : null,
+      hasProfilePicture: hasProfilePictureUpdate ? 1 : 0,
+      userId,
+    });
     const user = stmts.findUserById.get(userId);
     // Update in-memory socket state for all connected sockets of this user
     for (const [, s] of io.sockets.sockets) {
@@ -665,7 +934,8 @@ app.get('/api/admin/users', (req, res) => {
 // ── Group Routes ──────────────────────────────────────────────────────────────
 
 app.post('/api/groups/create', (req, res) => {
-  const { name, code } = req.body;
+  const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+  const code = typeof req.body.code === 'string' ? req.body.code.trim() : '';
   const userId = req.session.userId;
 
   if (!name || !code) {
@@ -701,7 +971,7 @@ app.post('/api/groups/create', (req, res) => {
 });
 
 app.post('/api/groups/join', (req, res) => {
-  const { code } = req.body;
+  const code = typeof req.body.code === 'string' ? req.body.code.trim() : '';
   const userId = req.session.userId;
 
   if (!code) {
@@ -713,23 +983,26 @@ app.post('/api/groups/join', (req, res) => {
     return res.status(404).json({ error: 'Group not found' });
   }
 
-  stmts.insertMember.run(group.id, userId);
+  const joined = stmts.insertMember.run(group.id, userId);
 
   // Emit member_joined to the group room
-  const user = stmts.findUserById.get(userId);
-  io.to(group.id).emit('member_joined', {
-    userId,
-    username: user.username,
-    iconColor: user.icon_color,
-    profilePicture: user.profile_picture || null,
-    groupId: group.id,
-  });
+  if (joined.changes > 0) {
+    const user = stmts.findUserById.get(userId);
+    io.to(group.id).emit('member_joined', {
+      userId,
+      username: user.username,
+      iconColor: user.icon_color,
+      profilePicture: user.profile_picture || null,
+      groupId: group.id,
+    });
+  }
 
   res.json({
     id: group.id,
     name: group.name,
     code: group.code,
     createdBy: group.created_by,
+    alreadyJoined: joined.changes === 0,
     allowMemberClear: group.allow_member_clear || 0,
     allowMemberExport: group.allow_member_export || 0,
     allowMemberKick: group.allow_member_kick || 0,
@@ -758,7 +1031,7 @@ app.get('/api/groups/mine', (req, res) => {
 app.patch('/api/groups/:groupId/name', (req, res) => {
   const { groupId } = req.params;
   const userId = req.session.userId;
-  const { name } = req.body;
+  const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
 
   const member = stmts.isMember.get(groupId, userId);
   if (!member) return res.status(403).json({ error: 'Not a member of this group' });
@@ -947,18 +1220,28 @@ app.post('/api/groups/:groupId/upload', uploadRawBodyParser, (req, res) => {
     return res.status(400).json({ error: 'encryptedContent and iv are required' });
   }
 
-  // Validate type
-  const msgType = type === 'file' ? 'file' : 'image';
-
-  // Sanitize filename: strip path separators and limit length
-  let safeFilename = null;
-  if (filename && typeof filename === 'string') {
-    safeFilename = filename.replace(/[/\\]/g, '').slice(0, 255) || null;
+  const msgType = type === 'file' || type === 'image' ? type : null;
+  if (!msgType) {
+    return res.status(400).json({ error: 'Invalid upload type' });
+  }
+  if (!isValidIv(iv)) {
+    return res.status(400).json({ error: 'Invalid upload encryption metadata' });
+  }
+  if (!isValidBase64(encryptedContent)) {
+    return res.status(400).json({ error: 'Invalid upload payload' });
   }
 
-  // Enforce cap
-  if (encryptedContent.length > MAX_ENCRYPTED_CONTENT_LENGTH) {
-    return res.status(400).json({ error: 'File too large. Maximum size is 25GB.' });
+  let safeFilename = sanitizeFilename(filename);
+  if (msgType === 'file' && !safeFilename) {
+    return res.status(400).json({ error: 'Invalid filename' });
+  }
+
+  const encryptedBytes = estimateBase64Bytes(encryptedContent);
+  if (encryptedBytes <= 0) {
+    return res.status(400).json({ error: 'Upload payload is empty' });
+  }
+  if (encryptedBytes > MAX_ATTACHMENT_BYTES) {
+    return res.status(413).json({ error: 'Attachment too large (max 15MB)' });
   }
   const msgId = uuidv4();
   const createdAt = new Date().toISOString();
@@ -1183,7 +1466,10 @@ io.on('connection', (socket) => {
 
   // ── send_message ──────────────────────────────────────────────────────────
   socket.on('send_message', ({ groupId, encryptedContent, iv, replyTo, spamSignature }) => {
-    if (!groupId || !encryptedContent || !iv) return;
+    if (!groupId) {
+      socket.emit('error', { message: 'Group ID is required' });
+      return;
+    }
 
     // Server-side rate limiting: max 10 messages per 5 seconds, keyed by userId
     const rateData = socketRateMap.get(socket.userId);
@@ -1209,9 +1495,15 @@ io.on('connection', (socket) => {
       rateData.timestamps.push(now);
     }
 
-    // Enforce size cap
-    if (encryptedContent.length > MAX_ENCRYPTED_CONTENT_LENGTH) {
-      socket.emit('error', { message: 'Message too large.' });
+    const payloadCheck = validateEncryptedTextPayload(encryptedContent, iv);
+    if (!payloadCheck.ok) {
+      socket.emit('error', { message: payloadCheck.error });
+      return;
+    }
+
+    const replyCheck = normalizeReplyPayload(replyTo, groupId);
+    if (!replyCheck.ok) {
+      socket.emit('error', { message: replyCheck.error });
       return;
     }
 
@@ -1233,7 +1525,7 @@ io.on('connection', (socket) => {
         encryptedContent,
         iv,
         'text',
-        replyTo || null,
+        replyCheck.value,
         null,
         null,
         totalRecipients
@@ -1253,7 +1545,7 @@ io.on('connection', (socket) => {
       encryptedContent,
       iv,
       type: 'text',
-      replyTo: replyTo || null,
+      replyTo: replyCheck.value,
       filename: null,
       whisperTo: null,
       createdAt,
@@ -1267,7 +1559,10 @@ io.on('connection', (socket) => {
 
   // ── send_whisper ──────────────────────────────────────────────────────────
   socket.on('send_whisper', ({ groupId, encryptedContent, iv, whisperTo, replyTo, spamSignature }) => {
-    if (!groupId || !encryptedContent || !iv || !Array.isArray(whisperTo)) return;
+    if (!groupId || !Array.isArray(whisperTo)) {
+      socket.emit('error', { message: 'Invalid whisper payload' });
+      return;
+    }
 
     // Rate limiting (same limits as send_message, keyed by userId)
     const rateData = socketRateMap.get(socket.userId);
@@ -1298,13 +1593,32 @@ io.on('connection', (socket) => {
       return;
     }
 
-    if (encryptedContent.length > MAX_ENCRYPTED_CONTENT_LENGTH) {
-      socket.emit('error', { message: 'Message too large.' });
+    const payloadCheck = validateEncryptedTextPayload(encryptedContent, iv);
+    if (!payloadCheck.ok) {
+      socket.emit('error', { message: payloadCheck.error });
       return;
     }
 
+    const replyCheck = normalizeReplyPayload(replyTo, groupId);
+    if (!replyCheck.ok) {
+      socket.emit('error', { message: replyCheck.error });
+      return;
+    }
+
+    const recipients = normalizeWhisperRecipients(whisperTo);
+    if (recipients.length === 0) {
+      socket.emit('error', { message: 'Select at least one whisper recipient.' });
+      return;
+    }
+    if (recipients.every((recipId) => recipId === socket.userId)) {
+      socket.emit('error', { message: 'Whispers must target at least one other group member.' });
+      return;
+    }
+    const recipientsExcludingSender = recipients.filter((recipId) => recipId !== socket.userId);
+
     // Validate that every whisper recipient is a member of this group
-    for (const recipId of whisperTo) {
+    for (const recipId of recipients) {
+      if (recipId === socket.userId) continue;
       if (!stmts.isMember.get(groupId, String(recipId))) {
         socket.emit('error', { message: 'One or more whisper recipients are not group members.' });
         return;
@@ -1313,9 +1627,9 @@ io.on('connection', (socket) => {
 
     const msgId = uuidv4();
     const createdAt = new Date().toISOString();
-    const totalRecipients = Math.max(0, whisperTo.length);
+    const totalRecipients = Math.max(0, recipientsExcludingSender.length);
     // Store whisper recipients as JSON array for safety
-    const whisperToStr = JSON.stringify(whisperTo.map(String));
+    const whisperToStr = JSON.stringify(recipientsExcludingSender);
 
     try {
       stmts.insertMessage.run(
@@ -1325,7 +1639,7 @@ io.on('connection', (socket) => {
         encryptedContent,
         iv,
         'whisper',
-        replyTo || null,
+        replyCheck.value,
         null,
         whisperToStr,
         totalRecipients
@@ -1345,7 +1659,7 @@ io.on('connection', (socket) => {
       encryptedContent,
       iv,
       type: 'whisper',
-      replyTo: replyTo || null,
+      replyTo: replyCheck.value,
       filename: null,
       whisperTo: whisperToStr,
       createdAt,
@@ -1355,7 +1669,7 @@ io.on('connection', (socket) => {
     };
 
     // Send to sender + recipients only
-    const recipientIds = new Set([socket.userId, ...whisperTo.map(String)]);
+    const recipientIds = new Set([socket.userId, ...recipients]);
     const roomSockets = getPresence(groupId);
     for (const sid of roomSockets) {
       const s = io.sockets.sockets.get(sid);
@@ -1393,11 +1707,13 @@ io.on('connection', (socket) => {
   // ── typing ────────────────────────────────────────────────────────────────
   socket.on('typing', ({ groupId }) => {
     if (!groupId) return;
+    if (!stmts.isMember.get(groupId, socket.userId)) return;
     socket.to(groupId).emit('user_typing', { username: socket.username });
   });
 
   socket.on('stop_typing', ({ groupId }) => {
     if (!groupId) return;
+    if (!stmts.isMember.get(groupId, socket.userId)) return;
     socket.to(groupId).emit('user_stop_typing', { username: socket.username });
   });
 
@@ -1437,6 +1753,28 @@ io.on('connection', (socket) => {
       }
     }
   });
+});
+
+app.use((err, req, res, next) => {
+  if (!err) return next();
+  if (err.type === 'entity.too.large') {
+    let error = 'Request payload too large';
+    if (req.path.includes('/groups/') && req.path.endsWith('/upload')) {
+      error = 'Attachment too large (max 15MB)';
+    } else if (req.path === '/api/auth/settings') {
+      error = 'Wallpaper too large (max 10MB)';
+    } else if (req.path === '/api/auth/profile') {
+      error = 'Profile picture too large (max 2MB)';
+    } else if (req.path.includes('/messages')) {
+      error = 'Message payload too large';
+    }
+    return res.status(413).json({ error });
+  }
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    return res.status(400).json({ error: 'Invalid JSON payload' });
+  }
+  console.error('Unhandled request error:', err);
+  return res.status(500).json({ error: 'Internal server error' });
 });
 
 // ── Start Server ──────────────────────────────────────────────────────────────
