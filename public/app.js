@@ -463,7 +463,7 @@ function ensureReadObserver() {
   readObserver = new IntersectionObserver((entries) => {
     for (const entry of entries) {
       if (!entry.isIntersecting) continue;
-      if (!socket || !currentGroupId || document.visibilityState !== 'visible') continue;
+      if (!socket || !currentGroupId || document.visibilityState !== 'visible' || !document.hasFocus()) continue;
       const row = entry.target;
       const messageId = row?.dataset?.msgId;
       if (!messageId || pendingReadMessageIds.has(messageId) || row?.dataset?.hasRead === '1') continue;
@@ -2179,12 +2179,16 @@ async function doSend(text) {
   if (!key) return;
   if (!text.trim()) return;
   const normalizedText = text.trim().replace(/\s+/g, ' ');
-  const visibleChars = Array.from(normalizedText).filter((char) => char.trim());
-  if (visibleChars.length === 1) {
+  const shouldInspectShortSpam = !text.includes('\n') && normalizedText.length <= 80;
+  const shouldCheckSingleGlyph = normalizedText.length <= 8;
+  const visibleChars = shouldInspectShortSpam || shouldCheckSingleGlyph
+    ? Array.from(normalizedText).filter((char) => char.trim())
+    : [];
+  if (shouldCheckSingleGlyph && visibleChars.length === 1) {
     showToast('Please send more than a single character or emoji', 'error');
     return;
   }
-  if (!text.includes('\n') && normalizedText.length <= 80) {
+  if (shouldInspectShortSpam) {
     const uniqueVisibleChars = new Set(visibleChars.map((char) => char.toLowerCase()));
     if (visibleChars.length >= 8 && uniqueVisibleChars.size <= 2) {
       showToast('Please avoid sending repetitive short messages', 'error');
