@@ -4,6 +4,38 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## PR — Composer repair after v1.0.4
+
+**What was broken**
+
+- The v1.0.4 composer refactor left the bottom message bar in a broken state: the new token/menu wrapper could collapse the textarea width, the slash-command menu could be clipped, and the composer no longer behaved like a stable chat input bar.
+- Slash suggestions were also too eager because the menu appeared for any leading slash text, even when the input did not match a supported command prefix.
+
+**Root cause**
+
+- The new `#message-composer-shell` was added inside the existing `.message-input-bar`, but the parent bar still used `overflow: hidden` while the slash menu was absolutely positioned above the shell. That caused the slash UI to be clipped by its parent container.
+- The shell also switched the textarea area to a wrapping row layout without giving the token strip and textarea stable full-width behavior, so the token strip and textarea could fight over horizontal space instead of stacking cleanly.
+
+**What was fixed**
+
+- Changed the composer shell to a vertical layout so the token strip sits above the textarea instead of competing with it for width.
+- Restored stable textarea sizing by giving the textarea and token strip full-width behavior inside the shell.
+- Allowed the composer container to overflow visibly so the slash-command menu can open above the input instead of being clipped.
+- Tightened slash-menu visibility so it only appears when the first character is `/` and the current prefix still matches a supported command (`/`, `/w`, `/#`, `/d`).
+
+**What was NOT changed**
+
+- Normal message encryption, send routing, uploads, read receipts, edits, deletes, group switching, local cache behavior, and Electron packaging were not redesigned.
+- The v1.0.4 command/message model was left in place; this repair only stabilizes the composer layout and the slash-menu trigger behavior.
+
+**Manual test notes**
+
+- Verified JavaScript syntax with `node --check public/app.js` and `node --check server.js`.
+- Verified the existing build path with `npm run build:linux -- --publish never`.
+- Manually reasoned through the repaired composer flow for normal typing, Enter vs Shift+Enter, slash-menu visibility, whisper/tag token display, and attachment uploads sharing the same composer state.
+
+---
+
 ## PR — Disappearing text messages
 
 **What changed**
