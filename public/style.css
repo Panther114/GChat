@@ -619,7 +619,7 @@ body.sidebar-resizing * {
   border-color: var(--whisper-border);
   border-left: 3px solid var(--whisper-border);
 }
-.whisper-label { font-size: 10px; color: #a78bfa; font-style: italic; display: inline-flex; align-items: center; }
+.whisper-label { font-size: 10px; color: #a78bfa; font-style: italic; display: inline-block; }
 
 /* System messages */
 .msg-system {
@@ -830,19 +830,19 @@ body.sidebar-resizing * {
 
 .message-input-bar textarea {
   flex: 1;
-   min-width: 120px;
-   background: transparent;
-   border: none;
-   color: var(--text-primary);
-   font-size: 13px;
-   padding: 3px 2px;
-   resize: none;
-   outline: none;
-   min-height: 26px;
-   max-height: 120px;
-   overflow-y: auto;
-   font-family: inherit;
-   line-height: 1.4;
+  min-width: 120px;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-size: 13px;
+  padding: 3px 2px;
+  resize: none;
+  outline: none;
+  min-height: 26px;
+  max-height: 120px;
+  overflow-y: auto;
+  font-family: inherit;
+  line-height: 1.4;
 }
 .message-input-bar textarea:disabled { opacity: .4; }
 

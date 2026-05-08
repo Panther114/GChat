@@ -399,6 +399,11 @@ function getMessageHashtagKey(msg) {
   return normalizeHashtagTopic(msg && msg.hashtag);
 }
 
+function getMessageHashtagPrefix(msg) {
+  const topic = getMessageHashtagKey(msg);
+  return topic ? `${formatHashtagLabel(topic)} ` : '';
+}
+
 function wallpaperCssValue(dataUrl) {
   if (!dataUrl) return DEFAULT_WALLPAPER;
   return `url(${JSON.stringify(String(dataUrl))})`;
@@ -1666,7 +1671,7 @@ function updateGroupPreview(groupId, text, time) {
 
 async function getMessagePreviewText(msg, groupId = msg.groupId) {
   if (!msg) return '';
-  const prefix = msg.hashtag ? `${formatHashtagLabel(msg.hashtag)} ` : '';
+  const prefix = getMessageHashtagPrefix(msg);
   if (msg.type === 'image') return prefix + '[Image]';
   if (msg.type === 'file') return prefix + '[File: ' + (msg.filename || '') + ']';
   if (msg.type === 'whisper') return prefix + '[Whisper]';
