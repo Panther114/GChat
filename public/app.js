@@ -46,6 +46,12 @@ async function encryptMessage(text, passphrase, groupId) {
   };
 }
 
+async function sha256Hex(text) {
+  const enc = new TextEncoder();
+  const digest = await crypto.subtle.digest('SHA-256', enc.encode(text));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
 async function decryptMessage(encryptedContent, ivB64, passphrase, groupId) {
   try {
     const key = await deriveKey(passphrase, groupId);
@@ -125,6 +131,33 @@ async function compressImage(file) {
   });
 }
 
+function readFileAsDataUrl(file, callbacks = {}) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onprogress = (event) => {
+      if (typeof callbacks.onProgress === 'function') callbacks.onProgress(event);
+    };
+    reader.onerror = () => reject(new Error('Unable to read image'));
+    reader.onload = (event) => {
+      const result = String(event.target?.result || '');
+      if (!result) {
+        reject(new Error('Unable to read image'));
+        return;
+      }
+      resolve(result);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function prepareWallpaperFile(file) {
+  if (!file || !file.type.startsWith('image/')) return file;
+  if (file.size <= 2 * 1024 * 1024) return file;
+  const optimized = await compressImage(file);
+  if (optimized instanceof Blob && optimized.size > 0 && optimized.size < file.size) return optimized;
+  return file;
+}
+
 // ── CSRF ──────────────────────────────────────────────────────────────────────
 let csrfToken = null;
 let appVersionLabel = 'v—';
@@ -136,8 +169,9 @@ async function fetchCsrfToken() {
   } catch { /* will retry */ }
 }
 
-function apiHeaders() {
-  const h = { 'Content-Type': 'application/json' };
+function apiHeaders(options = {}) {
+  const h = {};
+  if (options.json !== false) h['Content-Type'] = 'application/json';
   if (csrfToken) h['X-CSRF-Token'] = csrfToken;
   return h;
 }
@@ -332,17 +366,36 @@ function applyWallpaperFromSettings() {
   if (preview) preview.src = wallpaper || DEFAULT_WALLPAPER_PREVIEW_SRC;
 }
 
-async function saveSettingsToServer() {
+async function saveSettingsToServer(options = {}) {
   if (!currentUser) return false;
   const payload = {
     wallpaperDataUrl: appLocalSettings.wallpaperDataUrl || null,
     hideProfileDot: !!appLocalSettings.hideProfileDot,
   };
+  const body = JSON.stringify(payload);
+  if (typeof options.onUploadProgress === 'function' || typeof options.onUploadComplete === 'function') {
+    return new Promise((resolve) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('PATCH', '/api/auth/settings');
+      const headers = apiHeaders();
+      for (const [key, val] of Object.entries(headers)) xhr.setRequestHeader(key, val);
+      xhr.upload.onprogress = (evt) => {
+        if (!evt.lengthComputable || typeof options.onUploadProgress !== 'function') return;
+        options.onUploadProgress(evt.loaded, evt.total);
+      };
+      xhr.upload.onloadend = () => {
+        if (typeof options.onUploadComplete === 'function') options.onUploadComplete();
+      };
+      xhr.onerror = () => resolve(false);
+      xhr.onload = () => resolve(xhr.status >= 200 && xhr.status < 300);
+      xhr.send(body);
+    });
+  }
   try {
     const res = await fetch('/api/auth/settings', {
       method: 'PATCH',
       headers: apiHeaders(),
-      body: JSON.stringify(payload),
+      body,
     });
     return res.ok;
   } catch {
@@ -409,39 +462,24 @@ function ensureReadObserver() {
   if (readObserver) return;
   readObserver = new IntersectionObserver((entries) => {
     for (const entry of entries) {
-      if (!entry.isIntersecting || entry.intersectionRatio < 0.75) continue;
-      if (!socket || !currentGroupId || document.visibilityState !== 'visible' || !document.hasFocus()) continue;
+      if (!entry.isIntersecting) continue;
+      if (!socket || !currentGroupId || document.visibilityState !== 'visible') continue;
       const row = entry.target;
       const messageId = row?.dataset?.msgId;
-      if (!messageId || pendingReadMessageIds.has(messageId) || pendingReadTimers.has(messageId)) continue;
-      const timer = setTimeout(() => {
-        pendingReadTimers.delete(messageId);
-        if (!row?.isConnected) return;
-        pendingReadMessageIds.add(messageId);
-        row.classList.remove('unseen');
-        row.dataset.hasRead = '1';
-        if (currentGroupId) {
-          unreadCounts[currentGroupId] = Math.max(0, (unreadCounts[currentGroupId] || 0) - 1);
-          updateUnreadBadge(currentGroupId, unreadCounts[currentGroupId]);
-        }
-        readObserver.unobserve(row);
-        socket.emit('mark_message_read', { groupId: currentGroupId, messageId });
-      }, 1000);
-      pendingReadTimers.set(messageId, timer);
-    }
-    for (const entry of entries) {
-      if (entry.isIntersecting && entry.intersectionRatio >= 0.75) continue;
-      const row = entry.target;
-      const messageId = row?.dataset?.msgId;
-      if (!messageId) continue;
-      const timer = pendingReadTimers.get(messageId);
-      if (!timer) continue;
-      clearTimeout(timer);
-      pendingReadTimers.delete(messageId);
+      if (!messageId || pendingReadMessageIds.has(messageId) || row?.dataset?.hasRead === '1') continue;
+      pendingReadMessageIds.add(messageId);
+      row.classList.remove('unseen');
+      row.dataset.hasRead = '1';
+      if (currentGroupId) {
+        unreadCounts[currentGroupId] = Math.max(0, (unreadCounts[currentGroupId] || 0) - 1);
+        updateUnreadBadge(currentGroupId, unreadCounts[currentGroupId]);
+      }
+      readObserver.unobserve(row);
+      socket.emit('mark_message_read', { groupId: currentGroupId, messageId });
     }
   }, {
     root: messagesArea(),
-    threshold: [0.75],
+    threshold: 0,
   });
 }
 
@@ -466,8 +504,6 @@ function observeCurrentGroupRowsForRead() {
 }
 
 function resetReadTracking() {
-  for (const timer of pendingReadTimers.values()) clearTimeout(timer);
-  pendingReadTimers = new Map();
   pendingReadMessageIds = new Set();
   if (readObserver) {
     readObserver.disconnect();
@@ -638,7 +674,6 @@ let unreadNotificationCount = 0;
 let titleBlinkInterval = null;
 let readObserver = null;
 let pendingReadMessageIds = new Set();
-let pendingReadTimers = new Map();
 const groupDataCache = new Map();
 const groupPreloadPromises = new Map();
 const pendingAttachmentRows = new Map();
@@ -679,6 +714,22 @@ function getMemberProfile(groupId, userId) {
   const activeMember = members.find((member) => member.id === userId);
   if (activeMember) return activeMember;
   return null;
+}
+
+function getGroupMemberCount(groupId = currentGroupId) {
+  if (!groupId) return 0;
+  const cache = ensureGroupCacheEntry(groupId);
+  if (Array.isArray(cache?.members) && cache.members.length) return cache.members.length;
+  if (groupId === currentGroupId && Array.isArray(members)) return members.length;
+  return 0;
+}
+
+function resolveDeliveryRecipientCount(msg, groupId = currentGroupId) {
+  const total = Math.max(0, Number(msg?.totalRecipients) || 0);
+  if (!msg || msg.type === 'whisper') return total;
+  const memberCount = getGroupMemberCount(groupId);
+  if (memberCount > 0 && total >= memberCount) return Math.max(0, memberCount - 1);
+  return total;
 }
 
 function createLoadMoreIndicator() {
@@ -1661,7 +1712,7 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
     const del = document.createElement('span');
     del.className = 'msg-delivery';
     del.id = 'del-' + msg.id;
-    const { total, read } = normalizeDeliveryCounts(msg.totalRecipients, msg.readCount);
+    const { total, read } = normalizeDeliveryCounts(resolveDeliveryRecipientCount(msg, groupId), msg.readCount);
     del.dataset.totalRecipients = String(total);
     del.dataset.readCount = String(read);
     renderDeliveryTicks(del, total, read);
@@ -1962,10 +2013,44 @@ function setWallpaperSaveState(enabled) {
   saveBtn.disabled = !enabled;
 }
 
+function setWallpaperBusyState(busy) {
+  const saveBtn = $('wallpaper-save-btn');
+  const resetBtn = $('wallpaper-reset-btn');
+  const closeBtn = $('wallpaper-close-btn');
+  const input = $('wallpaper-input');
+  if (saveBtn) saveBtn.disabled = !!busy || !pendingWallpaperDataUrl;
+  if (resetBtn) resetBtn.disabled = !!busy;
+  if (closeBtn) closeBtn.disabled = !!busy;
+  if (input) input.disabled = !!busy;
+}
+
+function setWallpaperProgress(percent, label) {
+  const wrap = $('wallpaper-progress');
+  const fill = $('wallpaper-progress-fill');
+  const text = $('wallpaper-progress-label');
+  if (!wrap || !fill || !text) return;
+  if (percent == null) {
+    wrap.hidden = true;
+    fill.style.width = '0%';
+    text.textContent = '';
+    return;
+  }
+  const safePercent = Math.max(0, Math.min(100, Number(percent) || 0));
+  wrap.hidden = false;
+  fill.style.width = safePercent + '%';
+  text.textContent = label || '';
+}
+
+function resetWallpaperProgress() {
+  setWallpaperProgress(null, '');
+}
+
 function resetWallpaperDraft() {
   pendingWallpaperDataUrl = null;
   $('wallpaper-error').textContent = '';
   $('wallpaper-input').value = '';
+  resetWallpaperProgress();
+  setWallpaperBusyState(false);
   setWallpaperSaveState(false);
   applyWallpaperFromSettings();
 }
@@ -1975,10 +2060,21 @@ async function saveWallpaperDraft() {
     $('wallpaper-error').textContent = WALLPAPER_SELECT_FIRST_MSG;
     return;
   }
+  setWallpaperBusyState(true);
+  setWallpaperProgress(4, 'Uploading wallpaper…');
   appLocalSettings.wallpaperDataUrl = pendingWallpaperDataUrl;
   applyWallpaperFromSettings();
   writeLocalSettings(appLocalSettings, currentUser && currentUser.id);
-  const saved = await saveSettingsToServer();
+  const saved = await saveSettingsToServer({
+    onUploadProgress: (loaded, total) => {
+      const ratio = total > 0 ? loaded / total : 0;
+      setWallpaperProgress(Math.max(4, Math.round(ratio * 88)), 'Uploading wallpaper…');
+    },
+    onUploadComplete: () => {
+      setWallpaperProgress(92, 'Saving wallpaper…');
+    },
+  });
+  setWallpaperProgress(100, saved ? 'Wallpaper saved' : 'Wallpaper saved locally');
   if (!saved) {
     showToast(WALLPAPER_SAVE_SYNC_FAIL_MSG, 'info');
   }
@@ -2082,6 +2178,27 @@ async function doSend(text) {
   const key = getGroupKey(currentGroupId);
   if (!key) return;
   if (!text.trim()) return;
+  const normalizedText = text.trim().replace(/\s+/g, ' ');
+  const visibleChars = Array.from(normalizedText).filter((char) => char.trim());
+  if (visibleChars.length === 1) {
+    showToast('Please send more than a single character or emoji', 'error');
+    return;
+  }
+  if (!text.includes('\n') && normalizedText.length <= 80) {
+    const uniqueVisibleChars = new Set(visibleChars.map((char) => char.toLowerCase()));
+    if (visibleChars.length >= 8 && uniqueVisibleChars.size <= 2) {
+      showToast('Please avoid sending repetitive short messages', 'error');
+      return;
+    }
+    const shortTokens = normalizedText.split(' ').filter(Boolean);
+    if (shortTokens.length >= 4 && shortTokens.length <= 24) {
+      const tokenSet = new Set(shortTokens.map((token) => token.toLowerCase()));
+      if (tokenSet.size === 1 && shortTokens[0].length <= 8) {
+        showToast('Please avoid repeating the same short message', 'error');
+        return;
+      }
+    }
+  }
 
   // Client-side rate limiting
   const now = Date.now();
@@ -2091,7 +2208,7 @@ async function doSend(text) {
     return;
   }
   // Repeated message check
-  if (text === clientRateLimiter.lastContent) {
+  if (normalizedText === clientRateLimiter.lastContent) {
     clientRateLimiter.repeatCount = (clientRateLimiter.repeatCount || 0) + 1;
     if (clientRateLimiter.repeatCount >= 3) {
       showToast("Don't send the same message repeatedly", 'error');
@@ -2099,12 +2216,13 @@ async function doSend(text) {
     }
   } else {
     clientRateLimiter.repeatCount = 0;
-    clientRateLimiter.lastContent = text;
+    clientRateLimiter.lastContent = normalizedText;
   }
   clientRateLimiter.times.push(now);
 
   try {
     const { encryptedContent, iv } = await encryptMessage(text, key, currentGroupId);
+    const spamSignature = await sha256Hex(normalizedText.toLowerCase());
 
     // Build replyTo data
     let replyToData = null;
@@ -2122,9 +2240,10 @@ async function doSend(text) {
         encryptedContent, iv,
         whisperTo: whisperRecipients,
         replyTo: replyToData,
+        spamSignature,
       });
     } else {
-      socket.emit('send_message', { groupId: currentGroupId, encryptedContent, iv, replyTo: replyToData });
+      socket.emit('send_message', { groupId: currentGroupId, encryptedContent, iv, replyTo: replyToData, spamSignature });
     }
 
     // Stop typing indicator
@@ -2257,7 +2376,8 @@ function uploadEncryptedAttachment(groupId, body, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `/api/groups/${groupId}/upload`);
-    const headers = apiHeaders();
+    const isBinaryUpload = !!(body && body.encryptedBytes instanceof Uint8Array);
+    const headers = apiHeaders({ json: !isBinaryUpload });
     for (const [key, val] of Object.entries(headers)) xhr.setRequestHeader(key, val);
     xhr.upload.onprogress = (evt) => {
       if (!evt.lengthComputable || typeof onProgress !== 'function') return;
@@ -2270,7 +2390,7 @@ function uploadEncryptedAttachment(groupId, body, onProgress) {
       try { data = JSON.parse(raw); } catch { /* ignore parse errors */ }
       resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, data });
     };
-    if (body && body.encryptedBytes instanceof Uint8Array) {
+    if (isBinaryUpload) {
       xhr.setRequestHeader('Content-Type', 'application/octet-stream');
       xhr.setRequestHeader('X-Upload-IV', body.iv);
       xhr.setRequestHeader('X-Upload-Type', body.type);
@@ -2486,7 +2606,11 @@ function initSocket() {
 
   socket.on('message_deleted', ({ messageId }) => {
     const row = document.querySelector('[data-msg-id="' + messageId + '"]');
-    if (row) row.remove();
+    if (row) {
+      readObserver?.unobserve(row);
+      row.remove();
+    }
+    pendingReadMessageIds.delete(messageId);
     for (const [groupId, cache] of groupDataCache.entries()) {
       const index = cache.messages ? cache.messages.findIndex((msg) => msg.id === messageId) : -1;
       if (index === -1) continue;
@@ -2970,10 +3094,12 @@ function setupEventListeners() {
     resetWallpaperDraft();
     showToast(WALLPAPER_RESET_SUCCESS_MSG, 'success');
   });
-  $('wallpaper-input').addEventListener('change', (e) => {
+  $('wallpaper-input').addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
     $('wallpaper-error').textContent = '';
+    pendingWallpaperDataUrl = null;
+    resetWallpaperProgress();
     if (!file.type.startsWith('image/')) {
       $('wallpaper-error').textContent = WALLPAPER_INVALID_TYPE_MSG;
       setWallpaperSaveState(false);
@@ -2984,18 +3110,26 @@ function setupEventListeners() {
       setWallpaperSaveState(false);
       return;
     }
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      pendingWallpaperDataUrl = String(ev.target.result || '');
-      if (!pendingWallpaperDataUrl) {
-        $('wallpaper-error').textContent = WALLPAPER_READ_FAIL_MSG;
-        setWallpaperSaveState(false);
-        return;
-      }
+    setWallpaperSaveState(false);
+    try {
+      setWallpaperProgress(3, 'Preparing wallpaper…');
+      const preparedFile = await prepareWallpaperFile(file);
+      pendingWallpaperDataUrl = await readFileAsDataUrl(preparedFile, {
+        onProgress: (event) => {
+          if (!event.lengthComputable) return;
+          const percent = Math.round((event.loaded / event.total) * 100);
+          setWallpaperProgress(percent, `Reading wallpaper… ${percent}%`);
+        },
+      });
+      setWallpaperProgress(100, 'Ready to save');
       applyWallpaperDraftPreview(pendingWallpaperDataUrl);
       setWallpaperSaveState(true);
-    };
-    reader.readAsDataURL(file);
+    } catch {
+      pendingWallpaperDataUrl = null;
+      $('wallpaper-error').textContent = WALLPAPER_READ_FAIL_MSG;
+      resetWallpaperProgress();
+      setWallpaperSaveState(false);
+    }
   });
 
   // Profile modal
@@ -3059,6 +3193,9 @@ function setupEventListeners() {
       return;
     }
     const reader = new FileReader();
+    reader.onerror = () => {
+      $('profile-error').textContent = 'Unable to read image';
+    };
     reader.onload = (e) => {
       $('profile-picture-preview-img').src = e.target.result;
       $('profile-picture-preview').hidden = false;
@@ -3076,6 +3213,9 @@ function setupEventListeners() {
     }
 
     const reader = new FileReader();
+    reader.onerror = () => {
+      $('profile-error').textContent = 'Unable to read image';
+    };
     reader.onload = async (e) => {
       const profilePicture = e.target.result;
       const res = await fetch('/api/auth/profile', {

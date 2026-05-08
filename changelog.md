@@ -4,6 +4,16 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## v1.0.3
+
+- Fixed attachment uploads so encrypted image/file uploads no longer fail from the mixed content-type request path.
+- Made message read receipts trigger as soon as any part of a message enters the viewport, including very tall messages.
+- Added stronger client/server anti-spam handling for repetitive short messages and repeated sends.
+- Added wallpaper progress feedback and optimized large wallpaper uploads so big images apply reliably.
+- Bumped the app version to **1.0.3**.
+
+---
+
 ## v1.0.1
 
 - Added the new `gchat_icon.png` branding to the login page, browser favicon, desktop runtime icon, and packaged desktop icon assets.

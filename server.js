@@ -1065,6 +1065,10 @@ const socketRateMap = new Map(); // socketId -> { timestamps: [], lastContent: '
 // Per-room presence tracking: groupId -> Set<socketId>
 const roomPresence = new Map();
 
+function getSpamSignature(value) {
+  return typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value) ? value.toLowerCase() : null;
+}
+
 function addPresence(groupId, socketId) {
   if (!roomPresence.has(groupId)) roomPresence.set(groupId, new Set());
   roomPresence.get(groupId).add(socketId);
@@ -1178,7 +1182,7 @@ io.on('connection', (socket) => {
   });
 
   // ── send_message ──────────────────────────────────────────────────────────
-  socket.on('send_message', ({ groupId, encryptedContent, iv, replyTo }) => {
+  socket.on('send_message', ({ groupId, encryptedContent, iv, replyTo, spamSignature }) => {
     if (!groupId || !encryptedContent || !iv) return;
 
     // Server-side rate limiting: max 10 messages per 5 seconds, keyed by userId
@@ -1191,7 +1195,8 @@ io.on('connection', (socket) => {
         return;
       }
       // Check for repeated identical messages (3+ in a row)
-      if (encryptedContent === rateData.lastContent) {
+      const messageSignature = getSpamSignature(spamSignature) || encryptedContent;
+      if (messageSignature === rateData.lastContent) {
         rateData.repeatCount = (rateData.repeatCount || 0) + 1;
         if (rateData.repeatCount >= 3) {
           socket.emit('error', { message: 'Don\'t send the same message repeatedly.' });
@@ -1199,7 +1204,7 @@ io.on('connection', (socket) => {
         }
       } else {
         rateData.repeatCount = 0;
-        rateData.lastContent = encryptedContent;
+        rateData.lastContent = messageSignature;
       }
       rateData.timestamps.push(now);
     }
@@ -1261,7 +1266,7 @@ io.on('connection', (socket) => {
   });
 
   // ── send_whisper ──────────────────────────────────────────────────────────
-  socket.on('send_whisper', ({ groupId, encryptedContent, iv, whisperTo, replyTo }) => {
+  socket.on('send_whisper', ({ groupId, encryptedContent, iv, whisperTo, replyTo, spamSignature }) => {
     if (!groupId || !encryptedContent || !iv || !Array.isArray(whisperTo)) return;
 
     // Rate limiting (same limits as send_message, keyed by userId)
@@ -1273,7 +1278,8 @@ io.on('connection', (socket) => {
         socket.emit('error', { message: 'Rate limit exceeded. Please slow down.' });
         return;
       }
-      if (encryptedContent === rateData.lastContent) {
+      const messageSignature = getSpamSignature(spamSignature) || encryptedContent;
+      if (messageSignature === rateData.lastContent) {
         rateData.repeatCount = (rateData.repeatCount || 0) + 1;
         if (rateData.repeatCount >= 3) {
           socket.emit('error', { message: 'Don\'t send the same message repeatedly.' });
@@ -1281,7 +1287,7 @@ io.on('connection', (socket) => {
         }
       } else {
         rateData.repeatCount = 0;
-        rateData.lastContent = encryptedContent;
+        rateData.lastContent = messageSignature;
       }
       rateData.timestamps.push(now);
     }
