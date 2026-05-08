@@ -810,21 +810,22 @@ body.sidebar-resizing * {
   background: rgba(15,15,26,.9);
   border-top: 1px solid #1a1a2e;
   position: relative;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .message-composer-shell {
   flex: 1;
   min-width: 0;
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
   padding: 6px 10px;
   background: #111128;
   border: 1px solid #2a2a3e;
   border-radius: var(--input-radius);
   position: relative;
+  overflow: visible;
   transition: border-color .2s, box-shadow .2s, opacity .2s;
 }
 .message-composer-shell:focus-within {
@@ -837,6 +838,8 @@ body.sidebar-resizing * {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  width: 100%;
+  min-width: 0;
 }
 .message-token {
   display: inline-flex;
@@ -860,7 +863,8 @@ body.sidebar-resizing * {
 
 .message-input-bar textarea {
   flex: 1;
-  min-width: 120px;
+  width: 100%;
+  min-width: 0;
   background: transparent;
   border: none;
   color: var(--text-primary);
@@ -881,6 +885,7 @@ body.sidebar-resizing * {
   left: 0;
   right: auto;
   bottom: calc(100% + 10px);
+  max-width: min(280px, calc(100vw - 32px));
   min-width: 220px;
   background: rgba(17,17,32,.98);
   border: 1px solid #2a2a3e;

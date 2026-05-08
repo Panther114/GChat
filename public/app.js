@@ -1077,12 +1077,12 @@ function updateSlashCommandMenu() {
   const menu = $('slash-command-menu');
   const input = $('message-input');
   if (!menu || !input) return;
+  const match = /^\/([^\s]*)$/.exec(input.value);
+  const commandQuery = match ? match[1].toLowerCase() : null;
   const shouldShow = !composerTokens.whisper
     && !composerTokens.hashtag
-    && input.value.startsWith('/')
-    && !input.value.startsWith('/w ')
-    && !input.value.startsWith('/# ')
-    && !input.value.startsWith('/d ');
+    && commandQuery != null
+    && ['w', '#', 'd'].some((command) => command.startsWith(commandQuery));
   menu.hidden = !shouldShow;
 }
 
