@@ -404,6 +404,14 @@ function getMessageHashtagPrefix(msg) {
   return topic ? `${formatHashtagLabel(topic)} ` : '';
 }
 
+function getMessageTypePreviewLabel(msg) {
+  if (!msg) return '';
+  if (msg.type === 'image') return '[Image]';
+  if (msg.type === 'file') return '[File: ' + (msg.filename || '') + ']';
+  if (msg.type === 'whisper') return '[Whisper]';
+  return '';
+}
+
 function wallpaperCssValue(dataUrl) {
   if (!dataUrl) return DEFAULT_WALLPAPER;
   return `url(${JSON.stringify(String(dataUrl))})`;
@@ -619,15 +627,8 @@ function sendNativeNotification(title, body, groupId) {
 // Build the notification body text for a message, using the decrypted preview
 // when available and falling back to type-based labels for media/encrypted content.
 function getNotificationBody(msg, preview) {
-  if (msg.type === 'image' || msg.type === 'file' || msg.type === 'whisper') {
-    return preview && preview !== '[encrypted]'
-      ? preview
-      : msg.type === 'image'
-        ? '[Image]'
-        : msg.type === 'file'
-          ? '[File: ' + (msg.filename || '') + ']'
-          : '[Whisper]';
-  }
+  const typeLabel = getMessageTypePreviewLabel(msg);
+  if (typeLabel) return preview && preview !== '[encrypted]' ? preview : typeLabel;
   return preview !== '[encrypted]' ? preview : 'New message';
 }
 
@@ -1672,9 +1673,8 @@ function updateGroupPreview(groupId, text, time) {
 async function getMessagePreviewText(msg, groupId = msg.groupId) {
   if (!msg) return '';
   const prefix = getMessageHashtagPrefix(msg);
-  if (msg.type === 'image') return prefix + '[Image]';
-  if (msg.type === 'file') return prefix + '[File: ' + (msg.filename || '') + ']';
-  if (msg.type === 'whisper') return prefix + '[Whisper]';
+  const typeLabel = getMessageTypePreviewLabel(msg);
+  if (typeLabel) return prefix + typeLabel;
   const key = getGroupKey(groupId);
   if (!key || msg.type !== 'text') return prefix + '[encrypted]';
   const plaintext = await decryptMessage(msg.encryptedContent, msg.iv, key, groupId);
