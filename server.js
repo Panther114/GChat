@@ -18,7 +18,7 @@ const crypto = require('crypto');
 const packageJson = require('./package.json');
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const MAX_JSON_BODY_BYTES = 16 * 1024 * 1024; // 10MB wallpaper + base64 overhead + JSON
+const MAX_JSON_BODY_BYTES = 16 * 1024 * 1024; // total JSON payload budget for wallpaper base64 overhead + other API bodies
 const MAX_WALLPAPER_BYTES = 10 * 1024 * 1024;
 const MAX_PROFILE_PICTURE_BYTES = 2 * 1024 * 1024;
 const MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024;
@@ -94,19 +94,19 @@ function parseImageDataUrl(value, maxBytes, { allowNull = false } = {}) {
     return allowNull ? { ok: true, dataUrl: null } : { ok: false, error: 'Image is required' };
   }
   if (typeof value !== 'string') {
-    return { ok: false, error: 'Invalid image format' };
+    return { ok: false, reason: 'invalid_format', error: 'Invalid image format' };
   }
   const match = /^data:(image\/[A-Za-z0-9.+-]+);base64,([A-Za-z0-9+/]+={0,2})$/.exec(value);
   if (!match) {
-    return { ok: false, error: 'Invalid image format' };
+    return { ok: false, reason: 'invalid_format', error: 'Invalid image format' };
   }
   const mime = match[1].toLowerCase();
   const base64 = match[2];
   if (!SAFE_IMAGE_MIME_TYPES.has(mime) || !isValidBase64(base64)) {
-    return { ok: false, error: 'Invalid image format. Only JPEG, PNG, GIF, and WebP are allowed.' };
+    return { ok: false, reason: 'invalid_format', error: 'Invalid image format. Only JPEG, PNG, GIF, and WebP are allowed.' };
   }
   if (estimateBase64Bytes(base64) > maxBytes) {
-    return { ok: false, error: `Image too large (max ${toMiB(maxBytes)}MB)` };
+    return { ok: false, reason: 'too_large', error: `Image too large (max ${toMiB(maxBytes)}MB)` };
   }
   return { ok: true, dataUrl: value, mime };
 }
@@ -166,14 +166,26 @@ function normalizeReplyPayload(replyTo, groupId) {
 // locks the IP for the remainder of that window.
 const LOGIN_ATTEMPT_WINDOW = 15 * 60 * 1000; // 15 minutes
 const LOGIN_MAX_ATTEMPTS   = 10;
+const REGISTER_ATTEMPT_WINDOW = 15 * 60 * 1000; // 15 minutes
+const REGISTER_MAX_ATTEMPTS = 5;
+const SETTINGS_UPDATE_WINDOW = 60 * 1000; // 1 minute
+const SETTINGS_UPDATE_MAX = 20;
 const REMEMBER_ME_MAX_AGE = 30 * 24 * 60 * 60 * 1000;
 const loginAttempts = new Map(); // ip -> { count, windowStart }
+const registerAttempts = new Map(); // ip -> { count, windowStart }
+const settingsUpdateAttempts = new Map(); // userId -> { count, windowStart }
 
 // Periodically prune stale entries so the map doesn't grow unboundedly.
 setInterval(() => {
   const now = Date.now();
   for (const [ip, data] of loginAttempts) {
     if (now - data.windowStart > LOGIN_ATTEMPT_WINDOW) loginAttempts.delete(ip);
+  }
+  for (const [ip, data] of registerAttempts) {
+    if (now - data.windowStart > REGISTER_ATTEMPT_WINDOW) registerAttempts.delete(ip);
+  }
+  for (const [userId, data] of settingsUpdateAttempts) {
+    if (now - data.windowStart > SETTINGS_UPDATE_WINDOW) settingsUpdateAttempts.delete(userId);
   }
 }, 5 * 60 * 1000); // every 5 minutes
 
@@ -197,6 +209,74 @@ function isLoginBlocked(ip) {
 
 function clearLoginAttempts(ip) {
   loginAttempts.delete(ip);
+}
+
+function recordRegisterAttempt(ip) {
+  const now = Date.now();
+  const data = registerAttempts.get(ip);
+  if (!data || now - data.windowStart > REGISTER_ATTEMPT_WINDOW) {
+    registerAttempts.set(ip, { count: 1, windowStart: now });
+    return;
+  }
+  data.count++;
+}
+
+function isRegisterBlocked(ip) {
+  const now = Date.now();
+  const data = registerAttempts.get(ip);
+  if (!data) return false;
+  if (now - data.windowStart > REGISTER_ATTEMPT_WINDOW) {
+    registerAttempts.delete(ip);
+    return false;
+  }
+  return data.count >= REGISTER_MAX_ATTEMPTS;
+}
+
+function clearRegisterAttempts(ip) {
+  registerAttempts.delete(ip);
+}
+
+function recordSettingsUpdate(userId) {
+  const now = Date.now();
+  const data = settingsUpdateAttempts.get(userId);
+  if (!data || now - data.windowStart > SETTINGS_UPDATE_WINDOW) {
+    settingsUpdateAttempts.set(userId, { count: 1, windowStart: now });
+    return;
+  }
+  data.count++;
+}
+
+function isSettingsUpdateBlocked(userId) {
+  const now = Date.now();
+  const data = settingsUpdateAttempts.get(userId);
+  if (!data) return false;
+  if (now - data.windowStart > SETTINGS_UPDATE_WINDOW) {
+    settingsUpdateAttempts.delete(userId);
+    return false;
+  }
+  return data.count >= SETTINGS_UPDATE_MAX;
+}
+
+function getWallpaperValidationError(parsedWallpaper) {
+  if (parsedWallpaper.reason === 'too_large') {
+    return 'Wallpaper too large (max 10MB)';
+  }
+  if (parsedWallpaper.reason === 'invalid_format') {
+    return 'Invalid wallpaper format. Only JPEG, PNG, GIF, and WebP are allowed.';
+  }
+  return 'Invalid wallpaper format';
+}
+
+function getProfilePictureValidationError(parsedPicture) {
+  if (parsedPicture.reason === 'too_large') {
+    return 'Profile picture too large (max 2MB)';
+  }
+  return 'Invalid profile picture format. Only JPEG, PNG, GIF, and WebP are allowed.';
+}
+
+function normalizeWhisperRecipients(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map((entry) => String(entry || '').trim()).filter(Boolean))];
 }
 
 // ── Database ──────────────────────────────────────────────────────────────────
@@ -616,6 +696,10 @@ app.get('/api/auth/settings', (req, res) => {
 
 app.patch('/api/auth/settings', (req, res) => {
   const userId = req.session.userId;
+  if (isSettingsUpdateBlocked(userId)) {
+    return res.status(429).json({ error: 'Too many settings updates. Please slow down.' });
+  }
+  recordSettingsUpdate(userId);
   const current = stmts.findUserById.get(userId);
   if (!current) return res.status(401).json({ error: 'Not authenticated' });
   let settings = {};
@@ -625,12 +709,7 @@ app.patch('/api/auth/settings', (req, res) => {
   if (req.body.wallpaperDataUrl !== undefined) {
     const parsedWallpaper = parseImageDataUrl(req.body.wallpaperDataUrl, MAX_WALLPAPER_BYTES, { allowNull: true });
     if (!parsedWallpaper.ok) {
-      const error = parsedWallpaper.error === `Image too large (max ${toMiB(MAX_WALLPAPER_BYTES)}MB)`
-        ? 'Wallpaper too large (max 10MB)'
-        : parsedWallpaper.error === 'Invalid image format. Only JPEG, PNG, GIF, and WebP are allowed.'
-          ? 'Invalid wallpaper format. Only JPEG, PNG, GIF, and WebP are allowed.'
-          : 'Invalid wallpaper format';
-      return res.status(400).json({ error });
+      return res.status(400).json({ error: getWallpaperValidationError(parsedWallpaper) });
     }
     next.wallpaperDataUrl = parsedWallpaper.dataUrl;
   }
@@ -650,7 +729,10 @@ app.patch('/api/auth/settings', (req, res) => {
 app.post('/api/auth/register', async (req, res) => {
   const username = typeof req.body.username === 'string' ? req.body.username.trim() : '';
   const password = typeof req.body.password === 'string' ? req.body.password : '';
-  const iconColor = normalizeHexColor(req.body.iconColor, '#4A90D9');
+  const iconColor = (req.body.iconColor == null || req.body.iconColor === '')
+    ? '#4A90D9'
+    : normalizeHexColor(req.body.iconColor);
+  const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
 
   if (!username || !password) {
     return res.status(400).json({ error: 'Username and password are required' });
@@ -664,6 +746,10 @@ app.post('/api/auth/register', async (req, res) => {
   if (!iconColor) {
     return res.status(400).json({ error: 'Invalid icon color format' });
   }
+  if (isRegisterBlocked(clientIp)) {
+    return res.status(429).json({ error: 'Too many registration attempts. Please try again later.' });
+  }
+  recordRegisterAttempt(clientIp);
 
   const existing = stmts.findUserByUsername.get(username);
   if (existing) {
@@ -677,6 +763,7 @@ app.post('/api/auth/register', async (req, res) => {
 
     stmts.insertUser.run(id, username, passwordHash, color);
 
+    clearRegisterAttempts(clientIp);
     req.session.userId = id;
     req.session.save(() => {
       const user = stmts.findUserById.get(id);
@@ -737,6 +824,11 @@ app.post('/api/auth/logout', (req, res) => {
 // PATCH /api/auth/profile — update username / iconColor / profilePicture
 app.patch('/api/auth/profile', (req, res) => {
   const userId = req.session.userId;
+  if (isSettingsUpdateBlocked(userId)) {
+    return res.status(429).json({ error: 'Too many profile updates. Please slow down.' });
+  }
+  recordSettingsUpdate(userId);
+  const hasProfilePictureUpdate = Object.prototype.hasOwnProperty.call(req.body, 'profilePicture');
   const { profilePicture } = req.body;
   const username = req.body.username === undefined ? undefined : String(req.body.username).trim();
   const iconColor = req.body.iconColor === undefined ? undefined : normalizeHexColor(req.body.iconColor);
@@ -758,10 +850,7 @@ app.patch('/api/auth/profile', (req, res) => {
   if (profilePicture !== undefined && profilePicture !== null) {
     const parsedPicture = parseImageDataUrl(profilePicture, MAX_PROFILE_PICTURE_BYTES);
     if (!parsedPicture.ok) {
-      const error = parsedPicture.error === `Image too large (max ${toMiB(MAX_PROFILE_PICTURE_BYTES)}MB)`
-        ? 'Profile picture too large (max 2MB)'
-        : 'Invalid profile picture format. Only JPEG, PNG, GIF, and WebP are allowed.';
-      return res.status(400).json({ error });
+      return res.status(400).json({ error: getProfilePictureValidationError(parsedPicture) });
     }
   }
 
@@ -769,8 +858,8 @@ app.patch('/api/auth/profile', (req, res) => {
     stmts.updateUser.run({
       username: username || null,
       iconColor: iconColor || null,
-      profilePicture: profilePicture !== undefined ? profilePicture : null,
-      hasProfilePicture: profilePicture !== undefined ? 1 : 0,
+      profilePicture: hasProfilePictureUpdate ? profilePicture : null,
+      hasProfilePicture: hasProfilePictureUpdate ? 1 : 0,
       userId,
     });
     const user = stmts.findUserById.get(userId);
@@ -913,6 +1002,7 @@ app.post('/api/groups/join', (req, res) => {
     name: group.name,
     code: group.code,
     createdBy: group.created_by,
+    alreadyJoined: joined.changes === 0,
     allowMemberClear: group.allow_member_clear || 0,
     allowMemberExport: group.allow_member_export || 0,
     allowMemberKick: group.allow_member_kick || 0,
@@ -1146,7 +1236,7 @@ app.post('/api/groups/:groupId/upload', uploadRawBodyParser, (req, res) => {
     return res.status(400).json({ error: 'Invalid filename' });
   }
 
-  const encryptedBytes = isBinaryUpload ? req.body.length : estimateBase64Bytes(encryptedContent);
+  const encryptedBytes = estimateBase64Bytes(encryptedContent);
   if (encryptedBytes <= 0) {
     return res.status(400).json({ error: 'Upload payload is empty' });
   }
@@ -1515,11 +1605,16 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const recipients = [...new Set(whisperTo.map((value) => String(value || '').trim()).filter(Boolean))];
+    const recipients = normalizeWhisperRecipients(whisperTo);
     if (recipients.length === 0) {
       socket.emit('error', { message: 'Select at least one whisper recipient.' });
       return;
     }
+    if (recipients.every((recipId) => recipId === socket.userId)) {
+      socket.emit('error', { message: 'Whispers must target at least one other group member.' });
+      return;
+    }
+    const recipientsExcludingSender = recipients.filter((recipId) => recipId !== socket.userId);
 
     // Validate that every whisper recipient is a member of this group
     for (const recipId of recipients) {
@@ -1532,9 +1627,9 @@ io.on('connection', (socket) => {
 
     const msgId = uuidv4();
     const createdAt = new Date().toISOString();
-    const totalRecipients = Math.max(0, recipients.filter((recipId) => recipId !== socket.userId).length);
+    const totalRecipients = Math.max(0, recipientsExcludingSender.length);
     // Store whisper recipients as JSON array for safety
-    const whisperToStr = JSON.stringify(recipients.filter((recipId) => recipId !== socket.userId));
+    const whisperToStr = JSON.stringify(recipientsExcludingSender);
 
     try {
       stmts.insertMessage.run(

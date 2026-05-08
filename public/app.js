@@ -217,11 +217,6 @@ const localDayFormatter = new Intl.DateTimeFormat(undefined, {
   month: 'short',
   day: 'numeric',
 });
-const localDayKeyFormatter = new Intl.DateTimeFormat('en-CA', {
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit',
-});
 const DESKTOP_SIDEBAR_WIDTH_STORAGE_KEY = 'gchat:desktop-sidebar-width';
 const DESKTOP_RIGHT_PANEL_STORAGE_KEY = 'gchat:desktop-right-panel-expanded';
 const DESKTOP_DEFAULT_SIDEBAR_WIDTH = 260;
@@ -323,7 +318,8 @@ function estimateBase64Bytes(value) {
 }
 function getLocalDayKey(iso) {
   if (!iso) return '';
-  return localDayKeyFormatter.format(parseMessageDate(iso));
+  const date = parseMessageDate(iso);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 function parseMessageDate(iso) {
   return new Date(normalizeIsoTime(iso));
@@ -2133,9 +2129,6 @@ async function saveWallpaperDraft() {
     return;
   }
   setWallpaperProgress(100, result.ok ? 'Wallpaper saved' : 'Wallpaper saved locally');
-  if (!result.ok) {
-    showToast(WALLPAPER_SAVE_SYNC_FAIL_MSG, 'info');
-  }
   $('wallpaper-modal').hidden = true;
   resetWallpaperDraft();
   showToast(result.ok ? WALLPAPER_SAVE_SUCCESS_MSG : WALLPAPER_SAVE_SYNC_FAIL_MSG, result.ok ? 'success' : 'info');
@@ -3173,9 +3166,6 @@ function setupEventListeners() {
       writeLocalSettings(appLocalSettings, currentUser && currentUser.id);
       $('wallpaper-error').textContent = result.error || 'Failed to reset wallpaper';
       return;
-    }
-    if (!result.ok) {
-      showToast(WALLPAPER_RESET_SYNC_FAIL_MSG, 'info');
     }
     $('wallpaper-modal').hidden = true;
     resetWallpaperDraft();
