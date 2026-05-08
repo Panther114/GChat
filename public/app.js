@@ -2226,7 +2226,7 @@ async function doSend(text) {
 
   try {
     const { encryptedContent, iv } = await encryptMessage(text, key, currentGroupId);
-    const spamSignature = await sha256Hex(normalizedText.toLowerCase());
+    const spamSignature = shouldInspectShortSpam ? await sha256Hex(normalizedText.toLowerCase()) : null;
 
     // Build replyTo data
     let replyToData = null;
@@ -3198,7 +3198,7 @@ function setupEventListeners() {
     }
     const reader = new FileReader();
     reader.onerror = () => {
-      $('profile-error').textContent = 'Unable to read image';
+      $('profile-error').textContent = 'Failed to read the selected image. Please try a different file.';
     };
     reader.onload = (e) => {
       $('profile-picture-preview-img').src = e.target.result;
@@ -3218,7 +3218,7 @@ function setupEventListeners() {
 
     const reader = new FileReader();
     reader.onerror = () => {
-      $('profile-error').textContent = 'Unable to read image';
+      $('profile-error').textContent = 'Failed to read the selected image. Please try a different file.';
     };
     reader.onload = async (e) => {
       const profilePicture = e.target.result;
