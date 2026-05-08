@@ -195,11 +195,33 @@ const DEFAULT_WALLPAPER_PREVIEW_SRC = 'gchat_wallpaper.jpg';
 const WALLPAPER_SELECT_FIRST_MSG = 'Please choose an image first';
 const WALLPAPER_INVALID_TYPE_MSG = 'Please choose an image file';
 const WALLPAPER_TOO_LARGE_MSG = 'Wallpaper too large (max 10MB)';
+const ATTACHMENT_TOO_LARGE_MSG = 'Attachment too large (max 15MB)';
+const PROFILE_PICTURE_TOO_LARGE_MSG = 'Image too large (max 2MB)';
 const WALLPAPER_READ_FAIL_MSG = 'Unable to read image';
 const WALLPAPER_SAVE_SYNC_FAIL_MSG = 'Wallpaper saved locally but could not sync to server. Changes may not appear on other devices.';
 const WALLPAPER_RESET_SYNC_FAIL_MSG = 'Wallpaper reset locally but could not sync to server. Changes may not appear on other devices.';
 const WALLPAPER_SAVE_SUCCESS_MSG = 'Wallpaper saved';
 const WALLPAPER_RESET_SUCCESS_MSG = 'Wallpaper reset';
+const MAX_WALLPAPER_BYTES = 10 * 1024 * 1024;
+const MAX_PROFILE_PICTURE_BYTES = 2 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024;
+const MAX_TEXT_MESSAGE_BYTES = 64 * 1024;
+const ALLOWED_UPLOAD_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+const localTimeFormatter = new Intl.DateTimeFormat(undefined, {
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+});
+const localDayFormatter = new Intl.DateTimeFormat(undefined, {
+  year: 'numeric',
+  month: 'short',
+  day: 'numeric',
+});
+const localDayKeyFormatter = new Intl.DateTimeFormat('en-CA', {
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
 const DESKTOP_SIDEBAR_WIDTH_STORAGE_KEY = 'gchat:desktop-sidebar-width';
 const DESKTOP_RIGHT_PANEL_STORAGE_KEY = 'gchat:desktop-right-panel-expanded';
 const DESKTOP_DEFAULT_SIDEBAR_WIDTH = 260;
@@ -291,22 +313,32 @@ function normalizeIsoTime(iso) {
   const str = String(iso).replace(' ', 'T');
   return (str.endsWith('Z') || str.includes('+')) ? str : str + 'Z';
 }
+function isAllowedUploadImageType(type) {
+  return typeof type === 'string' && ALLOWED_UPLOAD_IMAGE_TYPES.has(type.toLowerCase());
+}
+function estimateBase64Bytes(value) {
+  if (typeof value !== 'string' || !value) return 0;
+  const padding = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;
+  return Math.max(0, Math.floor((value.length * 3) / 4) - padding);
+}
+function getLocalDayKey(iso) {
+  if (!iso) return '';
+  return localDayKeyFormatter.format(parseMessageDate(iso));
+}
 function parseMessageDate(iso) {
   return new Date(normalizeIsoTime(iso));
 }
 function formatTime(iso) {
   if (!iso) return '';
-  return parseMessageDate(iso).toLocaleTimeString('zh-CN', {
-    timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false,
-  });
+  return localTimeFormatter.format(parseMessageDate(iso));
 }
 function formatDay(iso) {
   if (!iso) return '';
-  return parseMessageDate(iso).toLocaleDateString('en-US', { timeZone: 'Asia/Shanghai' });
+  return localDayFormatter.format(parseMessageDate(iso));
 }
 function isSameMessageDay(a, b) {
   if (!a || !b) return false;
-  return formatDay(a) === formatDay(b);
+  return getLocalDayKey(a) === getLocalDayKey(b);
 }
 function shouldContinueSeries(prevMsg, currentMsg) {
   if (!prevMsg || !currentMsg) return false;
@@ -367,7 +399,7 @@ function applyWallpaperFromSettings() {
 }
 
 async function saveSettingsToServer(options = {}) {
-  if (!currentUser) return false;
+  if (!currentUser) return { ok: false, networkError: true, error: 'Not signed in' };
   const payload = {
     wallpaperDataUrl: appLocalSettings.wallpaperDataUrl || null,
     hideProfileDot: !!appLocalSettings.hideProfileDot,
@@ -386,8 +418,17 @@ async function saveSettingsToServer(options = {}) {
       xhr.upload.onloadend = () => {
         if (typeof options.onUploadComplete === 'function') options.onUploadComplete();
       };
-      xhr.onerror = () => resolve(false);
-      xhr.onload = () => resolve(xhr.status >= 200 && xhr.status < 300);
+      xhr.onerror = () => resolve({ ok: false, networkError: true, error: 'Network error. Please try again.' });
+      xhr.onload = () => {
+        let data = {};
+        try { data = JSON.parse(xhr.responseText || '{}'); } catch { /* ignore parse errors */ }
+        resolve({
+          ok: xhr.status >= 200 && xhr.status < 300,
+          status: xhr.status,
+          error: data.error || null,
+          networkError: false,
+        });
+      };
       xhr.send(body);
     });
   }
@@ -397,9 +438,15 @@ async function saveSettingsToServer(options = {}) {
       headers: apiHeaders(),
       body,
     });
-    return res.ok;
+    const data = await res.json().catch(() => ({}));
+    return {
+      ok: res.ok,
+      status: res.status,
+      error: data.error || null,
+      networkError: false,
+    };
   } catch {
-    return false;
+    return { ok: false, networkError: true, error: 'Network error. Please try again.' };
   }
 }
 
@@ -2060,12 +2107,13 @@ async function saveWallpaperDraft() {
     $('wallpaper-error').textContent = WALLPAPER_SELECT_FIRST_MSG;
     return;
   }
+  const previousWallpaperDataUrl = appLocalSettings.wallpaperDataUrl;
   setWallpaperBusyState(true);
   setWallpaperProgress(4, 'Uploading wallpaper…');
   appLocalSettings.wallpaperDataUrl = pendingWallpaperDataUrl;
   applyWallpaperFromSettings();
   writeLocalSettings(appLocalSettings, currentUser && currentUser.id);
-  const saved = await saveSettingsToServer({
+  const result = await saveSettingsToServer({
     onUploadProgress: (loaded, total) => {
       const ratio = total > 0 ? loaded / total : 0;
       setWallpaperProgress(Math.max(4, Math.round(ratio * 88)), 'Uploading wallpaper…');
@@ -2074,13 +2122,23 @@ async function saveWallpaperDraft() {
       setWallpaperProgress(92, 'Saving wallpaper…');
     },
   });
-  setWallpaperProgress(100, saved ? 'Wallpaper saved' : 'Wallpaper saved locally');
-  if (!saved) {
+  if (!result.ok && !result.networkError) {
+    appLocalSettings.wallpaperDataUrl = previousWallpaperDataUrl || null;
+    applyWallpaperFromSettings();
+    writeLocalSettings(appLocalSettings, currentUser && currentUser.id);
+    $('wallpaper-error').textContent = result.error || 'Failed to save wallpaper';
+    setWallpaperBusyState(false);
+    resetWallpaperProgress();
+    setWallpaperSaveState(true);
+    return;
+  }
+  setWallpaperProgress(100, result.ok ? 'Wallpaper saved' : 'Wallpaper saved locally');
+  if (!result.ok) {
     showToast(WALLPAPER_SAVE_SYNC_FAIL_MSG, 'info');
   }
   $('wallpaper-modal').hidden = true;
   resetWallpaperDraft();
-  showToast(WALLPAPER_SAVE_SUCCESS_MSG, 'success');
+  showToast(result.ok ? WALLPAPER_SAVE_SUCCESS_MSG : WALLPAPER_SAVE_SYNC_FAIL_MSG, result.ok ? 'success' : 'info');
 }
 
 function applyWallpaperDraftPreview(dataUrl) {
@@ -2228,6 +2286,10 @@ async function doSend(text) {
 
   try {
     const { encryptedContent, iv } = await encryptMessage(text, key, currentGroupId);
+    if (estimateBase64Bytes(encryptedContent) > MAX_TEXT_MESSAGE_BYTES) {
+      showToast('Message too large', 'error');
+      return;
+    }
     const spamSignature = shouldInspectShortSpam ? await sha256Hex(normalizedSignatureText) : null;
 
     // Build replyTo data
@@ -2248,6 +2310,9 @@ async function doSend(text) {
         replyTo: replyToData,
         spamSignature,
       });
+    } else if (messageMode === 'whisper') {
+      showToast('Select at least one whisper recipient', 'error');
+      return;
     } else {
       socket.emit('send_message', { groupId: currentGroupId, encryptedContent, iv, replyTo: replyToData, spamSignature });
     }
@@ -2378,6 +2443,16 @@ function removePendingAttachment(uploadId) {
   pendingAttachmentRows.delete(uploadId);
 }
 
+async function updateGroupSettingRequest(payload) {
+  const res = await fetch('/api/groups/' + currentGroupId + '/settings', {
+    method: 'PATCH',
+    headers: apiHeaders(),
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  return { ok: res.ok, error: data.error || null };
+}
+
 function uploadEncryptedAttachment(groupId, body, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
@@ -2418,20 +2493,18 @@ async function handleFileUpload(file) {
   }
   const uploadId = createUploadId();
 
-  const MAX_RAW = 25 * 1024 * 1024 * 1024; // 25GB
-
   let processedFile = file;
-  const isImage = file.type.startsWith('image/');
+  const isImage = isAllowedUploadImageType(file.type);
 
   if (isImage) {
     processedFile = await compressImage(file);
-    if (processedFile.size > MAX_RAW) {
-      showToast('Image too large (max 25GB after compression)', 'error');
+    if (processedFile.size > MAX_ATTACHMENT_BYTES) {
+      showToast(ATTACHMENT_TOO_LARGE_MSG, 'error');
       return;
     }
   } else {
-    if (file.size > MAX_RAW) {
-      showToast('File too large (max 25GB)', 'error');
+    if (file.size > MAX_ATTACHMENT_BYTES) {
+      showToast(ATTACHMENT_TOO_LARGE_MSG, 'error');
       return;
     }
   }
@@ -3089,16 +3162,24 @@ function setupEventListeners() {
   });
   $('wallpaper-save-btn').addEventListener('click', saveWallpaperDraft);
   $('wallpaper-reset-btn').addEventListener('click', async () => {
+    const previousWallpaperDataUrl = appLocalSettings.wallpaperDataUrl;
     appLocalSettings.wallpaperDataUrl = null;
     applyWallpaperFromSettings();
     writeLocalSettings(appLocalSettings, currentUser && currentUser.id);
-    const saved = await saveSettingsToServer();
-    if (!saved) {
+    const result = await saveSettingsToServer();
+    if (!result.ok && !result.networkError) {
+      appLocalSettings.wallpaperDataUrl = previousWallpaperDataUrl || null;
+      applyWallpaperFromSettings();
+      writeLocalSettings(appLocalSettings, currentUser && currentUser.id);
+      $('wallpaper-error').textContent = result.error || 'Failed to reset wallpaper';
+      return;
+    }
+    if (!result.ok) {
       showToast(WALLPAPER_RESET_SYNC_FAIL_MSG, 'info');
     }
     $('wallpaper-modal').hidden = true;
     resetWallpaperDraft();
-    showToast(WALLPAPER_RESET_SUCCESS_MSG, 'success');
+    showToast(result.ok ? WALLPAPER_RESET_SUCCESS_MSG : WALLPAPER_RESET_SYNC_FAIL_MSG, result.ok ? 'success' : 'info');
   });
   $('wallpaper-input').addEventListener('change', async (e) => {
     const file = e.target.files[0];
@@ -3106,12 +3187,12 @@ function setupEventListeners() {
     $('wallpaper-error').textContent = '';
     pendingWallpaperDataUrl = null;
     resetWallpaperProgress();
-    if (!file.type.startsWith('image/')) {
-      $('wallpaper-error').textContent = WALLPAPER_INVALID_TYPE_MSG;
+    if (!isAllowedUploadImageType(file.type)) {
+      $('wallpaper-error').textContent = 'Please choose a JPEG, PNG, GIF, or WebP image';
       setWallpaperSaveState(false);
       return;
     }
-    if (file.size > 10 * 1024 * 1024) {
+    if (file.size > MAX_WALLPAPER_BYTES) {
       $('wallpaper-error').textContent = WALLPAPER_TOO_LARGE_MSG;
       setWallpaperSaveState(false);
       return;
@@ -3194,8 +3275,12 @@ function setupEventListeners() {
   $('profile-picture-input').addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    if (file.size > 2 * 1024 * 1024) {
-      $('profile-error').textContent = 'Image too large (max 2MB)';
+    if (!isAllowedUploadImageType(file.type)) {
+      $('profile-error').textContent = 'Only JPEG, PNG, GIF, and WebP images are supported';
+      return;
+    }
+    if (file.size > MAX_PROFILE_PICTURE_BYTES) {
+      $('profile-error').textContent = PROFILE_PICTURE_TOO_LARGE_MSG;
       return;
     }
     const reader = new FileReader();
@@ -3213,8 +3298,12 @@ function setupEventListeners() {
   $('profile-save-picture').addEventListener('click', async () => {
     const file = $('profile-picture-input').files[0];
     if (!file) { $('profile-error').textContent = 'Please select an image'; return; }
-    if (file.size > 2 * 1024 * 1024) {
-      $('profile-error').textContent = 'Image too large (max 2MB)';
+    if (!isAllowedUploadImageType(file.type)) {
+      $('profile-error').textContent = 'Only JPEG, PNG, GIF, and WebP images are supported';
+      return;
+    }
+    if (file.size > MAX_PROFILE_PICTURE_BYTES) {
+      $('profile-error').textContent = PROFILE_PICTURE_TOO_LARGE_MSG;
       return;
     }
 
@@ -3410,10 +3499,13 @@ function setupEventListeners() {
 
   // Allow member clear toggle
   $('allow-member-clear-toggle').addEventListener('change', async (e) => {
-    await fetch('/api/groups/' + currentGroupId + '/settings', {
-      method: 'PATCH', headers: apiHeaders(),
-      body: JSON.stringify({ allowMemberClear: e.target.checked }),
-    });
+    const nextChecked = e.target.checked;
+    const result = await updateGroupSettingRequest({ allowMemberClear: nextChecked });
+    if (!result.ok) {
+      e.target.checked = !nextChecked;
+      showToast(result.error || 'Failed to update group settings', 'error');
+      return;
+    }
     if (currentGroupData) {
       currentGroupData.allowMemberClear = e.target.checked;
       updateGroupActionButtons(currentGroupData.createdBy === currentUser.id);
@@ -3421,10 +3513,13 @@ function setupEventListeners() {
   });
 
   $('allow-member-export-toggle').addEventListener('change', async (e) => {
-    await fetch('/api/groups/' + currentGroupId + '/settings', {
-      method: 'PATCH', headers: apiHeaders(),
-      body: JSON.stringify({ allowMemberExport: e.target.checked }),
-    });
+    const nextChecked = e.target.checked;
+    const result = await updateGroupSettingRequest({ allowMemberExport: nextChecked });
+    if (!result.ok) {
+      e.target.checked = !nextChecked;
+      showToast(result.error || 'Failed to update group settings', 'error');
+      return;
+    }
     if (currentGroupData) {
       currentGroupData.allowMemberExport = e.target.checked;
       updateGroupActionButtons(currentGroupData.createdBy === currentUser.id);
@@ -3432,10 +3527,13 @@ function setupEventListeners() {
   });
 
   $('allow-member-kick-toggle').addEventListener('change', async (e) => {
-    await fetch('/api/groups/' + currentGroupId + '/settings', {
-      method: 'PATCH', headers: apiHeaders(),
-      body: JSON.stringify({ allowMemberKick: e.target.checked }),
-    });
+    const nextChecked = e.target.checked;
+    const result = await updateGroupSettingRequest({ allowMemberKick: nextChecked });
+    if (!result.ok) {
+      e.target.checked = !nextChecked;
+      showToast(result.error || 'Failed to update group settings', 'error');
+      return;
+    }
     if (currentGroupData) {
       currentGroupData.allowMemberKick = e.target.checked;
     }
