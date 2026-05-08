@@ -22,6 +22,8 @@
   --whisper-bg:  #1e1030;
   --whisper-bg-light: #f6efff;
   --whisper-border: #7c3aed;
+  --disappearing-border: #ef4444;
+  --disappearing-glow: rgba(239,68,68,.4);
   --hashtag-token-bg: #ffd6ea;
   --hashtag-token-text: #111111;
   --tag-filter-idle: #4b5563;
@@ -619,7 +621,35 @@ body.sidebar-resizing * {
   border-color: var(--whisper-border);
   border-left: 3px solid var(--whisper-border);
 }
+.msg-row.disappearing .msg-bubble {
+  border-color: var(--disappearing-border);
+  box-shadow: 0 0 0 1px rgba(239,68,68,.22), 0 0 18px var(--disappearing-glow);
+  animation: disappearingGlow 4s ease-out 1;
+}
+.msg-row.own.disappearing .msg-bubble {
+  border: 1px solid var(--disappearing-border);
+}
 .whisper-label { font-size: 10px; color: #a78bfa; font-style: italic; display: inline-block; }
+.disappearing-label {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #b91c1c;
+  background: rgba(239,68,68,.12);
+  border: 1px solid rgba(239,68,68,.3);
+}
+
+@keyframes disappearingGlow {
+  0% {
+    box-shadow: 0 0 0 1px rgba(239,68,68,.38), 0 0 26px rgba(239,68,68,.55);
+  }
+  100% {
+    box-shadow: 0 0 0 1px rgba(239,68,68,.18), 0 0 8px rgba(239,68,68,.18);
+  }
+}
 
 /* System messages */
 .msg-system {

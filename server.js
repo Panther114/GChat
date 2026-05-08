@@ -29,6 +29,8 @@ const MAX_SOCKET_PAYLOAD_BYTES = 256 * 1024;
 const IV_BYTES = 12;
 const SAFE_IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const APP_VERSION = packageJson.version || '0.0.0';
+const MIN_DISAPPEARING_DURATION_MS = 6000;
+const MAX_DISAPPEARING_DURATION_MS = 45000;
 
 // ── App & Server ──────────────────────────────────────────────────────────────
 const app = express();
@@ -287,6 +289,20 @@ function normalizeHashtag(value) {
   return /^[a-z0-9_-]+$/.test(trimmed) ? trimmed : null;
 }
 
+function normalizeDisappearingDuration(value) {
+  if (value == null || value === '') return null;
+  const duration = Math.round(Number(value));
+  if (!Number.isFinite(duration)) return null;
+  if (duration < MIN_DISAPPEARING_DURATION_MS || duration > MAX_DISAPPEARING_DURATION_MS) return null;
+  return duration;
+}
+
+function markExpiredDisappearingMessagesHidden(userId) {
+  if (!userId) return;
+  const nowIso = new Date().toISOString();
+  stmts.hideExpiredDisappearingMessages.run(nowIso, userId, nowIso);
+}
+
 // ── Database ──────────────────────────────────────────────────────────────────
 const DB_PATH = process.env.DB_PATH || './Gchat.db';
 const SESSIONS_DIR = process.env.DB_PATH ? path.dirname(process.env.DB_PATH) : '.';
@@ -340,6 +356,15 @@ db.exec(`
     read_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (message_id, user_id)
   );
+
+  CREATE TABLE IF NOT EXISTS disappearing_message_states (
+    message_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    started_at TEXT,
+    expires_at TEXT,
+    hidden_at TEXT,
+    PRIMARY KEY (message_id, user_id)
+  );
 `);
 
 // Safe migrations — each wrapped in try/catch so re-runs are harmless
@@ -350,6 +375,8 @@ const migrations = [
   "ALTER TABLE messages ADD COLUMN whisper_to TEXT",
   "ALTER TABLE messages ADD COLUMN total_recipients INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE messages ADD COLUMN hashtag TEXT",
+  "ALTER TABLE messages ADD COLUMN is_disappearing INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE messages ADD COLUMN disappearing_duration_ms INTEGER",
   "ALTER TABLE group_chats ADD COLUMN allow_member_clear INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE group_chats ADD COLUMN allow_member_export INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE group_chats ADD COLUMN allow_member_kick INTEGER NOT NULL DEFAULT 0",
@@ -358,6 +385,8 @@ const migrations = [
   "ALTER TABLE users ADD COLUMN profile_picture TEXT",
   "ALTER TABLE users ADD COLUMN client_settings TEXT NOT NULL DEFAULT '{}'",
   "ALTER TABLE messages ADD COLUMN edited_at TEXT",
+  "CREATE INDEX IF NOT EXISTS idx_disappearing_states_user_hidden ON disappearing_message_states (user_id, hidden_at, expires_at)",
+  "CREATE INDEX IF NOT EXISTS idx_disappearing_states_message_user ON disappearing_message_states (message_id, user_id)",
   "CREATE INDEX IF NOT EXISTS idx_message_reads_message_id ON message_reads (message_id)",
   "CREATE INDEX IF NOT EXISTS idx_group_members_user_group ON group_members (user_id, group_id)",
   "CREATE INDEX IF NOT EXISTS idx_group_members_group_joined_at ON group_members (group_id, joined_at ASC, user_id)",
@@ -450,46 +479,63 @@ const stmts = {
 
   // Messages — DESC then reverse for last-N-in-order pattern
   getLastMessages: db.prepare(`
-     SELECT m.id, m.group_id, m.sender_id, u.username AS sender_name,
-            u.icon_color AS sender_color, m.encrypted_content, m.iv,
-           m.type, m.reply_to, m.filename, m.whisper_to, m.hashtag, m.created_at, m.edited_at,
-             m.total_recipients,
-            (SELECT COUNT(*) FROM message_reads mr WHERE mr.message_id = m.id) AS read_count,
-            EXISTS(
-              SELECT 1
-              FROM message_reads mr2
-              WHERE mr2.message_id = m.id AND mr2.user_id = ?
-            ) AS has_read
+      SELECT m.id, m.group_id, m.sender_id, u.username AS sender_name,
+             u.icon_color AS sender_color, m.encrypted_content, m.iv,
+            m.type, m.reply_to, m.filename, m.whisper_to, m.hashtag,
+            m.is_disappearing, m.disappearing_duration_ms,
+            dms.started_at AS disappearing_started_at,
+            dms.expires_at AS disappearing_expires_at,
+            dms.hidden_at AS disappearing_hidden_at,
+            m.created_at, m.edited_at,
+              m.total_recipients,
+             (SELECT COUNT(*) FROM message_reads mr WHERE mr.message_id = m.id) AS read_count,
+             EXISTS(
+               SELECT 1
+               FROM message_reads mr2
+               WHERE mr2.message_id = m.id AND mr2.user_id = @viewerId
+             ) AS has_read
     FROM messages m
     JOIN users u ON m.sender_id = u.id
-    WHERE m.group_id = ?
+    LEFT JOIN disappearing_message_states dms
+      ON dms.message_id = m.id AND dms.user_id = @viewerId
+    WHERE m.group_id = @groupId
+      AND (m.sender_id = @viewerId OR m.is_disappearing = 0 OR dms.hidden_at IS NULL)
     ORDER BY m.created_at DESC, m.id DESC
-    LIMIT ?
+    LIMIT @limit
   `),
   getMessagesBefore: db.prepare(`
-    WITH ref AS (SELECT created_at, id FROM messages WHERE id = ?)
-     SELECT m.id, m.group_id, m.sender_id, u.username AS sender_name,
-            u.icon_color AS sender_color, m.encrypted_content, m.iv,
-           m.type, m.reply_to, m.filename, m.whisper_to, m.hashtag, m.created_at, m.edited_at,
-             m.total_recipients,
-            (SELECT COUNT(*) FROM message_reads mr WHERE mr.message_id = m.id) AS read_count,
-            EXISTS(
-              SELECT 1
-              FROM message_reads mr2
-              WHERE mr2.message_id = m.id AND mr2.user_id = ?
-            ) AS has_read
+    WITH ref AS (SELECT created_at, id FROM messages WHERE id = @beforeId)
+      SELECT m.id, m.group_id, m.sender_id, u.username AS sender_name,
+             u.icon_color AS sender_color, m.encrypted_content, m.iv,
+            m.type, m.reply_to, m.filename, m.whisper_to, m.hashtag,
+            m.is_disappearing, m.disappearing_duration_ms,
+            dms.started_at AS disappearing_started_at,
+            dms.expires_at AS disappearing_expires_at,
+            dms.hidden_at AS disappearing_hidden_at,
+            m.created_at, m.edited_at,
+              m.total_recipients,
+             (SELECT COUNT(*) FROM message_reads mr WHERE mr.message_id = m.id) AS read_count,
+             EXISTS(
+               SELECT 1
+               FROM message_reads mr2
+               WHERE mr2.message_id = m.id AND mr2.user_id = @viewerId
+             ) AS has_read
     FROM messages m
     JOIN users u ON m.sender_id = u.id
+    LEFT JOIN disappearing_message_states dms
+      ON dms.message_id = m.id AND dms.user_id = @viewerId
     CROSS JOIN ref
-    WHERE m.group_id = ? AND (
+    WHERE m.group_id = @groupId
+      AND (m.sender_id = @viewerId OR m.is_disappearing = 0 OR dms.hidden_at IS NULL)
+      AND (
       m.created_at < ref.created_at OR
       (m.created_at = ref.created_at AND m.id < ref.id)
     )
     ORDER BY m.created_at DESC, m.id DESC
-    LIMIT ?
+    LIMIT @limit
   `),
   insertMessage: db.prepare(
-    'INSERT INTO messages (id, group_id, sender_id, encrypted_content, iv, type, reply_to, filename, whisper_to, hashtag, total_recipients) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    'INSERT INTO messages (id, group_id, sender_id, encrypted_content, iv, type, reply_to, filename, whisper_to, hashtag, is_disappearing, disappearing_duration_ms, total_recipients) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
   ),
   findMessageById: db.prepare('SELECT * FROM messages WHERE id = ?'),
   markMessageRead: db.prepare('INSERT OR IGNORE INTO message_reads (message_id, user_id) VALUES (?, ?)'),
@@ -498,6 +544,30 @@ const stmts = {
   updateMessage: db.prepare(
     'UPDATE messages SET encrypted_content = ?, iv = ?, edited_at = ? WHERE id = ?'
   ),
+  findDisappearingState: db.prepare('SELECT * FROM disappearing_message_states WHERE message_id = ? AND user_id = ?'),
+  insertDisappearingState: db.prepare(`
+    INSERT INTO disappearing_message_states (message_id, user_id, started_at, expires_at, hidden_at)
+    VALUES (?, ?, ?, ?, ?)
+  `),
+  updateDisappearingStateStart: db.prepare(`
+    UPDATE disappearing_message_states
+    SET started_at = COALESCE(started_at, ?),
+        expires_at = COALESCE(expires_at, ?)
+    WHERE message_id = ? AND user_id = ?
+  `),
+  markDisappearingStateHidden: db.prepare(`
+    UPDATE disappearing_message_states
+    SET hidden_at = COALESCE(hidden_at, ?)
+    WHERE message_id = ? AND user_id = ?
+  `),
+  hideExpiredDisappearingMessages: db.prepare(`
+    UPDATE disappearing_message_states
+    SET hidden_at = COALESCE(hidden_at, ?)
+    WHERE user_id = ?
+      AND hidden_at IS NULL
+      AND expires_at IS NOT NULL
+      AND expires_at <= ?
+  `),
 
   // Owner controls
   deleteMember: db.prepare('DELETE FROM group_members WHERE group_id = ? AND user_id = ?'),
@@ -659,6 +729,11 @@ function formatMessage(m) {
     filename: m.filename || null,
     whisperTo: m.whisper_to || null,
     hashtag: m.hashtag || null,
+    isDisappearing: !!m.is_disappearing,
+    disappearingDurationMs: Math.max(0, Number(m.disappearing_duration_ms) || 0),
+    disappearingStartedAt: m.disappearing_started_at || null,
+    disappearingExpiresAt: m.disappearing_expires_at || null,
+    disappearingHiddenAt: m.disappearing_hidden_at || null,
     createdAt: m.created_at,
     editedAt: m.edited_at || null,
     totalRecipients: Math.max(0, Number(m.total_recipients) || 0),
@@ -1103,12 +1178,22 @@ app.get('/api/groups/:groupId/messages', (req, res) => {
     return res.status(403).json({ error: 'Not a member of this group' });
   }
 
+  markExpiredDisappearingMessagesHidden(userId);
+
   let rows;
   if (before) {
-    // CTE parameter order: (beforeMessageId, userId, groupId, limit)
-    rows = stmts.getMessagesBefore.all(before, userId, groupId, limit).reverse();
+    rows = stmts.getMessagesBefore.all({
+      beforeId: before,
+      viewerId: userId,
+      groupId,
+      limit,
+    }).reverse();
   } else {
-    rows = stmts.getLastMessages.all(userId, groupId, limit).reverse();
+    rows = stmts.getLastMessages.all({
+      viewerId: userId,
+      groupId,
+      limit,
+    }).reverse();
   }
 
   res.json(rows.map(formatMessage));
@@ -1209,12 +1294,14 @@ app.post('/api/groups/:groupId/upload', uploadRawBodyParser, (req, res) => {
   let type = null;
   let filename = null;
   let clientUploadId = null;
+  let hashtag = null;
 
   if (isBinaryUpload) {
     encryptedContent = req.body.toString('base64');
     iv = typeof req.headers['x-upload-iv'] === 'string' ? req.headers['x-upload-iv'] : null;
     type = typeof req.headers['x-upload-type'] === 'string' ? req.headers['x-upload-type'] : null;
     clientUploadId = typeof req.headers['x-client-upload-id'] === 'string' ? req.headers['x-client-upload-id'] : null;
+    hashtag = typeof req.headers['x-upload-hashtag'] === 'string' ? req.headers['x-upload-hashtag'] : null;
     if (typeof req.headers['x-upload-filename'] === 'string') {
       try {
         filename = decodeURIComponent(req.headers['x-upload-filename']);
@@ -1223,7 +1310,7 @@ app.post('/api/groups/:groupId/upload', uploadRawBodyParser, (req, res) => {
       }
     }
   } else {
-    ({ encryptedContent, iv, type, filename, clientUploadId } = req.body || {});
+    ({ encryptedContent, iv, type, filename, clientUploadId, hashtag } = req.body || {});
   }
 
   if (!encryptedContent || typeof encryptedContent !== 'string' || !iv || typeof iv !== 'string') {
@@ -1245,6 +1332,10 @@ app.post('/api/groups/:groupId/upload', uploadRawBodyParser, (req, res) => {
   if (msgType === 'file' && !safeFilename) {
     return res.status(400).json({ error: 'Invalid filename' });
   }
+  const normalizedHashtag = normalizeHashtag(hashtag);
+  if (hashtag != null && normalizedHashtag == null) {
+    return res.status(400).json({ error: 'Invalid hashtag' });
+  }
 
   const encryptedBytes = estimateBase64Bytes(encryptedContent);
   if (encryptedBytes <= 0) {
@@ -1259,7 +1350,7 @@ app.post('/api/groups/:groupId/upload', uploadRawBodyParser, (req, res) => {
   const totalRecipients = Math.max(0, (stmts.countGroupMembers.get(groupId)?.count || 0) - 1);
 
   try {
-      stmts.insertMessage.run(msgId, groupId, userId, encryptedContent, iv, msgType, null, safeFilename, null, null, totalRecipients);
+      stmts.insertMessage.run(msgId, groupId, userId, encryptedContent, iv, msgType, null, safeFilename, null, normalizedHashtag, 0, null, totalRecipients);
   } catch (err) {
     console.error('DB insert file error:', err);
     return res.status(500).json({ error: 'Failed to save file' });
@@ -1277,7 +1368,12 @@ app.post('/api/groups/:groupId/upload', uploadRawBodyParser, (req, res) => {
     replyTo: null,
     filename: safeFilename,
     whisperTo: null,
-    hashtag: null,
+    hashtag: normalizedHashtag,
+    isDisappearing: false,
+    disappearingDurationMs: 0,
+    disappearingStartedAt: null,
+    disappearingExpiresAt: null,
+    disappearingHiddenAt: null,
     createdAt,
     editedAt: null,
     totalRecipients,
@@ -1379,6 +1475,24 @@ function getPresence(groupId) {
   return roomPresence.has(groupId) ? [...roomPresence.get(groupId)] : [];
 }
 
+function emitToUser(userId, event, payload) {
+  for (const socket of io.sockets.sockets.values()) {
+    if (socket.userId === userId) socket.emit(event, payload);
+  }
+}
+
+function canUserAccessMessage(message, userId) {
+  if (!message || !userId) return false;
+  if (String(message.sender_id) === String(userId)) return true;
+  if (message.type !== 'whisper') return true;
+  try {
+    const recipients = JSON.parse(message.whisper_to || '[]');
+    return Array.isArray(recipients) && recipients.map(String).includes(String(userId));
+  } catch {
+    return false;
+  }
+}
+
 // Share the express session with Socket.IO
 io.use((socket, next) => {
   const fakeRes = {
@@ -1422,6 +1536,8 @@ io.on('connection', (socket) => {
       socket.emit('error', { message: 'Not a member of this group' });
       return;
     }
+
+    markExpiredDisappearingMessagesHidden(socket.userId);
 
     // Leave previous rooms (except own socket room)
     for (const room of socket.rooms) {
@@ -1476,7 +1592,7 @@ io.on('connection', (socket) => {
   });
 
   // ── send_message ──────────────────────────────────────────────────────────
-  socket.on('send_message', ({ groupId, encryptedContent, iv, replyTo, hashtag, spamSignature }) => {
+  socket.on('send_message', ({ groupId, encryptedContent, iv, replyTo, hashtag, isDisappearing, disappearingDurationMs, spamSignature }) => {
     if (!groupId) {
       socket.emit('error', { message: 'Group ID is required' });
       return;
@@ -1522,6 +1638,14 @@ io.on('connection', (socket) => {
       socket.emit('error', { message: 'Invalid hashtag' });
       return;
     }
+    const normalizedIsDisappearing = !!isDisappearing;
+    const normalizedDisappearingDuration = normalizedIsDisappearing
+      ? normalizeDisappearingDuration(disappearingDurationMs)
+      : null;
+    if (normalizedIsDisappearing && normalizedDisappearingDuration == null) {
+      socket.emit('error', { message: 'Invalid disappearing message duration' });
+      return;
+    }
 
     const member = stmts.isMember.get(groupId, socket.userId);
     if (!member) {
@@ -1545,6 +1669,8 @@ io.on('connection', (socket) => {
         null,
         null,
         normalizedHashtag,
+        normalizedIsDisappearing ? 1 : 0,
+        normalizedDisappearingDuration,
         totalRecipients
       );
     } catch (err) {
@@ -1566,6 +1692,11 @@ io.on('connection', (socket) => {
       filename: null,
       whisperTo: null,
       hashtag: normalizedHashtag,
+      isDisappearing: normalizedIsDisappearing,
+      disappearingDurationMs: normalizedDisappearingDuration || 0,
+      disappearingStartedAt: null,
+      disappearingExpiresAt: null,
+      disappearingHiddenAt: null,
       createdAt,
       editedAt: null,
       totalRecipients,
@@ -1576,7 +1707,7 @@ io.on('connection', (socket) => {
   });
 
   // ── send_whisper ──────────────────────────────────────────────────────────
-  socket.on('send_whisper', ({ groupId, encryptedContent, iv, whisperTo, replyTo, hashtag, spamSignature }) => {
+  socket.on('send_whisper', ({ groupId, encryptedContent, iv, whisperTo, replyTo, hashtag, isDisappearing, disappearingDurationMs, spamSignature }) => {
     if (!groupId || !Array.isArray(whisperTo)) {
       socket.emit('error', { message: 'Invalid whisper payload' });
       return;
@@ -1627,6 +1758,18 @@ io.on('connection', (socket) => {
       socket.emit('error', { message: 'Invalid hashtag' });
       return;
     }
+    if (normalizedHashtag) {
+      socket.emit('error', { message: 'Tags cannot be combined with whispers' });
+      return;
+    }
+    const normalizedIsDisappearing = !!isDisappearing;
+    const normalizedDisappearingDuration = normalizedIsDisappearing
+      ? normalizeDisappearingDuration(disappearingDurationMs)
+      : null;
+    if (normalizedIsDisappearing && normalizedDisappearingDuration == null) {
+      socket.emit('error', { message: 'Invalid disappearing message duration' });
+      return;
+    }
 
     const recipients = normalizeWhisperRecipients(whisperTo);
     if (recipients.length === 0) {
@@ -1666,6 +1809,8 @@ io.on('connection', (socket) => {
         null,
         whisperToStr,
         normalizedHashtag,
+        normalizedIsDisappearing ? 1 : 0,
+        normalizedDisappearingDuration,
         totalRecipients
       );
     } catch (err) {
@@ -1687,6 +1832,11 @@ io.on('connection', (socket) => {
       filename: null,
       whisperTo: whisperToStr,
       hashtag: normalizedHashtag,
+      isDisappearing: normalizedIsDisappearing,
+      disappearingDurationMs: normalizedDisappearingDuration || 0,
+      disappearingStartedAt: null,
+      disappearingExpiresAt: null,
+      disappearingHiddenAt: null,
       createdAt,
       editedAt: null,
       totalRecipients,
@@ -1727,6 +1877,66 @@ io.on('connection', (socket) => {
     stmts.markMessageRead.run(messageId, socket.userId);
     const readCount = Math.max(0, Number(stmts.getMessageReadCount.get(messageId)?.count) || 0);
     io.to(groupId).emit('message_read_update', { messageId, readCount });
+  });
+
+  socket.on('start_disappearing_timer', ({ groupId, messageId }) => {
+    if (!groupId || !messageId) return;
+    const member = stmts.isMember.get(groupId, socket.userId);
+    if (!member) return;
+    markExpiredDisappearingMessagesHidden(socket.userId);
+    const message = stmts.findMessageById.get(messageId);
+    if (!message || message.group_id !== groupId || !message.is_disappearing) return;
+    if (!canUserAccessMessage(message, socket.userId) || String(message.sender_id) === String(socket.userId)) return;
+
+    let state = stmts.findDisappearingState.get(messageId, socket.userId);
+    if (!state) {
+      const startedAt = new Date().toISOString();
+      const duration = Math.max(MIN_DISAPPEARING_DURATION_MS, Math.min(MAX_DISAPPEARING_DURATION_MS, Number(message.disappearing_duration_ms) || MIN_DISAPPEARING_DURATION_MS));
+      const expiresAt = new Date(Date.now() + duration).toISOString();
+      stmts.insertDisappearingState.run(messageId, socket.userId, startedAt, expiresAt, null);
+      state = stmts.findDisappearingState.get(messageId, socket.userId);
+    } else if (!state.started_at || !state.expires_at) {
+      const startedAt = new Date().toISOString();
+      const duration = Math.max(MIN_DISAPPEARING_DURATION_MS, Math.min(MAX_DISAPPEARING_DURATION_MS, Number(message.disappearing_duration_ms) || MIN_DISAPPEARING_DURATION_MS));
+      const expiresAt = new Date(Date.now() + duration).toISOString();
+      stmts.updateDisappearingStateStart.run(startedAt, expiresAt, messageId, socket.userId);
+      state = stmts.findDisappearingState.get(messageId, socket.userId);
+    }
+
+    emitToUser(socket.userId, 'disappearing_state_updated', {
+      groupId,
+      messageId,
+      startedAt: state?.started_at || null,
+      expiresAt: state?.expires_at || null,
+      hiddenAt: state?.hidden_at || null,
+    });
+  });
+
+  socket.on('hide_disappearing_message', ({ groupId, messageId }) => {
+    if (!groupId || !messageId) return;
+    const member = stmts.isMember.get(groupId, socket.userId);
+    if (!member) return;
+    const message = stmts.findMessageById.get(messageId);
+    if (!message || message.group_id !== groupId || !message.is_disappearing) return;
+    if (!canUserAccessMessage(message, socket.userId) || String(message.sender_id) === String(socket.userId)) return;
+
+    const hiddenAt = new Date().toISOString();
+    let state = stmts.findDisappearingState.get(messageId, socket.userId);
+    if (!state) {
+      stmts.insertDisappearingState.run(messageId, socket.userId, null, null, hiddenAt);
+      state = stmts.findDisappearingState.get(messageId, socket.userId);
+    } else {
+      stmts.markDisappearingStateHidden.run(hiddenAt, messageId, socket.userId);
+      state = stmts.findDisappearingState.get(messageId, socket.userId);
+    }
+
+    emitToUser(socket.userId, 'disappearing_state_updated', {
+      groupId,
+      messageId,
+      startedAt: state?.started_at || null,
+      expiresAt: state?.expires_at || null,
+      hiddenAt: state?.hidden_at || hiddenAt,
+    });
   });
 
   // ── typing ────────────────────────────────────────────────────────────────

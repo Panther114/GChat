@@ -12,10 +12,10 @@ The hosted web app is the primary product. The desktop app is a native shell tha
 
 - Real-time group chat via Socket.IO
 - Group creation and joining through shareable group codes
-- Client-side encrypted text, image, file, and whisper messages
+- Client-side encrypted text, image, file, whisper, tagged, and disappearing-text messages
 - Message replies, editing, deletion, and delivery/read indicators
 - Typing indicators and online presence
-- Client-side search and chat export
+- Client-side search and chat export (disappearing messages are excluded from exports)
 - Image viewer and automatic image compression
 - Emoji picker and mobile-responsive layout
 
@@ -103,6 +103,7 @@ Important limitations:
 - Group keys are user-managed.
 - Lost group keys cannot be recovered by the server.
 - Metadata such as usernames, group membership, timestamps, and message ownership is still visible to the server.
+- Disappearing-message metadata, timers, and per-user hidden-state records are also visible to the server so the app can keep access state consistent across reloads.
 - Short repeated-message spam detection hashes normalized short messages server-side, which can reveal when two short messages are identical even though the server still does not receive plaintext.
 - This is application-layer encryption, not a replacement for audited secure messaging infrastructure.
 
