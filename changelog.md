@@ -4,6 +4,69 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## PR — Disappearing text messages
+
+**What changed**
+
+- Added lowercase `/d` disappearing text messages, including send-time parsing for:
+  - `/d message`
+  - `/# topic /d message`
+  - `/w username /d message`
+- Added backend message metadata for disappearing messages plus per-user disappearance state so expired receiver copies stay hidden across refresh, reconnect, group switching, and tag filtering.
+- Reused the existing viewport/read-observer flow so receiver timers start only after a disappearing message enters the focused viewport.
+- Added receiver-specific disappearance timers with persisted start/expiry state and local hidden-state persistence to prevent expired messages from reappearing from cached UI state.
+- Added red disappearing-message styling with a red outline, temporary glow, and clear disappearing label.
+- Preserved sender visibility for disappearing messages while keeping receiver expiration independent per user.
+- Extended uploads so tagged image/file messages continue to work when a hashtag token or active tag filter is present.
+- Excluded disappearing messages from chat export.
+- Added a slash-menu shortcut entry for `/d`.
+
+**What was NOT changed**
+
+- No disappearing behavior was added to images, files, profile pictures, wallpapers, or other attachments.
+- Whisper routing rules remain text-only; attachments were not upgraded to support whisper delivery.
+- Core encryption, group membership, delivery ticks, read receipts, local settings, and Electron wrapper behavior were not redesigned.
+
+**Notes / Risks**
+
+- Disappearing-message duration is computed client-side from plaintext length, then stored as encrypted-message metadata so reloads can resume the same expiry window.
+- Disappearing messages are intentionally omitted from local message cache snapshots to avoid stale local cache entries resurrecting expired messages before a fresh fetch.
+- Tags and whispers are now rejected together for text sends and tagged uploads to avoid ambiguous mixed-command behavior.
+
+**Manual test checklist**
+
+- [ ] `/d hello` sends a disappearing text message
+- [ ] lowercase `/d` works
+- [ ] uppercase `/D` does not activate disappearing behavior
+- [ ] sender sees the message with red outline/glow and it does not disappear for sender
+- [ ] receiver timer starts only after the message enters the focused viewport
+- [ ] longer disappearing messages remain visible longer than short ones
+- [ ] receiver loses access after the timer completes
+- [ ] expired disappearing messages do not reappear after refresh/reload/reconnect
+- [ ] different receivers lose access independently
+- [ ] disappearing messages are excluded from export
+- [ ] `/# games /d hello` works as a tagged disappearing message
+- [ ] `/w Gavin /d hello` works as a whisper disappearing message
+- [ ] `/# games /w Gavin hello` is rejected cleanly
+- [ ] `/w Gavin /# games hello` is rejected cleanly
+- [ ] tagged image uploads still work
+- [ ] tagged file uploads still work
+- [ ] image/file uploads cannot become disappearing messages
+- [ ] existing whisper behavior is preserved
+- [ ] existing tag-filter behavior is preserved
+- [ ] normal messages still work
+
+---
+
+## v1.0.4
+
+- Removed the one-character message block while keeping the short-message anti-spam checks in place.
+- Added a slash-command menu with `/w` whisper tokenization and `/#` hashtag tokenization in the chat composer.
+- Added hashtag chips on sent messages plus top-bar tag filters that can auto-apply the active tag to new messages.
+- Bumped the app version to **1.0.4**.
+
+---
+
 ## v1.0.3
 
 - Fixed attachment uploads so encrypted image/file uploads no longer fail from the mixed content-type request path.

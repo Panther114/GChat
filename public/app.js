@@ -236,7 +236,7 @@ function readLocalGroupCache(groupId) {
 function writeLocalGroupCache(groupId, cache) {
   try {
     localStorage.setItem(LOCAL_CACHE_PREFIX + groupId, JSON.stringify({
-      messages: cache.messages || [],
+      messages: getCacheableMessages(cache.messages || []),
       members: cache.members || [],
       oldestMessageId: cache.oldestMessageId || null,
       updatedAt: Date.now(),
@@ -380,6 +380,88 @@ function formatBytes(bytes) {
   return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[idx]}`;
 }
 
+function normalizeCommandUsername(value) {
+  return String(value || '').trim().replace(/\s+/g, '_').toLowerCase();
+}
+
+function normalizeHashtagTopic(value) {
+  if (value == null || value === '') return null;
+  const trimmed = String(value).trim().replace(/^#/, '').toLowerCase();
+  if (!trimmed || trimmed.length > 64) return null;
+  return /^[a-z0-9_-]+$/.test(trimmed) ? trimmed : null;
+}
+
+function formatHashtagLabel(topic) {
+  return topic ? `#${topic}` : '';
+}
+
+function getMessageHashtagKey(msg) {
+  return normalizeHashtagTopic(msg && msg.hashtag);
+}
+
+function getMessageHashtagPrefix(msg) {
+  const topic = getMessageHashtagKey(msg);
+  return topic ? `${formatHashtagLabel(topic)} ` : '';
+}
+
+function isDisappearingMessage(msg) {
+  return !!(msg && msg.isDisappearing);
+}
+
+function computeDisappearingDurationMs(text) {
+  const normalized = String(text || '').trim();
+  const chars = normalized.length;
+  const words = normalized ? normalized.split(/\s+/).filter(Boolean).length : 0;
+  return Math.max(6000, Math.min(45000, 7000 + (chars * 55) + (words * 220)));
+}
+
+function getHiddenDisappearingStorageKey(userId = currentUser && currentUser.id) {
+  return userId ? `gchat:disappearing-hidden:user:${userId}` : null;
+}
+
+function loadHiddenDisappearingMessageIds(userId = currentUser && currentUser.id) {
+  const key = getHiddenDisappearingStorageKey(userId);
+  if (!key) return new Set();
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) || '[]');
+    return new Set(Array.isArray(parsed) ? parsed.map(String) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function persistHiddenDisappearingMessageIds(userId = currentUser && currentUser.id) {
+  const key = getHiddenDisappearingStorageKey(userId);
+  if (!key) return;
+  try {
+    localStorage.setItem(key, JSON.stringify([...hiddenDisappearingMessageIds]));
+  } catch {
+    // best effort only
+  }
+}
+
+function isMessageHiddenForCurrentUser(msg) {
+  return !!(
+    msg &&
+    currentUser &&
+    msg.senderId !== currentUser.id &&
+    isDisappearingMessage(msg) &&
+    (msg.disappearingHiddenAt || hiddenDisappearingMessageIds.has(String(msg.id)))
+  );
+}
+
+function getCacheableMessages(messages = []) {
+  return (messages || []).filter((msg) => !isDisappearingMessage(msg));
+}
+
+function getMessageTypePreviewLabel(msg) {
+  if (!msg) return '';
+  if (msg.type === 'image') return '[Image]';
+  if (msg.type === 'file') return '[File: ' + (msg.filename || '') + ']';
+  if (msg.type === 'whisper') return '[Whisper]';
+  return '';
+}
+
 function wallpaperCssValue(dataUrl) {
   if (!dataUrl) return DEFAULT_WALLPAPER;
   return `url(${JSON.stringify(String(dataUrl))})`;
@@ -509,16 +591,23 @@ function ensureReadObserver() {
       if (!socket || !currentGroupId || document.visibilityState !== 'visible' || !document.hasFocus()) continue;
       const row = entry.target;
       const messageId = row?.dataset?.msgId;
-      if (!messageId || pendingReadMessageIds.has(messageId) || row?.dataset?.hasRead === '1') continue;
-      pendingReadMessageIds.add(messageId);
-      row.classList.remove('unseen');
-      row.dataset.hasRead = '1';
-      if (currentGroupId) {
-        unreadCounts[currentGroupId] = Math.max(0, (unreadCounts[currentGroupId] || 0) - 1);
-        updateUnreadBadge(currentGroupId, unreadCounts[currentGroupId]);
+      if (!messageId) continue;
+      if (row.dataset.disappearing === '1' && row.dataset.senderId !== String(currentUser?.id) && row.dataset.disappearingStarted !== '1') {
+        requestDisappearingTimerStart(messageId, currentGroupId);
       }
-      readObserver.unobserve(row);
-      socket.emit('mark_message_read', { groupId: currentGroupId, messageId });
+      if (!pendingReadMessageIds.has(messageId) && row?.dataset?.hasRead !== '1') {
+        pendingReadMessageIds.add(messageId);
+        row.classList.remove('unseen');
+        row.dataset.hasRead = '1';
+        if (currentGroupId) {
+          unreadCounts[currentGroupId] = Math.max(0, (unreadCounts[currentGroupId] || 0) - 1);
+          updateUnreadBadge(currentGroupId, unreadCounts[currentGroupId]);
+        }
+        socket.emit('mark_message_read', { groupId: currentGroupId, messageId });
+      }
+      if (row?.dataset?.hasRead === '1' && (row?.dataset?.disappearing !== '1' || row?.dataset?.disappearingStarted === '1')) {
+        readObserver.unobserve(row);
+      }
     }
   }, {
     root: messagesArea(),
@@ -527,7 +616,7 @@ function ensureReadObserver() {
 }
 
 function observeMessageForRead(row, msg) {
-  if (!row || row.nodeType !== 1 || !canTrackMessageRead(msg)) return;
+  if (!row || row.nodeType !== 1 || !canObserveMessageVisibility(msg)) return;
   ensureReadObserver();
   readObserver.observe(row);
 }
@@ -542,12 +631,16 @@ function observeCurrentGroupRowsForRead() {
       groupId: currentGroupId,
       senderId: row.dataset.senderId,
       hasRead: row.dataset.hasRead === '1',
+      id: row.dataset.msgId,
+      isDisappearing: row.dataset.disappearing === '1',
+      disappearingHiddenAt: row.dataset.disappearingHidden === '1' ? new Date().toISOString() : null,
     });
   }
 }
 
 function resetReadTracking() {
   pendingReadMessageIds = new Set();
+  pendingDisappearingStartMessageIds = new Set();
   if (readObserver) {
     readObserver.disconnect();
     readObserver = null;
@@ -595,9 +688,9 @@ function sendNativeNotification(title, body, groupId) {
 // Build the notification body text for a message, using the decrypted preview
 // when available and falling back to type-based labels for media/encrypted content.
 function getNotificationBody(msg, preview) {
-  if (msg.type === 'image') return '[Image]';
-  if (msg.type === 'file') return '[File: ' + (msg.filename || '') + ']';
-  if (msg.type === 'whisper') return '[Whisper]';
+  if (msg && msg.type === 'whisper') return '[Whisper]';
+  const typeLabel = getMessageTypePreviewLabel(msg);
+  if (typeLabel) return preview && preview !== '[encrypted]' ? preview : typeLabel;
   return preview !== '[encrypted]' ? preview : 'New message';
 }
 
@@ -717,9 +810,12 @@ let unreadNotificationCount = 0;
 let titleBlinkInterval = null;
 let readObserver = null;
 let pendingReadMessageIds = new Set();
+let pendingDisappearingStartMessageIds = new Set();
 const groupDataCache = new Map();
 const groupPreloadPromises = new Map();
 const pendingAttachmentRows = new Map();
+let hiddenDisappearingMessageIds = new Set();
+const disappearingMessageTimers = new Map();
 let imageViewerZoom = 1;
 const appLocalSettings = {
   wallpaperDataUrl: null,
@@ -728,6 +824,11 @@ const appLocalSettings = {
 let pendingWallpaperDataUrl = null;
 let desktopSidebarWidth = DESKTOP_DEFAULT_SIDEBAR_WIDTH;
 let desktopRightPanelExpanded = true;
+let activeTagFilter = null;
+const composerTokens = {
+  whisper: null,
+  hashtag: null,
+};
 
 function renderCurrentUserAvatar(user = currentUser) {
   const avatar = $('user-avatar');
@@ -738,8 +839,9 @@ function renderCurrentUserAvatar(user = currentUser) {
 function ensureGroupCacheEntry(groupId) {
   if (!groupDataCache.has(groupId)) {
     const local = readLocalGroupCache(groupId);
+    const localMessages = (local?.messages || []).filter((msg) => !isMessageHiddenForCurrentUser(msg));
     groupDataCache.set(groupId, {
-      messages: local?.messages || null,
+      messages: localMessages.length ? localMessages : (local?.messages ? [] : null),
       messageRows: null,
       members: local?.members || null,
       oldestMessageId: local?.oldestMessageId || null,
@@ -828,9 +930,12 @@ function renderGroupFromCache(groupId) {
   allMessages = cache.messages || [];
   oldestMessageId = cache.oldestMessageId;
   members = cache.members || [];
+  for (const msg of allMessages) scheduleDisappearingTimerForMessage(msg);
   $('chat-member-count').textContent = members.length + ' member' + (members.length !== 1 ? 's' : '');
   renderMembersList();
   renderWhisperPicker();
+  renderTagFilters();
+  applyActiveTagFilterToRenderedMessages();
 }
 
 function preloadAllGroups() {
@@ -876,6 +981,447 @@ const MOBILE_BREAKPOINT = 768;
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
+
+function resolveSlashWhisperTarget(rawTarget) {
+  const normalizedTarget = normalizeCommandUsername(rawTarget);
+  if (!normalizedTarget) return null;
+  return members.find((member) => normalizeCommandUsername(member.username) === normalizedTarget) || null;
+}
+
+function setComposerShellDisabled(disabled) {
+  const shell = $('message-composer-shell');
+  if (!shell) return;
+  shell.classList.toggle('is-disabled', !!disabled);
+}
+
+function setWhisperTokenFromMember(member, rawTarget = member && member.username) {
+  if (!member) return false;
+  composerTokens.whisper = {
+    memberId: member.id,
+    username: member.username,
+    raw: `/w ${rawTarget} `,
+    label: `Whisper → ${member.username}`,
+  };
+  whisperRecipients = [member.id];
+  messageMode = 'whisper';
+  return true;
+}
+
+function clearWhisperToken({ restoreText = false } = {}) {
+  const token = composerTokens.whisper;
+  if (!token) return;
+  composerTokens.whisper = null;
+  whisperRecipients = [];
+  messageMode = 'normal';
+  if (restoreText) {
+    const input = $('message-input');
+    if (input) {
+      input.value = token.raw + input.value;
+      input.selectionStart = input.selectionEnd = token.raw.length;
+    }
+  }
+}
+
+function setHashtagToken(topic, options = {}) {
+  const normalizedTopic = normalizeHashtagTopic(topic);
+  if (!normalizedTopic) return false;
+  composerTokens.hashtag = {
+    topic: normalizedTopic,
+    raw: `/# ${normalizedTopic} `,
+    label: formatHashtagLabel(normalizedTopic),
+    linkedToFilter: !!options.linkedToFilter,
+  };
+  return true;
+}
+
+function clearHashtagToken({ restoreText = false } = {}) {
+  const token = composerTokens.hashtag;
+  if (!token) return;
+  composerTokens.hashtag = null;
+  if (restoreText) {
+    const input = $('message-input');
+    if (input) {
+      input.value = token.raw + input.value;
+      input.selectionStart = input.selectionEnd = token.raw.length;
+    }
+  }
+  if (activeTagFilter && token.topic === activeTagFilter) {
+    activeTagFilter = null;
+    renderTagFilters();
+    applyActiveTagFilterToRenderedMessages();
+  }
+}
+
+function syncComposerTokens() {
+  const strip = $('message-token-strip');
+  if (!strip) return;
+  strip.replaceChildren();
+  const tokens = [];
+  if (composerTokens.whisper) {
+    const token = document.createElement('span');
+    token.className = 'message-token message-token-whisper';
+    token.textContent = composerTokens.whisper.label;
+    tokens.push(token);
+  }
+  if (composerTokens.hashtag) {
+    const token = document.createElement('span');
+    token.className = 'message-token message-token-hashtag';
+    token.textContent = composerTokens.hashtag.label;
+    tokens.push(token);
+  }
+  strip.hidden = tokens.length === 0;
+  strip.append(...tokens);
+}
+
+function updateSlashCommandMenu() {
+  const menu = $('slash-command-menu');
+  const input = $('message-input');
+  if (!menu || !input) return;
+  const shouldShow = !composerTokens.whisper
+    && !composerTokens.hashtag
+    && input.value.startsWith('/')
+    && !input.value.startsWith('/w ')
+    && !input.value.startsWith('/# ')
+    && !input.value.startsWith('/d ');
+  menu.hidden = !shouldShow;
+}
+
+function messageMatchesActiveTag(msg) {
+  if (!activeTagFilter) return true;
+  return getMessageHashtagKey(msg) === activeTagFilter;
+}
+
+function applyActiveTagFilterToRenderedMessages() {
+  const area = messagesArea();
+  if (!area) return;
+  const rows = Array.from(area.children);
+  for (const child of rows) {
+    if (child.classList.contains('load-more-indicator')) continue;
+    if (child.classList.contains('msg-row')) {
+      const msg = allMessages.find((entry) => String(entry.id) === child.dataset.msgId);
+      child.hidden = !messageMatchesActiveTag(msg);
+      continue;
+    }
+    if (child.classList.contains('msg-system')) {
+      child.hidden = !!activeTagFilter;
+    }
+  }
+  let divider = null;
+  let hasVisibleMessageAfterDivider = false;
+  for (const child of rows) {
+    if (child.classList.contains('msg-date-divider')) {
+      if (divider) divider.hidden = !hasVisibleMessageAfterDivider;
+      divider = child;
+      hasVisibleMessageAfterDivider = false;
+      child.hidden = true;
+      continue;
+    }
+    if (child.classList.contains('msg-row') && !child.hidden) {
+      hasVisibleMessageAfterDivider = true;
+      if (divider) divider.hidden = false;
+    }
+  }
+  if (divider) divider.hidden = !hasVisibleMessageAfterDivider;
+}
+
+function getAvailableGroupTags(groupId = currentGroupId) {
+  if (!groupId) return [];
+  const cache = ensureGroupCacheEntry(groupId);
+  const tags = new Map();
+  for (const msg of cache.messages || []) {
+    const topic = getMessageHashtagKey(msg);
+    if (!topic || tags.has(topic)) continue;
+    tags.set(topic, formatHashtagLabel(topic));
+  }
+  return [...tags.entries()].map(([topic, label]) => ({ topic, label }));
+}
+
+function renderTagFilters() {
+  const wrap = $('chat-tag-filters');
+  if (!wrap) return;
+  const tags = getAvailableGroupTags();
+  if (activeTagFilter && !tags.some((tag) => tag.topic === activeTagFilter)) {
+    activeTagFilter = null;
+  }
+  wrap.replaceChildren();
+  wrap.hidden = tags.length === 0;
+  for (const tag of tags) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'chat-tag-filter-btn';
+    if (tag.topic === activeTagFilter) btn.classList.add('active');
+    btn.textContent = tag.label;
+    btn.addEventListener('click', () => {
+      activeTagFilter = activeTagFilter === tag.topic ? null : tag.topic;
+      if (activeTagFilter) {
+        clearWhisperToken();
+        whisperRecipients = [];
+        messageMode = 'normal';
+        updateWhisperBtn();
+      }
+      if (activeTagFilter) setHashtagToken(activeTagFilter, { linkedToFilter: true });
+      else composerTokens.hashtag = null;
+      syncComposerTokens();
+      renderTagFilters();
+      applyActiveTagFilterToRenderedMessages();
+      updateSlashCommandMenu();
+      autoResizeTextarea($('message-input'));
+      $('message-input').focus();
+    });
+    wrap.appendChild(btn);
+  }
+}
+
+function handleComposerBackspace(input) {
+  if (!input || input.value || input.selectionStart !== 0 || input.selectionEnd !== 0) return false;
+  if (composerTokens.hashtag) {
+    clearHashtagToken({ restoreText: true });
+    syncComposerTokens();
+    renderTagFilters();
+    applyActiveTagFilterToRenderedMessages();
+    updateSlashCommandMenu();
+    autoResizeTextarea(input);
+    return true;
+  }
+  if (composerTokens.whisper) {
+    clearWhisperToken({ restoreText: true });
+    syncComposerTokens();
+    updateWhisperBtn();
+    updateSlashCommandMenu();
+    autoResizeTextarea(input);
+    return true;
+  }
+  return false;
+}
+
+function maybeTokenizeSlashCommand(input) {
+  if (!input) return false;
+  const whisperMatch = /^\/w\s+([^\s]+)\s$/.exec(input.value);
+  if (whisperMatch) {
+    if (composerTokens.hashtag) {
+      showToast('Tags cannot be combined with whispers', 'error');
+      return false;
+    }
+    const member = resolveSlashWhisperTarget(whisperMatch[1]);
+    if (!member) {
+      showToast('Whisper user not found in this group', 'error');
+      return false;
+    }
+    setWhisperTokenFromMember(member, whisperMatch[1]);
+    input.value = '';
+    syncComposerTokens();
+    updateWhisperBtn();
+    updateSlashCommandMenu();
+    autoResizeTextarea(input);
+    return true;
+  }
+  const hashtagMatch = /^\/#\s+([^\s]+)\s$/.exec(input.value);
+  if (hashtagMatch) {
+    if (composerTokens.whisper || (messageMode === 'whisper' && whisperRecipients.length > 0)) {
+      showToast('Tags cannot be combined with whispers', 'error');
+      return false;
+    }
+    const topic = normalizeHashtagTopic(hashtagMatch[1]);
+    if (!topic) {
+      showToast('Hashtag topics can use letters, numbers, underscores, and dashes', 'error');
+      return false;
+    }
+    if (activeTagFilter && activeTagFilter !== topic) activeTagFilter = null;
+    setHashtagToken(topic);
+    input.value = '';
+    syncComposerTokens();
+    renderTagFilters();
+    applyActiveTagFilterToRenderedMessages();
+    updateSlashCommandMenu();
+    autoResizeTextarea(input);
+    return true;
+  }
+  return false;
+}
+
+function parseCommandToken(body, command) {
+  const match = new RegExp(`^\\/${command}\\s+([^\\s]+)(?:\\s+|$)`).exec(body);
+  if (!match) return null;
+  return {
+    value: match[1],
+    rest: body.slice(match[0].length).trim(),
+  };
+}
+
+function parseComposerMessageInput(rawText) {
+  let body = String(rawText || '').trim();
+  let whisperRecipientIds = composerTokens.whisper
+    ? [composerTokens.whisper.memberId]
+    : (messageMode === 'whisper' && whisperRecipients.length ? [...whisperRecipients] : []);
+  let hashtag = composerTokens.hashtag ? composerTokens.hashtag.topic : null;
+  let isDisappearing = false;
+
+  if (messageMode === 'whisper' && !composerTokens.whisper && whisperRecipients.length === 0) {
+    return { ok: false, error: 'Select at least one whisper recipient' };
+  }
+
+  if (whisperRecipientIds.length && hashtag) {
+    return { ok: false, error: 'Tags cannot be combined with whispers' };
+  }
+
+  if (!whisperRecipientIds.length && !hashtag) {
+    const hashtagToken = parseCommandToken(body, '#');
+    if (hashtagToken) {
+      const topic = normalizeHashtagTopic(hashtagToken.value);
+      if (!topic) return { ok: false, error: 'Invalid hashtag topic' };
+      hashtag = topic;
+      body = hashtagToken.rest;
+      const invalidWhisper = parseCommandToken(body, 'w');
+      if (invalidWhisper) return { ok: false, error: 'Tags cannot be combined with whispers' };
+    } else {
+      const whisperToken = parseCommandToken(body, 'w');
+      if (whisperToken) {
+        const member = resolveSlashWhisperTarget(whisperToken.value);
+        if (!member) return { ok: false, error: 'Whisper user not found in this group' };
+        whisperRecipientIds = [member.id];
+        body = whisperToken.rest;
+        const invalidHashtag = parseCommandToken(body, '#');
+        if (invalidHashtag) return { ok: false, error: 'Tags cannot be combined with whispers' };
+      }
+    }
+  } else if (whisperRecipientIds.length && parseCommandToken(body, '#')) {
+    return { ok: false, error: 'Tags cannot be combined with whispers' };
+  } else if (hashtag && parseCommandToken(body, 'w')) {
+    return { ok: false, error: 'Tags cannot be combined with whispers' };
+  }
+
+  if (/^\/d\s+/.test(body)) {
+    isDisappearing = true;
+    body = body.replace(/^\/d\s+/, '').trim();
+  }
+
+  if (!body) return { ok: false, error: 'Message text is required' };
+
+  return {
+    ok: true,
+    text: body,
+    whisperRecipientIds,
+    hashtag,
+    isDisappearing,
+    disappearingDurationMs: isDisappearing ? computeDisappearingDurationMs(body) : 0,
+  };
+}
+
+function canTrackDisappearingMessage(msg) {
+  return !!(
+    msg &&
+    currentUser &&
+    msg.groupId === currentGroupId &&
+    msg.senderId !== currentUser.id &&
+    isDisappearingMessage(msg) &&
+    !isMessageHiddenForCurrentUser(msg)
+  );
+}
+
+function canObserveMessageVisibility(msg) {
+  return canTrackMessageRead(msg) || canTrackDisappearingMessage(msg);
+}
+
+function clearDisappearingTimer(messageId) {
+  const key = String(messageId || '');
+  const timer = disappearingMessageTimers.get(key);
+  if (timer) {
+    clearTimeout(timer);
+    disappearingMessageTimers.delete(key);
+  }
+}
+
+async function refreshGroupPreviewAfterHide(groupId) {
+  const cache = ensureGroupCacheEntry(groupId);
+  const lastMsg = cache.messages && cache.messages.length ? cache.messages[cache.messages.length - 1] : null;
+  await updateGroupPreviewFromMessage(groupId, lastMsg);
+}
+
+async function hideDisappearingMessageLocally(messageId, groupId = currentGroupId, options = {}) {
+  const normalizedId = String(messageId || '');
+  if (!normalizedId) return;
+  clearDisappearingTimer(normalizedId);
+  hiddenDisappearingMessageIds.add(normalizedId);
+  persistHiddenDisappearingMessageIds();
+  if (options.notifyServer && socket && currentGroupId) {
+    socket.emit('hide_disappearing_message', { groupId: groupId || currentGroupId, messageId: normalizedId });
+  }
+
+  const row = document.querySelector(`[data-msg-id="${CSS.escape(normalizedId)}"]`);
+  if (row) {
+    readObserver?.unobserve(row);
+    row.remove();
+  }
+
+  for (const [cacheGroupId, cache] of groupDataCache.entries()) {
+    if (!cache.messages) continue;
+    const nextMessages = cache.messages.filter((msg) => String(msg.id) !== normalizedId);
+    if (nextMessages.length === cache.messages.length) continue;
+    cache.messages = nextMessages;
+    if (cache.messageRows) {
+      cache.messageRows = cache.messageRows.filter((entry) => String(entry?.dataset?.msgId || '') !== normalizedId);
+    }
+    cache.rowsDirty = true;
+    cache.oldestMessageId = cache.messages.length ? cache.messages[0].id : null;
+    writeLocalGroupCache(cacheGroupId, cache);
+    if (cacheGroupId === currentGroupId) {
+      allMessages = cache.messages;
+      renderTagFilters();
+      applyActiveTagFilterToRenderedMessages();
+    }
+    await refreshGroupPreviewAfterHide(cacheGroupId);
+    break;
+  }
+}
+
+function scheduleDisappearingTimerForMessage(msg) {
+  if (!canTrackDisappearingMessage(msg) || !msg.disappearingExpiresAt) return;
+  const remainingMs = Date.parse(msg.disappearingExpiresAt) - Date.now();
+  if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
+    void hideDisappearingMessageLocally(msg.id, msg.groupId, { notifyServer: true });
+    return;
+  }
+  const key = String(msg.id);
+  if (disappearingMessageTimers.has(key)) return;
+  disappearingMessageTimers.set(key, setTimeout(() => {
+    disappearingMessageTimers.delete(key);
+    void hideDisappearingMessageLocally(msg.id, msg.groupId, { notifyServer: true });
+  }, remainingMs));
+}
+
+function requestDisappearingTimerStart(messageId, groupId = currentGroupId) {
+  const normalizedId = String(messageId || '');
+  if (!normalizedId || !socket || !groupId || pendingDisappearingStartMessageIds.has(normalizedId)) return;
+  pendingDisappearingStartMessageIds.add(normalizedId);
+  socket.emit('start_disappearing_timer', { groupId, messageId: normalizedId });
+}
+
+function applyDisappearingStateUpdate({ groupId, messageId, startedAt, expiresAt, hiddenAt }) {
+  const normalizedId = String(messageId || '');
+  pendingDisappearingStartMessageIds.delete(normalizedId);
+  for (const [cacheGroupId, cache] of groupDataCache.entries()) {
+    const target = cache.messages ? cache.messages.find((msg) => String(msg.id) === normalizedId) : null;
+    if (!target) continue;
+    target.disappearingStartedAt = startedAt || null;
+    target.disappearingExpiresAt = expiresAt || null;
+    target.disappearingHiddenAt = hiddenAt || null;
+    if (hiddenAt) {
+      void hideDisappearingMessageLocally(normalizedId, cacheGroupId, { notifyServer: false });
+      return;
+    }
+    if (cacheGroupId === currentGroupId) {
+      const row = document.querySelector(`[data-msg-id="${CSS.escape(normalizedId)}"]`);
+      if (row) {
+        row.dataset.disappearingStarted = startedAt ? '1' : '0';
+        if (row.dataset.hasRead === '1') readObserver?.unobserve(row);
+      }
+    }
+    scheduleDisappearingTimerForMessage(target);
+    writeLocalGroupCache(cacheGroupId, cache);
+    break;
+  }
+}
+
 const messagesArea = () => $('messages-area');
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -1200,6 +1746,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Set user display
   migrateLegacyLocalSettings(currentUser.id);
+  hiddenDisappearingMessageIds = loadHiddenDisappearingMessageIds(currentUser.id);
   $('user-username').textContent = currentUser.username;
   renderCurrentUserAvatar(currentUser);
   loadMergedLocalSettings(currentUser.id);
@@ -1264,6 +1811,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
   window.addEventListener('storage', (event) => {
     const userKey = getUserSettingsStorageKey(currentUser && currentUser.id);
+    const hiddenKey = getHiddenDisappearingStorageKey(currentUser && currentUser.id);
+    if (event.key === hiddenKey) {
+      hiddenDisappearingMessageIds = loadHiddenDisappearingMessageIds(currentUser && currentUser.id);
+      for (const cache of groupDataCache.values()) {
+        if (cache.messages) cache.rowsDirty = true;
+      }
+      if (currentGroupId) {
+        void rebuildGroupMessageRows(currentGroupId).then(() => renderGroupFromCache(currentGroupId));
+      }
+      return;
+    }
     if (event.key !== ACTIVE_LOCAL_SETTINGS_KEY && event.key !== LEGACY_LOCAL_SETTINGS_KEY && event.key !== userKey) return;
     loadMergedLocalSettings();
     renderGroupList();
@@ -1394,13 +1952,13 @@ function updateGroupPreview(groupId, text, time) {
 
 async function getMessagePreviewText(msg, groupId = msg.groupId) {
   if (!msg) return '';
-  if (msg.type === 'image') return '[Image]';
-  if (msg.type === 'file') return '[File: ' + (msg.filename || '') + ']';
-  if (msg.type === 'whisper') return '[Whisper]';
+  const prefix = getMessageHashtagPrefix(msg);
+  const typeLabel = getMessageTypePreviewLabel(msg);
+  if (typeLabel) return prefix + typeLabel;
   const key = getGroupKey(groupId);
-  if (!key || msg.type !== 'text') return '[encrypted]';
+  if (!key || msg.type !== 'text') return prefix + '[encrypted]';
   const plaintext = await decryptMessage(msg.encryptedContent, msg.iv, key, groupId);
-  return plaintext || '[encrypted]';
+  return prefix + (plaintext || '[encrypted]');
 }
 
 async function updateGroupPreviewFromMessage(groupId, msg) {
@@ -1447,6 +2005,10 @@ async function selectGroup(groupId) {
   pendingAttachmentRows.clear();
   whisperRecipients = [];
   messageMode = 'normal';
+  activeTagFilter = null;
+  composerTokens.whisper = null;
+  composerTokens.hashtag = null;
+  syncComposerTokens();
   updateWhisperBtn();
   resetReadTracking();
 
@@ -1469,6 +2031,7 @@ async function selectGroup(groupId) {
   $('right-group-code').textContent = currentGroupData ? currentGroupData.code : '';
   $('right-panel-content').hidden = false;
   $('right-panel-empty').hidden = true;
+  renderTagFilters();
 
   // Owner controls
   const isOwner = currentGroupData && currentGroupData.createdBy === currentUser.id;
@@ -1517,6 +2080,7 @@ function updateKeyState() {
   input.disabled = !hasKey;
   input.placeholder = hasKey ? 'Type a message…' : 'Enter group key to continue';
   sendBtn.disabled = !hasKey;
+  setComposerShellDisabled(!hasKey);
 }
 
 // ── Load messages ─────────────────────────────────────────────────────────────
@@ -1531,12 +2095,13 @@ async function loadMessages(groupId, before) {
       if (res.status === 401) { window.location.href = 'index.html'; return; }
       return;
     }
-    const msgs = await res.json();
+    const rawMsgs = await res.json();
+    const msgs = rawMsgs.filter((msg) => !isMessageHiddenForCurrentUser(msg));
     if (!before) {
       const cache = ensureGroupCacheEntry(groupId);
       cache.messages = msgs;
       cache.messageRows = await buildMessageRows(msgs, groupId);
-      cache.oldestMessageId = msgs.length > 0 ? msgs[0].id : null;
+      cache.oldestMessageId = rawMsgs.length > 0 ? rawMsgs[0].id : null;
       cache.rowsDirty = false;
       writeLocalGroupCache(groupId, cache);
       updateGroupUnseenCount(groupId, msgs);
@@ -1563,14 +2128,18 @@ async function loadMessages(groupId, before) {
       const cache = ensureGroupCacheEntry(groupId);
       cache.messages = allMessages;
       cache.messageRows = [...rows, ...(cache.messageRows || [])];
-      cache.oldestMessageId = msgs[0].id;
+      cache.oldestMessageId = rawMsgs[0].id;
       cache.rowsDirty = false;
       writeLocalGroupCache(groupId, cache);
       // Restore scroll position
       area.scrollTop = area.scrollHeight - prevScrollHeight;
     }
-    if (!before && groupId === currentGroupId && msgs.length > 0) {
-      oldestMessageId = msgs[0].id;
+    if (!before && groupId === currentGroupId && rawMsgs.length > 0) {
+      oldestMessageId = rawMsgs[0].id;
+    }
+    if (groupId === currentGroupId) {
+      renderTagFilters();
+      applyActiveTagFilterToRenderedMessages();
     }
   } catch(err) { console.error('loadMessages error:', err); }
   finally { if (!before && groupId === currentGroupId) loadingOlder = false; }
@@ -1679,11 +2248,19 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
     const normalizedRecipients = recipients.map((id) => String(id));
     if (!isOwn && !normalizedRecipients.includes(String(currentUser.id))) return null;
   }
+  if (isMessageHiddenForCurrentUser(msg)) return null;
 
   const row = document.createElement('div');
-  row.className = 'msg-row' + (isOwn ? ' own' : '') + (msg.type === 'whisper' ? ' whisper' : '');
+  row.className = 'msg-row'
+    + (isOwn ? ' own' : '')
+    + (msg.type === 'whisper' ? ' whisper' : '')
+    + (isDisappearingMessage(msg) ? ' disappearing' : '');
   row.dataset.msgId = msg.id;
   row.dataset.senderId = msg.senderId;
+  row.dataset.hashtag = getMessageHashtagKey(msg) || '';
+  row.dataset.disappearing = isDisappearingMessage(msg) ? '1' : '0';
+  row.dataset.disappearingStarted = msg.disappearingStartedAt ? '1' : '0';
+  row.dataset.disappearingHidden = msg.disappearingHiddenAt ? '1' : '0';
   row.dataset.hasRead = isReadByMe ? '1' : '0';
   if (!isReadByMe) row.classList.add('unseen');
 
@@ -1714,13 +2291,36 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
   bubble.dataset.encContent = msg.encryptedContent || '';
   bubble.dataset.iv = msg.iv || '';
 
+  const prefixRow = document.createElement('div');
+  prefixRow.className = 'msg-prefix-row';
+  let hasPrefixContent = false;
+
   // Whisper label
   if (msg.type === 'whisper') {
     const wl = document.createElement('span');
     wl.className = 'whisper-label';
     wl.textContent = 'Whisper' + (msg.whisperTo ? ' (private)' : '');
-    bubble.appendChild(wl);
+    prefixRow.appendChild(wl);
+    hasPrefixContent = true;
   }
+
+  if (isDisappearingMessage(msg)) {
+    const disappearingLabel = document.createElement('span');
+    disappearingLabel.className = 'disappearing-label';
+    disappearingLabel.textContent = 'Disappearing';
+    prefixRow.appendChild(disappearingLabel);
+    hasPrefixContent = true;
+  }
+
+  if (msg.hashtag) {
+    const hashtagChip = document.createElement('span');
+    hashtagChip.className = 'msg-hashtag-chip';
+    hashtagChip.textContent = formatHashtagLabel(msg.hashtag);
+    prefixRow.appendChild(hashtagChip);
+    hasPrefixContent = true;
+  }
+
+  if (hasPrefixContent) bubble.appendChild(prefixRow);
 
   // Reply quote
   if (msg.replyTo) {
@@ -1783,6 +2383,8 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
   } else {
     row.append(av, content);
   }
+
+  scheduleDisappearingTimerForMessage(msg);
 
   return row;
 }
@@ -1899,6 +2501,10 @@ async function appendMessageBubble(msg, scroll, groupId = currentGroupId) {
   cache.oldestMessageId = allMessages.length ? allMessages[0].id : null;
   cache.rowsDirty = false;
   writeLocalGroupCache(groupId, cache);
+  renderTagFilters();
+  applyActiveTagFilterToRenderedMessages();
+  const isVisibleInCurrentView = messageMatchesActiveTag(msg);
+  if (activeTagFilter && !isVisibleInCurrentView) return row;
 
   // Scroll behavior
   if (scroll !== false) {
@@ -2228,22 +2834,22 @@ async function doSend(text) {
   if (!currentGroupId || !socket) return;
   const key = getGroupKey(currentGroupId);
   if (!key) return;
-  if (!text.trim()) return;
-  const hasNewline = /[\r\n]/.test(text);
-  const normalizedText = text.trim().replace(/\s+/g, ' ');
-  const normalizedSignatureText = normalizedText.toLowerCase();
-  const shouldInspectShortSpam = !hasNewline && normalizedText.length <= 80;
-  const shouldCheckSingleGlyph = normalizedText.length <= 8;
-  const visibleChars = shouldInspectShortSpam || shouldCheckSingleGlyph
-    ? Array.from(normalizedText).filter((char) => char.trim())
-    : [];
-  if (shouldCheckSingleGlyph && visibleChars.length === 1) {
-    showToast('Please send more than a single character or emoji', 'error');
+  const parsedMessage = parseComposerMessageInput(text);
+  if (!parsedMessage.ok) {
+    showToast(parsedMessage.error, 'error');
     return;
   }
+  const messageText = parsedMessage.text;
+  const hasNewline = /[\r\n]/.test(messageText);
+  const normalizedText = messageText.trim().replace(/\s+/g, ' ');
+  const normalizedSignatureText = normalizedText.toLowerCase();
+  const shouldInspectShortSpam = !hasNewline && normalizedText.length <= 80;
+  const shortSpamChars = shouldInspectShortSpam
+    ? Array.from(normalizedText).filter((char) => char.trim())
+    : [];
   if (shouldInspectShortSpam) {
-    const uniqueVisibleChars = new Set(visibleChars.map((char) => char.toLowerCase()));
-    if (visibleChars.length >= 8 && uniqueVisibleChars.size <= 2) {
+    const uniqueVisibleChars = new Set(shortSpamChars.map((char) => char.toLowerCase()));
+    if (shortSpamChars.length >= 8 && uniqueVisibleChars.size <= 2) {
       showToast('Please avoid sending repetitive short messages', 'error');
       return;
     }
@@ -2278,12 +2884,13 @@ async function doSend(text) {
   clientRateLimiter.times.push(now);
 
   try {
-    const { encryptedContent, iv } = await encryptMessage(text, key, currentGroupId);
+    const { encryptedContent, iv } = await encryptMessage(messageText, key, currentGroupId);
     if (estimateBase64Bytes(encryptedContent) > MAX_TEXT_MESSAGE_BYTES) {
       showToast('Message too large', 'error');
       return;
     }
     const spamSignature = shouldInspectShortSpam ? await sha256Hex(normalizedSignatureText) : null;
+    const hashtag = parsedMessage.hashtag || null;
 
     // Build replyTo data
     let replyToData = null;
@@ -2295,19 +2902,28 @@ async function doSend(text) {
       });
     }
 
-    if (messageMode === 'whisper' && whisperRecipients.length > 0) {
+    if (parsedMessage.whisperRecipientIds && parsedMessage.whisperRecipientIds.length > 0) {
       socket.emit('send_whisper', {
         groupId: currentGroupId,
         encryptedContent, iv,
-        whisperTo: whisperRecipients,
+        whisperTo: parsedMessage.whisperRecipientIds,
         replyTo: replyToData,
+        hashtag,
+        isDisappearing: parsedMessage.isDisappearing,
+        disappearingDurationMs: parsedMessage.disappearingDurationMs,
         spamSignature,
       });
-    } else if (messageMode === 'whisper') {
-      showToast('Select at least one whisper recipient', 'error');
-      return;
     } else {
-      socket.emit('send_message', { groupId: currentGroupId, encryptedContent, iv, replyTo: replyToData, spamSignature });
+      socket.emit('send_message', {
+        groupId: currentGroupId,
+        encryptedContent,
+        iv,
+        replyTo: replyToData,
+        hashtag,
+        isDisappearing: parsedMessage.isDisappearing,
+        disappearingDurationMs: parsedMessage.disappearingDurationMs,
+        spamSignature,
+      });
     }
 
     // Stop typing indicator
@@ -2321,6 +2937,17 @@ async function doSend(text) {
     // Clear input
     const inp = $('message-input');
     inp.value = '';
+    if (!activeTagFilter) composerTokens.hashtag = null;
+    composerTokens.whisper = null;
+    whisperRecipients = [];
+    messageMode = 'normal';
+    if (activeTagFilter) {
+      setHashtagToken(activeTagFilter, { linkedToFilter: true });
+    }
+    syncComposerTokens();
+    updateWhisperBtn();
+    renderTagFilters();
+    updateSlashCommandMenu();
     autoResizeTextarea(inp);
     scrollToBottom(true);
   } catch(err) {
@@ -2470,6 +3097,7 @@ function uploadEncryptedAttachment(groupId, body, onProgress) {
       xhr.setRequestHeader('X-Upload-Type', body.type);
       xhr.setRequestHeader('X-Upload-Filename', encodeURIComponent(body.filename || 'file'));
       xhr.setRequestHeader('X-Client-Upload-Id', body.clientUploadId || '');
+      if (body.hashtag) xhr.setRequestHeader('X-Upload-Hashtag', body.hashtag);
       xhr.send(body.encryptedBytes);
       return;
     }
@@ -2482,6 +3110,10 @@ async function handleFileUpload(file) {
   const key = getGroupKey(currentGroupId);
   if (!key) {
     showToast('Set group key first', 'error');
+    return;
+  }
+  if (composerTokens.hashtag && (composerTokens.whisper || (messageMode === 'whisper' && whisperRecipients.length > 0))) {
+    showToast('Tags cannot be combined with whispers', 'error');
     return;
   }
   const uploadId = createUploadId();
@@ -2544,6 +3176,8 @@ async function handleFileUpload(file) {
     };
 
     const body = { encryptedBytes, iv, type: isImage ? 'image' : 'file', filename: file.name, clientUploadId: uploadId };
+    const hashtag = composerTokens.hashtag ? composerTokens.hashtag.topic : null;
+    if (hashtag) body.hashtag = hashtag;
     const res = await uploadEncryptedAttachment(currentGroupId, body, (loaded, total) => {
       updatePendingAttachmentProgress(uploadId, loaded, total);
       setPendingAttachmentStatus(uploadId, 'Uploading…');
@@ -2583,6 +3217,7 @@ function initSocket() {
     $('conn-dot').className = 'conn-dot';
     $('conn-label').textContent = 'Disconnected';
     $('reconnect-banner').hidden = false;
+    pendingDisappearingStartMessageIds = new Set();
   });
 
   socket.on('connect_error', () => {
@@ -2676,7 +3311,13 @@ function initSocket() {
     if (stored) stored.readCount = Math.max(0, Number(readCount) || 0);
   });
 
+  socket.on('disappearing_state_updated', (payload) => {
+    applyDisappearingStateUpdate(payload || {});
+  });
+
   socket.on('message_deleted', ({ messageId }) => {
+    clearDisappearingTimer(messageId);
+    if (hiddenDisappearingMessageIds.delete(String(messageId))) persistHiddenDisappearingMessageIds();
     const row = document.querySelector('[data-msg-id="' + messageId + '"]');
     if (row) {
       readObserver?.unobserve(row);
@@ -2696,6 +3337,8 @@ function initSocket() {
       writeLocalGroupCache(groupId, cache);
       if (groupId === currentGroupId) {
         allMessages = cache.messages;
+        renderTagFilters();
+        applyActiveTagFilterToRenderedMessages();
       }
       break;
     }
@@ -2750,6 +3393,11 @@ function initSocket() {
 
   socket.on('chat_cleared', ({ groupId }) => {
     const cache = ensureGroupCacheEntry(groupId);
+    for (const msg of cache.messages || []) {
+      clearDisappearingTimer(msg.id);
+      hiddenDisappearingMessageIds.delete(String(msg.id));
+    }
+    persistHiddenDisappearingMessageIds();
     cache.messages = [];
     cache.messageRows = [];
     cache.members = cache.members || [];
@@ -2758,6 +3406,7 @@ function initSocket() {
     writeLocalGroupCache(groupId, cache);
     if (groupId !== currentGroupId) return;
     renderGroupFromCache(groupId);
+    renderTagFilters();
     addSystemMessage('Chat history was cleared');
   });
 
@@ -2921,6 +3570,7 @@ function initSocket() {
   });
 
   socket.on('error', ({ message }) => {
+    pendingDisappearingStartMessageIds = new Set();
     showToast(message || 'An error occurred', 'error');
   });
 }
@@ -2966,6 +3616,7 @@ function setupKeyboardShortcuts() {
       $('ctx-menu').hidden = true;
       $('emoji-picker').hidden = true;
       $('whisper-picker').hidden = true;
+      $('slash-command-menu').hidden = true;
       // Close image viewer
       hideImageViewer();
       // Cancel reply
@@ -2991,10 +3642,11 @@ function autoResizeTextarea(el) {
 function updateWhisperBtn() {
   const keepBottomPinned = isMessagesPinnedToBottom();
   const btn = $('whisper-mode-btn');
-  if (messageMode === 'whisper') {
+  const whisperActive = messageMode === 'whisper' || !!composerTokens.whisper;
+  if (whisperActive) {
     setElementIcon(btn, 'megaphone', { iconOnly: true });
     btn.classList.add('whisper-active');
-    $('whisper-picker').hidden = false;
+    $('whisper-picker').hidden = !!composerTokens.whisper;
   } else {
     setElementIcon(btn, 'message-square', { iconOnly: true });
     btn.classList.remove('whisper-active');
@@ -3110,6 +3762,7 @@ async function exportChat() {
   const key = getGroupKey(currentGroupId);
   const lines = [];
   for (const msg of allMessages) {
+    if (isDisappearingMessage(msg)) continue;
     const time = formatTime(msg.createdAt);
     let content = '';
     if (msg.type === 'image') content = '[Image]';
@@ -3629,6 +4282,9 @@ function setupEventListeners() {
     if (!$('emoji-picker').contains(e.target) && e.target !== $('emoji-btn')) {
       $('emoji-picker').hidden = true;
     }
+    if (!$('slash-command-menu').contains(e.target) && e.target !== $('message-input')) {
+      $('slash-command-menu').hidden = true;
+    }
   });
 
   // Reply cancel
@@ -3640,7 +4296,20 @@ function setupEventListeners() {
   // Message input
   const msgInput = $('message-input');
 
+  document.querySelectorAll('.slash-command-item').forEach((item) => {
+    item.addEventListener('click', () => {
+      msgInput.value = item.dataset.command || '/';
+      msgInput.focus();
+      msgInput.selectionStart = msgInput.selectionEnd = msgInput.value.length;
+      updateSlashCommandMenu();
+      autoResizeTextarea(msgInput);
+    });
+  });
+
   msgInput.addEventListener('input', () => {
+    maybeTokenizeSlashCommand(msgInput);
+    syncComposerTokens();
+    updateSlashCommandMenu();
     autoResizeTextarea(msgInput);
     if (currentGroupId && socket) {
       socket.emit('typing', { groupId: currentGroupId });
@@ -3657,6 +4326,10 @@ function setupEventListeners() {
   });
 
   msgInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Backspace' && handleComposerBackspace(msgInput)) {
+      e.preventDefault();
+      return;
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       doSend(msgInput.value);
@@ -3693,7 +4366,18 @@ function setupEventListeners() {
 
   // Whisper mode toggle
   $('whisper-mode-btn').addEventListener('click', () => {
-    messageMode = messageMode === 'normal' ? 'whisper' : 'normal';
+    if (composerTokens.hashtag) {
+      showToast('Tags cannot be combined with whispers', 'error');
+      return;
+    }
+    if (composerTokens.whisper) {
+      clearWhisperToken();
+      syncComposerTokens();
+      updateSlashCommandMenu();
+    } else {
+      messageMode = messageMode === 'normal' ? 'whisper' : 'normal';
+      if (messageMode !== 'whisper') whisperRecipients = [];
+    }
     updateWhisperBtn();
   });
 
@@ -3763,8 +4447,9 @@ async function loadOlderMessages() {
     const url = `/api/groups/${currentGroupId}/messages?before=${oldestMessageId}&limit=50`;
     const res = await fetch(url);
     if (!res.ok) return;
-    const msgs = await res.json();
-    if (!msgs.length) {
+    const rawMsgs = await res.json();
+    const msgs = rawMsgs.filter((msg) => !isMessageHiddenForCurrentUser(msg));
+    if (!rawMsgs.length) {
       oldestMessageId = null; // no more older messages
       return;
     }
@@ -3795,7 +4480,7 @@ async function loadOlderMessages() {
     }
 
     allMessages = [...msgs, ...allMessages];
-    oldestMessageId = msgs[0].id;
+    oldestMessageId = rawMsgs[0].id;
     const cache = ensureGroupCacheEntry(currentGroupId);
     cache.messages = allMessages;
     cache.messageRows = [...rows, ...(cache.messageRows || [])];
