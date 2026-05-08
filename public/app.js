@@ -2029,7 +2029,7 @@ function setWallpaperProgress(percent, label) {
   const fill = $('wallpaper-progress-fill');
   const text = $('wallpaper-progress-label');
   if (!wrap || !fill || !text) return;
-  if (percent == null) {
+  if (percent === null || percent === undefined) {
     wrap.hidden = true;
     fill.style.width = '0%';
     text.textContent = '';
@@ -2380,7 +2380,7 @@ function uploadEncryptedAttachment(groupId, body, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `/api/groups/${groupId}/upload`);
-    const isBinaryUpload = !!(body && body.encryptedBytes instanceof Uint8Array);
+    const isBinaryUpload = body && body.encryptedBytes instanceof Uint8Array;
     const headers = apiHeaders({ json: !isBinaryUpload });
     for (const [key, val] of Object.entries(headers)) xhr.setRequestHeader(key, val);
     xhr.upload.onprogress = (evt) => {
