@@ -380,6 +380,25 @@ function formatBytes(bytes) {
   return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[idx]}`;
 }
 
+function normalizeCommandUsername(value) {
+  return String(value || '').trim().replace(/\s+/g, '_').toLowerCase();
+}
+
+function normalizeHashtagTopic(value) {
+  if (value == null || value === '') return null;
+  const trimmed = String(value).trim().replace(/^#/, '').toLowerCase();
+  if (!trimmed || trimmed.length > 64) return null;
+  return /^[a-z0-9_-]+$/.test(trimmed) ? trimmed : null;
+}
+
+function formatHashtagLabel(topic) {
+  return topic ? `#${topic}` : '';
+}
+
+function getMessageHashtagKey(msg) {
+  return normalizeHashtagTopic(msg && msg.hashtag);
+}
+
 function wallpaperCssValue(dataUrl) {
   if (!dataUrl) return DEFAULT_WALLPAPER;
   return `url(${JSON.stringify(String(dataUrl))})`;
@@ -595,9 +614,15 @@ function sendNativeNotification(title, body, groupId) {
 // Build the notification body text for a message, using the decrypted preview
 // when available and falling back to type-based labels for media/encrypted content.
 function getNotificationBody(msg, preview) {
-  if (msg.type === 'image') return '[Image]';
-  if (msg.type === 'file') return '[File: ' + (msg.filename || '') + ']';
-  if (msg.type === 'whisper') return '[Whisper]';
+  if (msg.type === 'image' || msg.type === 'file' || msg.type === 'whisper') {
+    return preview && preview !== '[encrypted]'
+      ? preview
+      : msg.type === 'image'
+        ? '[Image]'
+        : msg.type === 'file'
+          ? '[File: ' + (msg.filename || '') + ']'
+          : '[Whisper]';
+  }
   return preview !== '[encrypted]' ? preview : 'New message';
 }
 
@@ -728,6 +753,11 @@ const appLocalSettings = {
 let pendingWallpaperDataUrl = null;
 let desktopSidebarWidth = DESKTOP_DEFAULT_SIDEBAR_WIDTH;
 let desktopRightPanelExpanded = true;
+let activeTagFilter = null;
+const composerTokens = {
+  whisper: null,
+  hashtag: null,
+};
 
 function renderCurrentUserAvatar(user = currentUser) {
   const avatar = $('user-avatar');
@@ -831,6 +861,8 @@ function renderGroupFromCache(groupId) {
   $('chat-member-count').textContent = members.length + ' member' + (members.length !== 1 ? 's' : '');
   renderMembersList();
   renderWhisperPicker();
+  renderTagFilters();
+  applyActiveTagFilterToRenderedMessages();
 }
 
 function preloadAllGroups() {
@@ -876,6 +908,246 @@ const MOBILE_BREAKPOINT = 768;
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
+
+function resolveSlashWhisperTarget(rawTarget) {
+  const normalizedTarget = normalizeCommandUsername(rawTarget);
+  if (!normalizedTarget) return null;
+  return members.find((member) => normalizeCommandUsername(member.username) === normalizedTarget) || null;
+}
+
+function setComposerShellDisabled(disabled) {
+  const shell = $('message-composer-shell');
+  if (!shell) return;
+  shell.classList.toggle('is-disabled', !!disabled);
+}
+
+function setWhisperTokenFromMember(member, rawTarget = member && member.username) {
+  if (!member) return false;
+  composerTokens.whisper = {
+    memberId: member.id,
+    username: member.username,
+    raw: `/w ${rawTarget} `,
+    label: `Whisper → ${member.username}`,
+  };
+  whisperRecipients = [member.id];
+  messageMode = 'whisper';
+  return true;
+}
+
+function clearWhisperToken({ restoreText = false } = {}) {
+  const token = composerTokens.whisper;
+  if (!token) return;
+  composerTokens.whisper = null;
+  whisperRecipients = [];
+  messageMode = 'normal';
+  if (restoreText) {
+    const input = $('message-input');
+    if (input) {
+      input.value = token.raw + input.value;
+      input.selectionStart = input.selectionEnd = token.raw.length;
+    }
+  }
+}
+
+function setHashtagToken(topic, options = {}) {
+  const normalizedTopic = normalizeHashtagTopic(topic);
+  if (!normalizedTopic) return false;
+  composerTokens.hashtag = {
+    topic: normalizedTopic,
+    raw: `/# ${normalizedTopic} `,
+    label: formatHashtagLabel(normalizedTopic),
+    linkedToFilter: !!options.linkedToFilter,
+  };
+  return true;
+}
+
+function clearHashtagToken({ restoreText = false } = {}) {
+  const token = composerTokens.hashtag;
+  if (!token) return;
+  composerTokens.hashtag = null;
+  if (restoreText) {
+    const input = $('message-input');
+    if (input) {
+      input.value = token.raw + input.value;
+      input.selectionStart = input.selectionEnd = token.raw.length;
+    }
+  }
+  if (activeTagFilter && token.topic === activeTagFilter) {
+    activeTagFilter = null;
+  }
+}
+
+function syncComposerTokens() {
+  const strip = $('message-token-strip');
+  if (!strip) return;
+  strip.replaceChildren();
+  const tokens = [];
+  if (composerTokens.whisper) {
+    const token = document.createElement('span');
+    token.className = 'message-token message-token-whisper';
+    token.textContent = composerTokens.whisper.label;
+    tokens.push(token);
+  }
+  if (composerTokens.hashtag) {
+    const token = document.createElement('span');
+    token.className = 'message-token message-token-hashtag';
+    token.textContent = composerTokens.hashtag.label;
+    tokens.push(token);
+  }
+  strip.hidden = tokens.length === 0;
+  strip.append(...tokens);
+}
+
+function updateSlashCommandMenu() {
+  const menu = $('slash-command-menu');
+  const input = $('message-input');
+  if (!menu || !input) return;
+  const shouldShow = !composerTokens.whisper
+    && !composerTokens.hashtag
+    && input.value.startsWith('/')
+    && !input.value.startsWith('/w ')
+    && !input.value.startsWith('/# ');
+  menu.hidden = !shouldShow;
+}
+
+function messageMatchesActiveTag(msg) {
+  if (!activeTagFilter) return true;
+  return getMessageHashtagKey(msg) === activeTagFilter;
+}
+
+function applyActiveTagFilterToRenderedMessages() {
+  const area = messagesArea();
+  if (!area) return;
+  const rows = Array.from(area.children);
+  for (const child of rows) {
+    if (child.classList.contains('load-more-indicator')) continue;
+    if (child.classList.contains('msg-row')) {
+      const msg = allMessages.find((entry) => String(entry.id) === child.dataset.msgId);
+      child.hidden = !messageMatchesActiveTag(msg);
+      continue;
+    }
+    if (child.classList.contains('msg-system')) {
+      child.hidden = !!activeTagFilter;
+    }
+  }
+  let divider = null;
+  let hasVisibleMessageAfterDivider = false;
+  for (const child of rows) {
+    if (child.classList.contains('msg-date-divider')) {
+      if (divider) divider.hidden = !hasVisibleMessageAfterDivider;
+      divider = child;
+      hasVisibleMessageAfterDivider = false;
+      child.hidden = true;
+      continue;
+    }
+    if (child.classList.contains('msg-row') && !child.hidden) {
+      hasVisibleMessageAfterDivider = true;
+      if (divider) divider.hidden = false;
+    }
+  }
+  if (divider) divider.hidden = !hasVisibleMessageAfterDivider;
+}
+
+function getAvailableGroupTags(groupId = currentGroupId) {
+  if (!groupId) return [];
+  const cache = ensureGroupCacheEntry(groupId);
+  const tags = new Map();
+  for (const msg of cache.messages || []) {
+    const topic = getMessageHashtagKey(msg);
+    if (!topic || tags.has(topic)) continue;
+    tags.set(topic, formatHashtagLabel(topic));
+  }
+  return [...tags.entries()].map(([topic, label]) => ({ topic, label }));
+}
+
+function renderTagFilters() {
+  const wrap = $('chat-tag-filters');
+  if (!wrap) return;
+  const tags = getAvailableGroupTags();
+  if (activeTagFilter && !tags.some((tag) => tag.topic === activeTagFilter)) {
+    activeTagFilter = null;
+  }
+  wrap.replaceChildren();
+  wrap.hidden = tags.length === 0;
+  for (const tag of tags) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'chat-tag-filter-btn';
+    if (tag.topic === activeTagFilter) btn.classList.add('active');
+    btn.textContent = tag.label;
+    btn.addEventListener('click', () => {
+      activeTagFilter = activeTagFilter === tag.topic ? null : tag.topic;
+      if (activeTagFilter) setHashtagToken(activeTagFilter, { linkedToFilter: true });
+      else composerTokens.hashtag = null;
+      syncComposerTokens();
+      renderTagFilters();
+      applyActiveTagFilterToRenderedMessages();
+      updateSlashCommandMenu();
+      autoResizeTextarea($('message-input'));
+      $('message-input').focus();
+    });
+    wrap.appendChild(btn);
+  }
+}
+
+function handleComposerBackspace(input) {
+  if (!input || input.value || input.selectionStart !== 0 || input.selectionEnd !== 0) return false;
+  if (composerTokens.hashtag) {
+    clearHashtagToken({ restoreText: true });
+    syncComposerTokens();
+    renderTagFilters();
+    applyActiveTagFilterToRenderedMessages();
+    updateSlashCommandMenu();
+    autoResizeTextarea(input);
+    return true;
+  }
+  if (composerTokens.whisper) {
+    clearWhisperToken({ restoreText: true });
+    syncComposerTokens();
+    updateWhisperBtn();
+    updateSlashCommandMenu();
+    autoResizeTextarea(input);
+    return true;
+  }
+  return false;
+}
+
+function maybeTokenizeSlashCommand(input) {
+  if (!input) return false;
+  const whisperMatch = /^\/w\s+([^\s]+)\s$/.exec(input.value);
+  if (whisperMatch) {
+    const member = resolveSlashWhisperTarget(whisperMatch[1]);
+    if (!member) {
+      showToast('Whisper user not found in this group', 'error');
+      return false;
+    }
+    setWhisperTokenFromMember(member, whisperMatch[1]);
+    input.value = '';
+    syncComposerTokens();
+    updateWhisperBtn();
+    updateSlashCommandMenu();
+    autoResizeTextarea(input);
+    return true;
+  }
+  const hashtagMatch = /^\/#\s+([^\s]+)\s$/.exec(input.value);
+  if (hashtagMatch) {
+    const topic = normalizeHashtagTopic(hashtagMatch[1]);
+    if (!topic) {
+      showToast('Hashtag topics can use letters, numbers, underscores, and dashes', 'error');
+      return false;
+    }
+    if (activeTagFilter && activeTagFilter !== topic) activeTagFilter = null;
+    setHashtagToken(topic);
+    input.value = '';
+    syncComposerTokens();
+    renderTagFilters();
+    applyActiveTagFilterToRenderedMessages();
+    updateSlashCommandMenu();
+    autoResizeTextarea(input);
+    return true;
+  }
+  return false;
+}
 const messagesArea = () => $('messages-area');
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -1394,13 +1666,14 @@ function updateGroupPreview(groupId, text, time) {
 
 async function getMessagePreviewText(msg, groupId = msg.groupId) {
   if (!msg) return '';
-  if (msg.type === 'image') return '[Image]';
-  if (msg.type === 'file') return '[File: ' + (msg.filename || '') + ']';
-  if (msg.type === 'whisper') return '[Whisper]';
+  const prefix = msg.hashtag ? `${formatHashtagLabel(msg.hashtag)} ` : '';
+  if (msg.type === 'image') return prefix + '[Image]';
+  if (msg.type === 'file') return prefix + '[File: ' + (msg.filename || '') + ']';
+  if (msg.type === 'whisper') return prefix + '[Whisper]';
   const key = getGroupKey(groupId);
-  if (!key || msg.type !== 'text') return '[encrypted]';
+  if (!key || msg.type !== 'text') return prefix + '[encrypted]';
   const plaintext = await decryptMessage(msg.encryptedContent, msg.iv, key, groupId);
-  return plaintext || '[encrypted]';
+  return prefix + (plaintext || '[encrypted]');
 }
 
 async function updateGroupPreviewFromMessage(groupId, msg) {
@@ -1447,6 +1720,10 @@ async function selectGroup(groupId) {
   pendingAttachmentRows.clear();
   whisperRecipients = [];
   messageMode = 'normal';
+  activeTagFilter = null;
+  composerTokens.whisper = null;
+  composerTokens.hashtag = null;
+  syncComposerTokens();
   updateWhisperBtn();
   resetReadTracking();
 
@@ -1469,6 +1746,7 @@ async function selectGroup(groupId) {
   $('right-group-code').textContent = currentGroupData ? currentGroupData.code : '';
   $('right-panel-content').hidden = false;
   $('right-panel-empty').hidden = true;
+  renderTagFilters();
 
   // Owner controls
   const isOwner = currentGroupData && currentGroupData.createdBy === currentUser.id;
@@ -1517,6 +1795,7 @@ function updateKeyState() {
   input.disabled = !hasKey;
   input.placeholder = hasKey ? 'Type a message…' : 'Enter group key to continue';
   sendBtn.disabled = !hasKey;
+  setComposerShellDisabled(!hasKey);
 }
 
 // ── Load messages ─────────────────────────────────────────────────────────────
@@ -1571,6 +1850,10 @@ async function loadMessages(groupId, before) {
     }
     if (!before && groupId === currentGroupId && msgs.length > 0) {
       oldestMessageId = msgs[0].id;
+    }
+    if (groupId === currentGroupId) {
+      renderTagFilters();
+      applyActiveTagFilterToRenderedMessages();
     }
   } catch(err) { console.error('loadMessages error:', err); }
   finally { if (!before && groupId === currentGroupId) loadingOlder = false; }
@@ -1684,6 +1967,7 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
   row.className = 'msg-row' + (isOwn ? ' own' : '') + (msg.type === 'whisper' ? ' whisper' : '');
   row.dataset.msgId = msg.id;
   row.dataset.senderId = msg.senderId;
+  row.dataset.hashtag = getMessageHashtagKey(msg) || '';
   row.dataset.hasRead = isReadByMe ? '1' : '0';
   if (!isReadByMe) row.classList.add('unseen');
 
@@ -1714,13 +1998,28 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
   bubble.dataset.encContent = msg.encryptedContent || '';
   bubble.dataset.iv = msg.iv || '';
 
+  const prefixRow = document.createElement('div');
+  prefixRow.className = 'msg-prefix-row';
+  let hasPrefixContent = false;
+
   // Whisper label
   if (msg.type === 'whisper') {
     const wl = document.createElement('span');
     wl.className = 'whisper-label';
     wl.textContent = 'Whisper' + (msg.whisperTo ? ' (private)' : '');
-    bubble.appendChild(wl);
+    prefixRow.appendChild(wl);
+    hasPrefixContent = true;
   }
+
+  if (msg.hashtag) {
+    const hashtagChip = document.createElement('span');
+    hashtagChip.className = 'msg-hashtag-chip';
+    hashtagChip.textContent = formatHashtagLabel(msg.hashtag);
+    prefixRow.appendChild(hashtagChip);
+    hasPrefixContent = true;
+  }
+
+  if (hasPrefixContent) bubble.appendChild(prefixRow);
 
   // Reply quote
   if (msg.replyTo) {
@@ -1899,6 +2198,10 @@ async function appendMessageBubble(msg, scroll, groupId = currentGroupId) {
   cache.oldestMessageId = allMessages.length ? allMessages[0].id : null;
   cache.rowsDirty = false;
   writeLocalGroupCache(groupId, cache);
+  renderTagFilters();
+  applyActiveTagFilterToRenderedMessages();
+  const isVisibleInCurrentView = messageMatchesActiveTag(msg);
+  if (activeTagFilter && !isVisibleInCurrentView) return row;
 
   // Scroll behavior
   if (scroll !== false) {
@@ -2233,14 +2536,9 @@ async function doSend(text) {
   const normalizedText = text.trim().replace(/\s+/g, ' ');
   const normalizedSignatureText = normalizedText.toLowerCase();
   const shouldInspectShortSpam = !hasNewline && normalizedText.length <= 80;
-  const shouldCheckSingleGlyph = normalizedText.length <= 8;
-  const visibleChars = shouldInspectShortSpam || shouldCheckSingleGlyph
+  const visibleChars = shouldInspectShortSpam
     ? Array.from(normalizedText).filter((char) => char.trim())
     : [];
-  if (shouldCheckSingleGlyph && visibleChars.length === 1) {
-    showToast('Please send more than a single character or emoji', 'error');
-    return;
-  }
   if (shouldInspectShortSpam) {
     const uniqueVisibleChars = new Set(visibleChars.map((char) => char.toLowerCase()));
     if (visibleChars.length >= 8 && uniqueVisibleChars.size <= 2) {
@@ -2284,6 +2582,7 @@ async function doSend(text) {
       return;
     }
     const spamSignature = shouldInspectShortSpam ? await sha256Hex(normalizedSignatureText) : null;
+    const hashtag = composerTokens.hashtag ? composerTokens.hashtag.topic : null;
 
     // Build replyTo data
     let replyToData = null;
@@ -2301,13 +2600,14 @@ async function doSend(text) {
         encryptedContent, iv,
         whisperTo: whisperRecipients,
         replyTo: replyToData,
+        hashtag,
         spamSignature,
       });
     } else if (messageMode === 'whisper') {
       showToast('Select at least one whisper recipient', 'error');
       return;
     } else {
-      socket.emit('send_message', { groupId: currentGroupId, encryptedContent, iv, replyTo: replyToData, spamSignature });
+      socket.emit('send_message', { groupId: currentGroupId, encryptedContent, iv, replyTo: replyToData, hashtag, spamSignature });
     }
 
     // Stop typing indicator
@@ -2321,6 +2621,17 @@ async function doSend(text) {
     // Clear input
     const inp = $('message-input');
     inp.value = '';
+    if (!activeTagFilter) composerTokens.hashtag = null;
+    composerTokens.whisper = null;
+    whisperRecipients = [];
+    messageMode = 'normal';
+    if (activeTagFilter) {
+      setHashtagToken(activeTagFilter, { linkedToFilter: true });
+    }
+    syncComposerTokens();
+    updateWhisperBtn();
+    renderTagFilters();
+    updateSlashCommandMenu();
     autoResizeTextarea(inp);
     scrollToBottom(true);
   } catch(err) {
@@ -2696,6 +3007,8 @@ function initSocket() {
       writeLocalGroupCache(groupId, cache);
       if (groupId === currentGroupId) {
         allMessages = cache.messages;
+        renderTagFilters();
+        applyActiveTagFilterToRenderedMessages();
       }
       break;
     }
@@ -2758,6 +3071,7 @@ function initSocket() {
     writeLocalGroupCache(groupId, cache);
     if (groupId !== currentGroupId) return;
     renderGroupFromCache(groupId);
+    renderTagFilters();
     addSystemMessage('Chat history was cleared');
   });
 
@@ -2966,6 +3280,7 @@ function setupKeyboardShortcuts() {
       $('ctx-menu').hidden = true;
       $('emoji-picker').hidden = true;
       $('whisper-picker').hidden = true;
+      $('slash-command-menu').hidden = true;
       // Close image viewer
       hideImageViewer();
       // Cancel reply
@@ -2991,10 +3306,11 @@ function autoResizeTextarea(el) {
 function updateWhisperBtn() {
   const keepBottomPinned = isMessagesPinnedToBottom();
   const btn = $('whisper-mode-btn');
-  if (messageMode === 'whisper') {
+  const whisperActive = messageMode === 'whisper' || !!composerTokens.whisper;
+  if (whisperActive) {
     setElementIcon(btn, 'megaphone', { iconOnly: true });
     btn.classList.add('whisper-active');
-    $('whisper-picker').hidden = false;
+    $('whisper-picker').hidden = !!composerTokens.whisper;
   } else {
     setElementIcon(btn, 'message-square', { iconOnly: true });
     btn.classList.remove('whisper-active');
@@ -3629,6 +3945,9 @@ function setupEventListeners() {
     if (!$('emoji-picker').contains(e.target) && e.target !== $('emoji-btn')) {
       $('emoji-picker').hidden = true;
     }
+    if (!$('slash-command-menu').contains(e.target) && e.target !== $('message-input')) {
+      $('slash-command-menu').hidden = true;
+    }
   });
 
   // Reply cancel
@@ -3640,7 +3959,20 @@ function setupEventListeners() {
   // Message input
   const msgInput = $('message-input');
 
+  document.querySelectorAll('.slash-command-item').forEach((item) => {
+    item.addEventListener('click', () => {
+      msgInput.value = item.dataset.command || '/';
+      msgInput.focus();
+      msgInput.selectionStart = msgInput.selectionEnd = msgInput.value.length;
+      updateSlashCommandMenu();
+      autoResizeTextarea(msgInput);
+    });
+  });
+
   msgInput.addEventListener('input', () => {
+    maybeTokenizeSlashCommand(msgInput);
+    syncComposerTokens();
+    updateSlashCommandMenu();
     autoResizeTextarea(msgInput);
     if (currentGroupId && socket) {
       socket.emit('typing', { groupId: currentGroupId });
@@ -3657,6 +3989,10 @@ function setupEventListeners() {
   });
 
   msgInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Backspace' && handleComposerBackspace(msgInput)) {
+      e.preventDefault();
+      return;
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       doSend(msgInput.value);
@@ -3693,7 +4029,14 @@ function setupEventListeners() {
 
   // Whisper mode toggle
   $('whisper-mode-btn').addEventListener('click', () => {
-    messageMode = messageMode === 'normal' ? 'whisper' : 'normal';
+    if (composerTokens.whisper) {
+      clearWhisperToken();
+      syncComposerTokens();
+      updateSlashCommandMenu();
+    } else {
+      messageMode = messageMode === 'normal' ? 'whisper' : 'normal';
+      if (messageMode !== 'whisper') whisperRecipients = [];
+    }
     updateWhisperBtn();
   });
 

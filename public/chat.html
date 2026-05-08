@@ -50,6 +50,7 @@
         <div class="chat-topbar-info">
           <span class="chat-topbar-name" id="chat-group-name">Group Name</span>
           <span class="chat-topbar-meta" id="chat-member-count">0 members</span>
+          <div class="chat-tag-filters" id="chat-tag-filters" hidden></div>
         </div>
         <button class="btn-icon right-panel-toggle" id="right-panel-toggle" title="Group details" aria-label="Group details" data-icon="info" data-icon-only="true"></button>
       </div>
@@ -85,12 +86,25 @@
         <label class="btn-icon btn-attach" title="Attach file">
           <span class="attach-icon" data-icon="paperclip" data-icon-only="true" aria-hidden="true"></span><input type="file" id="file-input" accept="*/*" hidden />
         </label>
-        <textarea
-          id="message-input"
-          placeholder="Type a message…"
-          autocomplete="off"
-          rows="1"
-        ></textarea>
+        <div class="message-composer-shell" id="message-composer-shell">
+          <div class="message-token-strip" id="message-token-strip" hidden></div>
+          <textarea
+            id="message-input"
+            placeholder="Type a message…"
+            autocomplete="off"
+            rows="1"
+          ></textarea>
+          <div class="slash-command-menu" id="slash-command-menu" hidden>
+            <button class="slash-command-item" type="button" data-command="/w ">
+              <span class="slash-command-name">Whisper</span>
+              <span class="slash-command-hint">/w username</span>
+            </button>
+            <button class="slash-command-item" type="button" data-command="/# ">
+              <span class="slash-command-name">Hashtag</span>
+              <span class="slash-command-hint">/# topic</span>
+            </button>
+          </div>
+        </div>
         <button class="btn-send" id="send-btn" title="Send" aria-label="Send" data-icon="send" data-icon-only="true"></button>
       </div>
 

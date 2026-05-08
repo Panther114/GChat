@@ -4,6 +4,15 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## v1.0.4
+
+- Removed the one-character message block while keeping the short-message anti-spam checks in place.
+- Added a slash-command menu with `/w` whisper tokenization and `/#` hashtag tokenization in the chat composer.
+- Added hashtag chips on sent messages plus top-bar tag filters that can auto-apply the active tag to new messages.
+- Bumped the app version to **1.0.4**.
+
+---
+
 ## v1.0.3
 
 - Fixed attachment uploads so encrypted image/file uploads no longer fail from the mixed content-type request path.

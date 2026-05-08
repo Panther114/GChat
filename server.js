@@ -279,6 +279,14 @@ function normalizeWhisperRecipients(value) {
   return [...new Set(value.map((entry) => String(entry || '').trim()).filter(Boolean))];
 }
 
+function normalizeHashtag(value) {
+  if (value == null || value === '') return null;
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim().replace(/^#/, '').toLowerCase();
+  if (!trimmed || trimmed.length > 64) return null;
+  return /^[a-z0-9_-]+$/.test(trimmed) ? trimmed : null;
+}
+
 // ── Database ──────────────────────────────────────────────────────────────────
 const DB_PATH = process.env.DB_PATH || './Gchat.db';
 const SESSIONS_DIR = process.env.DB_PATH ? path.dirname(process.env.DB_PATH) : '.';
@@ -341,6 +349,7 @@ const migrations = [
   "ALTER TABLE messages ADD COLUMN filename TEXT",
   "ALTER TABLE messages ADD COLUMN whisper_to TEXT",
   "ALTER TABLE messages ADD COLUMN total_recipients INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE messages ADD COLUMN hashtag TEXT",
   "ALTER TABLE group_chats ADD COLUMN allow_member_clear INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE group_chats ADD COLUMN allow_member_export INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE group_chats ADD COLUMN allow_member_kick INTEGER NOT NULL DEFAULT 0",
@@ -441,10 +450,10 @@ const stmts = {
 
   // Messages — DESC then reverse for last-N-in-order pattern
   getLastMessages: db.prepare(`
-    SELECT m.id, m.group_id, m.sender_id, u.username AS sender_name,
-           u.icon_color AS sender_color, m.encrypted_content, m.iv,
-           m.type, m.reply_to, m.filename, m.whisper_to, m.created_at, m.edited_at,
-            m.total_recipients,
+     SELECT m.id, m.group_id, m.sender_id, u.username AS sender_name,
+            u.icon_color AS sender_color, m.encrypted_content, m.iv,
+           m.type, m.reply_to, m.filename, m.whisper_to, m.hashtag, m.created_at, m.edited_at,
+             m.total_recipients,
             (SELECT COUNT(*) FROM message_reads mr WHERE mr.message_id = m.id) AS read_count,
             EXISTS(
               SELECT 1
@@ -459,10 +468,10 @@ const stmts = {
   `),
   getMessagesBefore: db.prepare(`
     WITH ref AS (SELECT created_at, id FROM messages WHERE id = ?)
-    SELECT m.id, m.group_id, m.sender_id, u.username AS sender_name,
-           u.icon_color AS sender_color, m.encrypted_content, m.iv,
-           m.type, m.reply_to, m.filename, m.whisper_to, m.created_at, m.edited_at,
-            m.total_recipients,
+     SELECT m.id, m.group_id, m.sender_id, u.username AS sender_name,
+            u.icon_color AS sender_color, m.encrypted_content, m.iv,
+           m.type, m.reply_to, m.filename, m.whisper_to, m.hashtag, m.created_at, m.edited_at,
+             m.total_recipients,
             (SELECT COUNT(*) FROM message_reads mr WHERE mr.message_id = m.id) AS read_count,
             EXISTS(
               SELECT 1
@@ -480,7 +489,7 @@ const stmts = {
     LIMIT ?
   `),
   insertMessage: db.prepare(
-    'INSERT INTO messages (id, group_id, sender_id, encrypted_content, iv, type, reply_to, filename, whisper_to, total_recipients) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    'INSERT INTO messages (id, group_id, sender_id, encrypted_content, iv, type, reply_to, filename, whisper_to, hashtag, total_recipients) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
   ),
   findMessageById: db.prepare('SELECT * FROM messages WHERE id = ?'),
   markMessageRead: db.prepare('INSERT OR IGNORE INTO message_reads (message_id, user_id) VALUES (?, ?)'),
@@ -649,6 +658,7 @@ function formatMessage(m) {
     replyTo: m.reply_to || null,
     filename: m.filename || null,
     whisperTo: m.whisper_to || null,
+    hashtag: m.hashtag || null,
     createdAt: m.created_at,
     editedAt: m.edited_at || null,
     totalRecipients: Math.max(0, Number(m.total_recipients) || 0),
@@ -1249,7 +1259,7 @@ app.post('/api/groups/:groupId/upload', uploadRawBodyParser, (req, res) => {
   const totalRecipients = Math.max(0, (stmts.countGroupMembers.get(groupId)?.count || 0) - 1);
 
   try {
-    stmts.insertMessage.run(msgId, groupId, userId, encryptedContent, iv, msgType, null, safeFilename, null, totalRecipients);
+      stmts.insertMessage.run(msgId, groupId, userId, encryptedContent, iv, msgType, null, safeFilename, null, null, totalRecipients);
   } catch (err) {
     console.error('DB insert file error:', err);
     return res.status(500).json({ error: 'Failed to save file' });
@@ -1267,6 +1277,7 @@ app.post('/api/groups/:groupId/upload', uploadRawBodyParser, (req, res) => {
     replyTo: null,
     filename: safeFilename,
     whisperTo: null,
+    hashtag: null,
     createdAt,
     editedAt: null,
     totalRecipients,
@@ -1465,7 +1476,7 @@ io.on('connection', (socket) => {
   });
 
   // ── send_message ──────────────────────────────────────────────────────────
-  socket.on('send_message', ({ groupId, encryptedContent, iv, replyTo, spamSignature }) => {
+  socket.on('send_message', ({ groupId, encryptedContent, iv, replyTo, hashtag, spamSignature }) => {
     if (!groupId) {
       socket.emit('error', { message: 'Group ID is required' });
       return;
@@ -1506,6 +1517,11 @@ io.on('connection', (socket) => {
       socket.emit('error', { message: replyCheck.error });
       return;
     }
+    const normalizedHashtag = normalizeHashtag(hashtag);
+    if (hashtag != null && normalizedHashtag == null) {
+      socket.emit('error', { message: 'Invalid hashtag' });
+      return;
+    }
 
     const member = stmts.isMember.get(groupId, socket.userId);
     if (!member) {
@@ -1528,6 +1544,7 @@ io.on('connection', (socket) => {
         replyCheck.value,
         null,
         null,
+        normalizedHashtag,
         totalRecipients
       );
     } catch (err) {
@@ -1548,6 +1565,7 @@ io.on('connection', (socket) => {
       replyTo: replyCheck.value,
       filename: null,
       whisperTo: null,
+      hashtag: normalizedHashtag,
       createdAt,
       editedAt: null,
       totalRecipients,
@@ -1558,7 +1576,7 @@ io.on('connection', (socket) => {
   });
 
   // ── send_whisper ──────────────────────────────────────────────────────────
-  socket.on('send_whisper', ({ groupId, encryptedContent, iv, whisperTo, replyTo, spamSignature }) => {
+  socket.on('send_whisper', ({ groupId, encryptedContent, iv, whisperTo, replyTo, hashtag, spamSignature }) => {
     if (!groupId || !Array.isArray(whisperTo)) {
       socket.emit('error', { message: 'Invalid whisper payload' });
       return;
@@ -1604,6 +1622,11 @@ io.on('connection', (socket) => {
       socket.emit('error', { message: replyCheck.error });
       return;
     }
+    const normalizedHashtag = normalizeHashtag(hashtag);
+    if (hashtag != null && normalizedHashtag == null) {
+      socket.emit('error', { message: 'Invalid hashtag' });
+      return;
+    }
 
     const recipients = normalizeWhisperRecipients(whisperTo);
     if (recipients.length === 0) {
@@ -1642,6 +1665,7 @@ io.on('connection', (socket) => {
         replyCheck.value,
         null,
         whisperToStr,
+        normalizedHashtag,
         totalRecipients
       );
     } catch (err) {
@@ -1662,6 +1686,7 @@ io.on('connection', (socket) => {
       replyTo: replyCheck.value,
       filename: null,
       whisperTo: whisperToStr,
+      hashtag: normalizedHashtag,
       createdAt,
       editedAt: null,
       totalRecipients,
