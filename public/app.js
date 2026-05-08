@@ -688,6 +688,7 @@ function sendNativeNotification(title, body, groupId) {
 // Build the notification body text for a message, using the decrypted preview
 // when available and falling back to type-based labels for media/encrypted content.
 function getNotificationBody(msg, preview) {
+  if (msg && msg.type === 'whisper') return '[Whisper]';
   const typeLabel = getMessageTypePreviewLabel(msg);
   if (typeLabel) return preview && preview !== '[encrypted]' ? preview : typeLabel;
   return preview !== '[encrypted]' ? preview : 'New message';
@@ -1046,6 +1047,8 @@ function clearHashtagToken({ restoreText = false } = {}) {
   }
   if (activeTagFilter && token.topic === activeTagFilter) {
     activeTagFilter = null;
+    renderTagFilters();
+    applyActiveTagFilterToRenderedMessages();
   }
 }
 
@@ -2841,12 +2844,12 @@ async function doSend(text) {
   const normalizedText = messageText.trim().replace(/\s+/g, ' ');
   const normalizedSignatureText = normalizedText.toLowerCase();
   const shouldInspectShortSpam = !hasNewline && normalizedText.length <= 80;
-  const visibleChars = shouldInspectShortSpam
+  const shortSpamChars = shouldInspectShortSpam
     ? Array.from(normalizedText).filter((char) => char.trim())
     : [];
   if (shouldInspectShortSpam) {
-    const uniqueVisibleChars = new Set(visibleChars.map((char) => char.toLowerCase()));
-    if (visibleChars.length >= 8 && uniqueVisibleChars.size <= 2) {
+    const uniqueVisibleChars = new Set(shortSpamChars.map((char) => char.toLowerCase()));
+    if (shortSpamChars.length >= 8 && uniqueVisibleChars.size <= 2) {
       showToast('Please avoid sending repetitive short messages', 'error');
       return;
     }

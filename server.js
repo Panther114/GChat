@@ -297,6 +297,16 @@ function normalizeDisappearingDuration(value) {
   return duration;
 }
 
+function resolveStoredDisappearingDurationMs(message) {
+  return Math.max(
+    MIN_DISAPPEARING_DURATION_MS,
+    Math.min(
+      MAX_DISAPPEARING_DURATION_MS,
+      Number(message && message.disappearing_duration_ms) || MIN_DISAPPEARING_DURATION_MS
+    )
+  );
+}
+
 function markExpiredDisappearingMessagesHidden(userId) {
   if (!userId) return;
   const nowIso = new Date().toISOString();
@@ -1758,7 +1768,7 @@ io.on('connection', (socket) => {
       socket.emit('error', { message: 'Invalid hashtag' });
       return;
     }
-    if (normalizedHashtag) {
+    if (hashtag != null) {
       socket.emit('error', { message: 'Tags cannot be combined with whispers' });
       return;
     }
@@ -1891,13 +1901,13 @@ io.on('connection', (socket) => {
     let state = stmts.findDisappearingState.get(messageId, socket.userId);
     if (!state) {
       const startedAt = new Date().toISOString();
-      const duration = Math.max(MIN_DISAPPEARING_DURATION_MS, Math.min(MAX_DISAPPEARING_DURATION_MS, Number(message.disappearing_duration_ms) || MIN_DISAPPEARING_DURATION_MS));
+      const duration = resolveStoredDisappearingDurationMs(message);
       const expiresAt = new Date(Date.now() + duration).toISOString();
       stmts.insertDisappearingState.run(messageId, socket.userId, startedAt, expiresAt, null);
       state = stmts.findDisappearingState.get(messageId, socket.userId);
     } else if (!state.started_at || !state.expires_at) {
       const startedAt = new Date().toISOString();
-      const duration = Math.max(MIN_DISAPPEARING_DURATION_MS, Math.min(MAX_DISAPPEARING_DURATION_MS, Number(message.disappearing_duration_ms) || MIN_DISAPPEARING_DURATION_MS));
+      const duration = resolveStoredDisappearingDurationMs(message);
       const expiresAt = new Date(Date.now() + duration).toISOString();
       stmts.updateDisappearingStateStart.run(startedAt, expiresAt, messageId, socket.userId);
       state = stmts.findDisappearingState.get(messageId, socket.userId);
