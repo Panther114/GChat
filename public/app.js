@@ -2178,8 +2178,10 @@ async function doSend(text) {
   const key = getGroupKey(currentGroupId);
   if (!key) return;
   if (!text.trim()) return;
+  const hasNewline = /[\r\n]/.test(text);
   const normalizedText = text.trim().replace(/\s+/g, ' ');
-  const shouldInspectShortSpam = !text.includes('\n') && normalizedText.length <= 80;
+  const normalizedSignatureText = normalizedText.toLowerCase();
+  const shouldInspectShortSpam = !hasNewline && normalizedText.length <= 80;
   const shouldCheckSingleGlyph = normalizedText.length <= 8;
   const visibleChars = shouldInspectShortSpam || shouldCheckSingleGlyph
     ? Array.from(normalizedText).filter((char) => char.trim())
@@ -2226,7 +2228,7 @@ async function doSend(text) {
 
   try {
     const { encryptedContent, iv } = await encryptMessage(text, key, currentGroupId);
-    const spamSignature = shouldInspectShortSpam ? await sha256Hex(normalizedText.toLowerCase()) : null;
+    const spamSignature = shouldInspectShortSpam ? await sha256Hex(normalizedSignatureText) : null;
 
     // Build replyTo data
     let replyToData = null;
