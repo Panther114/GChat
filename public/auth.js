@@ -1,25 +1,12 @@
 // ── CSRF token (fetched once, reused for all state-changing requests) ─────
 let csrfToken = null;
-const LEGACY_LOCAL_SETTINGS_KEY = 'gchat:local-settings';
-const ACTIVE_LOCAL_SETTINGS_KEY = 'gchat:active-local-settings';
-
-function readStoredSettings(key) {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
-}
-
-function toWallpaperCssValue(dataUrl) {
-  if (!dataUrl) return "url('gchat_wallpaper.jpg')";
-  return `url(${JSON.stringify(String(dataUrl))})`;
-}
+const wallpaperTheme = window.GChatWallpaperTheme || null;
+const LEGACY_LOCAL_SETTINGS_KEY = wallpaperTheme ? wallpaperTheme.LEGACY_LOCAL_SETTINGS_KEY : 'gchat:local-settings';
+const ACTIVE_LOCAL_SETTINGS_KEY = wallpaperTheme ? wallpaperTheme.ACTIVE_LOCAL_SETTINGS_KEY : 'gchat:active-local-settings';
 
 function applyAuthWallpaperFromStorage() {
-  const settings = readStoredSettings(ACTIVE_LOCAL_SETTINGS_KEY) || readStoredSettings(LEGACY_LOCAL_SETTINGS_KEY) || {};
-  document.documentElement.style.setProperty('--auth-wallpaper', toWallpaperCssValue(settings.wallpaperDataUrl || null));
+  if (!wallpaperTheme) return;
+  wallpaperTheme.applyToRoot(wallpaperTheme.readSettingsFromStorage());
 }
 
 applyAuthWallpaperFromStorage();

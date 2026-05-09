@@ -113,6 +113,29 @@ function parseImageDataUrl(value, maxBytes, { allowNull = false } = {}) {
   return { ok: true, dataUrl: value, mime };
 }
 
+function parseBoundedInteger(value, min, max, fieldLabel) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return { ok: false, error: `${fieldLabel} must be a number` };
+  }
+  if (!Number.isInteger(parsed)) {
+    return { ok: false, error: `${fieldLabel} must be a whole number` };
+  }
+  if (parsed < min || parsed > max) {
+    return { ok: false, error: `${fieldLabel} must be between ${min} and ${max}` };
+  }
+  return { ok: true, value: parsed };
+}
+
+function normalizeClientSettings(settings = {}) {
+  const next = settings && typeof settings === 'object' ? { ...settings } : {};
+  next.wallpaperDataUrl = typeof next.wallpaperDataUrl === 'string' && next.wallpaperDataUrl ? next.wallpaperDataUrl : null;
+  next.wallpaperBlur = Number.isInteger(next.wallpaperBlur) ? Math.max(0, Math.min(24, next.wallpaperBlur)) : 0;
+  next.wallpaperTransparency = Number.isInteger(next.wallpaperTransparency) ? Math.max(0, Math.min(100, next.wallpaperTransparency)) : 100;
+  if (next.hideProfileDot !== undefined) next.hideProfileDot = !!next.hideProfileDot;
+  return next;
+}
+
 function validateEncryptedTextPayload(encryptedContent, iv) {
   if (typeof encryptedContent !== 'string' || typeof iv !== 'string' || !encryptedContent || !iv) {
     return { ok: false, error: 'encryptedContent and iv are required' };
@@ -724,7 +747,7 @@ function formatUser(user) {
     username: user.username,
     iconColor: user.icon_color,
     profilePicture: user.profile_picture || null,
-    clientSettings,
+    clientSettings: normalizeClientSettings(clientSettings),
   };
 }
 
@@ -789,7 +812,7 @@ app.get('/api/auth/settings', (req, res) => {
   if (!user) return res.status(401).json({ error: 'Not authenticated' });
   let settings = {};
   try { settings = JSON.parse(user.client_settings || '{}'); } catch { settings = {}; }
-  res.json(settings);
+  res.json(normalizeClientSettings(settings));
 });
 
 app.patch('/api/auth/settings', (req, res) => {
@@ -803,13 +826,23 @@ app.patch('/api/auth/settings', (req, res) => {
   let settings = {};
   try { settings = JSON.parse(current.client_settings || '{}'); } catch { settings = {}; }
 
-  const next = { ...settings };
+  const next = normalizeClientSettings(settings);
   if (req.body.wallpaperDataUrl !== undefined) {
     const parsedWallpaper = parseImageDataUrl(req.body.wallpaperDataUrl, MAX_WALLPAPER_BYTES, { allowNull: true });
     if (!parsedWallpaper.ok) {
       return res.status(400).json({ error: getWallpaperValidationError(parsedWallpaper) });
     }
     next.wallpaperDataUrl = parsedWallpaper.dataUrl;
+  }
+  if (req.body.wallpaperBlur !== undefined) {
+    const parsedBlur = parseBoundedInteger(req.body.wallpaperBlur, 0, 24, 'Wallpaper blur');
+    if (!parsedBlur.ok) return res.status(400).json({ error: parsedBlur.error });
+    next.wallpaperBlur = parsedBlur.value;
+  }
+  if (req.body.wallpaperTransparency !== undefined) {
+    const parsedTransparency = parseBoundedInteger(req.body.wallpaperTransparency, 0, 100, 'Wallpaper transparency');
+    if (!parsedTransparency.ok) return res.status(400).json({ error: parsedTransparency.error });
+    next.wallpaperTransparency = parsedTransparency.value;
   }
   if (req.body.hideProfileDot !== undefined) {
     next.hideProfileDot = !!req.body.hideProfileDot;
