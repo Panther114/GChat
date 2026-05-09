@@ -227,6 +227,7 @@ const localDayFormatter = new Intl.DateTimeFormat(undefined, {
 const DESKTOP_SIDEBAR_WIDTH_STORAGE_KEY = 'gchat:desktop-sidebar-width';
 const DESKTOP_RIGHT_PANEL_STORAGE_KEY = 'gchat:desktop-right-panel-expanded';
 const DESKTOP_DEFAULT_SIDEBAR_WIDTH = 260;
+// Keeps the desktop minimum near 60% of the old 220px floor while still fitting the icon and refresh control.
 const DESKTOP_MIN_SIDEBAR_WIDTH = 132;
 const DESKTOP_BRAND_ONLY_SIDEBAR_WIDTH = 172;
 const DESKTOP_ICON_ONLY_SIDEBAR_WIDTH = 148;
