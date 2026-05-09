@@ -62,6 +62,9 @@ const AI_RESET_TIME_LABEL = '4:00 AM Shanghai time';
 // Keep this aligned with DEFAULT_USER_DAILY_AI_TOKEN_LIMIT so repeatable schema
 // migrations keep the original default for already-deployed databases.
 const USER_AI_DAILY_TOKEN_LIMIT_MIGRATION_DEFAULT = 20000;
+if (USER_AI_DAILY_TOKEN_LIMIT_MIGRATION_DEFAULT !== DEFAULT_USER_DAILY_AI_TOKEN_LIMIT) {
+  throw new Error('User AI daily token migration default must match the runtime default');
+}
 
 // ── App & Server ──────────────────────────────────────────────────────────────
 const app = express();
