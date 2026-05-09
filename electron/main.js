@@ -435,7 +435,6 @@ ipcMain.handle('copy-binary-to-clipboard', async (_event, payload = {}) => {
 ipcMain.handle('clear-cache-and-restart', async () => {
   const sessionToClear = mainWindow?.webContents?.session;
   if (sessionToClear) {
-    await sessionToClear.clearStorageData();
     await sessionToClear.clearCache();
   }
   isQuitting = true;
