@@ -4194,6 +4194,11 @@ function setupEventListeners() {
     $('wallpaper-modal').hidden = true;
     resetWallpaperDraft();
   });
+  $('wallpaper-modal').addEventListener('click', (e) => {
+    if (e.target !== $('wallpaper-modal')) return;
+    $('wallpaper-modal').hidden = true;
+    resetWallpaperDraft();
+  });
   $('wallpaper-save-btn').addEventListener('click', saveWallpaperDraft);
   $('wallpaper-reset-btn').addEventListener('click', async () => {
     const previousWallpaperSettings = getWallpaperSettings(appLocalSettings);
