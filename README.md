@@ -119,7 +119,6 @@ Important limitations:
 | `DB_PATH` | Recommended | SQLite database path. Use `/data/Gchat.db` with a Railway volume for persistence. |
 | `ADMIN_SECRET` | Optional | Enables the admin users endpoint when set. |
 | `OPENROUTER_API_KEY` | Optional | Enables the server-side Grok 4.3 integration. Keep this only in server/runtime environment variables such as Railway service variables. |
-| `OPENROUTER_MODEL` | No | Optional OpenRouter model override. Defaults to `x-ai/grok-4.3`. |
 
 ---
 

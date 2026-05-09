@@ -35,7 +35,7 @@ const MIN_DISAPPEARING_DURATION_MS = 6000;
 const MAX_DISAPPEARING_DURATION_MS = 45000;
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 const OPENROUTER_CHAT_COMPLETIONS_URL = `${OPENROUTER_BASE_URL}/chat/completions`;
-const OPENROUTER_DEFAULT_MODEL = process.env.OPENROUTER_MODEL || 'x-ai/grok-4.3';
+const OPENROUTER_MODEL = 'x-ai/grok-4.3';
 const OPENROUTER_TIMEOUT_MS = 45000;
 const MAX_AI_PROMPT_CHARS = 4000;
 const MAX_AI_CONTEXT_MESSAGES = 40;
@@ -1672,7 +1672,7 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
         ...(origin ? { 'HTTP-Referer': origin } : {}),
       },
       body: JSON.stringify({
-        model: OPENROUTER_DEFAULT_MODEL,
+        model: OPENROUTER_MODEL,
         messages: [
           {
             role: 'system',
@@ -1700,7 +1700,7 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
 
     res.json({
       ok: true,
-      model: OPENROUTER_DEFAULT_MODEL,
+      model: OPENROUTER_MODEL,
       answer,
     });
   } catch (err) {

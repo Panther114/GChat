@@ -4262,11 +4262,14 @@ async function buildGrokContextMessages(groupId) {
   const resolved = await Promise.all(sourceMessages.map(async (msg) => {
     if (!msg) return null;
 
+    const prefixes = [];
     let content = '';
     if (msg.type === 'image') {
-      content = 'Image attachment';
+      prefixes.push('[Image]');
+      content = 'Attachment';
     } else if (msg.type === 'file') {
-      content = `File attachment: ${msg.filename || 'file'}`;
+      prefixes.push('[File]');
+      content = msg.filename ? `Attachment: ${msg.filename}` : 'Attachment';
     } else {
       const plaintext = await decryptMessage(msg.encryptedContent, msg.iv, key, groupId);
       if (!plaintext) return null;
@@ -4274,7 +4277,6 @@ async function buildGrokContextMessages(groupId) {
       if (!content) return null;
     }
 
-    const prefixes = [];
     if (msg.type === 'whisper') prefixes.push('[Whisper]');
     const hashtag = getMessageHashtagKey(msg);
     if (hashtag) prefixes.push(formatHashtagLabel(hashtag));
