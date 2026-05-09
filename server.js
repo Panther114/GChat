@@ -41,6 +41,9 @@ const MAX_AI_PROMPT_CHARS = 4000;
 const MAX_AI_CONTEXT_MESSAGES = 40;
 const MAX_AI_CONTEXT_MESSAGE_CHARS = 2000;
 const MAX_AI_CONTEXT_TOTAL_CHARS = 32000;
+const AI_ASSISTANT_USER_ID = '__gchat_ai_grok__';
+const AI_ASSISTANT_NAME = 'grok';
+const AI_ASSISTANT_COLOR = '#8d7bff';
 
 // ── App & Server ──────────────────────────────────────────────────────────────
 const app = express();
@@ -513,6 +516,7 @@ const migrations = [
   "ALTER TABLE group_chats ADD COLUMN allow_member_clear_tag INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE group_chats ADD COLUMN allow_member_export INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE group_chats ADD COLUMN allow_member_kick INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE group_chats ADD COLUMN ai_enabled INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE group_chats ADD COLUMN group_color TEXT",
   "CREATE TABLE IF NOT EXISTS _config (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
   "ALTER TABLE users ADD COLUMN profile_picture TEXT",
@@ -583,6 +587,7 @@ const stmts = {
   updateGroupAllowMemberClearTag: db.prepare('UPDATE group_chats SET allow_member_clear_tag = ? WHERE id = ?'),
   updateGroupAllowMemberExport: db.prepare('UPDATE group_chats SET allow_member_export = ? WHERE id = ?'),
   updateGroupAllowMemberKick: db.prepare('UPDATE group_chats SET allow_member_kick = ? WHERE id = ?'),
+  updateGroupAiEnabled: db.prepare('UPDATE group_chats SET ai_enabled = ? WHERE id = ?'),
   updateGroupColor: db.prepare('UPDATE group_chats SET group_color = ? WHERE id = ?'),
 
   // Members
@@ -593,7 +598,7 @@ const stmts = {
     'SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?'
   ),
   getUserGroups: db.prepare(`
-    SELECT g.id, g.name, g.code, g.created_by, g.created_at, g.allow_member_clear, g.allow_member_clear_tag, g.allow_member_export, g.allow_member_kick, g.group_color
+    SELECT g.id, g.name, g.code, g.created_by, g.created_at, g.allow_member_clear, g.allow_member_clear_tag, g.allow_member_export, g.allow_member_kick, g.ai_enabled, g.group_color
     FROM group_chats g
     JOIN group_members gm ON g.id = gm.group_id
     WHERE gm.user_id = ?
@@ -615,9 +620,9 @@ const stmts = {
   getLastMessages: db.prepare(`
       SELECT m.id, m.group_id, m.sender_id, u.username AS sender_name,
              u.icon_color AS sender_color, m.encrypted_content, m.iv,
-            m.type, m.reply_to, m.filename, m.whisper_to, m.hashtag,
-            m.is_disappearing, m.disappearing_duration_ms,
-            dms.started_at AS disappearing_started_at,
+             m.type, m.reply_to, m.filename, m.whisper_to, m.hashtag,
+             m.is_disappearing, m.disappearing_duration_ms,
+             dms.started_at AS disappearing_started_at,
             dms.expires_at AS disappearing_expires_at,
             dms.hidden_at AS disappearing_hidden_at,
             m.created_at, m.edited_at,
@@ -628,10 +633,10 @@ const stmts = {
                FROM message_reads mr2
                WHERE mr2.message_id = m.id AND mr2.user_id = @viewerId
              ) AS has_read
-    FROM messages m
-    JOIN users u ON m.sender_id = u.id
-    LEFT JOIN disappearing_message_states dms
-      ON dms.message_id = m.id AND dms.user_id = @viewerId
+     FROM messages m
+     LEFT JOIN users u ON m.sender_id = u.id
+     LEFT JOIN disappearing_message_states dms
+       ON dms.message_id = m.id AND dms.user_id = @viewerId
     WHERE m.group_id = @groupId
       AND (m.sender_id = @viewerId OR m.is_disappearing = 0 OR dms.hidden_at IS NULL)
     ORDER BY m.created_at DESC, m.id DESC
@@ -641,9 +646,9 @@ const stmts = {
     WITH ref AS (SELECT created_at, id FROM messages WHERE id = @beforeId)
       SELECT m.id, m.group_id, m.sender_id, u.username AS sender_name,
              u.icon_color AS sender_color, m.encrypted_content, m.iv,
-            m.type, m.reply_to, m.filename, m.whisper_to, m.hashtag,
-            m.is_disappearing, m.disappearing_duration_ms,
-            dms.started_at AS disappearing_started_at,
+             m.type, m.reply_to, m.filename, m.whisper_to, m.hashtag,
+             m.is_disappearing, m.disappearing_duration_ms,
+             dms.started_at AS disappearing_started_at,
             dms.expires_at AS disappearing_expires_at,
             dms.hidden_at AS disappearing_hidden_at,
             m.created_at, m.edited_at,
@@ -654,10 +659,10 @@ const stmts = {
                FROM message_reads mr2
                WHERE mr2.message_id = m.id AND mr2.user_id = @viewerId
              ) AS has_read
-    FROM messages m
-    JOIN users u ON m.sender_id = u.id
-    LEFT JOIN disappearing_message_states dms
-      ON dms.message_id = m.id AND dms.user_id = @viewerId
+     FROM messages m
+     LEFT JOIN users u ON m.sender_id = u.id
+     LEFT JOIN disappearing_message_states dms
+       ON dms.message_id = m.id AND dms.user_id = @viewerId
     CROSS JOIN ref
     WHERE m.group_id = @groupId
       AND (m.sender_id = @viewerId OR m.is_disappearing = 0 OR dms.hidden_at IS NULL)
@@ -851,12 +856,13 @@ function formatUser(user) {
 }
 
 function formatMessage(m) {
+  const isAiAssistantMessage = m.sender_id === AI_ASSISTANT_USER_ID;
   return {
     id: m.id,
     groupId: m.group_id,
     senderId: m.sender_id,
-    senderName: m.sender_name,
-    senderColor: m.sender_color,
+    senderName: m.sender_name || (isAiAssistantMessage ? AI_ASSISTANT_NAME : 'Unknown'),
+    senderColor: m.sender_color || (isAiAssistantMessage ? AI_ASSISTANT_COLOR : '#4A90D9'),
     encryptedContent: m.encrypted_content,
     iv: m.iv,
     type: m.type || 'text',
@@ -1197,6 +1203,7 @@ app.post('/api/groups/create', (req, res) => {
     allowMemberClearTag: group.allow_member_clear_tag || 0,
     allowMemberExport: group.allow_member_export || 0,
     allowMemberKick: group.allow_member_kick || 0,
+    aiEnabled: group.ai_enabled || 0,
     groupColor: group.group_color || null,
   });
 });
@@ -1238,6 +1245,7 @@ app.post('/api/groups/join', (req, res) => {
     allowMemberClearTag: group.allow_member_clear_tag || 0,
     allowMemberExport: group.allow_member_export || 0,
     allowMemberKick: group.allow_member_kick || 0,
+    aiEnabled: group.ai_enabled || 0,
     groupColor: group.group_color || null,
   });
 });
@@ -1255,6 +1263,7 @@ app.get('/api/groups/mine', (req, res) => {
       allowMemberClearTag: g.allow_member_clear_tag || 0,
       allowMemberExport: g.allow_member_export || 0,
       allowMemberKick: g.allow_member_kick || 0,
+      aiEnabled: g.ai_enabled || 0,
       groupColor: g.group_color || null,
     }))
   );
@@ -1282,7 +1291,7 @@ app.patch('/api/groups/:groupId/name', (req, res) => {
 app.patch('/api/groups/:groupId/settings', (req, res) => {
   const { groupId } = req.params;
   const userId = req.session.userId;
-  const { allowMemberClear, allowMemberClearTag, allowMemberExport, allowMemberKick, groupColor } = req.body;
+  const { allowMemberClear, allowMemberClearTag, allowMemberExport, allowMemberKick, aiEnabled, groupColor } = req.body;
 
   const group = stmts.findGroupById.get(groupId);
   if (!group) return res.status(404).json({ error: 'Group not found' });
@@ -1306,6 +1315,9 @@ app.patch('/api/groups/:groupId/settings', (req, res) => {
   if (allowMemberKick !== undefined) {
     stmts.updateGroupAllowMemberKick.run(allowMemberKick ? 1 : 0, groupId);
   }
+  if (aiEnabled !== undefined) {
+    stmts.updateGroupAiEnabled.run(aiEnabled ? 1 : 0, groupId);
+  }
   if (groupColor !== undefined) {
     if (groupColor !== null && (typeof groupColor !== 'string' || !/^#[0-9A-Fa-f]{6}$/.test(groupColor))) {
       return res.status(400).json({ error: 'Invalid group color format' });
@@ -1319,6 +1331,7 @@ app.patch('/api/groups/:groupId/settings', (req, res) => {
     allowMemberClearTag: !!updated.allow_member_clear_tag,
     allowMemberExport: !!updated.allow_member_export,
     allowMemberKick: !!updated.allow_member_kick,
+    aiEnabled: !!updated.ai_enabled,
     groupColor: updated.group_color || null,
   });
   res.json({ ok: true });
@@ -1514,7 +1527,7 @@ app.post('/api/groups/:groupId/upload', uploadRawBodyParser, (req, res) => {
     return res.status(400).json({ error: 'Invalid filename' });
   }
   const normalizedHashtag = normalizeHashtag(hashtag);
-  if (hashtag != null && normalizedHashtag == null) {
+  if (hashtag !== null && hashtag !== undefined && normalizedHashtag === null) {
     return res.status(400).json({ error: 'Invalid hashtag' });
   }
 
@@ -1640,6 +1653,9 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
   if (!group) return res.status(404).json({ error: 'Group not found' });
   if (!stmts.isMember.get(groupId, userId)) {
     return res.status(403).json({ error: 'Not a member of this group' });
+  }
+  if (!group.ai_enabled) {
+    return res.status(403).json({ error: 'AI mode is disabled by the group owner' });
   }
 
   const prompt = sanitizeAiText(req.body.prompt, MAX_AI_PROMPT_CHARS);
@@ -1901,7 +1917,7 @@ io.on('connection', (socket) => {
       return;
     }
     const normalizedHashtag = normalizeHashtag(hashtag);
-    if (hashtag != null && normalizedHashtag == null) {
+    if (hashtag !== null && hashtag !== undefined && normalizedHashtag === null) {
       socket.emit('error', { message: 'Invalid hashtag' });
       return;
     }
@@ -1973,6 +1989,97 @@ io.on('connection', (socket) => {
     io.to(groupId).emit('new_message', payload);
   });
 
+  socket.on('send_ai_message', ({ groupId, encryptedContent, iv, replyTo, hashtag }) => {
+    if (!groupId) {
+      socket.emit('error', { message: 'Group ID is required' });
+      return;
+    }
+
+    const group = stmts.findGroupById.get(groupId);
+    if (!group) {
+      socket.emit('error', { message: 'Group not found' });
+      return;
+    }
+    if (!group.ai_enabled) {
+      socket.emit('error', { message: 'AI mode is disabled by the group owner' });
+      return;
+    }
+
+    const member = stmts.isMember.get(groupId, socket.userId);
+    if (!member) {
+      socket.emit('error', { message: 'Not a member of this group' });
+      return;
+    }
+
+    const payloadCheck = validateEncryptedTextPayload(encryptedContent, iv);
+    if (!payloadCheck.ok) {
+      socket.emit('error', { message: payloadCheck.error });
+      return;
+    }
+
+    const replyCheck = normalizeReplyPayload(replyTo, groupId);
+    if (!replyCheck.ok) {
+      socket.emit('error', { message: replyCheck.error });
+      return;
+    }
+
+    const normalizedHashtag = normalizeHashtag(hashtag);
+    if (hashtag !== null && hashtag !== undefined && normalizedHashtag === null) {
+      socket.emit('error', { message: 'Invalid hashtag' });
+      return;
+    }
+
+    const msgId = uuidv4();
+    const createdAt = new Date().toISOString();
+    const totalRecipients = Math.max(0, Number(stmts.countGroupMembers.get(groupId)?.count) || 0);
+
+    try {
+      stmts.insertMessage.run(
+        msgId,
+        groupId,
+        AI_ASSISTANT_USER_ID,
+        encryptedContent,
+        iv,
+        'text',
+        replyCheck.value,
+        null,
+        null,
+        normalizedHashtag,
+        0,
+        null,
+        totalRecipients
+      );
+    } catch (err) {
+      console.error('DB insert AI message error:', err);
+      socket.emit('error', { message: 'Failed to save AI message' });
+      return;
+    }
+
+    io.to(groupId).emit('new_message', {
+      id: msgId,
+      groupId,
+      senderId: AI_ASSISTANT_USER_ID,
+      senderName: AI_ASSISTANT_NAME,
+      senderColor: AI_ASSISTANT_COLOR,
+      encryptedContent,
+      iv,
+      type: 'text',
+      replyTo: replyCheck.value,
+      filename: null,
+      whisperTo: null,
+      hashtag: normalizedHashtag,
+      isDisappearing: false,
+      disappearingDurationMs: 0,
+      disappearingStartedAt: null,
+      disappearingExpiresAt: null,
+      disappearingHiddenAt: null,
+      createdAt,
+      editedAt: null,
+      totalRecipients,
+      readCount: 0,
+    });
+  });
+
   // ── send_whisper ──────────────────────────────────────────────────────────
   socket.on('send_whisper', ({ groupId, encryptedContent, iv, whisperTo, replyTo, hashtag, isDisappearing, disappearingDurationMs, spamSignature }) => {
     if (!groupId || !Array.isArray(whisperTo)) {
@@ -2021,11 +2128,11 @@ io.on('connection', (socket) => {
       return;
     }
     const normalizedHashtag = normalizeHashtag(hashtag);
-    if (hashtag != null && normalizedHashtag == null) {
+    if (hashtag !== null && hashtag !== undefined && normalizedHashtag === null) {
       socket.emit('error', { message: 'Invalid hashtag' });
       return;
     }
-    if (hashtag != null) {
+    if (hashtag !== null && hashtag !== undefined) {
       socket.emit('error', { message: 'Tags cannot be combined with whispers' });
       return;
     }

@@ -931,6 +931,11 @@ body.sidebar-resizing * {
   color: var(--hashtag-token-text);
   border: 1px solid rgba(0,0,0,.08);
 }
+.message-token-ai {
+  background: rgba(108,99,255,.18);
+  color: #e2dcff;
+  border: 1px solid rgba(108,99,255,.3);
+}
 
 .message-input-bar textarea {
   flex: 1;
@@ -980,6 +985,11 @@ body.sidebar-resizing * {
   text-align: left;
 }
 .slash-command-item:hover { background: rgba(255,255,255,.06); }
+.slash-command-item:disabled {
+  cursor: not-allowed;
+  opacity: .55;
+}
+.slash-command-item:disabled:hover { background: transparent; }
 .slash-command-name { font-size: 13px; font-weight: 700; }
 .slash-command-hint { font-size: 11px; color: var(--text-secondary); }
 
@@ -1190,6 +1200,15 @@ body.sidebar-resizing * {
 .btn-enc-toggle:hover { background: rgba(33,150,243,.2); }
 .btn-grok { background: rgba(108,99,255,.12); border-color: rgba(108,99,255,.28); color: #c9c0ff; }
 .btn-grok:hover { background: rgba(108,99,255,.22); }
+.btn-grok:disabled,
+.btn-grok.is-disabled {
+  background: rgba(255,255,255,.06);
+  border-color: #2a2a3e;
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+.btn-grok:disabled:hover,
+.btn-grok.is-disabled:hover { background: rgba(255,255,255,.06); }
 .btn-forget-key { background: rgba(255,68,102,.1); border-color: rgba(255,68,102,.2); color: #ff6b88; }
 .btn-forget-key:hover { background: rgba(255,68,102,.2); }
 .btn-clear-history { background: rgba(255,170,51,.1); border-color: rgba(255,170,51,.2); color: var(--orange); }

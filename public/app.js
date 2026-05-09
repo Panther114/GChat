@@ -1088,9 +1088,11 @@ let activeTagFilter = null;
 let grokRequestInFlight = false;
 let grokResponseDraft = '';
 let grokResponseModel = '';
+let aiMessageRequestInFlight = false;
 const composerTokens = {
   whisper: null,
   hashtag: null,
+  ai: null,
 };
 
 function renderCurrentUserAvatar(user = currentUser) {
@@ -1348,6 +1350,27 @@ function clearHashtagToken({ restoreText = false } = {}) {
   }
 }
 
+function setAiToken() {
+  composerTokens.ai = {
+    raw: '/ai ',
+    label: 'AI',
+  };
+  return true;
+}
+
+function clearAiToken({ restoreText = false } = {}) {
+  const token = composerTokens.ai;
+  if (!token) return;
+  composerTokens.ai = null;
+  if (restoreText) {
+    const input = $('message-input');
+    if (input) {
+      input.value = token.raw + input.value;
+      input.selectionStart = input.selectionEnd = token.raw.length;
+    }
+  }
+}
+
 function syncComposerTokens() {
   const strip = $('message-token-strip');
   if (!strip) return;
@@ -1365,6 +1388,12 @@ function syncComposerTokens() {
     token.textContent = composerTokens.hashtag.label;
     tokens.push(token);
   }
+  if (composerTokens.ai) {
+    const token = document.createElement('span');
+    token.className = 'message-token message-token-ai';
+    token.textContent = composerTokens.ai.label;
+    tokens.push(token);
+  }
   strip.hidden = tokens.length === 0;
   strip.append(...tokens);
 }
@@ -1377,9 +1406,57 @@ function updateSlashCommandMenu() {
   const commandQuery = match ? match[1].toLowerCase() : null;
   const shouldShow = !composerTokens.whisper
     && !composerTokens.hashtag
+    && !composerTokens.ai
     && commandQuery != null
-    && ['w', '#', 'd'].some((command) => command.startsWith(commandQuery));
+    && ['w', '#', 'd', 'ai'].some((command) => command.startsWith(commandQuery));
   menu.hidden = !shouldShow;
+}
+
+function isAiModeEnabled(groupData = currentGroupData) {
+  return !!(groupData && groupData.aiEnabled);
+}
+
+function getAiDisabledMessage() {
+  return 'AI mode is disabled by the group owner';
+}
+
+function getWhisperCombinationError({ hasHashtag = false, hasAi = false } = {}) {
+  if (hasHashtag && hasAi) return 'AI requests and tags cannot be combined with whispers';
+  if (hasAi) return 'AI requests cannot be combined with whispers';
+  return 'Tags cannot be combined with whispers';
+}
+
+function canUseAiInCurrentGroup({ showError = false } = {}) {
+  if (!currentGroupId || !currentGroupData) {
+    if (showError) showToast('Select a group first', 'error');
+    return false;
+  }
+  if (!isAiModeEnabled()) {
+    if (showError) showToast(getAiDisabledMessage(), 'error');
+    return false;
+  }
+  return true;
+}
+
+function updateAiControls() {
+  const enabled = !!currentGroupId && isAiModeEnabled();
+  const askBtn = $('ask-grok-btn');
+  if (askBtn) {
+    askBtn.disabled = !enabled;
+    askBtn.classList.toggle('is-disabled', !enabled);
+    askBtn.title = enabled ? 'Ask Grok 4.3' : getAiDisabledMessage();
+  }
+  const slashAiBtn = $('slash-command-ai-item');
+  if (slashAiBtn) {
+    slashAiBtn.disabled = !enabled;
+    slashAiBtn.title = enabled ? 'AI' : getAiDisabledMessage();
+  }
+  if (!enabled && composerTokens.ai) {
+    clearAiToken();
+    syncComposerTokens();
+    updateSlashCommandMenu();
+  }
+  if (!enabled && !$('grok-modal').hidden) closeGrokModal();
 }
 
 function messageMatchesActiveTag(msg) {
@@ -1481,6 +1558,13 @@ function renderTagFilters() {
 
 function handleComposerBackspace(input) {
   if (!input || input.value || input.selectionStart !== 0 || input.selectionEnd !== 0) return false;
+  if (composerTokens.ai) {
+    clearAiToken({ restoreText: true });
+    syncComposerTokens();
+    updateSlashCommandMenu();
+    autoResizeTextarea(input);
+    return true;
+  }
   if (composerTokens.hashtag) {
     clearHashtagToken({ restoreText: true });
     syncComposerTokens();
@@ -1505,8 +1589,11 @@ function maybeTokenizeSlashCommand(input) {
   if (!input) return false;
   const whisperMatch = /^\/w\s+([^\s]+)\s$/.exec(input.value);
   if (whisperMatch) {
-    if (composerTokens.hashtag) {
-      showToast('Tags cannot be combined with whispers', 'error');
+    if (composerTokens.hashtag || composerTokens.ai) {
+      showToast(getWhisperCombinationError({
+        hasHashtag: !!composerTokens.hashtag,
+        hasAi: !!composerTokens.ai,
+      }), 'error');
       return false;
     }
     const member = resolveSlashWhisperTarget(whisperMatch[1]);
@@ -1528,6 +1615,10 @@ function maybeTokenizeSlashCommand(input) {
       showToast('Tags cannot be combined with whispers', 'error');
       return false;
     }
+    if (composerTokens.ai) {
+      showToast('Use /# before /ai', 'error');
+      return false;
+    }
     const topic = normalizeHashtagTopic(hashtagMatch[1]);
     if (!topic) {
       showToast('Hashtag topics can use letters, numbers, underscores, and dashes', 'error');
@@ -1539,6 +1630,20 @@ function maybeTokenizeSlashCommand(input) {
     syncComposerTokens();
     renderTagFilters();
     applyActiveTagFilterToRenderedMessages();
+    updateSlashCommandMenu();
+    autoResizeTextarea(input);
+    return true;
+  }
+  const aiMatch = /^\/ai\s$/.exec(input.value);
+  if (aiMatch) {
+    if (composerTokens.whisper || (messageMode === 'whisper' && whisperRecipients.length > 0)) {
+      showToast('AI requests cannot be combined with whispers', 'error');
+      return false;
+    }
+    if (!canUseAiInCurrentGroup({ showError: true })) return false;
+    setAiToken();
+    input.value = '';
+    syncComposerTokens();
     updateSlashCommandMenu();
     autoResizeTextarea(input);
     return true;
@@ -1555,20 +1660,29 @@ function parseCommandToken(body, command) {
   };
 }
 
+function parseAiCommand(body) {
+  const match = /^\/ai(?:\s+|$)([\s\S]*)$/.exec(body);
+  if (!match) return null;
+  return {
+    prompt: match[1].trim(),
+  };
+}
+
 function parseComposerMessageInput(rawText) {
   let body = String(rawText || '').trim();
   let whisperRecipientIds = composerTokens.whisper
     ? [composerTokens.whisper.memberId]
     : (messageMode === 'whisper' && whisperRecipients.length ? [...whisperRecipients] : []);
   let hashtag = composerTokens.hashtag ? composerTokens.hashtag.topic : null;
+  let isAiPrompt = !!composerTokens.ai;
   let isDisappearing = false;
 
   if (messageMode === 'whisper' && !composerTokens.whisper && whisperRecipients.length === 0) {
     return { ok: false, error: 'Select at least one whisper recipient' };
   }
 
-  if (whisperRecipientIds.length && hashtag) {
-    return { ok: false, error: 'Tags cannot be combined with whispers' };
+  if (whisperRecipientIds.length && (hashtag || isAiPrompt)) {
+    return { ok: false, error: getWhisperCombinationError({ hasHashtag: !!hashtag, hasAi: !!isAiPrompt }) };
   }
 
   if (!whisperRecipientIds.length && !hashtag) {
@@ -1580,21 +1694,73 @@ function parseComposerMessageInput(rawText) {
       body = hashtagToken.rest;
       const invalidWhisper = parseCommandToken(body, 'w');
       if (invalidWhisper) return { ok: false, error: 'Tags cannot be combined with whispers' };
+      const aiToken = parseAiCommand(body);
+      if (aiToken) {
+        isAiPrompt = true;
+        body = aiToken.prompt;
+      }
     } else {
-      const whisperToken = parseCommandToken(body, 'w');
-      if (whisperToken) {
-        const member = resolveSlashWhisperTarget(whisperToken.value);
-        if (!member) return { ok: false, error: 'Whisper user not found in this group' };
-        whisperRecipientIds = [member.id];
-        body = whisperToken.rest;
+      const aiToken = parseAiCommand(body);
+      if (aiToken) {
+        isAiPrompt = true;
+        body = aiToken.prompt;
         const invalidHashtag = parseCommandToken(body, '#');
-        if (invalidHashtag) return { ok: false, error: 'Tags cannot be combined with whispers' };
+        if (invalidHashtag) return { ok: false, error: 'Use /# before /ai' };
+        const invalidWhisper = parseCommandToken(body, 'w');
+        if (invalidWhisper) return { ok: false, error: 'AI requests cannot be combined with whispers' };
+      } else {
+        const whisperToken = parseCommandToken(body, 'w');
+        if (whisperToken) {
+          const member = resolveSlashWhisperTarget(whisperToken.value);
+          if (!member) return { ok: false, error: 'Whisper user not found in this group' };
+          whisperRecipientIds = [member.id];
+          body = whisperToken.rest;
+          const invalidHashtag = parseCommandToken(body, '#');
+          if (invalidHashtag) return { ok: false, error: 'Tags cannot be combined with whispers' };
+        }
       }
     }
-  } else if (whisperRecipientIds.length && parseCommandToken(body, '#')) {
-    return { ok: false, error: 'Tags cannot be combined with whispers' };
-  } else if (hashtag && parseCommandToken(body, 'w')) {
-    return { ok: false, error: 'Tags cannot be combined with whispers' };
+  } else if (whisperRecipientIds.length && (parseCommandToken(body, '#') || parseAiCommand(body))) {
+    return {
+      ok: false,
+      error: getWhisperCombinationError({
+        hasHashtag: !!parseCommandToken(body, '#'),
+        hasAi: !!parseAiCommand(body),
+      }),
+    };
+  } else {
+    if (hashtag && !isAiPrompt) {
+      const aiToken = parseAiCommand(body);
+      if (aiToken) {
+        isAiPrompt = true;
+        body = aiToken.prompt;
+      }
+    }
+    if (hashtag && parseCommandToken(body, 'w')) {
+      return { ok: false, error: 'Tags cannot be combined with whispers' };
+    }
+    if (isAiPrompt && parseCommandToken(body, 'w')) {
+      return { ok: false, error: 'AI requests cannot be combined with whispers' };
+    }
+  }
+
+  if (isAiPrompt) {
+    if (!canUseAiInCurrentGroup()) {
+      return { ok: false, error: getAiDisabledMessage() };
+    }
+    if (/^\/d\s+/.test(body)) {
+      return { ok: false, error: 'AI requests cannot be combined with disappearing messages' };
+    }
+    if (!body) return { ok: false, error: 'AI prompt is required' };
+    return {
+      ok: true,
+      text: body,
+      whisperRecipientIds: [],
+      hashtag,
+      isAiPrompt: true,
+      isDisappearing: false,
+      disappearingDurationMs: 0,
+    };
   }
 
   if (/^\/d\s+/.test(body)) {
@@ -1609,6 +1775,7 @@ function parseComposerMessageInput(rawText) {
     text: body,
     whisperRecipientIds,
     hashtag,
+    isAiPrompt: false,
     isDisappearing,
     disappearingDurationMs: isDisappearing ? computeDisappearingDurationMs(body) : 0,
   };
@@ -2387,8 +2554,10 @@ async function selectGroup(groupId) {
     $('allow-member-clear-tag-toggle').checked = !!currentGroupData.allowMemberClearTag;
     $('allow-member-export-toggle').checked = !!currentGroupData.allowMemberExport;
     $('allow-member-kick-toggle').checked = !!currentGroupData.allowMemberKick;
+    $('ai-mode-toggle').checked = !!currentGroupData.aiEnabled;
   }
   syncAllowMemberClearTagToggleState();
+  updateAiControls();
   updateGroupActionButtons(isOwner);
 
   // Key state
@@ -2883,6 +3052,27 @@ async function appendMessageBubble(msg, scroll, groupId = currentGroupId) {
   return row;
 }
 
+function resetComposerAfterSend() {
+  clearTimeout(window._myTypingTimer);
+  socket.emit('stop_typing', { groupId: currentGroupId });
+  replyingTo = null;
+  $('reply-preview-bar').hidden = true;
+  const inp = $('message-input');
+  inp.value = '';
+  clearAiToken();
+  if (!activeTagFilter) composerTokens.hashtag = null;
+  composerTokens.whisper = null;
+  whisperRecipients = [];
+  messageMode = 'normal';
+  if (activeTagFilter) setHashtagToken(activeTagFilter, { linkedToFilter: true });
+  syncComposerTokens();
+  updateWhisperBtn();
+  updateSlashCommandMenu();
+  renderTagFilters();
+  autoResizeTextarea(inp);
+  scrollToBottom(true);
+}
+
 function updateScrollBadge() {
   const btn = $('scroll-bottom-btn');
   const badge = $('scroll-unread-badge');
@@ -3218,11 +3408,19 @@ async function startEditMessage(msg, currentPlaintext) {
 // ── Send message ──────────────────────────────────────────────────────────────
 async function doSend(text) {
   if (!currentGroupId || !socket) return;
+  if (aiMessageRequestInFlight) {
+    showToast('AI request already in progress', 'info');
+    return;
+  }
   const key = getGroupKey(currentGroupId);
   if (!key) return;
   const parsedMessage = parseComposerMessageInput(text);
   if (!parsedMessage.ok) {
     showToast(parsedMessage.error, 'error');
+    return;
+  }
+  if (parsedMessage.isAiPrompt) {
+    await sendAiPromptToChat(parsedMessage);
     return;
   }
   const messageText = parsedMessage.text;
@@ -3311,31 +3509,7 @@ async function doSend(text) {
         spamSignature,
       });
     }
-
-    // Stop typing indicator
-    clearTimeout(window._myTypingTimer);
-    socket.emit('stop_typing', { groupId: currentGroupId });
-
-    // Clear reply
-    replyingTo = null;
-    $('reply-preview-bar').hidden = true;
-
-    // Clear input
-    const inp = $('message-input');
-    inp.value = '';
-    if (!activeTagFilter) composerTokens.hashtag = null;
-    composerTokens.whisper = null;
-    whisperRecipients = [];
-    messageMode = 'normal';
-    if (activeTagFilter) {
-      setHashtagToken(activeTagFilter, { linkedToFilter: true });
-    }
-    syncComposerTokens();
-    updateWhisperBtn();
-    renderTagFilters();
-    updateSlashCommandMenu();
-    autoResizeTextarea(inp);
-    scrollToBottom(true);
+    resetComposerAfterSend();
   } catch(err) {
     console.error('Encryption failed:', err);
     showToast('Failed to send message', 'error');
@@ -3814,13 +3988,14 @@ function initSocket() {
     renderGroupList();
   });
 
-  socket.on('group_settings_updated', ({ groupId, allowMemberClear, allowMemberClearTag, allowMemberExport, allowMemberKick, groupColor }) => {
+  socket.on('group_settings_updated', ({ groupId, allowMemberClear, allowMemberClearTag, allowMemberExport, allowMemberKick, aiEnabled, groupColor }) => {
     const group = groups.find((g) => g.id === groupId);
     if (group) {
       if (allowMemberClear !== undefined) group.allowMemberClear = !!allowMemberClear;
       if (allowMemberClearTag !== undefined) group.allowMemberClearTag = !!allowMemberClearTag;
       if (allowMemberExport !== undefined) group.allowMemberExport = !!allowMemberExport;
       if (allowMemberKick !== undefined) group.allowMemberKick = !!allowMemberKick;
+      if (aiEnabled !== undefined) group.aiEnabled = !!aiEnabled;
       if (groupColor !== undefined) group.groupColor = groupColor || null;
     }
     const cache = ensureGroupCacheEntry(groupId);
@@ -3834,6 +4009,7 @@ function initSocket() {
       if (allowMemberClearTag !== undefined) currentGroupData.allowMemberClearTag = !!allowMemberClearTag;
       if (allowMemberExport !== undefined) currentGroupData.allowMemberExport = !!allowMemberExport;
       if (allowMemberKick !== undefined) currentGroupData.allowMemberKick = !!allowMemberKick;
+      if (aiEnabled !== undefined) currentGroupData.aiEnabled = !!aiEnabled;
       if (groupColor !== undefined) currentGroupData.groupColor = groupColor || null;
     }
     const isOwner = currentGroupData && currentGroupData.createdBy === currentUser.id;
@@ -3842,8 +4018,10 @@ function initSocket() {
       $('allow-member-clear-tag-toggle').checked = !!currentGroupData.allowMemberClearTag;
       $('allow-member-export-toggle').checked = !!currentGroupData.allowMemberExport;
       $('allow-member-kick-toggle').checked = !!currentGroupData.allowMemberKick;
+      $('ai-mode-toggle').checked = !!currentGroupData.aiEnabled;
     }
     syncAllowMemberClearTagToggleState();
+    updateAiControls();
     updateGroupActionButtons(isOwner);
     renderMembersList();
     renderGroupList();
@@ -4244,6 +4422,7 @@ function openGrokModal() {
     showToast('Select a group first', 'error');
     return;
   }
+  if (!canUseAiInCurrentGroup({ showError: true })) return;
   if (!getGroupKey(currentGroupId)) {
     showToast('Set group key first', 'error');
     return;
@@ -4309,6 +4488,10 @@ async function buildGrokContextMessages(groupId) {
 
 async function submitGrokPrompt() {
   if (grokRequestInFlight || !currentGroupId || !currentGroupData) return;
+  if (!canUseAiInCurrentGroup()) {
+    $('grok-error').textContent = getAiDisabledMessage();
+    return;
+  }
   const prompt = $('grok-prompt-input').value.trim();
   if (!prompt) {
     $('grok-error').textContent = 'Prompt cannot be empty';
@@ -4348,6 +4531,68 @@ async function submitGrokPrompt() {
     setGrokResponse(message, '', { isError: true });
   } finally {
     setGrokBusy(false);
+  }
+}
+
+async function sendAiPromptToChat(parsedMessage) {
+  if (aiMessageRequestInFlight) {
+    showToast('AI request already in progress', 'info');
+    return;
+  }
+  if (!canUseAiInCurrentGroup({ showError: true })) return;
+
+  const key = getGroupKey(currentGroupId);
+  if (!key) {
+    showToast('Set group key first', 'error');
+    return;
+  }
+
+  aiMessageRequestInFlight = true;
+  showToast('Asking Grok 4.3…', 'info');
+
+  try {
+    const contextMessages = await buildGrokContextMessages(currentGroupId);
+    const res = await fetch(`/api/groups/${currentGroupId}/ai/chat`, {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify({
+        groupName: currentGroupData.name,
+        prompt: parsedMessage.text,
+        contextMessages,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Grok request failed');
+
+    const answer = String(data.answer || '').trim();
+    if (!answer) throw new Error('Grok returned an empty response');
+
+    const { encryptedContent, iv } = await encryptMessage(answer, key, currentGroupId);
+    if (estimateBase64Bytes(encryptedContent) > MAX_TEXT_MESSAGE_BYTES) {
+      throw new Error('Grok response is too large to send');
+    }
+
+    let replyToData = null;
+    if (replyingTo) {
+      replyToData = JSON.stringify({
+        id: replyingTo.id,
+        senderName: replyingTo.senderName,
+        preview: replyingTo.preview,
+      });
+    }
+
+    socket.emit('send_ai_message', {
+      groupId: currentGroupId,
+      encryptedContent,
+      iv,
+      replyTo: replyToData,
+      hashtag: parsedMessage.hashtag || null,
+    });
+    resetComposerAfterSend();
+  } catch (err) {
+    showToast(String(err && err.message ? err.message : 'Grok request failed'), 'error');
+  } finally {
+    aiMessageRequestInFlight = false;
   }
 }
 
@@ -4832,6 +5077,18 @@ function setupEventListeners() {
     if (currentGroupData) {
       currentGroupData.allowMemberKick = e.target.checked;
     }
+  });
+
+  $('ai-mode-toggle').addEventListener('change', async (e) => {
+    const nextChecked = e.target.checked;
+    const result = await updateGroupSettingRequest({ aiEnabled: nextChecked });
+    if (!result.ok) {
+      e.target.checked = !nextChecked;
+      showToast(result.error || 'Failed to update group settings', 'error');
+      return;
+    }
+    if (currentGroupData) currentGroupData.aiEnabled = nextChecked;
+    updateAiControls();
   });
 
   // Export chat
