@@ -4712,6 +4712,20 @@ function initSocket() {
     renderGroupList();
   });
 
+  socket.on('group_owner_transferred', ({ groupId, createdBy }) => {
+    const group = groups.find((g) => g.id === groupId);
+    if (group) group.createdBy = createdBy;
+    if (groupId === currentGroupId && currentGroupData) {
+      currentGroupData.createdBy = createdBy;
+      const isOwner = currentGroupData.createdBy === currentUser.id;
+      $('owner-actions').hidden = !isOwner;
+      $('set-group-color-btn').hidden = !isOwner;
+      updateGroupActionButtons(isOwner);
+      renderMembersList();
+    }
+    renderGroupList();
+  });
+
   socket.on('member_joined', ({ userId, username, iconColor, profilePicture, groupId }) => {
     const cache = ensureGroupCacheEntry(groupId);
     if (cache.members && !cache.members.find(m => m.id === userId)) {

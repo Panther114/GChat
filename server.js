@@ -787,6 +787,8 @@ const stmts = {
   updateGroupAllowMemberKick: db.prepare('UPDATE group_chats SET allow_member_kick = ? WHERE id = ?'),
   updateGroupAiEnabled: db.prepare('UPDATE group_chats SET ai_enabled = ? WHERE id = ?'),
   updateGroupColor: db.prepare('UPDATE group_chats SET group_color = ? WHERE id = ?'),
+  updateGroupOwner: db.prepare('UPDATE group_chats SET created_by = ? WHERE id = ?'),
+  getGroupsCreatedByUser: db.prepare('SELECT id FROM group_chats WHERE created_by = ?'),
 
   // Members
   insertMember: db.prepare(
@@ -1466,10 +1468,17 @@ app.get('/api/ai/usage', (req, res) => {
 
 // ── Admin Routes ──────────────────────────────────────────────────────────────
 
-const adminDeleteUserTx = db.transaction((targetUserId) => {
+const adminDeleteUserTx = db.transaction((targetUserId, nextOwnerId) => {
   const targetUser = stmts.findUserById.get(targetUserId);
   if (!targetUser) return null;
   const memberships = stmts.getUserGroupIds.all(targetUserId).map((row) => row.group_id);
+  const reassignedGroupIds = stmts.getGroupsCreatedByUser.all(targetUserId).map((row) => row.id);
+  const ownerJoinedGroupIds = [];
+  for (const groupId of reassignedGroupIds) {
+    stmts.updateGroupOwner.run(nextOwnerId, groupId);
+    const joined = stmts.insertMember.run(groupId, nextOwnerId);
+    if (joined.changes > 0) ownerJoinedGroupIds.push(groupId);
+  }
   stmts.deleteUserMessageReads.run(targetUserId);
   stmts.deleteUserDisappearingStates.run(targetUserId);
   stmts.deleteUserAiUsageEvents.run(targetUserId);
@@ -1478,6 +1487,8 @@ const adminDeleteUserTx = db.transaction((targetUserId) => {
   return {
     username: targetUser.username,
     groupIds: memberships,
+    reassignedGroupIds,
+    ownerJoinedGroupIds,
   };
 });
 
@@ -1586,9 +1597,24 @@ app.delete('/api/users/:userId', (req, res) => {
     return res.status(400).json({ error: 'Furina cannot be deleted from the user list' });
   }
 
-  const deleted = adminDeleteUserTx(targetUser.id);
+  const deleted = adminDeleteUserTx(targetUser.id, viewer.id);
   if (!deleted) return res.status(404).json({ error: 'User not found' });
 
+  for (const groupId of deleted.ownerJoinedGroupIds) {
+    io.to(groupId).emit('member_joined', {
+      userId: viewer.id,
+      username: viewer.username,
+      iconColor: viewer.icon_color,
+      profilePicture: viewer.profile_picture || null,
+      groupId,
+    });
+  }
+  for (const groupId of deleted.reassignedGroupIds) {
+    io.to(groupId).emit('group_owner_transferred', {
+      groupId,
+      createdBy: viewer.id,
+    });
+  }
   for (const groupId of deleted.groupIds) {
     io.to(groupId).emit('member_left', {
       userId: targetUser.id,
