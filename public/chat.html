@@ -139,6 +139,7 @@
       </div>
       <div class="right-panel-actions">
         <button class="btn-action-sm btn-set-key" id="set-key-btn" data-icon="key-round">Set Key</button>
+        <button class="btn-action-sm btn-grok" id="ask-grok-btn" data-icon="sparkles">Ask Grok 4.3</button>
         <button class="btn-action-sm btn-enc-toggle" id="enc-toggle-btn">Hide Encryption</button>
         <button class="btn-action-sm btn-forget-key" id="forget-key-btn" data-icon="key">Forget Key</button>
       </div>
@@ -377,6 +378,39 @@
         <button class="btn-secondary" id="wallpaper-reset-btn">Reset</button>
         <button class="btn-primary" id="wallpaper-save-btn" disabled>Save</button>
         <button class="btn-secondary" id="wallpaper-close-btn">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="grok-modal" hidden>
+    <div class="modal grok-modal">
+      <div class="modal-title-row">
+        <h2 data-icon="sparkles">Ask Grok 4.3</h2>
+        <button class="btn-icon profile-close-btn" id="grok-close-btn" title="Close" aria-label="Close" data-icon="x" data-icon-only="true"></button>
+      </div>
+      <p class="modal-desc">Recent messages are decrypted in your browser first. GChat only forwards that one temporary AI request to OpenRouter through the server.</p>
+      <div class="form-group">
+        <label>Group</label>
+        <div class="grok-group-name" id="grok-group-name">—</div>
+      </div>
+      <div class="form-group">
+        <label for="grok-prompt-input">Prompt</label>
+        <textarea id="grok-prompt-input" rows="5" placeholder="Summarize the recent chat, find action items, or draft a reply…"></textarea>
+      </div>
+      <div class="grok-status" id="grok-status" hidden></div>
+      <p class="form-error" id="grok-error"></p>
+      <div class="grok-response-wrap" id="grok-response-wrap" hidden>
+        <div class="grok-response-header">
+          <span>Response</span>
+          <span class="grok-response-model" id="grok-response-model"></span>
+        </div>
+        <div class="grok-response" id="grok-response"></div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-secondary" id="grok-copy-btn" disabled>Copy</button>
+        <button class="btn-secondary" id="grok-insert-btn" disabled>Use as draft</button>
+        <button class="btn-secondary" id="grok-cancel-btn">Close</button>
+        <button class="btn-primary" id="grok-submit-btn">Ask Grok</button>
       </div>
     </div>
   </div>

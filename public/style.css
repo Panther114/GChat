@@ -1188,6 +1188,8 @@ body.sidebar-resizing * {
 .btn-action-sm:hover { background: rgba(255,255,255,.1); }
 .btn-enc-toggle { background: rgba(33,150,243,.12); border-color: rgba(33,150,243,.25); color: #64b5f6; }
 .btn-enc-toggle:hover { background: rgba(33,150,243,.2); }
+.btn-grok { background: rgba(108,99,255,.12); border-color: rgba(108,99,255,.28); color: #c9c0ff; }
+.btn-grok:hover { background: rgba(108,99,255,.22); }
 .btn-forget-key { background: rgba(255,68,102,.1); border-color: rgba(255,68,102,.2); color: #ff6b88; }
 .btn-forget-key:hover { background: rgba(255,68,102,.2); }
 .btn-clear-history { background: rgba(255,170,51,.1); border-color: rgba(255,170,51,.2); color: var(--orange); }
@@ -1423,6 +1425,63 @@ body.sidebar-resizing * {
 .wallpaper-progress-fill { width: 0%; height: 100%; background: linear-gradient(90deg, var(--accent1), var(--accent2)); transition: width .15s ease; }
 .wallpaper-progress-label { font-size: 12px; color: var(--text-secondary); }
 #wallpaper-modal .modal { max-width: 440px; }
+.grok-modal { max-width: 640px; }
+.grok-group-name {
+  border: 1px solid #2a2a3e;
+  border-radius: 8px;
+  background: #0d0d18;
+  color: var(--text-primary);
+  font-size: 14px;
+  padding: 10px 12px;
+}
+#grok-prompt-input {
+  min-height: 120px;
+  resize: vertical;
+}
+.grok-status {
+  border: 1px solid rgba(108,99,255,.24);
+  border-radius: 8px;
+  background: rgba(108,99,255,.08);
+  color: #d9d5ff;
+  font-size: 12px;
+  padding: 10px 12px;
+}
+.grok-response-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.grok-response-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.grok-response-model {
+  color: #c9c0ff;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.grok-response {
+  border: 1px solid #2a2a3e;
+  border-radius: 10px;
+  background: #0d0d18;
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  padding: 14px;
+  max-height: 320px;
+  overflow: auto;
+}
+.grok-response.is-error {
+  border-color: rgba(255,68,102,.28);
+  color: #ffc2cf;
+}
 
 /* Profile modal colors */
 #profile-modal .color-pick-row { display: flex; align-items: center; gap: 10px; }

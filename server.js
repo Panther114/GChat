@@ -33,6 +33,14 @@ const SAFE_IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', '
 const APP_VERSION = packageJson.version || '0.0.0';
 const MIN_DISAPPEARING_DURATION_MS = 6000;
 const MAX_DISAPPEARING_DURATION_MS = 45000;
+const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
+const OPENROUTER_CHAT_COMPLETIONS_URL = `${OPENROUTER_BASE_URL}/chat/completions`;
+const OPENROUTER_MODEL = 'x-ai/grok-4.3';
+const OPENROUTER_TIMEOUT_MS = 45000;
+const MAX_AI_PROMPT_CHARS = 4000;
+const MAX_AI_CONTEXT_MESSAGES = 40;
+const MAX_AI_CONTEXT_MESSAGE_CHARS = 2000;
+const MAX_AI_CONTEXT_TOTAL_CHARS = 32000;
 
 // ── App & Server ──────────────────────────────────────────────────────────────
 const app = express();
@@ -136,6 +144,95 @@ function normalizeClientSettings(settings = {}) {
   next.wallpaperTransparency = Number.isInteger(next.wallpaperTransparency) ? Math.max(0, Math.min(MAX_WALLPAPER_TRANSPARENCY, next.wallpaperTransparency)) : MAX_WALLPAPER_TRANSPARENCY;
   if (next.hideProfileDot !== undefined) next.hideProfileDot = !!next.hideProfileDot;
   return next;
+}
+
+function sanitizeAiText(value, maxLength) {
+  if (typeof value !== 'string') return null;
+  const normalized = value
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ' ')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .trim();
+  if (!normalized) return null;
+  return normalized.slice(0, maxLength);
+}
+
+function normalizeAiContextMessages(value) {
+  if (value == null) return { ok: true, value: [] };
+  if (!Array.isArray(value)) {
+    return { ok: false, error: 'Invalid AI context payload' };
+  }
+  if (value.length > MAX_AI_CONTEXT_MESSAGES) {
+    return { ok: false, error: 'Too many AI context messages' };
+  }
+
+  const normalized = [];
+  let totalChars = 0;
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') {
+      return { ok: false, error: 'Invalid AI context payload' };
+    }
+    const content = sanitizeAiText(entry.content, MAX_AI_CONTEXT_MESSAGE_CHARS);
+    if (!content) continue;
+    const senderName = sanitizeAiText(entry.senderName, 64) || 'Unknown';
+    const createdAt = sanitizeAiText(entry.createdAt, 64) || 'unknown time';
+    const type = typeof entry.type === 'string' ? entry.type.slice(0, 32) : 'text';
+    const hashtag = normalizeHashtag(entry.hashtag);
+    totalChars += content.length;
+    if (totalChars > MAX_AI_CONTEXT_TOTAL_CHARS) {
+      return { ok: false, error: 'AI context is too large' };
+    }
+    normalized.push({
+      senderName,
+      createdAt,
+      content,
+      type,
+      hashtag,
+    });
+  }
+
+  return { ok: true, value: normalized };
+}
+
+function buildAiTranscript(contextMessages, fallbackGroupName) {
+  const groupName = sanitizeAiText(fallbackGroupName, 64) || 'Current group';
+  if (!contextMessages.length) {
+    return `Group: ${groupName}\n\nConversation excerpt:\n[No prior messages were provided.]`;
+  }
+  const lines = contextMessages.map((entry) => {
+    const typePrefix = entry.type === 'whisper'
+      ? '[Whisper] '
+      : entry.type === 'image'
+        ? '[Image] '
+        : entry.type === 'file'
+          ? '[File] '
+          : '';
+    const hashtagPrefix = entry.hashtag ? `#${entry.hashtag} ` : '';
+    return `[${entry.createdAt}] ${entry.senderName}: ${typePrefix}${hashtagPrefix}${entry.content}`;
+  });
+  return `Group: ${groupName}\n\nConversation excerpt:\n${lines.join('\n')}`;
+}
+
+function extractOpenRouterText(content) {
+  if (typeof content === 'string') return content.trim();
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((part) => {
+      if (typeof part === 'string') return part;
+      if (part && typeof part.text === 'string') return part.text;
+      return '';
+    })
+    .join('\n')
+    .trim();
+}
+
+function getOpenRouterErrorMessage(payload) {
+  const fallback = 'OpenRouter request failed';
+  if (!payload || typeof payload !== 'object') return fallback;
+  const nested = payload.error && typeof payload.error === 'object'
+    ? sanitizeAiText(payload.error.message, 240)
+    : null;
+  return nested || fallback;
 }
 
 function validateEncryptedTextPayload(encryptedContent, iv) {
@@ -1529,6 +1626,92 @@ app.delete('/api/groups/:groupId', (req, res) => {
 
   io.to(groupId).emit('group_disbanded', { groupId });
   res.json({ ok: true });
+});
+
+app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
+  const { groupId } = req.params;
+  const userId = req.session.userId;
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ error: 'AI assistant is not configured on this server' });
+  }
+
+  const group = stmts.findGroupById.get(groupId);
+  if (!group) return res.status(404).json({ error: 'Group not found' });
+  if (!stmts.isMember.get(groupId, userId)) {
+    return res.status(403).json({ error: 'Not a member of this group' });
+  }
+
+  const prompt = sanitizeAiText(req.body.prompt, MAX_AI_PROMPT_CHARS);
+  if (!prompt) {
+    return res.status(400).json({ error: 'Prompt is required' });
+  }
+
+  const normalizedContext = normalizeAiContextMessages(req.body.contextMessages);
+  if (!normalizedContext.ok) {
+    return res.status(400).json({ error: normalizedContext.error });
+  }
+
+  const transcript = buildAiTranscript(
+    normalizedContext.value,
+    sanitizeAiText(req.body.groupName, 64) || group.name
+  );
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), OPENROUTER_TIMEOUT_MS);
+  try {
+    const origin = typeof req.headers.origin === 'string' && /^https?:\/\//.test(req.headers.origin)
+      ? req.headers.origin
+      : null;
+    const upstream = await fetch(OPENROUTER_CHAT_COMPLETIONS_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+        'X-Title': 'GChat',
+        ...(origin ? { 'HTTP-Referer': origin } : {}),
+      },
+      body: JSON.stringify({
+        model: OPENROUTER_MODEL,
+        messages: [
+          {
+            role: 'system',
+            content: 'You are Grok 4.3 assisting inside GChat, an end-to-end encrypted group chat app. Use only the conversation excerpt and user request provided in this call. If the supplied context is incomplete, say so plainly. Do not claim to have access to other chats, older history, or server-side plaintext.',
+          },
+          {
+            role: 'user',
+            content: `${transcript}\n\nUser request:\n${prompt}`,
+          },
+        ],
+      }),
+      signal: controller.signal,
+    });
+    const payload = await upstream.json().catch(() => ({}));
+    if (!upstream.ok) {
+      const errorMessage = getOpenRouterErrorMessage(payload);
+      const status = upstream.status === 429 ? 429 : 502;
+      return res.status(status).json({ error: errorMessage });
+    }
+
+    const answer = extractOpenRouterText(payload?.choices?.[0]?.message?.content);
+    if (!answer) {
+      return res.status(502).json({ error: 'OpenRouter returned an empty response' });
+    }
+
+    res.json({
+      ok: true,
+      model: OPENROUTER_MODEL,
+      answer,
+    });
+  } catch (err) {
+    if (err && err.name === 'AbortError') {
+      return res.status(504).json({ error: 'OpenRouter request timed out' });
+    }
+    console.error('OpenRouter AI request error:', err);
+    res.status(502).json({ error: 'Failed to contact OpenRouter' });
+  } finally {
+    clearTimeout(timeout);
+  }
 });
 
 // ── Socket.IO ─────────────────────────────────────────────────────────────────
