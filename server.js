@@ -20,6 +20,8 @@ const packageJson = require('./package.json');
 // ── Constants ─────────────────────────────────────────────────────────────────
 const MAX_JSON_BODY_BYTES = 16 * 1024 * 1024; // total JSON payload budget for wallpaper base64 overhead + other API bodies
 const MAX_WALLPAPER_BYTES = 10 * 1024 * 1024;
+const MAX_WALLPAPER_BLUR = 24;
+const MAX_WALLPAPER_TRANSPARENCY = 100;
 const MAX_PROFILE_PICTURE_BYTES = 2 * 1024 * 1024;
 const MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024;
 const MAX_ATTACHMENT_BODY_BYTES = 16 * 1024 * 1024;
@@ -130,8 +132,8 @@ function parseBoundedInteger(value, min, max, fieldLabel) {
 function normalizeClientSettings(settings = {}) {
   const next = settings && typeof settings === 'object' ? { ...settings } : {};
   next.wallpaperDataUrl = typeof next.wallpaperDataUrl === 'string' && next.wallpaperDataUrl ? next.wallpaperDataUrl : null;
-  next.wallpaperBlur = Number.isInteger(next.wallpaperBlur) ? Math.max(0, Math.min(24, next.wallpaperBlur)) : 0;
-  next.wallpaperTransparency = Number.isInteger(next.wallpaperTransparency) ? Math.max(0, Math.min(100, next.wallpaperTransparency)) : 100;
+  next.wallpaperBlur = Number.isInteger(next.wallpaperBlur) ? Math.max(0, Math.min(MAX_WALLPAPER_BLUR, next.wallpaperBlur)) : 0;
+  next.wallpaperTransparency = Number.isInteger(next.wallpaperTransparency) ? Math.max(0, Math.min(MAX_WALLPAPER_TRANSPARENCY, next.wallpaperTransparency)) : MAX_WALLPAPER_TRANSPARENCY;
   if (next.hideProfileDot !== undefined) next.hideProfileDot = !!next.hideProfileDot;
   return next;
 }
@@ -835,12 +837,12 @@ app.patch('/api/auth/settings', (req, res) => {
     next.wallpaperDataUrl = parsedWallpaper.dataUrl;
   }
   if (req.body.wallpaperBlur !== undefined) {
-    const parsedBlur = parseBoundedInteger(req.body.wallpaperBlur, 0, 24, 'Wallpaper blur');
+    const parsedBlur = parseBoundedInteger(req.body.wallpaperBlur, 0, MAX_WALLPAPER_BLUR, 'Wallpaper blur');
     if (!parsedBlur.ok) return res.status(400).json({ error: parsedBlur.error });
     next.wallpaperBlur = parsedBlur.value;
   }
   if (req.body.wallpaperTransparency !== undefined) {
-    const parsedTransparency = parseBoundedInteger(req.body.wallpaperTransparency, 0, 100, 'Wallpaper transparency');
+    const parsedTransparency = parseBoundedInteger(req.body.wallpaperTransparency, 0, MAX_WALLPAPER_TRANSPARENCY, 'Wallpaper transparency');
     if (!parsedTransparency.ok) return res.status(400).json({ error: parsedTransparency.error });
     next.wallpaperTransparency = parsedTransparency.value;
   }

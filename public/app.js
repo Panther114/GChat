@@ -642,6 +642,14 @@ function syncWallpaperDraftControls(settings = appLocalSettings) {
   if (transparencyValue) transparencyValue.textContent = `${normalized.wallpaperTransparency}%`;
 }
 
+function buildWallpaperDraft(overrides = {}) {
+  return {
+    ...getWallpaperSettings(appLocalSettings),
+    ...(wallpaperDraft || {}),
+    ...overrides,
+  };
+}
+
 function applyWallpaperFromSettings() {
   const wallpaperSettings = getWallpaperSettings(appLocalSettings);
   if (wallpaperTheme) {
@@ -4212,11 +4220,7 @@ function setupEventListeners() {
     const file = e.target.files[0];
     if (!file) return;
     $('wallpaper-error').textContent = '';
-    wallpaperDraft = {
-      ...getWallpaperSettings(appLocalSettings),
-      ...(wallpaperDraft || {}),
-    };
-    wallpaperDraft.wallpaperDataUrl = null;
+    wallpaperDraft = buildWallpaperDraft({ wallpaperDataUrl: null });
     resetWallpaperProgress();
     if (!isAllowedUploadImageType(file.type)) {
       $('wallpaper-error').textContent = 'Please choose a JPEG, PNG, GIF, or WebP image';
@@ -4251,20 +4255,16 @@ function setupEventListeners() {
   });
   $('wallpaper-blur-input').addEventListener('input', (e) => {
     const maxWallpaperBlur = wallpaperTheme ? wallpaperTheme.MAX_WALLPAPER_BLUR : 24;
-    wallpaperDraft = {
-      ...getWallpaperSettings(appLocalSettings),
-      ...(wallpaperDraft || {}),
+    wallpaperDraft = buildWallpaperDraft({
       wallpaperBlur: clampInteger(e.target.value, DEFAULT_WALLPAPER_BLUR, maxWallpaperBlur, DEFAULT_WALLPAPER_BLUR),
-    };
+    });
     applyWallpaperDraftPreview();
     setWallpaperSaveState(!wallpaperSettingsEqual(wallpaperDraft, appLocalSettings));
   });
   $('wallpaper-transparency-input').addEventListener('input', (e) => {
-    wallpaperDraft = {
-      ...getWallpaperSettings(appLocalSettings),
-      ...(wallpaperDraft || {}),
+    wallpaperDraft = buildWallpaperDraft({
       wallpaperTransparency: clampInteger(e.target.value, 0, 100, DEFAULT_WALLPAPER_TRANSPARENCY),
-    };
+    });
     applyWallpaperDraftPreview();
     setWallpaperSaveState(!wallpaperSettingsEqual(wallpaperDraft, appLocalSettings));
   });
