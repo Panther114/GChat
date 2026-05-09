@@ -202,6 +202,8 @@ const ACTIVE_LOCAL_SETTINGS_KEY = 'gchat:active-local-settings';
 const LOCAL_SETTINGS_KEY_PREFIX = 'gchat:local-settings:user:';
 const DEFAULT_WALLPAPER = "url('gchat_wallpaper.jpg')";
 const DEFAULT_WALLPAPER_PREVIEW_SRC = 'gchat_wallpaper.jpg';
+const DEFAULT_WALLPAPER_BLUR = 0;
+const DEFAULT_WALLPAPER_TRANSPARENCY = 100;
 const WALLPAPER_SELECT_FIRST_MSG = 'Please choose an image first';
 const WALLPAPER_INVALID_TYPE_MSG = 'Please choose an image file';
 const WALLPAPER_TOO_LARGE_MSG = 'Wallpaper too large (max 10MB)';
@@ -217,6 +219,7 @@ const MAX_PROFILE_PICTURE_BYTES = 2 * 1024 * 1024;
 const MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024;
 const MAX_TEXT_MESSAGE_BYTES = 64 * 1024;
 const ALLOWED_UPLOAD_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+const wallpaperTheme = window.GChatWallpaperTheme || null;
 const localTimeFormatter = new Intl.DateTimeFormat(undefined, {
   hour: '2-digit',
   minute: '2-digit',
@@ -576,23 +579,98 @@ function getMessageTypePreviewLabel(msg) {
 }
 
 function wallpaperCssValue(dataUrl) {
+  if (wallpaperTheme) return wallpaperTheme.wallpaperCssValue(dataUrl);
   if (!dataUrl) return DEFAULT_WALLPAPER;
   return `url(${JSON.stringify(String(dataUrl))})`;
 }
 
-function applyWallpaperFromSettings() {
-  const wallpaper = appLocalSettings.wallpaperDataUrl;
-  const cssValue = wallpaperCssValue(wallpaper);
-  document.documentElement.style.setProperty('--chat-wallpaper', cssValue);
-  document.documentElement.style.setProperty('--auth-wallpaper', cssValue);
+function normalizeWallpaperSettings(settings = {}) {
+  if (wallpaperTheme) return wallpaperTheme.normalizeSettings(settings);
+  return {
+    ...settings,
+    wallpaperDataUrl: typeof settings.wallpaperDataUrl === 'string' && settings.wallpaperDataUrl ? settings.wallpaperDataUrl : null,
+    wallpaperBlur: DEFAULT_WALLPAPER_BLUR,
+    wallpaperTransparency: DEFAULT_WALLPAPER_TRANSPARENCY,
+  };
+}
+
+function clampInteger(value, min, max, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(parsed)));
+}
+
+function getWallpaperSettings(settings = appLocalSettings) {
+  const normalized = normalizeWallpaperSettings(settings);
+  return {
+    wallpaperDataUrl: normalized.wallpaperDataUrl,
+    wallpaperBlur: normalized.wallpaperBlur,
+    wallpaperTransparency: normalized.wallpaperTransparency,
+  };
+}
+
+function wallpaperSettingsEqual(left, right) {
+  const a = getWallpaperSettings(left);
+  const b = getWallpaperSettings(right);
+  return a.wallpaperDataUrl === b.wallpaperDataUrl
+    && a.wallpaperBlur === b.wallpaperBlur
+    && a.wallpaperTransparency === b.wallpaperTransparency;
+}
+
+function applyWallpaperPreviewStyle(dataUrl, blur, transparency) {
   const preview = $('wallpaper-current-preview');
-  if (preview) preview.src = wallpaper || DEFAULT_WALLPAPER_PREVIEW_SRC;
+  const overlay = $('wallpaper-current-preview-overlay');
+  if (preview) {
+    preview.src = dataUrl || DEFAULT_WALLPAPER_PREVIEW_SRC;
+    preview.style.filter = `blur(${blur}px)`;
+    preview.style.transform = blur > 0 ? 'scale(1.08)' : 'scale(1)';
+  }
+  if (overlay) {
+    overlay.style.background = `rgba(0,0,0,${(100 - transparency) / 100})`;
+  }
+}
+
+function syncWallpaperDraftControls(settings = appLocalSettings) {
+  const normalized = getWallpaperSettings(settings);
+  const blurInput = $('wallpaper-blur-input');
+  const blurValue = $('wallpaper-blur-value');
+  const transparencyInput = $('wallpaper-transparency-input');
+  const transparencyValue = $('wallpaper-transparency-value');
+  if (blurInput) blurInput.value = String(normalized.wallpaperBlur);
+  if (blurValue) blurValue.textContent = `${normalized.wallpaperBlur}px`;
+  if (transparencyInput) transparencyInput.value = String(normalized.wallpaperTransparency);
+  if (transparencyValue) transparencyValue.textContent = `${normalized.wallpaperTransparency}%`;
+}
+
+function buildWallpaperDraft(overrides = {}) {
+  return {
+    ...getWallpaperSettings(appLocalSettings),
+    ...(wallpaperDraft || {}),
+    ...overrides,
+  };
+}
+
+function applyWallpaperFromSettings() {
+  const wallpaperSettings = getWallpaperSettings(appLocalSettings);
+  if (wallpaperTheme) {
+    wallpaperTheme.applyToRoot(wallpaperSettings);
+  } else {
+    const cssValue = wallpaperCssValue(wallpaperSettings.wallpaperDataUrl);
+    document.documentElement.style.setProperty('--chat-wallpaper', cssValue);
+    document.documentElement.style.setProperty('--auth-wallpaper', cssValue);
+    document.documentElement.style.setProperty('--wallpaper-blur', `${wallpaperSettings.wallpaperBlur}px`);
+    document.documentElement.style.setProperty('--wallpaper-overlay-opacity', String((100 - wallpaperSettings.wallpaperTransparency) / 100));
+  }
+  applyWallpaperPreviewStyle(wallpaperSettings.wallpaperDataUrl, wallpaperSettings.wallpaperBlur, wallpaperSettings.wallpaperTransparency);
+  syncWallpaperDraftControls(wallpaperSettings);
 }
 
 async function saveSettingsToServer(options = {}) {
   if (!currentUser) return { ok: false, networkError: true, error: 'Not signed in' };
   const payload = {
     wallpaperDataUrl: appLocalSettings.wallpaperDataUrl || null,
+    wallpaperBlur: getWallpaperSettings(appLocalSettings).wallpaperBlur,
+    wallpaperTransparency: getWallpaperSettings(appLocalSettings).wallpaperTransparency,
     hideProfileDot: !!appLocalSettings.hideProfileDot,
   };
   const body = JSON.stringify(payload);
@@ -645,8 +723,10 @@ async function loadSettingsFromServer() {
   try {
     const res = await fetch('/api/auth/settings');
     if (!res.ok) return;
-    const data = await res.json();
-    if (typeof data.wallpaperDataUrl === 'string') appLocalSettings.wallpaperDataUrl = data.wallpaperDataUrl || null;
+    const data = normalizeWallpaperSettings(await res.json());
+    appLocalSettings.wallpaperDataUrl = data.wallpaperDataUrl || null;
+    appLocalSettings.wallpaperBlur = data.wallpaperBlur;
+    appLocalSettings.wallpaperTransparency = data.wallpaperTransparency;
     if (typeof data.hideProfileDot === 'boolean') appLocalSettings.hideProfileDot = data.hideProfileDot;
   } catch {
     // ignore and use local settings
@@ -654,8 +734,10 @@ async function loadSettingsFromServer() {
 }
 
 function loadMergedLocalSettings(userId = currentUser && currentUser.id) {
-  const local = readLocalSettings(userId);
-  if (typeof local.wallpaperDataUrl === 'string') appLocalSettings.wallpaperDataUrl = local.wallpaperDataUrl || null;
+  const local = normalizeWallpaperSettings(readLocalSettings(userId));
+  appLocalSettings.wallpaperDataUrl = local.wallpaperDataUrl || null;
+  appLocalSettings.wallpaperBlur = local.wallpaperBlur;
+  appLocalSettings.wallpaperTransparency = local.wallpaperTransparency;
   if (typeof local.hideProfileDot === 'boolean') appLocalSettings.hideProfileDot = local.hideProfileDot;
   applyWallpaperFromSettings();
 }
@@ -993,9 +1075,11 @@ const messageVisibilityTimers = new Map();
 let imageViewerZoom = 1;
 const appLocalSettings = {
   wallpaperDataUrl: null,
+  wallpaperBlur: DEFAULT_WALLPAPER_BLUR,
+  wallpaperTransparency: DEFAULT_WALLPAPER_TRANSPARENCY,
   hideProfileDot: true,
 };
-let pendingWallpaperDataUrl = null;
+let wallpaperDraft = null;
 let desktopSidebarWidth = DESKTOP_DEFAULT_SIDEBAR_WIDTH;
 let desktopRightPanelExpanded = true;
 let activeTagFilter = null;
@@ -2951,7 +3035,7 @@ function setWallpaperBusyState(busy) {
   const resetBtn = $('wallpaper-reset-btn');
   const closeBtn = $('wallpaper-close-btn');
   const input = $('wallpaper-input');
-  if (saveBtn) saveBtn.disabled = !!busy || !pendingWallpaperDataUrl;
+  if (saveBtn) saveBtn.disabled = !!busy || !wallpaperDraft || wallpaperSettingsEqual(wallpaperDraft, appLocalSettings);
   if (resetBtn) resetBtn.disabled = !!busy;
   if (closeBtn) closeBtn.disabled = !!busy;
   if (input) input.disabled = !!busy;
@@ -2979,7 +3063,7 @@ function resetWallpaperProgress() {
 }
 
 function resetWallpaperDraft() {
-  pendingWallpaperDataUrl = null;
+  wallpaperDraft = null;
   $('wallpaper-error').textContent = '';
   $('wallpaper-input').value = '';
   resetWallpaperProgress();
@@ -2989,14 +3073,17 @@ function resetWallpaperDraft() {
 }
 
 async function saveWallpaperDraft() {
-  if (!pendingWallpaperDataUrl) {
+  if (!wallpaperDraft || wallpaperSettingsEqual(wallpaperDraft, appLocalSettings)) {
     $('wallpaper-error').textContent = WALLPAPER_SELECT_FIRST_MSG;
     return;
   }
-  const previousWallpaperDataUrl = appLocalSettings.wallpaperDataUrl;
+  const previousWallpaperSettings = getWallpaperSettings(appLocalSettings);
+  const nextWallpaperSettings = getWallpaperSettings(wallpaperDraft);
   setWallpaperBusyState(true);
   setWallpaperProgress(4, 'Uploading wallpaper…');
-  appLocalSettings.wallpaperDataUrl = pendingWallpaperDataUrl;
+  appLocalSettings.wallpaperDataUrl = nextWallpaperSettings.wallpaperDataUrl;
+  appLocalSettings.wallpaperBlur = nextWallpaperSettings.wallpaperBlur;
+  appLocalSettings.wallpaperTransparency = nextWallpaperSettings.wallpaperTransparency;
   applyWallpaperFromSettings();
   writeLocalSettings(appLocalSettings, currentUser && currentUser.id);
   const result = await saveSettingsToServer({
@@ -3009,7 +3096,9 @@ async function saveWallpaperDraft() {
     },
   });
   if (!result.ok && !result.networkError) {
-    appLocalSettings.wallpaperDataUrl = previousWallpaperDataUrl || null;
+    appLocalSettings.wallpaperDataUrl = previousWallpaperSettings.wallpaperDataUrl || null;
+    appLocalSettings.wallpaperBlur = previousWallpaperSettings.wallpaperBlur;
+    appLocalSettings.wallpaperTransparency = previousWallpaperSettings.wallpaperTransparency;
     applyWallpaperFromSettings();
     writeLocalSettings(appLocalSettings, currentUser && currentUser.id);
     $('wallpaper-error').textContent = result.error || 'Failed to save wallpaper';
@@ -3025,10 +3114,13 @@ async function saveWallpaperDraft() {
 }
 
 function applyWallpaperDraftPreview(dataUrl) {
-  const preview = $('wallpaper-current-preview');
-  if (preview) {
-    preview.src = dataUrl || appLocalSettings.wallpaperDataUrl || DEFAULT_WALLPAPER_PREVIEW_SRC;
-  }
+  const draft = getWallpaperSettings({
+    ...appLocalSettings,
+    ...(wallpaperDraft || {}),
+    wallpaperDataUrl: dataUrl !== undefined ? dataUrl : (wallpaperDraft ? wallpaperDraft.wallpaperDataUrl : appLocalSettings.wallpaperDataUrl),
+  });
+  applyWallpaperPreviewStyle(draft.wallpaperDataUrl, draft.wallpaperBlur, draft.wallpaperTransparency);
+  syncWallpaperDraftControls(draft);
 }
 
 async function downloadAttachment(msg) {
@@ -4104,13 +4196,17 @@ function setupEventListeners() {
   });
   $('wallpaper-save-btn').addEventListener('click', saveWallpaperDraft);
   $('wallpaper-reset-btn').addEventListener('click', async () => {
-    const previousWallpaperDataUrl = appLocalSettings.wallpaperDataUrl;
+    const previousWallpaperSettings = getWallpaperSettings(appLocalSettings);
     appLocalSettings.wallpaperDataUrl = null;
+    appLocalSettings.wallpaperBlur = DEFAULT_WALLPAPER_BLUR;
+    appLocalSettings.wallpaperTransparency = DEFAULT_WALLPAPER_TRANSPARENCY;
     applyWallpaperFromSettings();
     writeLocalSettings(appLocalSettings, currentUser && currentUser.id);
     const result = await saveSettingsToServer();
     if (!result.ok && !result.networkError) {
-      appLocalSettings.wallpaperDataUrl = previousWallpaperDataUrl || null;
+      appLocalSettings.wallpaperDataUrl = previousWallpaperSettings.wallpaperDataUrl || null;
+      appLocalSettings.wallpaperBlur = previousWallpaperSettings.wallpaperBlur;
+      appLocalSettings.wallpaperTransparency = previousWallpaperSettings.wallpaperTransparency;
       applyWallpaperFromSettings();
       writeLocalSettings(appLocalSettings, currentUser && currentUser.id);
       $('wallpaper-error').textContent = result.error || 'Failed to reset wallpaper';
@@ -4124,7 +4220,7 @@ function setupEventListeners() {
     const file = e.target.files[0];
     if (!file) return;
     $('wallpaper-error').textContent = '';
-    pendingWallpaperDataUrl = null;
+    wallpaperDraft = buildWallpaperDraft({ wallpaperDataUrl: null });
     resetWallpaperProgress();
     if (!isAllowedUploadImageType(file.type)) {
       $('wallpaper-error').textContent = 'Please choose a JPEG, PNG, GIF, or WebP image';
@@ -4140,7 +4236,7 @@ function setupEventListeners() {
     try {
       setWallpaperProgress(3, 'Preparing wallpaper…');
       const preparedFile = await prepareWallpaperFile(file);
-      pendingWallpaperDataUrl = await readFileAsDataUrl(preparedFile, {
+      wallpaperDraft.wallpaperDataUrl = await readFileAsDataUrl(preparedFile, {
         onProgress: (event) => {
           if (!event.lengthComputable) return;
           const percent = Math.round((event.loaded / event.total) * 100);
@@ -4148,14 +4244,29 @@ function setupEventListeners() {
         },
       });
       setWallpaperProgress(100, 'Ready to save');
-      applyWallpaperDraftPreview(pendingWallpaperDataUrl);
-      setWallpaperSaveState(true);
+      applyWallpaperDraftPreview(wallpaperDraft.wallpaperDataUrl);
+      setWallpaperSaveState(!wallpaperSettingsEqual(wallpaperDraft, appLocalSettings));
     } catch {
-      pendingWallpaperDataUrl = null;
+      wallpaperDraft.wallpaperDataUrl = null;
       $('wallpaper-error').textContent = WALLPAPER_READ_FAIL_MSG;
       resetWallpaperProgress();
       setWallpaperSaveState(false);
     }
+  });
+  $('wallpaper-blur-input').addEventListener('input', (e) => {
+    const maxWallpaperBlur = wallpaperTheme ? wallpaperTheme.MAX_WALLPAPER_BLUR : 24;
+    wallpaperDraft = buildWallpaperDraft({
+      wallpaperBlur: clampInteger(e.target.value, DEFAULT_WALLPAPER_BLUR, maxWallpaperBlur, DEFAULT_WALLPAPER_BLUR),
+    });
+    applyWallpaperDraftPreview();
+    setWallpaperSaveState(!wallpaperSettingsEqual(wallpaperDraft, appLocalSettings));
+  });
+  $('wallpaper-transparency-input').addEventListener('input', (e) => {
+    wallpaperDraft = buildWallpaperDraft({
+      wallpaperTransparency: clampInteger(e.target.value, 0, 100, DEFAULT_WALLPAPER_TRANSPARENCY),
+    });
+    applyWallpaperDraftPreview();
+    setWallpaperSaveState(!wallpaperSettingsEqual(wallpaperDraft, appLocalSettings));
   });
 
   // Profile modal
