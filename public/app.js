@@ -3059,7 +3059,7 @@ function resetComposerAfterSend() {
   $('reply-preview-bar').hidden = true;
   const inp = $('message-input');
   inp.value = '';
-  composerTokens.ai = null;
+  clearAiToken();
   if (!activeTagFilter) composerTokens.hashtag = null;
   composerTokens.whisper = null;
   whisperRecipients = [];
