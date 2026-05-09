@@ -388,6 +388,7 @@ const migrations = [
   "ALTER TABLE messages ADD COLUMN is_disappearing INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE messages ADD COLUMN disappearing_duration_ms INTEGER",
   "ALTER TABLE group_chats ADD COLUMN allow_member_clear INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE group_chats ADD COLUMN allow_member_clear_tag INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE group_chats ADD COLUMN allow_member_export INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE group_chats ADD COLUMN allow_member_kick INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE group_chats ADD COLUMN group_color TEXT",
@@ -457,6 +458,7 @@ const stmts = {
   findGroupById: db.prepare('SELECT * FROM group_chats WHERE id = ?'),
   updateGroupName: db.prepare('UPDATE group_chats SET name = ? WHERE id = ?'),
   updateGroupAllowMemberClear: db.prepare('UPDATE group_chats SET allow_member_clear = ? WHERE id = ?'),
+  updateGroupAllowMemberClearTag: db.prepare('UPDATE group_chats SET allow_member_clear_tag = ? WHERE id = ?'),
   updateGroupAllowMemberExport: db.prepare('UPDATE group_chats SET allow_member_export = ? WHERE id = ?'),
   updateGroupAllowMemberKick: db.prepare('UPDATE group_chats SET allow_member_kick = ? WHERE id = ?'),
   updateGroupColor: db.prepare('UPDATE group_chats SET group_color = ? WHERE id = ?'),
@@ -469,7 +471,7 @@ const stmts = {
     'SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?'
   ),
   getUserGroups: db.prepare(`
-    SELECT g.id, g.name, g.code, g.created_by, g.created_at, g.allow_member_clear, g.allow_member_export, g.allow_member_kick, g.group_color
+    SELECT g.id, g.name, g.code, g.created_by, g.created_at, g.allow_member_clear, g.allow_member_clear_tag, g.allow_member_export, g.allow_member_kick, g.group_color
     FROM group_chats g
     JOIN group_members gm ON g.id = gm.group_id
     WHERE gm.user_id = ?
@@ -551,6 +553,7 @@ const stmts = {
   markMessageRead: db.prepare('INSERT OR IGNORE INTO message_reads (message_id, user_id) VALUES (?, ?)'),
   getMessageReadCount: db.prepare('SELECT COUNT(*) AS count FROM message_reads WHERE message_id = ?'),
   deleteMessage: db.prepare('DELETE FROM messages WHERE id = ?'),
+  deleteMessagesByHashtag: db.prepare('DELETE FROM messages WHERE group_id = ? AND hashtag = ?'),
   updateMessage: db.prepare(
     'UPDATE messages SET encrypted_content = ?, iv = ?, edited_at = ? WHERE id = ?'
   ),
@@ -1059,6 +1062,7 @@ app.post('/api/groups/create', (req, res) => {
     code: group.code,
     createdBy: group.created_by,
     allowMemberClear: group.allow_member_clear || 0,
+    allowMemberClearTag: group.allow_member_clear_tag || 0,
     allowMemberExport: group.allow_member_export || 0,
     allowMemberKick: group.allow_member_kick || 0,
     groupColor: group.group_color || null,
@@ -1099,6 +1103,7 @@ app.post('/api/groups/join', (req, res) => {
     createdBy: group.created_by,
     alreadyJoined: joined.changes === 0,
     allowMemberClear: group.allow_member_clear || 0,
+    allowMemberClearTag: group.allow_member_clear_tag || 0,
     allowMemberExport: group.allow_member_export || 0,
     allowMemberKick: group.allow_member_kick || 0,
     groupColor: group.group_color || null,
@@ -1115,6 +1120,7 @@ app.get('/api/groups/mine', (req, res) => {
       code: g.code,
       createdBy: g.created_by,
       allowMemberClear: g.allow_member_clear || 0,
+      allowMemberClearTag: g.allow_member_clear_tag || 0,
       allowMemberExport: g.allow_member_export || 0,
       allowMemberKick: g.allow_member_kick || 0,
       groupColor: g.group_color || null,
@@ -1144,7 +1150,7 @@ app.patch('/api/groups/:groupId/name', (req, res) => {
 app.patch('/api/groups/:groupId/settings', (req, res) => {
   const { groupId } = req.params;
   const userId = req.session.userId;
-  const { allowMemberClear, allowMemberExport, allowMemberKick, groupColor } = req.body;
+  const { allowMemberClear, allowMemberClearTag, allowMemberExport, allowMemberKick, groupColor } = req.body;
 
   const group = stmts.findGroupById.get(groupId);
   if (!group) return res.status(404).json({ error: 'Group not found' });
@@ -1152,6 +1158,12 @@ app.patch('/api/groups/:groupId/settings', (req, res) => {
 
   if (allowMemberClear !== undefined) {
     stmts.updateGroupAllowMemberClear.run(allowMemberClear ? 1 : 0, groupId);
+    if (allowMemberClear) {
+      stmts.updateGroupAllowMemberClearTag.run(1, groupId);
+    }
+  }
+  if (allowMemberClearTag !== undefined && allowMemberClear !== true) {
+    stmts.updateGroupAllowMemberClearTag.run(allowMemberClearTag ? 1 : 0, groupId);
   }
   if (allowMemberExport !== undefined) {
     stmts.updateGroupAllowMemberExport.run(allowMemberExport ? 1 : 0, groupId);
@@ -1169,6 +1181,7 @@ app.patch('/api/groups/:groupId/settings', (req, res) => {
   io.to(groupId).emit('group_settings_updated', {
     groupId,
     allowMemberClear: !!updated.allow_member_clear,
+    allowMemberClearTag: !!updated.allow_member_clear_tag,
     allowMemberExport: !!updated.allow_member_export,
     allowMemberKick: !!updated.allow_member_kick,
     groupColor: updated.group_color || null,
@@ -1227,6 +1240,29 @@ app.delete('/api/groups/:groupId/messages', (req, res) => {
 
   stmts.deleteGroupMessages.run(groupId);
   io.to(groupId).emit('chat_cleared', { groupId });
+  res.json({ ok: true });
+});
+
+app.delete('/api/groups/:groupId/tags/:tag/messages', (req, res) => {
+  const { groupId, tag } = req.params;
+  const userId = req.session.userId;
+
+  const group = stmts.findGroupById.get(groupId);
+  if (!group) return res.status(404).json({ error: 'Group not found' });
+
+  const member = stmts.isMember.get(groupId, userId);
+  if (!member) return res.status(403).json({ error: 'Not a member of this group' });
+
+  const normalizedTag = normalizeHashtag(tag);
+  if (!normalizedTag) return res.status(400).json({ error: 'Invalid hashtag' });
+
+  const isOwner = group.created_by === userId;
+  if (!isOwner && !group.allow_member_clear && !group.allow_member_clear_tag) {
+    return res.status(403).json({ error: 'Only the group owner can clear this hashtag' });
+  }
+
+  stmts.deleteMessagesByHashtag.run(groupId, normalizedTag);
+  io.to(groupId).emit('tag_cleared', { groupId, hashtag: normalizedTag });
   res.json({ ok: true });
 });
 

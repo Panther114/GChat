@@ -161,6 +161,13 @@ async function prepareWallpaperFile(file) {
 // ── CSRF ──────────────────────────────────────────────────────────────────────
 let csrfToken = null;
 let appVersionLabel = 'v—';
+let currentAppVersion = null;
+let hostedAppUpdateTimer = null;
+let hostedAppReloadPending = false;
+const HOSTED_APP_UPDATE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
+const MESSAGE_VIEW_BASE_DELAY_MS = 2200;
+const MESSAGE_VIEW_PER_CHAR_MS = 200;
+const MESSAGE_VIEW_MAX_DELAY_MS = 18000;
 async function fetchCsrfToken() {
   try {
     const r = await fetch('/api/auth/csrf');
@@ -293,6 +300,86 @@ function migrateLegacyLocalSettings(userId = currentUser && currentUser.id) {
   writeLocalSettings(next, userId);
 }
 
+async function clearBrowserRuntimeCaches({ includeLocalData = false } = {}) {
+  if ('caches' in window) {
+    try {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((key) => caches.delete(key)));
+    } catch {
+      // best effort only
+    }
+  }
+
+  if (!includeLocalData) return;
+
+  try { sessionStorage.clear(); } catch { /* ignore */ }
+  try { localStorage.clear(); } catch { /* ignore */ }
+  derivedKeyCache.clear();
+  clearAllMessageVisibilityTimers();
+  groupDataCache.clear();
+  groupPreloadPromises.clear();
+  hiddenDisappearingMessageIds = new Set();
+}
+
+function buildReloadUrl() {
+  const nextUrl = new URL(window.location.href);
+  nextUrl.searchParams.set('_gchat_reload', String(Date.now()));
+  return nextUrl.toString();
+}
+
+async function reloadAppShell() {
+  if (window.electronAPI?.reloadHostedApp) {
+    try {
+      const reloaded = await window.electronAPI.reloadHostedApp();
+      if (reloaded) return;
+    } catch {
+      // fall back to browser reload below
+    }
+  }
+  window.location.replace(buildReloadUrl());
+}
+
+async function clearCacheAndRestartApp() {
+  await clearBrowserRuntimeCaches({ includeLocalData: true });
+  if (window.electronAPI?.clearCacheAndRestart) {
+    await window.electronAPI.clearCacheAndRestart();
+    return;
+  }
+  await reloadAppShell();
+}
+
+async function fetchAppVersionInfo() {
+  try {
+    const versionRes = await fetch('/api/meta/version', { cache: 'no-store' });
+    if (!versionRes.ok) return null;
+    const info = await versionRes.json().catch(() => null);
+    return info && typeof info.version === 'string' ? info : null;
+  } catch {
+    return null;
+  }
+}
+
+async function checkForHostedAppUpdate() {
+  const info = await fetchAppVersionInfo();
+  if (!info) return false;
+  currentAppVersion = currentAppVersion || info.version;
+  appVersionLabel = 'v' + info.version;
+  $('app-version-label').textContent = appVersionLabel;
+  if (currentAppVersion === info.version || hostedAppReloadPending) return false;
+  currentAppVersion = info.version;
+  hostedAppReloadPending = true;
+  showToast('New version detected. Refreshing…');
+  await reloadAppShell();
+  return true;
+}
+
+function startHostedAppUpdatePolling() {
+  if (hostedAppUpdateTimer) clearInterval(hostedAppUpdateTimer);
+  hostedAppUpdateTimer = setInterval(() => {
+    void checkForHostedAppUpdate();
+  }, HOSTED_APP_UPDATE_CHECK_INTERVAL_MS);
+}
+
 function createUploadId() {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
   return `upload-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -395,6 +482,13 @@ function formatHashtagLabel(topic) {
   return topic ? `#${topic}` : '';
 }
 
+function createHashtagChip(topic) {
+  const chip = document.createElement('span');
+  chip.className = 'msg-hashtag-chip';
+  chip.textContent = formatHashtagLabel(topic);
+  return chip;
+}
+
 function getMessageHashtagKey(msg) {
   return normalizeHashtagTopic(msg && msg.hashtag);
 }
@@ -410,9 +504,11 @@ function isDisappearingMessage(msg) {
 
 function computeDisappearingDurationMs(text) {
   const normalized = String(text || '').trim();
-  const chars = normalized.length;
-  const words = normalized ? normalized.split(/\s+/).filter(Boolean).length : 0;
-  return Math.max(6000, Math.min(45000, 7000 + (chars * 55) + (words * 220)));
+  const chars = Math.max(1, normalized.length);
+  return Math.max(
+    MESSAGE_VIEW_BASE_DELAY_MS,
+    Math.min(MESSAGE_VIEW_MAX_DELAY_MS, chars * MESSAGE_VIEW_PER_CHAR_MS)
+  );
 }
 
 function getHiddenDisappearingStorageKey(userId = currentUser && currentUser.id) {
@@ -583,29 +679,84 @@ function canTrackMessageRead(msg) {
   );
 }
 
+function clearMessageVisibilityTimer(messageId) {
+  const key = String(messageId || '');
+  const timer = messageVisibilityTimers.get(key);
+  if (!timer) return;
+  clearTimeout(timer);
+  messageVisibilityTimers.delete(key);
+}
+
+function clearAllMessageVisibilityTimers() {
+  for (const [messageId, timer] of messageVisibilityTimers.entries()) {
+    clearTimeout(timer);
+    messageVisibilityTimers.delete(messageId);
+  }
+}
+
+function isRowVisibleInMessagesViewport(row) {
+  const area = messagesArea();
+  if (!area || !row || row.hidden) return false;
+  const areaRect = area.getBoundingClientRect();
+  const rowRect = row.getBoundingClientRect();
+  return rowRect.bottom > areaRect.top && rowRect.top < areaRect.bottom;
+}
+
+function resolveMessageViewportDelayMs(row) {
+  const stored = Number(row?.dataset?.readDelayMs) || 0;
+  if (stored > 0) return stored;
+  const text = row?.querySelector('.msg-text')?.textContent || '';
+  return computeDisappearingDurationMs(text);
+}
+
+function completeViewportTrackingForRow(row) {
+  if (!row || !row.isConnected || !socket || !currentGroupId || document.visibilityState !== 'visible' || !document.hasFocus()) return;
+  const messageId = row.dataset.msgId;
+  if (!messageId) return;
+
+  if (!pendingReadMessageIds.has(messageId) && row.dataset.hasRead !== '1') {
+    pendingReadMessageIds.add(messageId);
+    row.classList.remove('unseen');
+    row.dataset.hasRead = '1';
+    if (currentGroupId) {
+      unreadCounts[currentGroupId] = Math.max(0, (unreadCounts[currentGroupId] || 0) - 1);
+      updateUnreadBadge(currentGroupId, unreadCounts[currentGroupId]);
+    }
+    socket.emit('mark_message_read', { groupId: currentGroupId, messageId });
+  }
+
+  if (row.dataset.disappearing === '1' && row.dataset.senderId !== String(currentUser?.id) && row.dataset.disappearingHidden !== '1') {
+    row.dataset.disappearingHidden = '1';
+    void hideDisappearingMessageLocally(messageId, currentGroupId, { notifyServer: true });
+    return;
+  }
+
+  if (row.dataset.hasRead === '1') {
+    readObserver?.unobserve(row);
+  }
+}
+
+function syncViewportTrackingForRow(row, isIntersecting) {
+  const messageId = row?.dataset?.msgId;
+  if (!messageId) return;
+  if (!isIntersecting || document.visibilityState !== 'visible' || !document.hasFocus()) {
+    clearMessageVisibilityTimer(messageId);
+    return;
+  }
+  if (messageVisibilityTimers.has(messageId)) return;
+  messageVisibilityTimers.set(messageId, setTimeout(() => {
+    messageVisibilityTimers.delete(messageId);
+    completeViewportTrackingForRow(row);
+  }, resolveMessageViewportDelayMs(row)));
+}
+
 function ensureReadObserver() {
   if (readObserver) return;
   readObserver = new IntersectionObserver((entries) => {
     for (const entry of entries) {
-      if (!entry.isIntersecting) continue;
-      if (!socket || !currentGroupId || document.visibilityState !== 'visible' || !document.hasFocus()) continue;
       const row = entry.target;
-      const messageId = row?.dataset?.msgId;
-      if (!messageId) continue;
-      if (row.dataset.disappearing === '1' && row.dataset.senderId !== String(currentUser?.id) && row.dataset.disappearingStarted !== '1') {
-        requestDisappearingTimerStart(messageId, currentGroupId);
-      }
-      if (!pendingReadMessageIds.has(messageId) && row?.dataset?.hasRead !== '1') {
-        pendingReadMessageIds.add(messageId);
-        row.classList.remove('unseen');
-        row.dataset.hasRead = '1';
-        if (currentGroupId) {
-          unreadCounts[currentGroupId] = Math.max(0, (unreadCounts[currentGroupId] || 0) - 1);
-          updateUnreadBadge(currentGroupId, unreadCounts[currentGroupId]);
-        }
-        socket.emit('mark_message_read', { groupId: currentGroupId, messageId });
-      }
-      if (row?.dataset?.hasRead === '1' && (row?.dataset?.disappearing !== '1' || row?.dataset?.disappearingStarted === '1')) {
+      syncViewportTrackingForRow(row, entry.isIntersecting && isRowVisibleInMessagesViewport(row));
+      if (row?.dataset?.hasRead === '1' && row?.dataset?.disappearing !== '1') {
         readObserver.unobserve(row);
       }
     }
@@ -636,11 +787,16 @@ function observeCurrentGroupRowsForRead() {
       disappearingHiddenAt: row.dataset.disappearingHidden === '1' ? new Date().toISOString() : null,
     });
   }
+  for (const row of rows) {
+    if (row.dataset.senderId === currentUser.id) continue;
+    syncViewportTrackingForRow(row, isRowVisibleInMessagesViewport(row));
+  }
 }
 
 function resetReadTracking() {
   pendingReadMessageIds = new Set();
   pendingDisappearingStartMessageIds = new Set();
+  clearAllMessageVisibilityTimers();
   if (readObserver) {
     readObserver.disconnect();
     readObserver = null;
@@ -816,6 +972,7 @@ const groupPreloadPromises = new Map();
 const pendingAttachmentRows = new Map();
 let hiddenDisappearingMessageIds = new Set();
 const disappearingMessageTimers = new Map();
+const messageVisibilityTimers = new Map();
 let imageViewerZoom = 1;
 const appLocalSettings = {
   wallpaperDataUrl: null,
@@ -915,6 +1072,41 @@ async function rebuildGroupMessageRows(groupId) {
   cache.rowsDirty = false;
 }
 
+async function removeTagMessagesFromCache(groupId, hashtag) {
+  const normalizedTag = normalizeHashtagTopic(hashtag);
+  if (!normalizedTag) return false;
+  const cache = ensureGroupCacheEntry(groupId);
+  if (!cache.messages) return false;
+
+  const removedIds = [];
+  cache.messages = cache.messages.filter((msg) => {
+    const shouldKeep = getMessageHashtagKey(msg) !== normalizedTag;
+    if (!shouldKeep) removedIds.push(String(msg.id));
+    return shouldKeep;
+  });
+  if (removedIds.length === 0) return false;
+
+  for (const messageId of removedIds) {
+    clearDisappearingTimer(messageId);
+    clearMessageVisibilityTimer(messageId);
+    hiddenDisappearingMessageIds.delete(messageId);
+  }
+  persistHiddenDisappearingMessageIds();
+
+  cache.oldestMessageId = cache.messages.length ? cache.messages[0].id : null;
+  cache.rowsDirty = true;
+  updateGroupUnseenCount(groupId, cache.messages);
+  if (groupId === currentGroupId) {
+    await rebuildGroupMessageRows(groupId);
+    renderGroupFromCache(groupId);
+    observeCurrentGroupRowsForRead();
+    addSystemMessage(`${formatHashtagLabel(normalizedTag)} was cleared`);
+  }
+  writeLocalGroupCache(groupId, cache);
+  await updateGroupPreviewFromMessage(groupId, cache.messages[cache.messages.length - 1] || null);
+  return true;
+}
+
 function renderGroupFromCache(groupId) {
   const cache = ensureGroupCacheEntry(groupId);
   const area = messagesArea();
@@ -949,12 +1141,10 @@ function preloadAllGroups() {
 async function ensureGroupDataPreloaded(groupId) {
   if (groupPreloadPromises.has(groupId)) return groupPreloadPromises.get(groupId);
   const cache = ensureGroupCacheEntry(groupId);
-  if (cache.messages && cache.members && cache.messageRows && !cache.rowsDirty) return cache;
 
   const preload = (async () => {
     if (cache.messages && cache.members && cache.rowsDirty) {
       await rebuildGroupMessageRows(groupId);
-      return ensureGroupCacheEntry(groupId);
     }
     const results = await Promise.allSettled([loadMessages(groupId), loadMembers(groupId)]);
     for (const result of results) {
@@ -1122,6 +1312,11 @@ function applyActiveTagFilterToRenderedMessages() {
     }
   }
   if (divider) divider.hidden = !hasVisibleMessageAfterDivider;
+  for (const child of rows) {
+    if (child.classList.contains('msg-row')) {
+      syncViewportTrackingForRow(child, isRowVisibleInMessagesViewport(child));
+    }
+  }
 }
 
 function getAvailableGroupTags(groupId = currentGroupId) {
@@ -1149,6 +1344,7 @@ function renderTagFilters() {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'chat-tag-filter-btn';
+    btn.dataset.tagTopic = tag.topic;
     if (tag.topic === activeTagFilter) btn.classList.add('active');
     btn.textContent = tag.label;
     btn.addEventListener('click', () => {
@@ -1167,6 +1363,11 @@ function renderTagFilters() {
       updateSlashCommandMenu();
       autoResizeTextarea($('message-input'));
       $('message-input').focus();
+    });
+    btn.addEventListener('contextmenu', (event) => {
+      if (!canCurrentUserClearTag()) return;
+      event.preventDefault();
+      showTagContextMenu(event, tag.topic);
     });
     wrap.appendChild(btn);
   }
@@ -1341,6 +1542,7 @@ async function hideDisappearingMessageLocally(messageId, groupId = currentGroupI
   const normalizedId = String(messageId || '');
   if (!normalizedId) return;
   clearDisappearingTimer(normalizedId);
+  clearMessageVisibilityTimer(normalizedId);
   hiddenDisappearingMessageIds.add(normalizedId);
   persistHiddenDisappearingMessageIds();
   if (options.notifyServer && socket && currentGroupId) {
@@ -1753,14 +1955,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadSettingsFromServer();
   applyWallpaperFromSettings();
   writeLocalSettings(appLocalSettings, currentUser.id);
-  try {
-    const versionRes = await fetch('/api/meta/version');
-    if (versionRes.ok) {
-      const info = await versionRes.json();
-      if (info && typeof info.version === 'string') appVersionLabel = 'v' + info.version;
-    }
-  } catch {
-    // keep fallback
+  const versionInfo = await fetchAppVersionInfo();
+  if (versionInfo) {
+    currentAppVersion = versionInfo.version;
+    appVersionLabel = 'v' + versionInfo.version;
   }
   $('app-version-label').textContent = appVersionLabel;
 
@@ -1776,6 +1974,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   updateMobilePanelOverlay();
   applyDesktopSidebarState();
   applyDesktopRightPanelState();
+  startHostedAppUpdatePolling();
 
   // Request permission to show native OS notifications
   requestNotificationPermission();
@@ -1793,12 +1992,18 @@ document.addEventListener('DOMContentLoaded', async () => {
   window.addEventListener('focus', () => {
     clearPageTitleNotification();
     observeCurrentGroupRowsForRead();
+    void checkForHostedAppUpdate();
   });
   window.addEventListener('blur', () => {
-    // Start tracking unread when page loses focus
+    clearAllMessageVisibilityTimers();
   });
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') observeCurrentGroupRowsForRead();
+    if (document.visibilityState === 'visible') {
+      observeCurrentGroupRowsForRead();
+      void checkForHostedAppUpdate();
+      return;
+    }
+    clearAllMessageVisibilityTimers();
   });
   window.addEventListener('resize', () => {
     if (!isMobileLayout()) {
@@ -1934,6 +2139,33 @@ function updateGroupActionButtons(isOwner) {
   }
 }
 
+function canCurrentUserClearTag() {
+  if (!currentGroupData || !currentUser) return false;
+  if (currentGroupData.createdBy === currentUser.id) return true;
+  return !!(currentGroupData.allowMemberClear || currentGroupData.allowMemberClearTag);
+}
+
+function syncAllowMemberClearTagToggleState() {
+  const clearToggle = $('allow-member-clear-toggle');
+  const tagToggle = $('allow-member-clear-tag-toggle');
+  if (!clearToggle || !tagToggle) return;
+  const forcedOn = !!clearToggle.checked;
+  tagToggle.checked = forcedOn || !!currentGroupData?.allowMemberClearTag;
+  tagToggle.disabled = forcedOn;
+}
+
+async function clearTagMessages(topic) {
+  const normalizedTopic = normalizeHashtagTopic(topic);
+  if (!normalizedTopic || !currentGroupId) return;
+  const res = await fetch(`/api/groups/${currentGroupId}/tags/${encodeURIComponent(normalizedTopic)}/messages`, {
+    method: 'DELETE',
+    headers: apiHeaders(),
+  });
+  if (res.ok) return;
+  const data = await res.json().catch(() => ({}));
+  showToast(data.error || 'Failed to clear hashtag', 'error');
+}
+
 function canCurrentUserKickMember(targetUserId) {
   if (!currentGroupData || !currentUser) return false;
   if (String(targetUserId) === String(currentUser.id)) return false;
@@ -2040,9 +2272,11 @@ async function selectGroup(groupId) {
   $('common-actions').hidden = false;
   if (currentGroupData) {
     $('allow-member-clear-toggle').checked = !!currentGroupData.allowMemberClear;
+    $('allow-member-clear-tag-toggle').checked = !!currentGroupData.allowMemberClearTag;
     $('allow-member-export-toggle').checked = !!currentGroupData.allowMemberExport;
     $('allow-member-kick-toggle').checked = !!currentGroupData.allowMemberKick;
   }
+  syncAllowMemberClearTagToggleState();
   updateGroupActionButtons(isOwner);
 
   // Key state
@@ -2312,10 +2546,12 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
     hasPrefixContent = true;
   }
 
-  if (msg.hashtag) {
-    const hashtagChip = document.createElement('span');
-    hashtagChip.className = 'msg-hashtag-chip';
-    hashtagChip.textContent = formatHashtagLabel(msg.hashtag);
+  const inlineHashtagChip = msg.hashtag && msg.type === 'text'
+    ? createHashtagChip(msg.hashtag)
+    : null;
+
+  if (msg.hashtag && !inlineHashtagChip) {
+    const hashtagChip = createHashtagChip(msg.hashtag);
     prefixRow.appendChild(hashtagChip);
     hasPrefixContent = true;
   }
@@ -2338,8 +2574,18 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
   const textEl = document.createElement('span');
   textEl.className = 'msg-text';
   await renderMsgContent(msg, textEl, bubble, groupId);
+  row.dataset.readDelayMs = String(computeDisappearingDurationMs(
+    textEl.textContent || getMessageTypePreviewLabel(msg) || msg.filename || 'Message'
+  ));
 
-  bubble.appendChild(textEl);
+  if (inlineHashtagChip) {
+    const inlineRow = document.createElement('div');
+    inlineRow.className = 'msg-inline-row';
+    inlineRow.append(inlineHashtagChip, textEl);
+    bubble.appendChild(inlineRow);
+  } else {
+    bubble.appendChild(textEl);
+  }
 
   // Timestamp + delivery + edited badge
   const meta = document.createElement('span');
@@ -2550,8 +2796,10 @@ function scrollToMessage(msgId) {
 // ── Context menu ──────────────────────────────────────────────────────────────
 let ctxMsg = null;
 let ctxText = '';
+let ctxTagTopic = null;
 function showContextMenu(e, msg, text) {
   ctxMsg = msg; ctxText = text;
+  hideTagContextMenu();
   const menu = $('ctx-menu');
   const isAttachment = msg.type === 'image' || msg.type === 'file';
   $('ctx-reply').hidden = false;
@@ -2568,6 +2816,24 @@ function showContextMenu(e, msg, text) {
 }
 
 function hideContextMenu() { $('ctx-menu').hidden = true; ctxMsg = null; }
+
+function showTagContextMenu(e, topic) {
+  ctxTagTopic = normalizeHashtagTopic(topic);
+  if (!ctxTagTopic) return;
+  hideContextMenu();
+  const menu = $('tag-ctx-menu');
+  const deleteBtn = $('tag-ctx-delete');
+  deleteBtn.textContent = `Delete ${formatHashtagLabel(ctxTagTopic)}`;
+  setElementIcon(deleteBtn, 'trash-2', { label: `Delete ${formatHashtagLabel(ctxTagTopic)}` });
+  menu.hidden = false;
+  menu.style.left = Math.min(e.clientX, window.innerWidth - 170) + 'px';
+  menu.style.top = Math.min(e.clientY, window.innerHeight - 100) + 'px';
+}
+
+function hideTagContextMenu() {
+  $('tag-ctx-menu').hidden = true;
+  ctxTagTopic = null;
+}
 
 async function getAttachmentData(msg) {
   if (!msg || (msg.type !== 'image' && msg.type !== 'file')) return null;
@@ -3218,6 +3484,7 @@ function initSocket() {
     $('conn-label').textContent = 'Disconnected';
     $('reconnect-banner').hidden = false;
     pendingDisappearingStartMessageIds = new Set();
+    clearAllMessageVisibilityTimers();
   });
 
   socket.on('connect_error', () => {
@@ -3317,6 +3584,7 @@ function initSocket() {
 
   socket.on('message_deleted', ({ messageId }) => {
     clearDisappearingTimer(messageId);
+    clearMessageVisibilityTimer(messageId);
     if (hiddenDisappearingMessageIds.delete(String(messageId))) persistHiddenDisappearingMessageIds();
     const row = document.querySelector('[data-msg-id="' + messageId + '"]');
     if (row) {
@@ -3395,6 +3663,7 @@ function initSocket() {
     const cache = ensureGroupCacheEntry(groupId);
     for (const msg of cache.messages || []) {
       clearDisappearingTimer(msg.id);
+      clearMessageVisibilityTimer(msg.id);
       hiddenDisappearingMessageIds.delete(String(msg.id));
     }
     persistHiddenDisappearingMessageIds();
@@ -3403,11 +3672,16 @@ function initSocket() {
     cache.members = cache.members || [];
     cache.oldestMessageId = null;
     cache.rowsDirty = false;
+    updateGroupUnseenCount(groupId, cache.messages);
     writeLocalGroupCache(groupId, cache);
     if (groupId !== currentGroupId) return;
     renderGroupFromCache(groupId);
     renderTagFilters();
     addSystemMessage('Chat history was cleared');
+  });
+
+  socket.on('tag_cleared', ({ groupId, hashtag }) => {
+    void removeTagMessagesFromCache(groupId, hashtag);
   });
 
   socket.on('group_renamed', ({ groupId, newName }) => {
@@ -3420,10 +3694,11 @@ function initSocket() {
     renderGroupList();
   });
 
-  socket.on('group_settings_updated', ({ groupId, allowMemberClear, allowMemberExport, allowMemberKick, groupColor }) => {
+  socket.on('group_settings_updated', ({ groupId, allowMemberClear, allowMemberClearTag, allowMemberExport, allowMemberKick, groupColor }) => {
     const group = groups.find((g) => g.id === groupId);
     if (group) {
       if (allowMemberClear !== undefined) group.allowMemberClear = !!allowMemberClear;
+      if (allowMemberClearTag !== undefined) group.allowMemberClearTag = !!allowMemberClearTag;
       if (allowMemberExport !== undefined) group.allowMemberExport = !!allowMemberExport;
       if (allowMemberKick !== undefined) group.allowMemberKick = !!allowMemberKick;
       if (groupColor !== undefined) group.groupColor = groupColor || null;
@@ -3436,6 +3711,7 @@ function initSocket() {
     }
     if (currentGroupData) {
       if (allowMemberClear !== undefined) currentGroupData.allowMemberClear = !!allowMemberClear;
+      if (allowMemberClearTag !== undefined) currentGroupData.allowMemberClearTag = !!allowMemberClearTag;
       if (allowMemberExport !== undefined) currentGroupData.allowMemberExport = !!allowMemberExport;
       if (allowMemberKick !== undefined) currentGroupData.allowMemberKick = !!allowMemberKick;
       if (groupColor !== undefined) currentGroupData.groupColor = groupColor || null;
@@ -3443,9 +3719,11 @@ function initSocket() {
     const isOwner = currentGroupData && currentGroupData.createdBy === currentUser.id;
     if (isOwner) {
       $('allow-member-clear-toggle').checked = !!currentGroupData.allowMemberClear;
+      $('allow-member-clear-tag-toggle').checked = !!currentGroupData.allowMemberClearTag;
       $('allow-member-export-toggle').checked = !!currentGroupData.allowMemberExport;
       $('allow-member-kick-toggle').checked = !!currentGroupData.allowMemberKick;
     }
+    syncAllowMemberClearTagToggleState();
     updateGroupActionButtons(isOwner);
     renderMembersList();
     renderGroupList();
@@ -4027,6 +4305,15 @@ function setupEventListeners() {
     $('join-modal').hidden = false;
   });
   $('join-cancel-btn').addEventListener('click', () => $('join-modal').hidden = true);
+  $('clear-cache-btn').addEventListener('click', () => {
+    showConfirm(
+      'Clear Cache and Restart',
+      'This will clear local cache and restart GChat. Continue?',
+      async () => {
+        await clearCacheAndRestartApp();
+      }
+    );
+  });
   $('join-confirm-btn').addEventListener('click', async () => {
     const code = $('join-group-code').value.trim();
     $('join-error').textContent = '';
@@ -4146,11 +4433,30 @@ function setupEventListeners() {
     const result = await updateGroupSettingRequest({ allowMemberClear: nextChecked });
     if (!result.ok) {
       e.target.checked = !nextChecked;
+      syncAllowMemberClearTagToggleState();
       showToast(result.error || 'Failed to update group settings', 'error');
       return;
     }
     if (currentGroupData) {
       currentGroupData.allowMemberClear = e.target.checked;
+      if (e.target.checked) currentGroupData.allowMemberClearTag = true;
+      syncAllowMemberClearTagToggleState();
+      updateGroupActionButtons(currentGroupData.createdBy === currentUser.id);
+    }
+  });
+
+  $('allow-member-clear-tag-toggle').addEventListener('change', async (e) => {
+    const nextChecked = e.target.checked;
+    const result = await updateGroupSettingRequest({ allowMemberClearTag: nextChecked });
+    if (!result.ok) {
+      e.target.checked = !nextChecked;
+      syncAllowMemberClearTagToggleState();
+      showToast(result.error || 'Failed to update group settings', 'error');
+      return;
+    }
+    if (currentGroupData) {
+      currentGroupData.allowMemberClearTag = nextChecked;
+      syncAllowMemberClearTagToggleState();
       updateGroupActionButtons(currentGroupData.createdBy === currentUser.id);
     }
   });
@@ -4277,8 +4583,22 @@ function setupEventListeners() {
     hideContextMenu();
   });
 
+  $('tag-ctx-delete').addEventListener('click', () => {
+    if (!ctxTagTopic || !canCurrentUserClearTag()) return;
+    const topic = ctxTagTopic;
+    hideTagContextMenu();
+    showConfirm(
+      `Delete ${formatHashtagLabel(topic)}`,
+      `This will permanently delete every ${formatHashtagLabel(topic)} message for everyone. Continue?`,
+      async () => {
+        await clearTagMessages(topic);
+      }
+    );
+  });
+
   document.addEventListener('click', (e) => {
     if (!$('ctx-menu').contains(e.target)) hideContextMenu();
+    if (!$('tag-ctx-menu').contains(e.target)) hideTagContextMenu();
     if (!$('emoji-picker').contains(e.target) && e.target !== $('emoji-btn')) {
       $('emoji-picker').hidden = true;
     }
