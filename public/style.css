@@ -272,7 +272,14 @@ body.sidebar-resizing * {
   object-fit: contain;
 }
 .brand-name { font-size: 17px; font-weight: 700; background: linear-gradient(135deg, var(--brand-gradient-start), var(--brand-gradient-end)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
-.brand-version { margin-left: auto; font-size: 11px; color: var(--text-secondary); opacity: .9; }
+.brand-cache-btn {
+  margin-left: auto;
+  width: 28px;
+  height: 28px;
+  color: var(--text-secondary);
+}
+.brand-cache-btn:hover { color: var(--text-primary); }
+.brand-version { margin-left: 8px; font-size: 11px; color: var(--text-secondary); opacity: .9; }
 
 .conn-status {
   display: flex;
@@ -976,9 +983,20 @@ body.sidebar-resizing * {
   gap: 6px;
   margin-bottom: 4px;
 }
+.msg-inline-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+.msg-inline-row .msg-text {
+  min-width: 0;
+  flex: 1 1 auto;
+}
 .msg-hashtag-chip {
   display: inline-flex;
   align-items: center;
+  flex-shrink: 0;
   border-radius: 999px;
   padding: 3px 8px;
   background: var(--hashtag-token-bg);

@@ -37,6 +37,7 @@ const APP_USER_MODEL_ID = 'com.Gchat.app';
 const MIN_WINDOW_WIDTH = 880;
 const MIN_WINDOW_HEIGHT = 600;
 const ERR_ABORTED = -3;
+const UPDATE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
 
 // ── electron-store is ESM-only in v10+; use dynamic import ────────────────────
 let store = null;
@@ -431,6 +432,24 @@ ipcMain.handle('copy-binary-to-clipboard', async (_event, payload = {}) => {
   }
 });
 
+ipcMain.handle('clear-cache-and-restart', async () => {
+  const sessionToClear = mainWindow?.webContents?.session;
+  if (sessionToClear) {
+    await sessionToClear.clearStorageData();
+    await sessionToClear.clearCache();
+  }
+  isQuitting = true;
+  app.relaunch();
+  app.exit(0);
+  return true;
+});
+
+ipcMain.handle('reload-hosted-app', async () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  await mainWindow.webContents.reloadIgnoringCache();
+  return true;
+});
+
 // ── Badge icon helper ─────────────────────────────────────────────────────────
 function createBadgeIcon(count) {
   const label = count > 99 ? '99+' : String(count);
@@ -483,6 +502,9 @@ function setupAutoUpdater() {
 
   if (app.isPackaged) {
     autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+    setInterval(() => {
+      autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+    }, UPDATE_CHECK_INTERVAL_MS);
   }
 }
 

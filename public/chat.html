@@ -13,6 +13,7 @@
     <div class="sidebar-brand">
       <img class="brand-icon" src="gchat_icon.png" alt="GChat logo" />
       <span class="brand-name">GChat</span>
+      <button class="btn-icon brand-cache-btn" id="clear-cache-btn" title="Clear cache and restart" aria-label="Clear cache and restart" data-icon="refresh-cw" data-icon-only="true"></button>
       <span class="brand-version" id="app-version-label">v—</span>
     </div>
     <div class="conn-status" id="conn-status">
@@ -150,6 +151,11 @@
         <label class="toggle-label toggle-switch-row" for="allow-member-clear-toggle">
           <span>Members can clear</span>
           <input type="checkbox" id="allow-member-clear-toggle" />
+          <span class="toggle-switch-ui" aria-hidden="true"></span>
+        </label>
+        <label class="toggle-label toggle-switch-row" for="allow-member-clear-tag-toggle">
+          <span>Members can clear #</span>
+          <input type="checkbox" id="allow-member-clear-tag-toggle" />
           <span class="toggle-switch-ui" aria-hidden="true"></span>
         </label>
         <label class="toggle-label toggle-switch-row" for="allow-member-export-toggle">
@@ -300,6 +306,10 @@
     <button class="ctx-item" id="ctx-reply" data-icon="reply">Reply</button>
     <button class="ctx-item" id="ctx-copy" data-icon="copy">Copy</button>
     <button class="ctx-item" id="ctx-download" data-icon="download">Download</button>
+  </div>
+
+  <div class="ctx-menu" id="tag-ctx-menu" hidden>
+    <button class="ctx-item" id="tag-ctx-delete" data-icon="trash-2">Delete #</button>
   </div>
 
   <div class="modal-overlay" id="group-color-modal" hidden>

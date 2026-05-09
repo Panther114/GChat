@@ -106,4 +106,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   copyBinaryToClipboard(payload) {
     return ipcRenderer.invoke('copy-binary-to-clipboard', payload);
   },
+
+  clearCacheAndRestart() {
+    return ipcRenderer.invoke('clear-cache-and-restart');
+  },
+
+  reloadHostedApp() {
+    return ipcRenderer.invoke('reload-hosted-app');
+  },
 });
