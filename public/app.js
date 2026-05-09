@@ -594,6 +594,12 @@ function normalizeWallpaperSettings(settings = {}) {
   };
 }
 
+function clampInteger(value, min, max, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(parsed)));
+}
+
 function getWallpaperSettings(settings = appLocalSettings) {
   const normalized = normalizeWallpaperSettings(settings);
   return {
@@ -4244,10 +4250,11 @@ function setupEventListeners() {
     }
   });
   $('wallpaper-blur-input').addEventListener('input', (e) => {
+    const maxWallpaperBlur = wallpaperTheme ? wallpaperTheme.MAX_WALLPAPER_BLUR : 24;
     wallpaperDraft = {
       ...getWallpaperSettings(appLocalSettings),
       ...(wallpaperDraft || {}),
-      wallpaperBlur: Math.max(DEFAULT_WALLPAPER_BLUR, Math.min(wallpaperTheme ? wallpaperTheme.MAX_WALLPAPER_BLUR : 24, Number(e.target.value) || DEFAULT_WALLPAPER_BLUR)),
+      wallpaperBlur: clampInteger(e.target.value, DEFAULT_WALLPAPER_BLUR, maxWallpaperBlur, DEFAULT_WALLPAPER_BLUR),
     };
     applyWallpaperDraftPreview();
     setWallpaperSaveState(!wallpaperSettingsEqual(wallpaperDraft, appLocalSettings));
@@ -4256,7 +4263,7 @@ function setupEventListeners() {
     wallpaperDraft = {
       ...getWallpaperSettings(appLocalSettings),
       ...(wallpaperDraft || {}),
-      wallpaperTransparency: Math.max(0, Math.min(100, Number(e.target.value) || 0)),
+      wallpaperTransparency: clampInteger(e.target.value, 0, 100, DEFAULT_WALLPAPER_TRANSPARENCY),
     };
     applyWallpaperDraftPreview();
     setWallpaperSaveState(!wallpaperSettingsEqual(wallpaperDraft, appLocalSettings));

@@ -39,7 +39,7 @@
 
   function getWallpaperOverlayOpacity(settings) {
     const normalized = normalizeSettings(settings);
-    return String((100 - normalized.wallpaperTransparency) / 100);
+    return (100 - normalized.wallpaperTransparency) / 100;
   }
 
   function applyToRoot(settings, root) {
@@ -48,7 +48,7 @@
     target.style.setProperty('--chat-wallpaper', wallpaperCssValue(normalized.wallpaperDataUrl));
     target.style.setProperty('--auth-wallpaper', wallpaperCssValue(normalized.wallpaperDataUrl));
     target.style.setProperty('--wallpaper-blur', `${normalized.wallpaperBlur}px`);
-    target.style.setProperty('--wallpaper-overlay-opacity', getWallpaperOverlayOpacity(normalized));
+    target.style.setProperty('--wallpaper-overlay-opacity', String(getWallpaperOverlayOpacity(normalized)));
     return normalized;
   }
 
