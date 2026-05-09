@@ -277,6 +277,10 @@ const localTimeFormatter = new Intl.DateTimeFormat(undefined, {
   hour12: false,
 });
 const integerFormatter = new Intl.NumberFormat();
+const tokenAmountFormatter = new Intl.NumberFormat(undefined, {
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 2,
+});
 const localDayFormatter = new Intl.DateTimeFormat(undefined, {
   year: 'numeric',
   month: 'short',
@@ -533,13 +537,31 @@ function isAiAssistantMessage(msg) {
   return String(msg?.senderId || '') === AI_ASSISTANT_USER_ID;
 }
 
+function normalizeAiTokenAmount(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return 0;
+  return Math.round(parsed * 10000) / 10000;
+}
+
+function formatAiTokenAmount(value) {
+  const normalized = normalizeAiTokenAmount(value);
+  if (normalized > 0 && normalized < 0.01) return '<0.01';
+  return tokenAmountFormatter.format(normalized);
+}
+
 function normalizeAiMeta(meta) {
   if (!meta || typeof meta !== 'object') return null;
-  const promptTokens = Math.max(0, Math.round(Number(meta.promptTokens) || 0));
-  const completionTokens = Math.max(0, Math.round(Number(meta.completionTokens) || 0));
+  const promptTokens = normalizeAiTokenAmount(meta.promptTokens);
+  const completionTokens = normalizeAiTokenAmount(meta.completionTokens);
   const totalTokens = Math.max(
     promptTokens + completionTokens,
-    Math.max(0, Math.round(Number(meta.totalTokens) || 0))
+    normalizeAiTokenAmount(meta.totalTokens)
+  );
+  const rawPromptTokens = Math.max(0, Math.round(Number(meta.rawPromptTokens) || 0));
+  const rawCompletionTokens = Math.max(0, Math.round(Number(meta.rawCompletionTokens) || 0));
+  const rawTotalTokens = Math.max(
+    rawPromptTokens + rawCompletionTokens,
+    Math.max(0, Math.round(Number(meta.rawTotalTokens) || 0))
   );
   const estimatedCostUsdRaw = Number(meta.estimatedCostUsd);
   const estimatedCostUsd = Number.isFinite(estimatedCostUsdRaw) && estimatedCostUsdRaw >= 0
@@ -559,6 +581,9 @@ function normalizeAiMeta(meta) {
     promptTokens,
     completionTokens,
     totalTokens,
+    rawPromptTokens,
+    rawCompletionTokens,
+    rawTotalTokens,
     estimatedCostUsd,
     estimatedCostRmb,
   };
@@ -597,7 +622,7 @@ function buildAiMetaDisplay(meta) {
   ];
   const statsParts = [];
   if (normalized.totalTokens > 0) {
-    statsParts.push(`${integerFormatter.format(normalized.totalTokens)} tokens`);
+    statsParts.push(`${formatAiTokenAmount(normalized.totalTokens)} tokens`);
   }
   const costText = formatRmbCost(normalized.estimatedCostRmb);
   if (costText) statsParts.push(costText);
@@ -638,12 +663,14 @@ function createAiMetaElement(meta) {
 function normalizeAiUsageSection(value) {
   if (!value || typeof value !== 'object') return null;
   const dailyLimit = Math.max(0, Math.round(Number(value.dailyLimit) || 0));
-  const usedTokens = Math.max(0, Math.round(Number(value.usedTokens) || 0));
+  const usedTokens = normalizeAiTokenAmount(value.usedTokens);
   return {
     ...value,
     dailyLimit,
     usedTokens,
-    remainingTokens: Math.max(0, Number.isFinite(Number(value.remainingTokens)) ? Math.round(Number(value.remainingTokens)) : (dailyLimit - usedTokens)),
+    remainingTokens: normalizeAiTokenAmount(
+      Number.isFinite(Number(value.remainingTokens)) ? Number(value.remainingTokens) : (dailyLimit - usedTokens)
+    ),
     exceeded: !!value.exceeded || dailyLimit <= 0 || usedTokens >= dailyLimit,
   };
 }
@@ -664,7 +691,7 @@ function normalizeAiUsageSummary(value) {
 
 function formatAiUsageValue(section) {
   if (!section) return '0 / 0 tokens';
-  return `${integerFormatter.format(section.usedTokens)} / ${integerFormatter.format(section.dailyLimit)} tokens`;
+  return `${formatAiTokenAmount(section.usedTokens)} / ${integerFormatter.format(section.dailyLimit)} tokens`;
 }
 
 function getAiUsagePercent(section) {
@@ -733,7 +760,7 @@ function normalizeManagedUserSummary(value) {
       iconColor: user.iconColor || '#4A90D9',
       profilePicture: user.profilePicture || null,
       aiDailyTokenLimit: Math.max(0, Math.round(Number(user.aiDailyTokenLimit) || 0)),
-      aiTokensUsedToday: Math.max(0, Math.round(Number(user.aiTokensUsedToday) || 0)),
+      aiTokensUsedToday: normalizeAiTokenAmount(user.aiTokensUsedToday),
       aiLimitExceeded: !!user.aiLimitExceeded,
     })) : [],
     viewerCanManageAiLimits: !!value.viewerCanManageAiLimits,
@@ -795,7 +822,7 @@ function renderUserManagementPanel() {
 
     const value = document.createElement('div');
     value.className = 'user-management-user-value';
-    value.textContent = `${integerFormatter.format(user.aiTokensUsedToday)} / ${integerFormatter.format(user.aiDailyTokenLimit)} tokens`;
+    value.textContent = `${formatAiTokenAmount(user.aiTokensUsedToday)} / ${integerFormatter.format(user.aiDailyTokenLimit)} tokens`;
 
     const usage = document.createElement('div');
     usage.className = 'user-management-user-usage';

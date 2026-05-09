@@ -43,10 +43,11 @@ const AI_MODEL_OPTIONS = {
   },
   'deepseek/deepseek-v4-flash': {
     label: 'DeepSeek V4 Flash',
-    inputCostPerMillion: 0.14,
-    outputCostPerMillion: 0.28,
+    inputCostPerMillion: 0.069,
+    outputCostPerMillion: 0.281,
   },
 };
+const STANDARD_AI_TOKEN_MODEL = 'x-ai/grok-4.3';
 const DEFAULT_AI_MODEL = 'deepseek/deepseek-v4-flash';
 const AI_MODE_OPTIONS = new Set(['fast', 'thinking']);
 const DEFAULT_AI_MODE = 'thinking';
@@ -207,6 +208,12 @@ function normalizeAiTokenCount(value) {
   return Math.round(parsed);
 }
 
+function normalizeAiTokenAmount(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return 0;
+  return Math.round(parsed * 10000) / 10000;
+}
+
 function normalizeAiCostUsd(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) return null;
@@ -270,11 +277,17 @@ function getAiUsageWindow(now = Date.now()) {
 
 function sanitizeAiMessageMeta(value) {
   if (!value || typeof value !== 'object') return null;
-  const promptTokens = normalizeAiTokenCount(value.promptTokens ?? value.prompt_tokens);
-  const completionTokens = normalizeAiTokenCount(value.completionTokens ?? value.completion_tokens);
+  const promptTokens = normalizeAiTokenAmount(value.promptTokens ?? value.prompt_tokens);
+  const completionTokens = normalizeAiTokenAmount(value.completionTokens ?? value.completion_tokens);
   const totalTokens = Math.max(
     promptTokens + completionTokens,
-    normalizeAiTokenCount(value.totalTokens ?? value.total_tokens)
+    normalizeAiTokenAmount(value.totalTokens ?? value.total_tokens)
+  );
+  const rawPromptTokens = normalizeAiTokenCount(value.rawPromptTokens ?? value.raw_prompt_tokens);
+  const rawCompletionTokens = normalizeAiTokenCount(value.rawCompletionTokens ?? value.raw_completion_tokens);
+  const rawTotalTokens = Math.max(
+    rawPromptTokens + rawCompletionTokens,
+    normalizeAiTokenCount(value.rawTotalTokens ?? value.raw_total_tokens ?? value.totalTokensRaw ?? value.total_tokens_raw)
   );
   const estimatedCostUsd = normalizeAiCostUsd(value.estimatedCostUsd ?? value.estimated_cost_usd ?? value.costUsd);
   const explicitCostRmb = normalizeAiCostUsd(value.estimatedCostRmb ?? value.estimated_cost_rmb ?? value.costRmb);
@@ -290,6 +303,9 @@ function sanitizeAiMessageMeta(value) {
     promptTokens,
     completionTokens,
     totalTokens,
+    rawPromptTokens,
+    rawCompletionTokens,
+    rawTotalTokens,
     estimatedCostUsd,
     estimatedCostRmb,
     costSource,
@@ -399,6 +415,32 @@ function extractOpenRouterUsage(payload) {
     promptTokens,
     completionTokens,
     totalTokens,
+  };
+}
+
+function convertModelUsageToStandardTokens(usage, model = DEFAULT_AI_MODEL) {
+  const normalizedModel = normalizeAiModel(model);
+  const pricing = AI_MODEL_OPTIONS[normalizedModel] || AI_MODEL_OPTIONS[DEFAULT_AI_MODEL];
+  const standardPricing = AI_MODEL_OPTIONS[STANDARD_AI_TOKEN_MODEL] || pricing;
+  const rawPromptTokens = normalizeAiTokenCount(usage?.promptTokens ?? usage?.prompt_tokens);
+  const rawCompletionTokens = normalizeAiTokenCount(usage?.completionTokens ?? usage?.completion_tokens);
+  const rawTotalTokens = Math.max(
+    rawPromptTokens + rawCompletionTokens,
+    normalizeAiTokenCount(usage?.totalTokens ?? usage?.total_tokens)
+  );
+  const promptTokens = normalizeAiTokenAmount(
+    rawPromptTokens * (pricing.inputCostPerMillion / standardPricing.inputCostPerMillion)
+  );
+  const completionTokens = normalizeAiTokenAmount(
+    rawCompletionTokens * (pricing.outputCostPerMillion / standardPricing.outputCostPerMillion)
+  );
+  return {
+    promptTokens,
+    completionTokens,
+    totalTokens: normalizeAiTokenAmount(promptTokens + completionTokens),
+    rawPromptTokens,
+    rawCompletionTokens,
+    rawTotalTokens,
   };
 }
 
@@ -1199,8 +1241,8 @@ function getAiUsageSnapshotForUser(userId) {
   const globalUsage = stmts.getGlobalAiUsageInWindow.get(window.startIso, window.endIso) || {};
   const userLimit = getUserAiDailyTokenLimit(user);
   const globalLimit = getGlobalAiDailyTokenLimit();
-  const userUsedTokens = normalizeAiTokenCount(userUsage.total_tokens);
-  const globalUsedTokens = normalizeAiTokenCount(globalUsage.total_tokens);
+  const userUsedTokens = normalizeAiTokenAmount(userUsage.total_tokens);
+  const globalUsedTokens = normalizeAiTokenAmount(globalUsage.total_tokens);
   const userExceeded = userLimit <= 0 || userUsedTokens >= userLimit;
   const globalExceeded = globalLimit <= 0 || globalUsedTokens >= globalLimit;
   return {
@@ -1210,13 +1252,13 @@ function getAiUsageSnapshotForUser(userId) {
       username: user.username,
       dailyLimit: userLimit,
       usedTokens: userUsedTokens,
-      remainingTokens: Math.max(0, userLimit - userUsedTokens),
+      remainingTokens: normalizeAiTokenAmount(Math.max(0, userLimit - userUsedTokens)),
       exceeded: userExceeded,
     },
     global: {
       dailyLimit: globalLimit,
       usedTokens: globalUsedTokens,
-      remainingTokens: Math.max(0, globalLimit - globalUsedTokens),
+      remainingTokens: normalizeAiTokenAmount(Math.max(0, globalLimit - globalUsedTokens)),
       exceeded: globalExceeded,
     },
     canStartRequest: !userExceeded && !globalExceeded,
@@ -1236,7 +1278,7 @@ function getAiLimitError(summary) {
 
 function formatManagedUser(user, usageWindow) {
   const usage = stmts.getUserAiUsageInWindow.get(user.id, usageWindow.startIso, usageWindow.endIso) || {};
-  const usedTokens = normalizeAiTokenCount(usage.total_tokens);
+  const usedTokens = normalizeAiTokenAmount(usage.total_tokens);
   const dailyLimit = getUserAiDailyTokenLimit(user);
   return {
     id: user.id,
@@ -1582,9 +1624,9 @@ app.get('/api/users/management', (req, res) => {
     viewerCanDeleteUsers: canManage,
     global: {
       dailyLimit: globalLimit,
-      usedTokens: normalizeAiTokenCount(globalUsage.total_tokens),
-      remainingTokens: Math.max(0, globalLimit - normalizeAiTokenCount(globalUsage.total_tokens)),
-      exceeded: globalLimit <= 0 || normalizeAiTokenCount(globalUsage.total_tokens) >= globalLimit,
+      usedTokens: normalizeAiTokenAmount(globalUsage.total_tokens),
+      remainingTokens: normalizeAiTokenAmount(Math.max(0, globalLimit - normalizeAiTokenAmount(globalUsage.total_tokens))),
+      exceeded: globalLimit <= 0 || normalizeAiTokenAmount(globalUsage.total_tokens) >= globalLimit,
     },
     window: usageWindow,
   });
@@ -1630,9 +1672,9 @@ app.patch('/api/ai/global-limit', (req, res) => {
     ok: true,
     global: {
       dailyLimit: parsedLimit.value,
-      usedTokens: normalizeAiTokenCount(globalUsage.total_tokens),
-      remainingTokens: Math.max(0, parsedLimit.value - normalizeAiTokenCount(globalUsage.total_tokens)),
-      exceeded: parsedLimit.value <= 0 || normalizeAiTokenCount(globalUsage.total_tokens) >= parsedLimit.value,
+      usedTokens: normalizeAiTokenAmount(globalUsage.total_tokens),
+      remainingTokens: normalizeAiTokenAmount(Math.max(0, parsedLimit.value - normalizeAiTokenAmount(globalUsage.total_tokens))),
+      exceeded: parsedLimit.value <= 0 || normalizeAiTokenAmount(globalUsage.total_tokens) >= parsedLimit.value,
     },
     window: usageWindow,
   });
@@ -2275,15 +2317,19 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
     }
 
     const usage = extractOpenRouterUsage(payload);
+    const standardizedUsage = convertModelUsageToStandardTokens(usage, selectedModel);
     const directCostUsd = extractOpenRouterCostUsd(payload);
     const estimatedCostUsd = directCostUsd ?? estimateOpenRouterCostUsd(usage, selectedModel);
     const aiMeta = sanitizeAiMessageMeta({
       model: getOpenRouterResponseModel(payload, selectedModel),
       mode: selectedMode,
       tone: selectedTone,
-      promptTokens: usage.promptTokens,
-      completionTokens: usage.completionTokens,
-      totalTokens: usage.totalTokens,
+      promptTokens: standardizedUsage.promptTokens,
+      completionTokens: standardizedUsage.completionTokens,
+      totalTokens: standardizedUsage.totalTokens,
+      rawPromptTokens: standardizedUsage.rawPromptTokens,
+      rawCompletionTokens: standardizedUsage.rawCompletionTokens,
+      rawTotalTokens: standardizedUsage.rawTotalTokens,
       estimatedCostUsd,
       estimatedCostRmb: convertUsdToRmb(estimatedCostUsd),
       costSource: directCostUsd != null ? 'upstream' : 'estimated',
