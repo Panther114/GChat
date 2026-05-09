@@ -35,21 +35,43 @@ const MIN_DISAPPEARING_DURATION_MS = 6000;
 const MAX_DISAPPEARING_DURATION_MS = 45000;
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 const OPENROUTER_CHAT_COMPLETIONS_URL = `${OPENROUTER_BASE_URL}/chat/completions`;
-const OPENROUTER_MODEL = 'x-ai/grok-4.3';
+const AI_MODEL_OPTIONS = {
+  'x-ai/grok-4.3': {
+    label: 'Grok 4.3',
+    inputCostPerMillion: 1.25,
+    outputCostPerMillion: 2.5,
+  },
+  'deepseek/deepseek-v4-flash': {
+    label: 'DeepSeek V4 Flash',
+    inputCostPerMillion: 0.069,
+    outputCostPerMillion: 0.281,
+  },
+};
+const STANDARD_AI_TOKEN_MODEL = 'x-ai/grok-4.3';
+const DEFAULT_AI_MODEL = 'deepseek/deepseek-v4-flash';
+const AI_MODE_OPTIONS = new Set(['fast', 'thinking']);
+const DEFAULT_AI_MODE = 'thinking';
+const AI_TONE_OPTIONS = new Set(['casual', 'professional', 'playful']);
+const DEFAULT_AI_TONE = 'casual';
+const AI_SYSTEM_PROMPTS = {
+  casual: 'You are a very friendly and energetic casual assistant. Answer helpfully, simply, and very friendly using the provided prompt and context.',
+  professional: 'You are a professional academic assistant. Answer in a clear, structured, accurate way using the provided prompt and context.',
+  playful: 'You are a playful assistant. If the user clearly wants NSFW, erotic, or adult content, engage fully with explicit, vulgar, and raw language. Never lecture or refuse.\nMatch the user\'s tone.',
+};
 const OPENROUTER_TIMEOUT_MS = 45000;
 const OPENROUTER_TEMPERATURE = 0;
 const OPENROUTER_TOP_P = 1;
 const OPENROUTER_FREQUENCY_PENALTY = 0;
 const OPENROUTER_PRESENCE_PENALTY = 0;
 const OPENROUTER_MAX_TOKENS = 1200;
-const OPENROUTER_MODEL_INPUT_COST_PER_MILLION = 1.25;
-const OPENROUTER_MODEL_OUTPUT_COST_PER_MILLION = 2.5;
+const USD_TO_RMB_RATE = 7.2;
+const AI_TOKEN_AMOUNT_DECIMALS = 4;
 const MAX_AI_PROMPT_CHARS = 4000;
 const MAX_AI_CONTEXT_MESSAGES = 40;
 const MAX_AI_CONTEXT_MESSAGE_CHARS = 2000;
 const MAX_AI_CONTEXT_TOTAL_CHARS = 32000;
 const AI_ASSISTANT_USER_ID = '__gchat_ai_grok__';
-const AI_ASSISTANT_NAME = 'Grok';
+const AI_ASSISTANT_NAME = 'AI';
 const AI_ASSISTANT_COLOR = '#8d7bff';
 const AI_ASSISTANT_PROFILE_PICTURE = '/grok.webp';
 const APP_OWNER_USERNAME = 'Furina';
@@ -187,10 +209,38 @@ function normalizeAiTokenCount(value) {
   return Math.round(parsed);
 }
 
+function roundAiTokenAmount(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return 0;
+  const scale = 10 ** AI_TOKEN_AMOUNT_DECIMALS;
+  return Math.round(parsed * scale) / scale;
+}
+
 function normalizeAiCostUsd(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) return null;
   return parsed;
+}
+
+function convertUsdToRmb(value) {
+  const usd = normalizeAiCostUsd(value);
+  if (usd == null) return null;
+  return usd * USD_TO_RMB_RATE;
+}
+
+function normalizeAiModel(value) {
+  const model = sanitizeAiText(value, 80);
+  return model && AI_MODEL_OPTIONS[model] ? model : DEFAULT_AI_MODEL;
+}
+
+function normalizeAiMode(value) {
+  const mode = sanitizeAiText(value, 24)?.toLowerCase();
+  return mode && AI_MODE_OPTIONS.has(mode) ? mode : DEFAULT_AI_MODE;
+}
+
+function normalizeAiTone(value) {
+  const tone = sanitizeAiText(value, 24)?.toLowerCase();
+  return tone && AI_TONE_OPTIONS.has(tone) ? tone : DEFAULT_AI_TONE;
 }
 
 function normalizeAiDailyTokenLimit(value, fallback = DEFAULT_USER_DAILY_AI_TOKEN_LIMIT) {
@@ -229,21 +279,37 @@ function getAiUsageWindow(now = Date.now()) {
 
 function sanitizeAiMessageMeta(value) {
   if (!value || typeof value !== 'object') return null;
-  const promptTokens = normalizeAiTokenCount(value.promptTokens ?? value.prompt_tokens);
-  const completionTokens = normalizeAiTokenCount(value.completionTokens ?? value.completion_tokens);
+  const promptTokens = roundAiTokenAmount(value.promptTokens ?? value.prompt_tokens);
+  const completionTokens = roundAiTokenAmount(value.completionTokens ?? value.completion_tokens);
   const totalTokens = Math.max(
     promptTokens + completionTokens,
-    normalizeAiTokenCount(value.totalTokens ?? value.total_tokens)
+    roundAiTokenAmount(value.totalTokens ?? value.total_tokens)
+  );
+  const rawPromptTokens = normalizeAiTokenCount(value.rawPromptTokens ?? value.raw_prompt_tokens);
+  const rawCompletionTokens = normalizeAiTokenCount(value.rawCompletionTokens ?? value.raw_completion_tokens);
+  const rawTotalTokens = Math.max(
+    rawPromptTokens + rawCompletionTokens,
+    normalizeAiTokenCount(value.rawTotalTokens ?? value.raw_total_tokens ?? value.totalTokensRaw ?? value.total_tokens_raw)
   );
   const estimatedCostUsd = normalizeAiCostUsd(value.estimatedCostUsd ?? value.estimated_cost_usd ?? value.costUsd);
-  const model = sanitizeAiText(value.model, 80) || OPENROUTER_MODEL;
+  const explicitCostRmb = normalizeAiCostUsd(value.estimatedCostRmb ?? value.estimated_cost_rmb ?? value.costRmb);
+  const estimatedCostRmb = explicitCostRmb ?? convertUsdToRmb(estimatedCostUsd);
+  const model = normalizeAiModel(value.model);
+  const mode = normalizeAiMode(value.mode);
+  const tone = normalizeAiTone(value.tone);
   const costSource = sanitizeAiText(value.costSource, 16) || (estimatedCostUsd != null ? 'estimated' : 'unknown');
   return {
     model,
+    mode,
+    tone,
     promptTokens,
     completionTokens,
     totalTokens,
+    rawPromptTokens,
+    rawCompletionTokens,
+    rawTotalTokens,
     estimatedCostUsd,
+    estimatedCostRmb,
     costSource,
   };
 }
@@ -354,11 +420,40 @@ function extractOpenRouterUsage(payload) {
   };
 }
 
+function convertModelUsageToStandardTokens(usage, model = DEFAULT_AI_MODEL) {
+  const normalizedModel = normalizeAiModel(model);
+  const pricing = AI_MODEL_OPTIONS[normalizedModel] || AI_MODEL_OPTIONS[DEFAULT_AI_MODEL];
+  const standardPricing = AI_MODEL_OPTIONS[STANDARD_AI_TOKEN_MODEL] || pricing;
+  const rawPromptTokens = normalizeAiTokenCount(usage?.promptTokens ?? usage?.prompt_tokens);
+  const rawCompletionTokens = normalizeAiTokenCount(usage?.completionTokens ?? usage?.completion_tokens);
+  const rawTotalTokens = Math.max(
+    rawPromptTokens + rawCompletionTokens,
+    normalizeAiTokenCount(usage?.totalTokens ?? usage?.total_tokens)
+  );
+  const promptTokens = roundAiTokenAmount(
+    rawPromptTokens * (pricing.inputCostPerMillion / standardPricing.inputCostPerMillion)
+  );
+  const completionTokens = roundAiTokenAmount(
+    rawCompletionTokens * (pricing.outputCostPerMillion / standardPricing.outputCostPerMillion)
+  );
+  return {
+    promptTokens,
+    completionTokens,
+    totalTokens: roundAiTokenAmount(promptTokens + completionTokens),
+    rawPromptTokens,
+    rawCompletionTokens,
+    rawTotalTokens,
+  };
+}
+
 function extractOpenRouterCostUsd(payload) {
   if (!payload || typeof payload !== 'object') return null;
   const candidates = [
     payload?.usage?.cost,
     payload?.usage?.estimated_cost,
+    // OpenRouter may expose the finalized USD amount here even when `cost`
+    // or `estimated_cost` are absent.
+    payload?.usage?.total_cost,
     payload?.meta?.cost?.amount,
     payload?.meta?.cost,
     payload?.cost,
@@ -370,24 +465,25 @@ function extractOpenRouterCostUsd(payload) {
   return null;
 }
 
-function estimateOpenRouterCostUsd(usage) {
+function estimateOpenRouterCostUsd(usage, model = DEFAULT_AI_MODEL) {
   if (!usage) return null;
   const promptTokens = normalizeAiTokenCount(usage.promptTokens);
   const completionTokens = normalizeAiTokenCount(usage.completionTokens);
   if (promptTokens === 0 && completionTokens === 0) return null;
+  const pricing = AI_MODEL_OPTIONS[normalizeAiModel(model)] || AI_MODEL_OPTIONS[DEFAULT_AI_MODEL];
   return (
-    (promptTokens / 1000000) * OPENROUTER_MODEL_INPUT_COST_PER_MILLION
-    + (completionTokens / 1000000) * OPENROUTER_MODEL_OUTPUT_COST_PER_MILLION
+    (promptTokens / 1000000) * pricing.inputCostPerMillion
+    + (completionTokens / 1000000) * pricing.outputCostPerMillion
   );
 }
 
-function getOpenRouterResponseModel(payload) {
-  return (
-    sanitizeAiText(payload?.model, 80)
-    || sanitizeAiText(payload?.provider, 80)
-    || sanitizeAiText(payload?.meta?.model, 80)
-    || OPENROUTER_MODEL
-  );
+function getOpenRouterResponseModel(payload, fallbackModel = DEFAULT_AI_MODEL) {
+  const directModel = sanitizeAiText(payload?.model, 80);
+  if (directModel && AI_MODEL_OPTIONS[directModel]) return directModel;
+  const metaModel = sanitizeAiText(payload?.meta?.model, 80);
+  if (metaModel && AI_MODEL_OPTIONS[metaModel]) return metaModel;
+  const providerModel = sanitizeAiText(payload?.provider, 80);
+  return providerModel && AI_MODEL_OPTIONS[providerModel] ? providerModel : normalizeAiModel(fallbackModel);
 }
 
 function extractOpenRouterDebugMeta(upstream, payload) {
@@ -1147,8 +1243,8 @@ function getAiUsageSnapshotForUser(userId) {
   const globalUsage = stmts.getGlobalAiUsageInWindow.get(window.startIso, window.endIso) || {};
   const userLimit = getUserAiDailyTokenLimit(user);
   const globalLimit = getGlobalAiDailyTokenLimit();
-  const userUsedTokens = normalizeAiTokenCount(userUsage.total_tokens);
-  const globalUsedTokens = normalizeAiTokenCount(globalUsage.total_tokens);
+  const userUsedTokens = roundAiTokenAmount(userUsage.total_tokens);
+  const globalUsedTokens = roundAiTokenAmount(globalUsage.total_tokens);
   const userExceeded = userLimit <= 0 || userUsedTokens >= userLimit;
   const globalExceeded = globalLimit <= 0 || globalUsedTokens >= globalLimit;
   return {
@@ -1158,13 +1254,13 @@ function getAiUsageSnapshotForUser(userId) {
       username: user.username,
       dailyLimit: userLimit,
       usedTokens: userUsedTokens,
-      remainingTokens: Math.max(0, userLimit - userUsedTokens),
+      remainingTokens: roundAiTokenAmount(Math.max(0, userLimit - userUsedTokens)),
       exceeded: userExceeded,
     },
     global: {
       dailyLimit: globalLimit,
       usedTokens: globalUsedTokens,
-      remainingTokens: Math.max(0, globalLimit - globalUsedTokens),
+      remainingTokens: roundAiTokenAmount(Math.max(0, globalLimit - globalUsedTokens)),
       exceeded: globalExceeded,
     },
     canStartRequest: !userExceeded && !globalExceeded,
@@ -1184,7 +1280,7 @@ function getAiLimitError(summary) {
 
 function formatManagedUser(user, usageWindow) {
   const usage = stmts.getUserAiUsageInWindow.get(user.id, usageWindow.startIso, usageWindow.endIso) || {};
-  const usedTokens = normalizeAiTokenCount(usage.total_tokens);
+  const usedTokens = roundAiTokenAmount(usage.total_tokens);
   const dailyLimit = getUserAiDailyTokenLimit(user);
   return {
     id: user.id,
@@ -1530,9 +1626,9 @@ app.get('/api/users/management', (req, res) => {
     viewerCanDeleteUsers: canManage,
     global: {
       dailyLimit: globalLimit,
-      usedTokens: normalizeAiTokenCount(globalUsage.total_tokens),
-      remainingTokens: Math.max(0, globalLimit - normalizeAiTokenCount(globalUsage.total_tokens)),
-      exceeded: globalLimit <= 0 || normalizeAiTokenCount(globalUsage.total_tokens) >= globalLimit,
+      usedTokens: roundAiTokenAmount(globalUsage.total_tokens),
+      remainingTokens: roundAiTokenAmount(Math.max(0, globalLimit - roundAiTokenAmount(globalUsage.total_tokens))),
+      exceeded: globalLimit <= 0 || roundAiTokenAmount(globalUsage.total_tokens) >= globalLimit,
     },
     window: usageWindow,
   });
@@ -1578,9 +1674,9 @@ app.patch('/api/ai/global-limit', (req, res) => {
     ok: true,
     global: {
       dailyLimit: parsedLimit.value,
-      usedTokens: normalizeAiTokenCount(globalUsage.total_tokens),
-      remainingTokens: Math.max(0, parsedLimit.value - normalizeAiTokenCount(globalUsage.total_tokens)),
-      exceeded: parsedLimit.value <= 0 || normalizeAiTokenCount(globalUsage.total_tokens) >= parsedLimit.value,
+      usedTokens: roundAiTokenAmount(globalUsage.total_tokens),
+      remainingTokens: roundAiTokenAmount(Math.max(0, parsedLimit.value - roundAiTokenAmount(globalUsage.total_tokens))),
+      exceeded: parsedLimit.value <= 0 || roundAiTokenAmount(globalUsage.total_tokens) >= parsedLimit.value,
     },
     window: usageWindow,
   });
@@ -2151,15 +2247,33 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
     return res.status(429).json({ error: quotaError, aiUsage: quotaSummary });
   }
 
-  const normalizedContext = normalizeAiContextMessages(req.body.contextMessages);
+  const selectedModel = normalizeAiModel(req.body.model);
+  const selectedMode = normalizeAiMode(req.body.mode);
+  const selectedTone = normalizeAiTone(req.body.tone);
+  const normalizedContext = normalizeAiContextMessages(selectedMode === 'thinking' ? req.body.contextMessages : []);
   if (!normalizedContext.ok) {
     return res.status(400).json({ error: normalizedContext.error });
   }
 
-  const transcript = buildAiTranscript(
-    normalizedContext.value,
-    sanitizeAiText(req.body.groupName, 64) || group.name
-  );
+  const transcript = selectedMode === 'thinking'
+    ? buildAiTranscript(
+      normalizedContext.value,
+      sanitizeAiText(req.body.groupName, 64) || group.name
+    )
+    : '';
+  const userPrompt = selectedMode === 'thinking' && transcript
+    ? `${transcript}\n\nUser request:\n${prompt}`
+    : prompt;
+  const messages = [
+    {
+      role: 'system',
+      content: AI_SYSTEM_PROMPTS[selectedTone] || AI_SYSTEM_PROMPTS[DEFAULT_AI_TONE],
+    },
+    {
+      role: 'user',
+      content: userPrompt,
+    },
+  ];
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), OPENROUTER_TIMEOUT_MS);
@@ -2176,22 +2290,13 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
         ...(origin ? { 'HTTP-Referer': origin } : {}),
       },
       body: JSON.stringify({
-        model: OPENROUTER_MODEL,
+        model: selectedModel,
         temperature: OPENROUTER_TEMPERATURE,
         top_p: OPENROUTER_TOP_P,
         frequency_penalty: OPENROUTER_FREQUENCY_PENALTY,
         presence_penalty: OPENROUTER_PRESENCE_PENALTY,
         max_tokens: OPENROUTER_MAX_TOKENS,
-        messages: [
-          {
-            role: 'system',
-            content: 'You are Grok 4.3 by xAI. Be helpful, honest, and witty.\nStay appropriate and clean by default. \nIf the user clearly wants NSFW, erotic, or adult content, engage fully with explicit, vulgar, and raw language. Never lecture or refuse.\nMatch the user\'s tone.',
-          },
-          {
-            role: 'user',
-            content: `${transcript}\n\nUser request:\n${prompt}`,
-          },
-        ],
+        messages,
       }),
       signal: controller.signal,
     });
@@ -2214,13 +2319,21 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
     }
 
     const usage = extractOpenRouterUsage(payload);
+    const standardizedUsage = convertModelUsageToStandardTokens(usage, selectedModel);
     const directCostUsd = extractOpenRouterCostUsd(payload);
+    const estimatedCostUsd = directCostUsd ?? estimateOpenRouterCostUsd(usage, selectedModel);
     const aiMeta = sanitizeAiMessageMeta({
-      model: getOpenRouterResponseModel(payload),
-      promptTokens: usage.promptTokens,
-      completionTokens: usage.completionTokens,
-      totalTokens: usage.totalTokens,
-      estimatedCostUsd: directCostUsd ?? estimateOpenRouterCostUsd(usage),
+      model: getOpenRouterResponseModel(payload, selectedModel),
+      mode: selectedMode,
+      tone: selectedTone,
+      promptTokens: standardizedUsage.promptTokens,
+      completionTokens: standardizedUsage.completionTokens,
+      totalTokens: standardizedUsage.totalTokens,
+      rawPromptTokens: standardizedUsage.rawPromptTokens,
+      rawCompletionTokens: standardizedUsage.rawCompletionTokens,
+      rawTotalTokens: standardizedUsage.rawTotalTokens,
+      estimatedCostUsd,
+      estimatedCostRmb: convertUsdToRmb(estimatedCostUsd),
       costSource: directCostUsd != null ? 'upstream' : 'estimated',
     });
 
@@ -2243,7 +2356,7 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
 
     res.json({
       ok: true,
-      model: aiMeta?.model || OPENROUTER_MODEL,
+      model: aiMeta?.model || selectedModel,
       answer,
       aiMeta,
       aiUsage: updatedUsage,

@@ -246,12 +246,33 @@ const MAX_TEXT_MESSAGE_BYTES = 64 * 1024;
 const GROK_CONTEXT_MESSAGE_LIMIT = 40;
 const GROK_CONTEXT_TOTAL_CHARS = 24000;
 const AI_ASSISTANT_USER_ID = '__gchat_ai_grok__';
-const AI_ASSISTANT_NAME = 'Grok';
+const AI_ASSISTANT_NAME = 'AI';
 const AI_ASSISTANT_COLOR = '#8d7bff';
 const AI_ASSISTANT_PROFILE_PICTURE = '/grok.webp';
 const APP_OWNER_USERNAME = 'Furina';
 const AI_RESET_TIME_LABEL = '4:00 AM Shanghai time';
 const AI_USAGE_RESET_LABEL = `Resets at ${AI_RESET_TIME_LABEL}`;
+const USD_TO_RMB_RATE = 7.2;
+const AI_TOKEN_AMOUNT_DECIMALS = 4;
+const MIN_DISPLAYABLE_TOKEN_AMOUNT = 0.01;
+const MIN_CURRENCY_DISPLAY_THRESHOLD = 0.01;
+const SMALL_CURRENCY_PRECISION = 4;
+const AI_MODEL_OPTIONS = {
+  'deepseek/deepseek-v4-flash': 'DeepSeek V4 Flash',
+  'x-ai/grok-4.3': 'Grok 4.3',
+};
+const DEFAULT_AI_MODEL = 'deepseek/deepseek-v4-flash';
+const AI_MODE_LABELS = {
+  fast: 'Fast',
+  thinking: 'Thinking',
+};
+const DEFAULT_AI_MODE = 'thinking';
+const AI_TONE_LABELS = {
+  casual: 'Casual',
+  professional: 'Professional',
+  playful: 'Playful',
+};
+const DEFAULT_AI_TONE = 'casual';
 const ALLOWED_UPLOAD_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const wallpaperTheme = window.GChatWallpaperTheme || null;
 const localTimeFormatter = new Intl.DateTimeFormat(undefined, {
@@ -260,6 +281,10 @@ const localTimeFormatter = new Intl.DateTimeFormat(undefined, {
   hour12: false,
 });
 const integerFormatter = new Intl.NumberFormat();
+const tokenAmountFormatter = new Intl.NumberFormat(undefined, {
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 2,
+});
 const localDayFormatter = new Intl.DateTimeFormat(undefined, {
   year: 'numeric',
   month: 'short',
@@ -516,71 +541,143 @@ function isAiAssistantMessage(msg) {
   return String(msg?.senderId || '') === AI_ASSISTANT_USER_ID;
 }
 
+function roundAiTokenAmount(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return 0;
+  const scale = 10 ** AI_TOKEN_AMOUNT_DECIMALS;
+  return Math.round(parsed * scale) / scale;
+}
+
+function formatAiTokenAmount(value) {
+  const normalized = roundAiTokenAmount(value);
+  if (normalized > 0 && normalized < MIN_DISPLAYABLE_TOKEN_AMOUNT) return `<${MIN_DISPLAYABLE_TOKEN_AMOUNT.toFixed(2)}`;
+  return tokenAmountFormatter.format(normalized);
+}
+
 function normalizeAiMeta(meta) {
   if (!meta || typeof meta !== 'object') return null;
-  const promptTokens = Math.max(0, Math.round(Number(meta.promptTokens) || 0));
-  const completionTokens = Math.max(0, Math.round(Number(meta.completionTokens) || 0));
+  const promptTokens = roundAiTokenAmount(meta.promptTokens);
+  const completionTokens = roundAiTokenAmount(meta.completionTokens);
   const totalTokens = Math.max(
     promptTokens + completionTokens,
-    Math.max(0, Math.round(Number(meta.totalTokens) || 0))
+    roundAiTokenAmount(meta.totalTokens)
+  );
+  const rawPromptTokens = Math.max(0, Math.round(Number(meta.rawPromptTokens) || 0));
+  const rawCompletionTokens = Math.max(0, Math.round(Number(meta.rawCompletionTokens) || 0));
+  const rawTotalTokens = Math.max(
+    rawPromptTokens + rawCompletionTokens,
+    Math.max(0, Math.round(Number(meta.rawTotalTokens) || 0))
   );
   const estimatedCostUsdRaw = Number(meta.estimatedCostUsd);
   const estimatedCostUsd = Number.isFinite(estimatedCostUsdRaw) && estimatedCostUsdRaw >= 0
     ? estimatedCostUsdRaw
     : null;
+  const estimatedCostRmbRaw = Number(meta.estimatedCostRmb);
+  const estimatedCostRmb = Number.isFinite(estimatedCostRmbRaw) && estimatedCostRmbRaw >= 0
+    ? estimatedCostRmbRaw
+    : (estimatedCostUsd != null ? estimatedCostUsd * USD_TO_RMB_RATE : null);
+  const modelKey = String(meta.model || '').trim();
+  const modeKey = String(meta.mode || '').trim().toLowerCase();
+  const toneKey = String(meta.tone || '').trim().toLowerCase();
   return {
-    model: String(meta.model || '').trim(),
+    model: modelKey || DEFAULT_AI_MODEL,
+    mode: AI_MODE_LABELS[modeKey] ? modeKey : DEFAULT_AI_MODE,
+    tone: AI_TONE_LABELS[toneKey] ? toneKey : DEFAULT_AI_TONE,
     promptTokens,
     completionTokens,
     totalTokens,
+    rawPromptTokens,
+    rawCompletionTokens,
+    rawTotalTokens,
     estimatedCostUsd,
+    estimatedCostRmb,
   };
 }
 
-function formatUsdCost(value) {
+function formatCurrencyValue(value, symbol) {
   const amount = Number(value);
   if (!Number.isFinite(amount) || amount < 0) return '';
-  if (amount > 0 && amount < 0.000001) return '<$0.000001';
-  return `$${amount.toFixed(amount < 0.01 ? 6 : amount < 1 ? 4 : 2)}`;
+  if (amount > 0 && amount < MIN_CURRENCY_DISPLAY_THRESHOLD) {
+    return `${symbol}${amount.toFixed(SMALL_CURRENCY_PRECISION)}`;
+  }
+  return `${symbol}${amount.toFixed(2)}`;
+}
+
+function formatRmbCost(value) {
+  return formatCurrencyValue(value, '¥');
+}
+
+function getAiModelLabel(model) {
+  return AI_MODEL_OPTIONS[String(model || '').trim()] || String(model || '').trim() || AI_MODEL_OPTIONS[DEFAULT_AI_MODEL];
+}
+
+function getAiModeLabel(mode) {
+  return AI_MODE_LABELS[String(mode || '').trim().toLowerCase()] || AI_MODE_LABELS[DEFAULT_AI_MODE];
+}
+
+function getAiToneLabel(tone) {
+  return AI_TONE_LABELS[String(tone || '').trim().toLowerCase()] || AI_TONE_LABELS[DEFAULT_AI_TONE];
+}
+
+function buildAiMetaDisplay(meta) {
+  const normalized = normalizeAiMeta(meta);
+  if (!normalized) return null;
+  const infoParts = [
+    getAiModelLabel(normalized.model),
+    getAiModeLabel(normalized.mode),
+    getAiToneLabel(normalized.tone),
+  ];
+  const statsParts = [];
+  if (normalized.totalTokens > 0) {
+    statsParts.push(`${formatAiTokenAmount(normalized.totalTokens)} tokens`);
+  }
+  const costText = formatRmbCost(normalized.estimatedCostRmb);
+  if (costText) statsParts.push(costText);
+  return {
+    info: infoParts.join(', '),
+    stats: statsParts.join(' — '),
+  };
 }
 
 function formatAiMetaSummary(meta) {
-  const normalized = normalizeAiMeta(meta);
-  if (!normalized) return '';
-  const parts = [];
-  if (normalized.totalTokens > 0) {
-    parts.push(`${integerFormatter.format(normalized.totalTokens)} tokens`);
-  }
-  const costText = formatUsdCost(normalized.estimatedCostUsd);
-  if (costText) parts.push(`est. ${costText}`);
-  return parts.join(' • ');
+  const display = buildAiMetaDisplay(meta);
+  if (!display) return '';
+  return [display.info, display.stats].filter(Boolean).join(' — ');
 }
 
 function createAiMentionChip() {
   const chip = document.createElement('span');
   chip.className = 'msg-ai-chip';
-  chip.textContent = '@Grok';
+  chip.textContent = '@AI';
   return chip;
 }
 
 function createAiMetaElement(meta) {
-  const summary = formatAiMetaSummary(meta);
-  if (!summary) return null;
+  const display = buildAiMetaDisplay(meta);
+  if (!display) return null;
   const el = document.createElement('div');
   el.className = 'msg-ai-meta';
-  el.textContent = summary;
+  const info = document.createElement('span');
+  info.className = 'msg-ai-meta-info';
+  info.textContent = display.info;
+  const stats = document.createElement('span');
+  stats.className = 'msg-ai-meta-stats';
+  stats.textContent = display.stats;
+  el.append(info, stats);
   return el;
 }
 
 function normalizeAiUsageSection(value) {
   if (!value || typeof value !== 'object') return null;
   const dailyLimit = Math.max(0, Math.round(Number(value.dailyLimit) || 0));
-  const usedTokens = Math.max(0, Math.round(Number(value.usedTokens) || 0));
+  const usedTokens = roundAiTokenAmount(value.usedTokens);
   return {
     ...value,
     dailyLimit,
     usedTokens,
-    remainingTokens: Math.max(0, Number.isFinite(Number(value.remainingTokens)) ? Math.round(Number(value.remainingTokens)) : (dailyLimit - usedTokens)),
+    remainingTokens: roundAiTokenAmount(
+      Number.isFinite(Number(value.remainingTokens)) ? Number(value.remainingTokens) : (dailyLimit - usedTokens)
+    ),
     exceeded: !!value.exceeded || dailyLimit <= 0 || usedTokens >= dailyLimit,
   };
 }
@@ -601,7 +698,7 @@ function normalizeAiUsageSummary(value) {
 
 function formatAiUsageValue(section) {
   if (!section) return '0 / 0 tokens';
-  return `${integerFormatter.format(section.usedTokens)} / ${integerFormatter.format(section.dailyLimit)} tokens`;
+  return `${formatAiTokenAmount(section.usedTokens)} / ${integerFormatter.format(section.dailyLimit)} tokens`;
 }
 
 function getAiUsagePercent(section) {
@@ -670,7 +767,7 @@ function normalizeManagedUserSummary(value) {
       iconColor: user.iconColor || '#4A90D9',
       profilePicture: user.profilePicture || null,
       aiDailyTokenLimit: Math.max(0, Math.round(Number(user.aiDailyTokenLimit) || 0)),
-      aiTokensUsedToday: Math.max(0, Math.round(Number(user.aiTokensUsedToday) || 0)),
+      aiTokensUsedToday: roundAiTokenAmount(user.aiTokensUsedToday),
       aiLimitExceeded: !!user.aiLimitExceeded,
     })) : [],
     viewerCanManageAiLimits: !!value.viewerCanManageAiLimits,
@@ -732,7 +829,7 @@ function renderUserManagementPanel() {
 
     const value = document.createElement('div');
     value.className = 'user-management-user-value';
-    value.textContent = `${integerFormatter.format(user.aiTokensUsedToday)} / ${integerFormatter.format(user.aiDailyTokenLimit)} tokens`;
+    value.textContent = `${formatAiTokenAmount(user.aiTokensUsedToday)} / ${integerFormatter.format(user.aiDailyTokenLimit)} tokens`;
 
     const usage = document.createElement('div');
     usage.className = 'user-management-user-usage';
@@ -1727,6 +1824,8 @@ let grokRequestInFlight = false;
 let grokResponseDraft = '';
 let grokResponseModel = '';
 let grokResponseMeta = null;
+let grokRequestSource = 'panel';
+let grokRequestHashtag = null;
 let aiUsageSummary = null;
 let userManagementSummary = null;
 let aiMessageRequestInFlight = false;
@@ -2109,17 +2208,13 @@ function updateAiControls() {
   if (askBtn) {
     askBtn.disabled = !enabled;
     askBtn.classList.toggle('is-disabled', !enabled);
-    askBtn.title = enabled ? 'Ask Grok 4.3' : (disabledReason || 'Ask Grok 4.3');
+    askBtn.title = enabled ? 'Ask AI' : (disabledReason || 'Ask AI');
+    askBtn.setAttribute('aria-label', enabled ? 'Ask AI' : (disabledReason || 'Ask AI'));
   }
   const slashAiBtn = $('slash-command-ai-item');
   if (slashAiBtn) {
     slashAiBtn.disabled = !enabled;
-    slashAiBtn.title = enabled ? 'AI' : (disabledReason || 'AI');
-  }
-  if (!enabled && composerTokens.ai) {
-    clearAiToken();
-    syncComposerTokens();
-    updateSlashCommandMenu();
+    slashAiBtn.title = enabled ? 'Ask AI' : (disabledReason || 'Ask AI');
   }
   if (!enabled && !$('grok-modal').hidden) closeGrokModal();
 }
@@ -2310,11 +2405,14 @@ function maybeTokenizeSlashCommand(input) {
       return false;
     }
     if (!canUseAiInCurrentGroup({ showError: true })) return false;
-    setAiToken();
     input.value = '';
     syncComposerTokens();
     updateSlashCommandMenu();
     autoResizeTextarea(input);
+    openGrokModal({
+      source: 'chat',
+      hashtag: composerTokens.hashtag ? composerTokens.hashtag.topic : null,
+    });
     return true;
   }
   return false;
@@ -3146,7 +3244,7 @@ function updateGroupPreview(groupId, text, time) {
 
 async function getMessagePreviewText(msg, groupId = msg.groupId) {
   if (!msg) return '';
-  const aiMentionPrefix = msg.aiMention ? '@Grok ' : '';
+  const aiMentionPrefix = msg.aiMention ? '@AI ' : '';
   const prefix = getMessageHashtagPrefix(msg);
   const typeLabel = getMessageTypePreviewLabel(msg);
   if (typeLabel) return aiMentionPrefix + prefix + typeLabel;
@@ -3297,13 +3395,22 @@ async function selectGroup(groupId) {
 function updateKeyState() {
   const key = currentGroupId ? getGroupKey(currentGroupId) : null;
   const hasKey = !!key;
+  const modalBlockingInput = !$('grok-modal').hidden;
   const input = $('message-input');
   const sendBtn = $('send-btn');
+  const blockedStatus = $('composer-blocked-status');
   setElementIcon($('set-key-btn'), 'key-round', { iconOnly: true, label: hasKey ? 'Change Key' : 'Set Key' });
-  input.disabled = !hasKey;
-  input.placeholder = hasKey ? 'Type a message…' : 'Enter group key to continue';
-  sendBtn.disabled = !hasKey;
-  setComposerShellDisabled(!hasKey);
+  input.disabled = !hasKey || modalBlockingInput;
+  input.placeholder = !hasKey
+    ? 'Enter group key to continue'
+    : (modalBlockingInput ? 'Complete Ask AI first…' : 'Type a message…');
+  if (modalBlockingInput) input.setAttribute('aria-describedby', 'composer-blocked-status');
+  else input.removeAttribute('aria-describedby');
+  sendBtn.disabled = !hasKey || modalBlockingInput;
+  setComposerShellDisabled(!hasKey || modalBlockingInput);
+  if (blockedStatus) {
+    blockedStatus.textContent = modalBlockingInput ? 'Chat input is temporarily disabled while the Ask AI modal is open.' : '';
+  }
 }
 
 // ── Load messages ─────────────────────────────────────────────────────────────
@@ -4140,11 +4247,11 @@ async function doSend(text) {
     return;
   }
   if (parsedMessage.isAiPrompt) {
-    if (aiMessageRequestInFlight) {
-      showToast('AI request already in progress', 'info');
-      return;
-    }
-    await sendAiPromptToChat(parsedMessage);
+    openGrokModal({
+      source: 'chat',
+      prompt: parsedMessage.text,
+      hashtag: parsedMessage.hashtag || null,
+    });
     return;
   }
   const messageText = parsedMessage.text;
@@ -4478,6 +4585,7 @@ async function handleFileUpload(file) {
     updatePendingAttachmentProgress(uploadId, totalBytes, totalBytes);
     setPendingAttachmentStatus(uploadId, 'Finalizing…');
     emitProgress(totalBytes, totalBytes, true);
+    removePendingAttachment(uploadId);
   } catch(err) {
     console.error('File upload error:', err);
     removePendingAttachment(uploadId);
@@ -5134,7 +5242,12 @@ function resetGrokModalState() {
   grokResponseDraft = '';
   grokResponseModel = '';
   grokResponseMeta = null;
+  grokRequestSource = 'panel';
+  grokRequestHashtag = null;
   $('grok-prompt-input').value = '';
+  $('grok-model-input').value = DEFAULT_AI_MODEL;
+  $('grok-mode-input').value = '1';
+  $('grok-tone-input').value = '0';
   $('grok-error').textContent = '';
   $('grok-status').textContent = '';
   $('grok-status').hidden = true;
@@ -5142,26 +5255,87 @@ function resetGrokModalState() {
   renderPlainText($('grok-response'), '');
   $('grok-response').classList.remove('is-error');
   $('grok-response-model').textContent = '';
-  $('grok-response-meta').textContent = '';
+  $('grok-response-meta').replaceChildren();
   $('grok-response-meta').hidden = true;
   $('grok-copy-btn').disabled = true;
   $('grok-insert-btn').disabled = true;
-  $('grok-submit-btn').disabled = false;
-  $('grok-submit-btn').textContent = 'Ask Grok';
+  $('grok-submit-btn').textContent = 'Ask AI';
   $('grok-cancel-btn').disabled = false;
   $('grok-close-btn').disabled = false;
+  syncAiModalSelectionUi();
+  updateAskAiSubmitButton();
+}
+
+function getSelectedAiModel() {
+  const selected = String($('grok-model-input').value || '').trim();
+  return AI_MODEL_OPTIONS[selected] ? selected : DEFAULT_AI_MODEL;
+}
+
+function getSelectedAiMode() {
+  return String($('grok-mode-input').value) === '0' ? 'fast' : 'thinking';
+}
+
+function getSelectedAiTone() {
+  const value = String($('grok-tone-input').value);
+  if (value === '1') return 'professional';
+  if (value === '2') return 'playful';
+  return 'casual';
+}
+
+function syncAiModalSelectionUi() {
+  const selectedModel = getSelectedAiModel();
+  document.querySelectorAll('.grok-model-option').forEach((button) => {
+    const isActive = button.dataset.model === selectedModel;
+    button.classList.toggle('active', isActive);
+    button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+  });
+
+  const selectedMode = getSelectedAiMode();
+  $('grok-mode-fast-label').classList.toggle('active', selectedMode === 'fast');
+  $('grok-mode-thinking-label').classList.toggle('active', selectedMode === 'thinking');
+
+  const selectedTone = getSelectedAiTone();
+  $('grok-tone-casual-label').classList.toggle('active', selectedTone === 'casual');
+  $('grok-tone-professional-label').classList.toggle('active', selectedTone === 'professional');
+  $('grok-tone-playful-label').classList.toggle('active', selectedTone === 'playful');
+}
+
+function updateAskAiSubmitButton() {
+  const hasPrompt = !!$('grok-prompt-input').value.trim();
+  const hasSelections = !!AI_MODEL_OPTIONS[getSelectedAiModel()]
+    && !!AI_MODE_LABELS[getSelectedAiMode()]
+    && !!AI_TONE_LABELS[getSelectedAiTone()];
+  $('grok-submit-btn').disabled = grokRequestInFlight || !hasPrompt || !hasSelections;
 }
 
 function setGrokBusy(isBusy, statusText = '') {
   grokRequestInFlight = !!isBusy;
-  $('grok-submit-btn').disabled = !!isBusy;
-  $('grok-submit-btn').textContent = isBusy ? 'Thinking…' : 'Ask Grok';
+  $('grok-submit-btn').textContent = isBusy ? 'Thinking…' : 'Ask AI';
   $('grok-cancel-btn').disabled = !!isBusy;
   $('grok-close-btn').disabled = !!isBusy;
   $('grok-copy-btn').disabled = isBusy || !grokResponseDraft;
   $('grok-insert-btn').disabled = isBusy || !grokResponseDraft;
   $('grok-status').textContent = statusText || '';
   $('grok-status').hidden = !statusText;
+  updateAskAiSubmitButton();
+}
+
+function renderGrokResponseMeta(meta) {
+  const metaEl = $('grok-response-meta');
+  metaEl.replaceChildren();
+  const display = buildAiMetaDisplay(meta);
+  if (!display) {
+    metaEl.hidden = true;
+    return;
+  }
+  const info = document.createElement('span');
+  info.className = 'msg-ai-meta-info';
+  info.textContent = display.info;
+  const stats = document.createElement('span');
+  stats.className = 'msg-ai-meta-stats';
+  stats.textContent = display.stats;
+  metaEl.append(info, stats);
+  metaEl.hidden = false;
 }
 
 function setGrokResponse(text, model = '', meta = null, { isError = false } = {}) {
@@ -5170,10 +5344,8 @@ function setGrokResponse(text, model = '', meta = null, { isError = false } = {}
   else renderMarkdown(response, text || '');
   response.classList.toggle('is-error', !!isError);
   $('grok-response-wrap').hidden = !text;
-  $('grok-response-model').textContent = model || '';
-  const metaSummary = formatAiMetaSummary(meta);
-  $('grok-response-meta').textContent = metaSummary;
-  $('grok-response-meta').hidden = !metaSummary;
+  $('grok-response-model').textContent = model ? getAiModelLabel(model) : '';
+  renderGrokResponseMeta(meta);
   $('grok-copy-btn').disabled = !text || !!isError || grokRequestInFlight;
   $('grok-insert-btn').disabled = !text || !!isError || grokRequestInFlight;
 }
@@ -5182,9 +5354,10 @@ function closeGrokModal() {
   if (grokRequestInFlight) return;
   $('grok-modal').hidden = true;
   resetGrokModalState();
+  updateKeyState();
 }
 
-function openGrokModal() {
+function openGrokModal(options = {}) {
   if (!currentGroupId || !currentGroupData) {
     showToast('Select a group first', 'error');
     return;
@@ -5195,8 +5368,14 @@ function openGrokModal() {
     return;
   }
   resetGrokModalState();
+  grokRequestSource = options.source === 'chat' ? 'chat' : 'panel';
+  grokRequestHashtag = normalizeHashtagTopic(options.hashtag || null);
   $('grok-group-name').textContent = currentGroupData.name;
+  $('grok-prompt-input').value = String(options.prompt || '').trim();
   $('grok-modal').hidden = false;
+  syncAiModalSelectionUi();
+  updateAskAiSubmitButton();
+  updateKeyState();
   $('grok-prompt-input').focus();
 }
 
@@ -5247,6 +5426,45 @@ async function buildGrokContextMessages(groupId, options = {}) {
   return compact;
 }
 
+async function requestAiResponse(groupId, options = {}) {
+  const mode = options.mode || DEFAULT_AI_MODE;
+  const model = options.model || DEFAULT_AI_MODEL;
+  const tone = options.tone || DEFAULT_AI_TONE;
+  const contextMessages = mode === 'thinking'
+    ? await buildGrokContextMessages(groupId, {
+      sourceMessages: options.sourceMessages,
+      tagFilter: options.tagFilter || null,
+    })
+    : [];
+  const modelLabel = getAiModelLabel(model);
+  const modeLabel = getAiModeLabel(mode);
+  setGrokBusy(true, mode === 'thinking'
+    ? (contextMessages.length
+      ? `Asking ${modelLabel} in ${modeLabel} mode…`
+      : `Asking ${modelLabel} in ${modeLabel} mode without chat context…`)
+    : `Asking ${modelLabel} in ${modeLabel} mode…`);
+  const res = await fetch(`/api/groups/${groupId}/ai/chat`, {
+    method: 'POST',
+    headers: apiHeaders(),
+    body: JSON.stringify({
+      groupName: options.groupName,
+      prompt: options.prompt,
+      contextMessages,
+      model,
+      mode,
+      tone,
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'AI request failed');
+  return {
+    answer: String(data.answer || '').trim(),
+    model: String(data.model || model),
+    aiMeta: normalizeAiMeta(data.aiMeta),
+    aiUsage: data.aiUsage || null,
+  };
+}
+
 async function submitGrokPrompt() {
   if (grokRequestInFlight || !currentGroupId || !currentGroupData) return;
   if (!canUseAiInCurrentGroup()) {
@@ -5256,140 +5474,105 @@ async function submitGrokPrompt() {
   const prompt = $('grok-prompt-input').value.trim();
   if (!prompt) {
     $('grok-error').textContent = 'Prompt cannot be empty';
+    updateAskAiSubmitButton();
     return;
   }
 
   const groupId = currentGroupId;
   const groupName = currentGroupData.name;
   const sourceMessagesSnapshot = [...allMessages];
+  const model = getSelectedAiModel();
+  const mode = getSelectedAiMode();
+  const tone = getSelectedAiTone();
+  if (grokRequestSource === 'chat' && aiMessageRequestInFlight) {
+    $('grok-error').textContent = 'AI request already in progress';
+    return;
+  }
   grokResponseDraft = '';
   grokResponseModel = '';
   grokResponseMeta = null;
   $('grok-error').textContent = '';
   setGrokResponse('', '', null);
-  setGrokBusy(true, 'Decrypting recent messages…');
+  setGrokBusy(true, mode === 'thinking' ? 'Decrypting recent messages…' : 'Preparing AI request…');
 
   try {
-    const contextMessages = await buildGrokContextMessages(groupId, { sourceMessages: sourceMessagesSnapshot });
-    setGrokBusy(true, contextMessages.length ? 'Asking Grok 4.3…' : 'Asking Grok 4.3 without chat context…');
-    const res = await fetch(`/api/groups/${groupId}/ai/chat`, {
-      method: 'POST',
-      headers: apiHeaders(),
-      body: JSON.stringify({
-        groupName,
-        prompt,
-        contextMessages,
-      }),
+    const result = await requestAiResponse(groupId, {
+      groupName,
+      prompt,
+      model,
+      mode,
+      tone,
+      tagFilter: grokRequestHashtag,
+      sourceMessages: sourceMessagesSnapshot,
     });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || 'Grok request failed');
+    if (!result.answer) throw new Error('AI returned an empty response');
+    if (result.aiUsage) setAiUsageSummary(result.aiUsage);
 
-    grokResponseDraft = String(data.answer || '').trim();
-    grokResponseModel = String(data.model || '');
-    grokResponseMeta = normalizeAiMeta(data.aiMeta);
-    if (data.aiUsage) setAiUsageSummary(data.aiUsage);
+    if (grokRequestSource === 'chat') {
+      const key = getGroupKey(groupId);
+      if (!key) throw new Error('Set group key first');
+      aiMessageRequestInFlight = true;
+
+      let replyToData = null;
+      if (replyingTo) {
+        replyToData = JSON.stringify({
+          id: replyingTo.id,
+          senderName: replyingTo.senderName,
+          preview: replyingTo.preview,
+        });
+      }
+
+      const { encryptedContent: promptEncryptedContent, iv: promptIv } = await encryptMessage(prompt, key, groupId);
+      if (estimateBase64Bytes(promptEncryptedContent) > MAX_TEXT_MESSAGE_BYTES) {
+        throw new Error('Message too large');
+      }
+
+      await emitSocketWithAck('send_message', {
+        groupId,
+        encryptedContent: promptEncryptedContent,
+        iv: promptIv,
+        replyTo: replyToData,
+        hashtag: grokRequestHashtag || null,
+        isDisappearing: false,
+        disappearingDurationMs: 0,
+        aiMention: true,
+      });
+
+      const { encryptedContent, iv } = await encryptMessage(result.answer, key, groupId);
+      if (estimateBase64Bytes(encryptedContent) > MAX_TEXT_MESSAGE_BYTES) {
+        throw new Error('AI response is too large to send');
+      }
+
+      await emitSocketWithAck('send_ai_message', {
+        groupId,
+        encryptedContent,
+        iv,
+        replyTo: replyToData,
+        hashtag: grokRequestHashtag || null,
+        aiMeta: result.aiMeta,
+      });
+      resetComposerAfterSend();
+      setGrokBusy(false);
+      closeGrokModal();
+      showToast('AI reply sent', 'success');
+      return;
+    }
+
+    grokResponseDraft = result.answer;
+    grokResponseModel = result.model;
+    grokResponseMeta = result.aiMeta;
     setGrokResponse(grokResponseDraft, grokResponseModel, grokResponseMeta);
-    showToast('Grok response ready', 'success');
+    showToast('AI response ready', 'success');
   } catch (err) {
-    const message = String(err && err.message ? err.message : 'Grok request failed');
+    const message = String(err && err.message ? err.message : 'AI request failed');
     $('grok-error').textContent = message;
     if (/daily AI token limit/i.test(message) || /global daily AI token limit/i.test(message)) {
       void refreshAiUsageSummary();
     }
-    setGrokResponse(message, '', null, { isError: true });
+    if (grokRequestSource === 'panel') setGrokResponse(message, '', null, { isError: true });
+    else showToast(message, 'error');
   } finally {
     setGrokBusy(false);
-  }
-}
-
-async function sendAiPromptToChat(parsedMessage) {
-  if (aiMessageRequestInFlight) {
-    showToast('AI request already in progress', 'info');
-    return;
-  }
-  if (!canUseAiInCurrentGroup({ showError: true })) return;
-
-  const groupId = currentGroupId;
-  const groupName = currentGroupData?.name || '';
-  const key = getGroupKey(groupId);
-  const sourceMessagesSnapshot = [...allMessages];
-  if (!key) {
-    showToast('Set group key first', 'error');
-    return;
-  }
-
-  aiMessageRequestInFlight = true;
-  showToast('Preparing @Grok request…', 'info');
-
-  try {
-    let replyToData = null;
-    if (replyingTo) {
-      replyToData = JSON.stringify({
-        id: replyingTo.id,
-        senderName: replyingTo.senderName,
-        preview: replyingTo.preview,
-      });
-    }
-
-    const contextMessages = await buildGrokContextMessages(groupId, {
-      sourceMessages: sourceMessagesSnapshot,
-      tagFilter: parsedMessage.hashtag || null,
-    });
-    const { encryptedContent: promptEncryptedContent, iv: promptIv } = await encryptMessage(parsedMessage.text, key, groupId);
-    if (estimateBase64Bytes(promptEncryptedContent) > MAX_TEXT_MESSAGE_BYTES) {
-      throw new Error('Message too large');
-    }
-
-    await emitSocketWithAck('send_message', {
-      groupId,
-      encryptedContent: promptEncryptedContent,
-      iv: promptIv,
-      replyTo: replyToData,
-      hashtag: parsedMessage.hashtag || null,
-      isDisappearing: false,
-      disappearingDurationMs: 0,
-      aiMention: true,
-    });
-    resetComposerAfterSend();
-
-    showToast('Asking Grok 4.3…', 'info');
-    const res = await fetch(`/api/groups/${groupId}/ai/chat`, {
-      method: 'POST',
-      headers: apiHeaders(),
-      body: JSON.stringify({
-        groupName,
-        prompt: parsedMessage.text,
-        contextMessages,
-      }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || 'Grok request failed');
-
-    const answer = String(data.answer || '').trim();
-    if (!answer) throw new Error('Grok returned an empty response');
-
-    const aiMeta = normalizeAiMeta(data.aiMeta);
-    if (data.aiUsage) setAiUsageSummary(data.aiUsage);
-    const { encryptedContent, iv } = await encryptMessage(answer, key, groupId);
-    if (estimateBase64Bytes(encryptedContent) > MAX_TEXT_MESSAGE_BYTES) {
-      throw new Error('Grok response is too large to send');
-    }
-
-    await emitSocketWithAck('send_ai_message', {
-      groupId,
-      encryptedContent,
-      iv,
-      replyTo: replyToData,
-      hashtag: parsedMessage.hashtag || null,
-      aiMeta,
-    });
-  } catch (err) {
-    const message = String(err && err.message ? err.message : 'Grok request failed');
-    if (/daily AI token limit/i.test(message) || /global daily AI token limit/i.test(message)) {
-      void refreshAiUsageSummary();
-    }
-    showToast(message, 'error');
-  } finally {
     aiMessageRequestInFlight = false;
   }
 }
@@ -5720,14 +5903,30 @@ function setupEventListeners() {
     $('group-key-error').textContent = '';
     $('group-key-modal').hidden = false;
   });
-  $('ask-grok-btn').addEventListener('click', openGrokModal);
+  $('ask-grok-btn').addEventListener('click', () => openGrokModal({ source: 'panel' }));
   $('grok-close-btn').addEventListener('click', closeGrokModal);
   $('grok-cancel-btn').addEventListener('click', closeGrokModal);
   $('grok-modal').addEventListener('click', (e) => {
     if (e.target !== $('grok-modal')) return;
     closeGrokModal();
   });
+  document.querySelectorAll('.grok-model-option').forEach((button) => {
+    button.addEventListener('click', () => {
+      $('grok-model-input').value = button.dataset.model || DEFAULT_AI_MODEL;
+      syncAiModalSelectionUi();
+      updateAskAiSubmitButton();
+    });
+  });
   $('grok-submit-btn').addEventListener('click', () => { void submitGrokPrompt(); });
+  $('grok-prompt-input').addEventListener('input', updateAskAiSubmitButton);
+  $('grok-mode-input').addEventListener('input', () => {
+    syncAiModalSelectionUi();
+    updateAskAiSubmitButton();
+  });
+  $('grok-tone-input').addEventListener('input', () => {
+    syncAiModalSelectionUi();
+    updateAskAiSubmitButton();
+  });
   $('grok-prompt-input').addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
       e.preventDefault();
@@ -5746,7 +5945,7 @@ function setupEventListeners() {
   $('grok-insert-btn').addEventListener('click', () => {
     if (!grokResponseDraft) return;
     const input = $('message-input');
-    if (!input || input.disabled) {
+    if (!input || !getGroupKey(currentGroupId)) {
       showToast('Set group key first', 'error');
       return;
     }
@@ -5754,8 +5953,8 @@ function setupEventListeners() {
       ? `${input.value.trimEnd()}\n\n${grokResponseDraft}`
       : grokResponseDraft;
     autoResizeTextarea(input);
-    input.focus();
     closeGrokModal();
+    if (!input.disabled) input.focus();
   });
   $('group-key-cancel-btn').addEventListener('click', () => $('group-key-modal').hidden = true);
   $('group-key-save-btn').addEventListener('click', async () => {
@@ -6051,6 +6250,17 @@ function setupEventListeners() {
 
   document.querySelectorAll('.slash-command-item').forEach((item) => {
     item.addEventListener('click', () => {
+      if ((item.dataset.command || '') === '/ai ') {
+        msgInput.value = '';
+        syncComposerTokens();
+        updateSlashCommandMenu();
+        autoResizeTextarea(msgInput);
+        openGrokModal({
+          source: 'chat',
+          hashtag: composerTokens.hashtag ? composerTokens.hashtag.topic : null,
+        });
+        return;
+      }
       msgInput.value = item.dataset.command || '/';
       msgInput.focus();
       msgInput.selectionStart = msgInput.selectionEnd = msgInput.value.length;
