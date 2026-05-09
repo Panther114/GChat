@@ -5918,7 +5918,7 @@ function setupEventListeners() {
       : grokResponseDraft;
     autoResizeTextarea(input);
     closeGrokModal();
-    input.focus();
+    if (!input.disabled) input.focus();
   });
   $('group-key-cancel-btn').addEventListener('click', () => $('group-key-modal').hidden = true);
   $('group-key-save-btn').addEventListener('click', async () => {
