@@ -227,8 +227,8 @@ const localDayFormatter = new Intl.DateTimeFormat(undefined, {
 const DESKTOP_SIDEBAR_WIDTH_STORAGE_KEY = 'gchat:desktop-sidebar-width';
 const DESKTOP_RIGHT_PANEL_STORAGE_KEY = 'gchat:desktop-right-panel-expanded';
 const DESKTOP_DEFAULT_SIDEBAR_WIDTH = 260;
-const DESKTOP_MIN_SIDEBAR_WIDTH = 220;
-const DESKTOP_COMPACT_SIDEBAR_WIDTH = 236;
+const DESKTOP_MIN_SIDEBAR_WIDTH = 132;
+const DESKTOP_COMPACT_SIDEBAR_WIDTH = 172;
 
 function readLocalGroupCache(groupId) {
   try {
