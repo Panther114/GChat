@@ -998,7 +998,7 @@ body.sidebar-resizing * {
   border: 1px solid rgba(0,0,0,.08);
 }
 .message-token-ai {
-  background: rgba(108,99,255,.18);
+  background: #d9d0ff;
   color: #111111;
   border: 1px solid rgba(108,99,255,.3);
 }
@@ -1164,7 +1164,7 @@ body.sidebar-resizing * {
   flex-shrink: 0;
   border-radius: 999px;
   padding: 3px 8px;
-  background: rgba(108,99,255,.18);
+  background: #d9d0ff;
   color: #111111;
   font-size: 11px;
   font-weight: 700;
