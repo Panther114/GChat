@@ -4297,7 +4297,7 @@ async function buildGrokContextMessages(groupId) {
     if (remaining <= 0) break;
     const text = String(entry.content).trim();
     if (!text) continue;
-    const trimmedContent = text.length > remaining ? text.slice(text.length - remaining) : text;
+    const trimmedContent = text.length > remaining ? text.slice(0, remaining) : text;
     compact.push({ ...entry, content: trimmedContent });
     remaining -= trimmedContent.length;
   }
