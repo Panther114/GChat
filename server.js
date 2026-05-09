@@ -407,6 +407,8 @@ function extractOpenRouterCostUsd(payload) {
   const candidates = [
     payload?.usage?.cost,
     payload?.usage?.estimated_cost,
+    // OpenRouter may expose the finalized USD amount here even when `cost`
+    // or `estimated_cost` are absent.
     payload?.usage?.total_cost,
     payload?.meta?.cost?.amount,
     payload?.meta?.cost,

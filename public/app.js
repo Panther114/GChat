@@ -3364,13 +3364,19 @@ function updateKeyState() {
   const modalBlockingInput = !$('grok-modal').hidden;
   const input = $('message-input');
   const sendBtn = $('send-btn');
+  const blockedStatus = $('composer-blocked-status');
   setElementIcon($('set-key-btn'), 'key-round', { iconOnly: true, label: hasKey ? 'Change Key' : 'Set Key' });
   input.disabled = !hasKey || modalBlockingInput;
   input.placeholder = !hasKey
     ? 'Enter group key to continue'
     : (modalBlockingInput ? 'Complete Ask AI first…' : 'Type a message…');
+  if (modalBlockingInput) input.setAttribute('aria-describedby', 'composer-blocked-status');
+  else input.removeAttribute('aria-describedby');
   sendBtn.disabled = !hasKey || modalBlockingInput;
   setComposerShellDisabled(!hasKey || modalBlockingInput);
+  if (blockedStatus) {
+    blockedStatus.textContent = modalBlockingInput ? 'Chat input is temporarily disabled while the Ask AI modal is open.' : '';
+  }
 }
 
 // ── Load messages ─────────────────────────────────────────────────────────────
@@ -5469,10 +5475,6 @@ async function submitGrokPrompt() {
     if (result.aiUsage) setAiUsageSummary(result.aiUsage);
 
     if (grokRequestSource === 'chat') {
-      if (aiMessageRequestInFlight) {
-        showToast('AI request already in progress', 'info');
-        return;
-      }
       const key = getGroupKey(groupId);
       if (!key) throw new Error('Set group key first');
       aiMessageRequestInFlight = true;

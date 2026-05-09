@@ -86,6 +86,7 @@
       </div>
 
       <div class="message-input-bar" id="message-input-bar">
+        <p class="visually-hidden" id="composer-blocked-status" aria-live="polite"></p>
         <button class="btn-icon btn-whisper-mode" id="whisper-mode-btn" title="Message mode" aria-label="Message mode"></button>
         <button class="btn-icon btn-emoji" id="emoji-btn" title="Emoji" aria-label="Emoji" data-icon="smile" data-icon-only="true"></button>
         <label class="btn-icon btn-attach" title="Attach file">
@@ -452,11 +453,12 @@
         <div class="grok-response" id="grok-response"></div>
         <div class="grok-response-meta" id="grok-response-meta" hidden></div>
       </div>
+      <p class="modal-desc grok-submit-help" id="grok-submit-help">Enter a prompt and keep model, mode, and tone selected to enable Ask AI.</p>
       <div class="modal-actions">
         <button class="btn-secondary" id="grok-copy-btn" disabled>Copy</button>
         <button class="btn-secondary" id="grok-insert-btn" disabled>Use as draft</button>
         <button class="btn-secondary" id="grok-cancel-btn">Close</button>
-        <button class="btn-primary" id="grok-submit-btn" disabled>Ask AI</button>
+        <button class="btn-primary" id="grok-submit-btn" disabled aria-describedby="grok-submit-help">Ask AI</button>
       </div>
     </div>
   </div>
