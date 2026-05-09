@@ -457,6 +457,11 @@ body.sidebar-resizing * {
   cursor: pointer;
   transition: background .2s;
 }
+.sidebar-actions .btn-action {
+  width: 100%;
+  display: flex;
+  align-items: center;
+}
 .btn-action:hover { background: rgba(108,99,255,.25); }
 
 .sidebar-user {
@@ -993,8 +998,8 @@ body.sidebar-resizing * {
   border: 1px solid rgba(0,0,0,.08);
 }
 .message-token-ai {
-  background: rgba(108,99,255,.18);
-  color: #e2dcff;
+  background: #d9d0ff;
+  color: #111111;
   border: 1px solid rgba(108,99,255,.3);
 }
 
@@ -1159,8 +1164,8 @@ body.sidebar-resizing * {
   flex-shrink: 0;
   border-radius: 999px;
   padding: 3px 8px;
-  background: rgba(108,99,255,.18);
-  color: #e7e2ff;
+  background: #d9d0ff;
+  color: #111111;
   font-size: 11px;
   font-weight: 700;
   border: 1px solid rgba(108,99,255,.3);
@@ -1374,7 +1379,11 @@ body.sidebar-resizing * {
 .right-panel-code strong { color: var(--accent2); font-family: monospace; }
 .btn-copy { background: none; border: none; cursor: pointer; color: var(--text-secondary); padding: 2px; }
 
-.right-panel-actions { display: flex; flex-direction: column; gap: 6px; }
+.right-panel-actions {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
 .btn-action-sm {
   background: rgba(255,255,255,.06);
   border: 1px solid #2a2a3e;
@@ -1387,6 +1396,37 @@ body.sidebar-resizing * {
   transition: background .2s;
 }
 .btn-action-sm:hover { background: rgba(255,255,255,.1); }
+.btn-panel-action {
+  width: 100%;
+  aspect-ratio: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  text-align: center;
+  position: relative;
+}
+.btn-panel-action.has-icon .ui-icon { margin-right: 0; }
+.btn-panel-action::after {
+  content: attr(data-icon-label);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  transform: translateX(-50%);
+  background: rgba(0,0,0,.86);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  padding: 5px 7px;
+  border-radius: 6px;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .15s;
+  z-index: 5;
+}
+.btn-panel-action:hover::after,
+.btn-panel-action:focus-visible::after { opacity: 1; }
 .btn-enc-toggle { background: rgba(33,150,243,.12); border-color: rgba(33,150,243,.25); color: #64b5f6; }
 .btn-enc-toggle:hover { background: rgba(33,150,243,.2); }
 .btn-grok { background: rgba(108,99,255,.12); border-color: rgba(108,99,255,.28); color: #c9c0ff; }
@@ -1759,7 +1799,7 @@ body.sidebar-resizing * {
 .user-management-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+   gap: 8px;
 }
 .user-management-empty {
   padding: 20px 0;
@@ -1769,9 +1809,9 @@ body.sidebar-resizing * {
 .user-management-user {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 14px;
-  border-radius: 14px;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
   border: 1px solid rgba(255,255,255,.08);
   background: rgba(255,255,255,.03);
 }
@@ -1779,39 +1819,56 @@ body.sidebar-resizing * {
   flex: 1;
   min-width: 0;
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  align-items: center;
 }
 .user-management-user-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 12px;
+  width: 100%;
+  min-width: 0;
 }
 .user-management-user-name {
   font-size: 14px;
   font-weight: 700;
   color: var(--text-primary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.user-management-user-usage {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin-left: auto;
 }
 .user-management-user-value {
   font-size: 12px;
   color: var(--text-secondary);
   white-space: nowrap;
 }
+.user-management-user-track {
+  width: 64px;
+  height: 6px;
+  flex-shrink: 0;
+}
 .user-management-user-actions {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
 .user-management-user-actions input {
-  width: 140px;
+  width: 112px;
   background: #0d0d18;
   border: 1px solid #2a2a3e;
   border-radius: 8px;
   color: var(--text-primary);
   font-size: 13px;
-  padding: 8px 10px;
+  padding: 6px 8px;
 }
 .user-management-delete-btn {
   white-space: nowrap;
@@ -2030,10 +2087,15 @@ body.sidebar-compact .sidebar-user {
     margin: 16px;
   }
   .user-management-user,
-  .user-management-user-head,
   .user-management-global-head {
     flex-direction: column;
     align-items: stretch;
+  }
+  .user-management-user-head {
+    flex-wrap: wrap;
+  }
+  .user-management-user-usage {
+    margin-left: 0;
   }
   .user-management-reset-note {
     text-align: left;

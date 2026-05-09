@@ -25,7 +25,7 @@
       <div class="empty-groups" id="empty-groups">No groups yet.<br>Create or join one below!</div>
     </nav>
     <div class="sidebar-actions">
-      <button class="btn-action" id="user-list-btn" data-icon="users">User List</button>
+      <button class="btn-action" id="user-list-btn" data-icon="users" title="Open user list" aria-label="Open user list">User List</button>
       <button class="btn-action" id="new-group-btn" data-icon="plus">New Group</button>
       <button class="btn-action" id="join-group-btn" data-icon="log-in">Join Group</button>
     </div>
@@ -143,10 +143,10 @@
         <button class="btn-copy" id="copy-code-btn" title="Copy code" aria-label="Copy code" data-icon="copy" data-icon-only="true"></button>
       </div>
       <div class="right-panel-actions">
-        <button class="btn-action-sm btn-set-key" id="set-key-btn" data-icon="key-round">Set Key</button>
-        <button class="btn-action-sm btn-grok" id="ask-grok-btn" data-icon="sparkles">Ask Grok 4.3</button>
-        <button class="btn-action-sm btn-enc-toggle" id="enc-toggle-btn">Hide Encryption</button>
-        <button class="btn-action-sm btn-forget-key" id="forget-key-btn" data-icon="key">Forget Key</button>
+        <button class="btn-action-sm btn-panel-action btn-set-key" id="set-key-btn" data-icon="key-round" data-icon-only="true" data-icon-label="Set Key" title="Set Key" aria-label="Set Key"></button>
+        <button class="btn-action-sm btn-panel-action btn-grok" id="ask-grok-btn" data-icon="sparkles" data-icon-only="true" data-icon-label="Ask Grok 4.3" title="Ask Grok 4.3" aria-label="Ask Grok 4.3"></button>
+        <button class="btn-action-sm btn-panel-action btn-enc-toggle" id="enc-toggle-btn" data-icon="lock" data-icon-only="true" data-icon-label="Hide Encryption" title="Hide Encryption" aria-label="Hide Encryption"></button>
+        <button class="btn-action-sm btn-panel-action btn-forget-key" id="forget-key-btn" data-icon="key" data-icon-only="true" data-icon-label="Forget Key" title="Forget Key" aria-label="Forget Key"></button>
       </div>
       <div class="search-bar">
         <span class="search-icon" data-icon="search" data-icon-only="true" aria-hidden="true"></span>

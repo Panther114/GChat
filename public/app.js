@@ -734,10 +734,10 @@ function renderUserManagementPanel() {
     value.className = 'user-management-user-value';
     value.textContent = `${integerFormatter.format(user.aiTokensUsedToday)} / ${integerFormatter.format(user.aiDailyTokenLimit)} tokens`;
 
-    head.append(name, value);
-
+    const usage = document.createElement('div');
+    usage.className = 'user-management-user-usage';
     const track = document.createElement('div');
-    track.className = 'usage-bar-track';
+    track.className = 'usage-bar-track user-management-user-track';
     const fill = document.createElement('div');
     fill.className = 'usage-bar-fill';
     fill.style.width = `${getAiUsagePercent({
@@ -745,8 +745,10 @@ function renderUserManagementPanel() {
       dailyLimit: user.aiDailyTokenLimit,
     })}%`;
     track.appendChild(fill);
+    usage.append(value, track);
 
-    main.append(head, track);
+    head.append(name, usage);
+    main.append(head);
 
     if (summary.viewerCanManageAiLimits || (summary.viewerCanDeleteUsers && user.username !== APP_OWNER_USERNAME)) {
       const actions = document.createElement('div');
@@ -1461,10 +1463,8 @@ function completeViewportTrackingForRow(row) {
     pendingReadMessageIds.add(messageId);
     row.classList.remove('unseen');
     row.dataset.hasRead = '1';
-    if (currentGroupId) {
-      unreadCounts[currentGroupId] = Math.max(0, (unreadCounts[currentGroupId] || 0) - 1);
-      updateUnreadBadge(currentGroupId, unreadCounts[currentGroupId]);
-    }
+    setLocalMessageReadState(currentGroupId, messageId, true);
+    syncGroupUnreadCount(currentGroupId);
     socket.emit('mark_message_read', { groupId: currentGroupId, messageId });
   }
 
@@ -1835,6 +1835,7 @@ async function removeTagMessagesFromCache(groupId, hashtag) {
   if (!normalizedTag) return false;
   const cache = ensureGroupCacheEntry(groupId);
   if (!cache.messages) return false;
+  const isCurrentGroup = groupId === currentGroupId;
 
   const removedIds = [];
   cache.messages = cache.messages.filter((msg) => {
@@ -1845,16 +1846,23 @@ async function removeTagMessagesFromCache(groupId, hashtag) {
   if (removedIds.length === 0) return false;
 
   for (const messageId of removedIds) {
+    pendingReadMessageIds.delete(messageId);
+    pendingDisappearingStartMessageIds.delete(messageId);
     clearDisappearingTimer(messageId);
     clearMessageVisibilityTimer(messageId);
     hiddenDisappearingMessageIds.delete(messageId);
+    if (isCurrentGroup) {
+      const row = document.querySelector(`[data-msg-id="${CSS.escape(messageId)}"]`);
+      if (row) readObserver?.unobserve(row);
+    }
   }
   persistHiddenDisappearingMessageIds();
 
+  if (isCurrentGroup) allMessages = cache.messages;
   cache.oldestMessageId = cache.messages.length ? cache.messages[0].id : null;
   cache.rowsDirty = true;
-  updateGroupUnseenCount(groupId, cache.messages);
-  if (groupId === currentGroupId) {
+  syncGroupUnreadCount(groupId);
+  if (isCurrentGroup) {
     await rebuildGroupMessageRows(groupId);
     renderGroupFromCache(groupId);
     observeCurrentGroupRowsForRead();
@@ -2499,6 +2507,7 @@ async function hideDisappearingMessageLocally(messageId, groupId = currentGroupI
     }
     cache.rowsDirty = true;
     cache.oldestMessageId = cache.messages.length ? cache.messages[0].id : null;
+    syncGroupUnreadCount(cacheGroupId);
     writeLocalGroupCache(cacheGroupId, cache);
     if (cacheGroupId === currentGroupId) {
       allMessages = cache.messages;
@@ -2730,7 +2739,13 @@ function setElementIcon(el, name, options = {}) {
   const { iconOnly = false, position = 'start' } = options;
   const existingLabel = el.dataset.iconLabel ?? el.textContent.trim();
   const resolvedLabel = options.label ?? existingLabel;
-  if (resolvedLabel) el.dataset.iconLabel = resolvedLabel;
+  if (resolvedLabel) {
+    el.dataset.iconLabel = resolvedLabel;
+    if (iconOnly) {
+      el.title = resolvedLabel;
+      el.setAttribute('aria-label', resolvedLabel);
+    }
+  }
   el.replaceChildren();
   if (!iconOnly && position === 'start') el.appendChild(createIcon(name));
   if (!iconOnly && resolvedLabel) {
@@ -3161,6 +3176,23 @@ function applyCurrentUserReadState(msg) {
   }
 }
 
+function setLocalMessageReadState(groupId, messageId, hasRead = true) {
+  const normalizedGroupId = String(groupId || '');
+  const normalizedMessageId = String(messageId || '');
+  if (!normalizedGroupId || !normalizedMessageId) return;
+  const cache = ensureGroupCacheEntry(normalizedGroupId);
+  let changed = false;
+  for (const msg of cache.messages || []) {
+    if (String(msg.id) !== normalizedMessageId) continue;
+    if (msg.hasRead !== hasRead) {
+      msg.hasRead = hasRead;
+      changed = true;
+    }
+    break;
+  }
+  if (changed) writeLocalGroupCache(normalizedGroupId, cache);
+}
+
 function updateUnreadBadge(groupId, count) {
   const badge = $('badge-' + groupId);
   if (!badge) return;
@@ -3175,6 +3207,13 @@ function updateGroupUnseenCount(groupId, messages = []) {
   }, 0);
   unreadCounts[groupId] = unseen;
   updateUnreadBadge(groupId, unseen);
+}
+
+function syncGroupUnreadCount(groupId) {
+  const cache = ensureGroupCacheEntry(groupId);
+  const messages = cache.messages || (groupId === currentGroupId ? allMessages : null);
+  if (!messages) return;
+  updateGroupUnseenCount(groupId, messages);
 }
 
 // ── Select group ──────────────────────────────────────────────────────────────
@@ -3260,7 +3299,7 @@ function updateKeyState() {
   const hasKey = !!key;
   const input = $('message-input');
   const sendBtn = $('send-btn');
-  setElementIcon($('set-key-btn'), 'key-round', { label: hasKey ? 'Change Key' : 'Set Key' });
+  setElementIcon($('set-key-btn'), 'key-round', { iconOnly: true, label: hasKey ? 'Change Key' : 'Set Key' });
   input.disabled = !hasKey;
   input.placeholder = hasKey ? 'Type a message…' : 'Enter group key to continue';
   sendBtn.disabled = !hasKey;
@@ -4508,10 +4547,13 @@ function initSocket() {
           cache.messageRows.push(row);
         }
       }
-      // Increment unseen for non-active group (only messages from others)
       if (msg.senderId !== currentUser.id) {
-        unreadCounts[msg.groupId] = (unreadCounts[msg.groupId] || 0) + 1;
-        updateUnreadBadge(msg.groupId, unreadCounts[msg.groupId]);
+        if (cache.messages) {
+          syncGroupUnreadCount(msg.groupId);
+        } else {
+          unreadCounts[msg.groupId] = (unreadCounts[msg.groupId] || 0) + 1;
+          updateUnreadBadge(msg.groupId, unreadCounts[msg.groupId]);
+        }
         playNotifSound();
       }
       // Update last message preview
@@ -4530,11 +4572,11 @@ function initSocket() {
       return;
     }
     applyCurrentUserReadState(msg);
-    if (msg.senderId !== currentUser.id) {
-      unreadCounts[msg.groupId] = (unreadCounts[msg.groupId] || 0) + 1;
-      updateUnreadBadge(msg.groupId, unreadCounts[msg.groupId]);
-    }
     await appendMessageBubble(msg, true, msg.groupId);
+    if (msg.senderId !== currentUser.id) {
+      observeCurrentGroupRowsForRead();
+      syncGroupUnreadCount(msg.groupId);
+    }
     // Update preview
     const preview2 = await getMessagePreviewText(msg, msg.groupId);
     updateGroupPreview(msg.groupId, preview2, msg.createdAt);
@@ -4581,12 +4623,14 @@ function initSocket() {
         cache.rowsDirty = true;
       }
       cache.oldestMessageId = cache.messages.length ? cache.messages[0].id : null;
+      syncGroupUnreadCount(groupId);
       writeLocalGroupCache(groupId, cache);
       if (groupId === currentGroupId) {
         allMessages = cache.messages;
         renderTagFilters();
         applyActiveTagFilterToRenderedMessages();
       }
+      void refreshGroupPreviewAfterHide(groupId);
       break;
     }
   });
@@ -4957,7 +5001,7 @@ function toggleEncryptionButton() {
   setElementIcon(
     $('enc-toggle-btn'),
     encryptionVisible ? 'lock' : 'unlock',
-    { label: encryptionVisible ? 'Hide Encryption' : 'Show Encrypted' }
+    { iconOnly: true, label: encryptionVisible ? 'Hide Encryption' : 'Show Encrypted' }
   );
 }
 
