@@ -168,6 +168,9 @@ const HOSTED_APP_UPDATE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
 const MESSAGE_VIEW_BASE_DELAY_MS = 2200;
 const MESSAGE_VIEW_PER_CHAR_MS = 200;
 const MESSAGE_VIEW_MAX_DELAY_MS = 18000;
+const MIN_DISAPPEARING_DURATION_MS = 6000;
+const DISAPPEARING_DURATION_PER_CHAR_MS = 180;
+const MAX_DISAPPEARING_DURATION_MS = 45000;
 async function fetchCsrfToken() {
   try {
     const r = await fetch('/api/auth/csrf');
@@ -504,12 +507,24 @@ function isDisappearingMessage(msg) {
   return !!(msg && msg.isDisappearing);
 }
 
-function computeDisappearingDurationMs(text) {
+function computeMessageViewportDelayMs(text) {
   const normalized = String(text || '').trim();
   const chars = normalized.length;
   return Math.max(
     MESSAGE_VIEW_BASE_DELAY_MS,
     Math.min(MESSAGE_VIEW_MAX_DELAY_MS, chars * MESSAGE_VIEW_PER_CHAR_MS)
+  );
+}
+
+function computeDisappearingDurationMs(text) {
+  const normalized = String(text || '').trim();
+  const chars = normalized.length;
+  return Math.max(
+    MIN_DISAPPEARING_DURATION_MS,
+    Math.min(
+      MAX_DISAPPEARING_DURATION_MS,
+      MIN_DISAPPEARING_DURATION_MS + (chars * DISAPPEARING_DURATION_PER_CHAR_MS)
+    )
   );
 }
 
@@ -708,7 +723,7 @@ function resolveMessageViewportDelayMs(row) {
   const stored = Number(row?.dataset?.readDelayMs) || 0;
   if (stored > 0) return stored;
   const text = row?.querySelector('.msg-text')?.textContent || '';
-  return computeDisappearingDurationMs(text);
+  return computeMessageViewportDelayMs(text);
 }
 
 function completeViewportTrackingForRow(row) {
@@ -2577,7 +2592,7 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
   const textEl = document.createElement('span');
   textEl.className = 'msg-text';
   await renderMsgContent(msg, textEl, bubble, groupId);
-  row.dataset.readDelayMs = String(computeDisappearingDurationMs(
+  row.dataset.readDelayMs = String(computeMessageViewportDelayMs(
     textEl.textContent || getMessageTypePreviewLabel(msg) || msg.filename || 'Message'
   ));
 
