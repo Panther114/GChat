@@ -1584,7 +1584,12 @@ function maybeTokenizeSlashCommand(input) {
   const whisperMatch = /^\/w\s+([^\s]+)\s$/.exec(input.value);
   if (whisperMatch) {
     if (composerTokens.hashtag || composerTokens.ai) {
-      showToast('AI requests and tags cannot be combined with whispers', 'error');
+      showToast(
+        composerTokens.ai
+          ? 'AI requests and tags cannot be combined with whispers'
+          : 'Tags cannot be combined with whispers',
+        'error'
+      );
       return false;
     }
     const member = resolveSlashWhisperTarget(whisperMatch[1]);
@@ -4557,11 +4562,20 @@ async function sendAiPromptToChat(parsedMessage) {
       throw new Error('Grok response is too large to send');
     }
 
+    let replyToData = null;
+    if (replyingTo) {
+      replyToData = JSON.stringify({
+        id: replyingTo.id,
+        senderName: replyingTo.senderName,
+        preview: replyingTo.preview,
+      });
+    }
+
     socket.emit('send_ai_message', {
       groupId: currentGroupId,
       encryptedContent,
       iv,
-      replyTo: null,
+      replyTo: replyToData,
       hashtag: parsedMessage.hashtag || null,
     });
     resetComposerAfterSend();
