@@ -196,6 +196,31 @@ function clearGroupKey(groupId) {
   localStorage.removeItem('gk:' + groupId);
 }
 
+function capturePreservedLocalStorageEntries() {
+  const entries = [];
+  try {
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (!key || !key.startsWith('gk:')) continue;
+      entries.push([key, localStorage.getItem(key)]);
+    }
+  } catch {
+    return [];
+  }
+  return entries;
+}
+
+function restorePreservedLocalStorageEntries(entries = []) {
+  for (const [key, value] of entries) {
+    if (!key || value == null) continue;
+    try {
+      localStorage.setItem(key, value);
+    } catch {
+      // best effort only
+    }
+  }
+}
+
 const LOCAL_CACHE_PREFIX = 'gchat:cache:group:';
 const LEGACY_LOCAL_SETTINGS_KEY = 'gchat:local-settings';
 const ACTIVE_LOCAL_SETTINGS_KEY = 'gchat:active-local-settings';
@@ -220,6 +245,10 @@ const MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024;
 const MAX_TEXT_MESSAGE_BYTES = 64 * 1024;
 const GROK_CONTEXT_MESSAGE_LIMIT = 40;
 const GROK_CONTEXT_TOTAL_CHARS = 24000;
+const AI_ASSISTANT_USER_ID = '__gchat_ai_grok__';
+const AI_ASSISTANT_NAME = 'Grok';
+const AI_ASSISTANT_COLOR = '#8d7bff';
+const AI_ASSISTANT_PROFILE_PICTURE = 'grok.webp';
 const ALLOWED_UPLOAD_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const wallpaperTheme = window.GChatWallpaperTheme || null;
 const localTimeFormatter = new Intl.DateTimeFormat(undefined, {
@@ -227,6 +256,7 @@ const localTimeFormatter = new Intl.DateTimeFormat(undefined, {
   minute: '2-digit',
   hour12: false,
 });
+const integerFormatter = new Intl.NumberFormat();
 const localDayFormatter = new Intl.DateTimeFormat(undefined, {
   year: 'numeric',
   month: 'short',
@@ -322,8 +352,10 @@ async function clearBrowserRuntimeCaches({ includeLocalData = false } = {}) {
 
   if (!includeLocalData) return;
 
+  const preservedLocalEntries = capturePreservedLocalStorageEntries();
   try { sessionStorage.clear(); } catch { /* ignore */ }
   try { localStorage.clear(); } catch { /* ignore */ }
+  restorePreservedLocalStorageEntries(preservedLocalEntries);
   derivedKeyCache.clear();
   clearAllMessageVisibilityTimers();
   groupDataCache.clear();
@@ -475,6 +507,91 @@ function formatBytes(bytes) {
     idx += 1;
   }
   return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[idx]}`;
+}
+
+function isAiAssistantMessage(msg) {
+  return String(msg?.senderId || '') === AI_ASSISTANT_USER_ID;
+}
+
+function normalizeAiMeta(meta) {
+  if (!meta || typeof meta !== 'object') return null;
+  const promptTokens = Math.max(0, Math.round(Number(meta.promptTokens) || 0));
+  const completionTokens = Math.max(0, Math.round(Number(meta.completionTokens) || 0));
+  const totalTokens = Math.max(
+    promptTokens + completionTokens,
+    Math.max(0, Math.round(Number(meta.totalTokens) || 0))
+  );
+  const estimatedCostUsdRaw = Number(meta.estimatedCostUsd);
+  const estimatedCostUsd = Number.isFinite(estimatedCostUsdRaw) && estimatedCostUsdRaw >= 0
+    ? estimatedCostUsdRaw
+    : null;
+  return {
+    model: String(meta.model || '').trim(),
+    promptTokens,
+    completionTokens,
+    totalTokens,
+    estimatedCostUsd,
+  };
+}
+
+function formatUsdCost(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount < 0) return '';
+  if (amount > 0 && amount < 0.000001) return '<$0.000001';
+  return `$${amount.toFixed(amount < 0.01 ? 6 : amount < 1 ? 4 : 2)}`;
+}
+
+function formatAiMetaSummary(meta) {
+  const normalized = normalizeAiMeta(meta);
+  if (!normalized) return '';
+  const parts = [];
+  if (normalized.totalTokens > 0) {
+    parts.push(`${integerFormatter.format(normalized.totalTokens)} tokens`);
+  }
+  const costText = formatUsdCost(normalized.estimatedCostUsd);
+  if (costText) parts.push(`est. ${costText}`);
+  return parts.join(' • ');
+}
+
+function createAiMentionChip() {
+  const chip = document.createElement('span');
+  chip.className = 'msg-ai-chip';
+  chip.textContent = '@Grok';
+  return chip;
+}
+
+function createAiMetaElement(meta) {
+  const summary = formatAiMetaSummary(meta);
+  if (!summary) return null;
+  const el = document.createElement('div');
+  el.className = 'msg-ai-meta';
+  el.textContent = summary;
+  return el;
+}
+
+function emitSocketWithAck(event, payload, timeoutMs = 12000) {
+  return new Promise((resolve, reject) => {
+    if (!socket) {
+      reject(new Error('Connection unavailable'));
+      return;
+    }
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error('Request timed out'));
+    }, timeoutMs);
+    socket.emit(event, payload, (response) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (response && response.ok) {
+        resolve(response);
+        return;
+      }
+      reject(new Error(response?.error || 'Request failed'));
+    });
+  });
 }
 
 function normalizeCommandUsername(value) {
@@ -1088,6 +1205,7 @@ let activeTagFilter = null;
 let grokRequestInFlight = false;
 let grokResponseDraft = '';
 let grokResponseModel = '';
+let grokResponseMeta = null;
 let aiMessageRequestInFlight = false;
 const composerTokens = {
   whisper: null,
@@ -1117,6 +1235,14 @@ function ensureGroupCacheEntry(groupId) {
 }
 
 function getMemberProfile(groupId, userId) {
+  if (String(userId) === AI_ASSISTANT_USER_ID) {
+    return {
+      id: AI_ASSISTANT_USER_ID,
+      username: AI_ASSISTANT_NAME,
+      iconColor: AI_ASSISTANT_COLOR,
+      profilePicture: AI_ASSISTANT_PROFILE_PICTURE,
+    };
+  }
   const cache = ensureGroupCacheEntry(groupId);
   const groupMembers = cache.members || [];
   const groupMember = groupMembers.find((member) => member.id === userId);
@@ -1137,6 +1263,7 @@ function getGroupMemberCount(groupId = currentGroupId) {
 function resolveDeliveryRecipientCount(msg, groupId = currentGroupId) {
   const total = Math.max(0, Number(msg?.totalRecipients) || 0);
   if (!msg || msg.type === 'whisper') return total;
+  if (isAiAssistantMessage(msg)) return total;
   const memberCount = getGroupMemberCount(groupId);
   if (memberCount > 0 && total >= memberCount) return Math.max(0, memberCount - 1);
   return total;
@@ -2463,13 +2590,14 @@ function updateGroupPreview(groupId, text, time) {
 
 async function getMessagePreviewText(msg, groupId = msg.groupId) {
   if (!msg) return '';
+  const aiMentionPrefix = msg.aiMention ? '@Grok ' : '';
   const prefix = getMessageHashtagPrefix(msg);
   const typeLabel = getMessageTypePreviewLabel(msg);
-  if (typeLabel) return prefix + typeLabel;
+  if (typeLabel) return aiMentionPrefix + prefix + typeLabel;
   const key = getGroupKey(groupId);
-  if (!key || msg.type !== 'text') return prefix + '[encrypted]';
+  if (!key || msg.type !== 'text') return aiMentionPrefix + prefix + '[encrypted]';
   const plaintext = await decryptMessage(msg.encryptedContent, msg.iv, key, groupId);
-  return prefix + (plaintext || '[encrypted]');
+  return aiMentionPrefix + prefix + (plaintext || '[encrypted]');
 }
 
 async function updateGroupPreviewFromMessage(groupId, msg) {
@@ -2743,6 +2871,7 @@ function renderWhisperPicker() {
 // ── Build & append message bubbles ────────────────────────────────────────────
 async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, options = {}) {
   const isOwn = msg.senderId === currentUser.id;
+  const isAiAssistant = isAiAssistantMessage(msg);
   const showSenderName = options.showSenderName !== false;
   const isReadByMe = isOwn || msg.hasRead === true;
 
@@ -2827,11 +2956,11 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
     hasPrefixContent = true;
   }
 
-  const inlineHashtagChip = msg.hashtag && msg.type === 'text'
-    ? createHashtagChip(msg.hashtag)
-    : null;
+  const inlinePrefixChips = [];
+  if (msg.aiMention && msg.type === 'text') inlinePrefixChips.push(createAiMentionChip());
+  if (msg.hashtag && msg.type === 'text') inlinePrefixChips.push(createHashtagChip(msg.hashtag));
 
-  if (msg.hashtag && !inlineHashtagChip) {
+  if (msg.hashtag && msg.type !== 'text') {
     const hashtagChip = createHashtagChip(msg.hashtag);
     prefixRow.appendChild(hashtagChip);
     hasPrefixContent = true;
@@ -2859,14 +2988,17 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
     textEl.textContent || getMessageTypePreviewLabel(msg) || msg.filename || 'Message'
   ));
 
-  if (inlineHashtagChip) {
+  if (inlinePrefixChips.length) {
     const inlineRow = document.createElement('div');
     inlineRow.className = 'msg-inline-row';
-    inlineRow.append(inlineHashtagChip, textEl);
+    inlineRow.append(...inlinePrefixChips, textEl);
     bubble.appendChild(inlineRow);
   } else {
     bubble.appendChild(textEl);
   }
+
+  const aiMetaEl = createAiMetaElement(msg.aiMeta);
+  if (aiMetaEl) bubble.appendChild(aiMetaEl);
 
   // Timestamp + delivery + edited badge
   const meta = document.createElement('span');
@@ -2878,7 +3010,7 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
     editedBadge.textContent = ' (edited)';
     meta.appendChild(editedBadge);
   }
-  if (isOwn) {
+  if (isOwn || isAiAssistant) {
     const del = document.createElement('span');
     del.className = 'msg-delivery';
     del.id = 'del-' + msg.id;
@@ -4373,6 +4505,7 @@ async function exportChat() {
 function resetGrokModalState() {
   grokResponseDraft = '';
   grokResponseModel = '';
+  grokResponseMeta = null;
   $('grok-prompt-input').value = '';
   $('grok-error').textContent = '';
   $('grok-status').textContent = '';
@@ -4381,6 +4514,8 @@ function resetGrokModalState() {
   $('grok-response').textContent = '';
   $('grok-response').classList.remove('is-error');
   $('grok-response-model').textContent = '';
+  $('grok-response-meta').textContent = '';
+  $('grok-response-meta').hidden = true;
   $('grok-copy-btn').disabled = true;
   $('grok-insert-btn').disabled = true;
   $('grok-submit-btn').disabled = false;
@@ -4401,12 +4536,15 @@ function setGrokBusy(isBusy, statusText = '') {
   $('grok-status').hidden = !statusText;
 }
 
-function setGrokResponse(text, model = '', { isError = false } = {}) {
+function setGrokResponse(text, model = '', meta = null, { isError = false } = {}) {
   const response = $('grok-response');
   response.textContent = text || '';
   response.classList.toggle('is-error', !!isError);
   $('grok-response-wrap').hidden = !text;
   $('grok-response-model').textContent = model || '';
+  const metaSummary = formatAiMetaSummary(meta);
+  $('grok-response-meta').textContent = metaSummary;
+  $('grok-response-meta').hidden = !metaSummary;
   $('grok-copy-btn').disabled = !text || !!isError || grokRequestInFlight;
   $('grok-insert-btn').disabled = !text || !!isError || grokRequestInFlight;
 }
@@ -4440,26 +4578,16 @@ async function buildGrokContextMessages(groupId) {
   const sourceMessages = (allMessages || []).slice(-GROK_CONTEXT_MESSAGE_LIMIT);
   const resolved = await Promise.all(sourceMessages.map(async (msg) => {
     if (!msg) return null;
+    if (msg.type === 'whisper' || isDisappearingMessage(msg)) return null;
+    if (msg.type === 'image' || msg.type === 'file') return null;
 
-    const prefixes = [];
     let content = '';
-    if (msg.type === 'image') {
-      prefixes.push('[Image]');
-      content = 'Attachment';
-    } else if (msg.type === 'file') {
-      prefixes.push('[File]');
-      content = msg.filename ? `Attachment: ${msg.filename}` : 'Attachment';
-    } else {
-      const plaintext = await decryptMessage(msg.encryptedContent, msg.iv, key, groupId);
-      if (!plaintext) return null;
-      content = plaintext.trim();
-      if (!content) return null;
-    }
+    const plaintext = await decryptMessage(msg.encryptedContent, msg.iv, key, groupId);
+    if (!plaintext) return null;
+    content = plaintext.trim();
+    if (!content) return null;
 
-    if (msg.type === 'whisper') prefixes.push('[Whisper]');
     const hashtag = getMessageHashtagKey(msg);
-    if (hashtag) prefixes.push(formatHashtagLabel(hashtag));
-    if (prefixes.length) content = `${prefixes.join(' ')} ${content}`;
 
     return {
       senderName: msg.senderName || 'Unknown',
@@ -4467,6 +4595,7 @@ async function buildGrokContextMessages(groupId) {
       content,
       type: msg.type || 'text',
       hashtag: hashtag || null,
+      isDisappearing: !!msg.isDisappearing,
     };
   }));
 
@@ -4502,8 +4631,9 @@ async function submitGrokPrompt() {
   const groupName = currentGroupData.name;
   grokResponseDraft = '';
   grokResponseModel = '';
+  grokResponseMeta = null;
   $('grok-error').textContent = '';
-  setGrokResponse('', '');
+  setGrokResponse('', '', null);
   setGrokBusy(true, 'Decrypting recent messages…');
 
   try {
@@ -4523,12 +4653,13 @@ async function submitGrokPrompt() {
 
     grokResponseDraft = String(data.answer || '').trim();
     grokResponseModel = String(data.model || '');
-    setGrokResponse(grokResponseDraft, grokResponseModel);
+    grokResponseMeta = normalizeAiMeta(data.aiMeta);
+    setGrokResponse(grokResponseDraft, grokResponseModel, grokResponseMeta);
     showToast('Grok response ready', 'success');
   } catch (err) {
     const message = String(err && err.message ? err.message : 'Grok request failed');
     $('grok-error').textContent = message;
-    setGrokResponse(message, '', { isError: true });
+    setGrokResponse(message, '', null, { isError: true });
   } finally {
     setGrokBusy(false);
   }
@@ -4541,22 +4672,51 @@ async function sendAiPromptToChat(parsedMessage) {
   }
   if (!canUseAiInCurrentGroup({ showError: true })) return;
 
-  const key = getGroupKey(currentGroupId);
+  const groupId = currentGroupId;
+  const groupName = currentGroupData?.name || '';
+  const key = getGroupKey(groupId);
   if (!key) {
     showToast('Set group key first', 'error');
     return;
   }
 
   aiMessageRequestInFlight = true;
-  showToast('Asking Grok 4.3…', 'info');
+  showToast('Sending @Grok message…', 'info');
 
   try {
-    const contextMessages = await buildGrokContextMessages(currentGroupId);
-    const res = await fetch(`/api/groups/${currentGroupId}/ai/chat`, {
+    let replyToData = null;
+    if (replyingTo) {
+      replyToData = JSON.stringify({
+        id: replyingTo.id,
+        senderName: replyingTo.senderName,
+        preview: replyingTo.preview,
+      });
+    }
+
+    const contextMessages = await buildGrokContextMessages(groupId);
+    const { encryptedContent: promptEncryptedContent, iv: promptIv } = await encryptMessage(parsedMessage.text, key, groupId);
+    if (estimateBase64Bytes(promptEncryptedContent) > MAX_TEXT_MESSAGE_BYTES) {
+      throw new Error('Message too large');
+    }
+
+    await emitSocketWithAck('send_message', {
+      groupId,
+      encryptedContent: promptEncryptedContent,
+      iv: promptIv,
+      replyTo: replyToData,
+      hashtag: parsedMessage.hashtag || null,
+      isDisappearing: false,
+      disappearingDurationMs: 0,
+      aiMention: true,
+    });
+    resetComposerAfterSend();
+
+    showToast('Asking Grok 4.3…', 'info');
+    const res = await fetch(`/api/groups/${groupId}/ai/chat`, {
       method: 'POST',
       headers: apiHeaders(),
       body: JSON.stringify({
-        groupName: currentGroupData.name,
+        groupName,
         prompt: parsedMessage.text,
         contextMessages,
       }),
@@ -4567,28 +4727,20 @@ async function sendAiPromptToChat(parsedMessage) {
     const answer = String(data.answer || '').trim();
     if (!answer) throw new Error('Grok returned an empty response');
 
-    const { encryptedContent, iv } = await encryptMessage(answer, key, currentGroupId);
+    const aiMeta = normalizeAiMeta(data.aiMeta);
+    const { encryptedContent, iv } = await encryptMessage(answer, key, groupId);
     if (estimateBase64Bytes(encryptedContent) > MAX_TEXT_MESSAGE_BYTES) {
       throw new Error('Grok response is too large to send');
     }
 
-    let replyToData = null;
-    if (replyingTo) {
-      replyToData = JSON.stringify({
-        id: replyingTo.id,
-        senderName: replyingTo.senderName,
-        preview: replyingTo.preview,
-      });
-    }
-
-    socket.emit('send_ai_message', {
-      groupId: currentGroupId,
+    await emitSocketWithAck('send_ai_message', {
+      groupId,
       encryptedContent,
       iv,
       replyTo: replyToData,
       hashtag: parsedMessage.hashtag || null,
+      aiMeta,
     });
-    resetComposerAfterSend();
   } catch (err) {
     showToast(String(err && err.message ? err.message : 'Grok request failed'), 'error');
   } finally {
@@ -4862,7 +5014,7 @@ function setupEventListeners() {
   $('clear-cache-btn').addEventListener('click', () => {
     showConfirm(
       'Clear Cache and Restart',
-      'This will clear local cache and restart GChat. Continue?',
+      'This will clear local cache and restart GChat. Stored group keys will be kept. Continue?',
       async () => {
         await clearCacheAndRestartApp();
       }

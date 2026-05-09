@@ -37,13 +37,21 @@ const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 const OPENROUTER_CHAT_COMPLETIONS_URL = `${OPENROUTER_BASE_URL}/chat/completions`;
 const OPENROUTER_MODEL = 'x-ai/grok-4.3';
 const OPENROUTER_TIMEOUT_MS = 45000;
+const OPENROUTER_TEMPERATURE = 0;
+const OPENROUTER_TOP_P = 1;
+const OPENROUTER_FREQUENCY_PENALTY = 0;
+const OPENROUTER_PRESENCE_PENALTY = 0;
+const OPENROUTER_MAX_TOKENS = 1200;
+const OPENROUTER_MODEL_INPUT_COST_PER_MILLION = 1.25;
+const OPENROUTER_MODEL_OUTPUT_COST_PER_MILLION = 2.5;
 const MAX_AI_PROMPT_CHARS = 4000;
 const MAX_AI_CONTEXT_MESSAGES = 40;
 const MAX_AI_CONTEXT_MESSAGE_CHARS = 2000;
 const MAX_AI_CONTEXT_TOTAL_CHARS = 32000;
 const AI_ASSISTANT_USER_ID = '__gchat_ai_grok__';
-const AI_ASSISTANT_NAME = 'grok';
+const AI_ASSISTANT_NAME = 'Grok';
 const AI_ASSISTANT_COLOR = '#8d7bff';
+const AI_ASSISTANT_PROFILE_PICTURE = '/grok.webp';
 
 // ── App & Server ──────────────────────────────────────────────────────────────
 const app = express();
@@ -160,6 +168,48 @@ function sanitizeAiText(value, maxLength) {
   return normalized.slice(0, maxLength);
 }
 
+function normalizeAiTokenCount(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return 0;
+  return Math.round(parsed);
+}
+
+function normalizeAiCostUsd(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return null;
+  return parsed;
+}
+
+function sanitizeAiMessageMeta(value) {
+  if (!value || typeof value !== 'object') return null;
+  const promptTokens = normalizeAiTokenCount(value.promptTokens ?? value.prompt_tokens);
+  const completionTokens = normalizeAiTokenCount(value.completionTokens ?? value.completion_tokens);
+  const totalTokens = Math.max(
+    promptTokens + completionTokens,
+    normalizeAiTokenCount(value.totalTokens ?? value.total_tokens)
+  );
+  const estimatedCostUsd = normalizeAiCostUsd(value.estimatedCostUsd ?? value.estimated_cost_usd ?? value.costUsd);
+  const model = sanitizeAiText(value.model, 80) || OPENROUTER_MODEL;
+  const costSource = sanitizeAiText(value.costSource, 16) || (estimatedCostUsd != null ? 'estimated' : 'unknown');
+  return {
+    model,
+    promptTokens,
+    completionTokens,
+    totalTokens,
+    estimatedCostUsd,
+    costSource,
+  };
+}
+
+function parseStoredAiMessageMeta(raw) {
+  if (typeof raw !== 'string' || !raw) return null;
+  try {
+    return sanitizeAiMessageMeta(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
 function normalizeAiContextMessages(value) {
   if (value == null) return { ok: true, value: [] };
   if (!Array.isArray(value)) {
@@ -181,6 +231,7 @@ function normalizeAiContextMessages(value) {
     const createdAt = sanitizeAiText(entry.createdAt, 64) || 'unknown time';
     const type = typeof entry.type === 'string' ? entry.type.slice(0, 32) : 'text';
     const hashtag = normalizeHashtag(entry.hashtag);
+    const isDisappearing = !!entry.isDisappearing;
     totalChars += content.length;
     if (totalChars > MAX_AI_CONTEXT_TOTAL_CHARS) {
       return { ok: false, error: 'AI context is too large' };
@@ -191,6 +242,7 @@ function normalizeAiContextMessages(value) {
       content,
       type,
       hashtag,
+      isDisappearing,
     });
   }
 
@@ -199,19 +251,18 @@ function normalizeAiContextMessages(value) {
 
 function buildAiTranscript(contextMessages, fallbackGroupName) {
   const groupName = sanitizeAiText(fallbackGroupName, 64) || 'Current group';
-  if (!contextMessages.length) {
+  const filteredMessages = contextMessages.filter((entry) => (
+    entry
+    && entry.type === 'text'
+    && !entry.isDisappearing
+    && entry.content
+  ));
+  if (!filteredMessages.length) {
     return `Group: ${groupName}\n\nConversation excerpt:\n[No prior messages were provided.]`;
   }
-  const lines = contextMessages.map((entry) => {
-    const typePrefix = entry.type === 'whisper'
-      ? '[Whisper] '
-      : entry.type === 'image'
-        ? '[Image] '
-        : entry.type === 'file'
-          ? '[File] '
-          : '';
+  const lines = filteredMessages.map((entry) => {
     const hashtagPrefix = entry.hashtag ? `#${entry.hashtag} ` : '';
-    return `[${entry.createdAt}] ${entry.senderName}: ${typePrefix}${hashtagPrefix}${entry.content}`;
+    return `[${entry.createdAt}] ${entry.senderName}: ${hashtagPrefix}${entry.content}`;
   });
   return `Group: ${groupName}\n\nConversation excerpt:\n${lines.join('\n')}`;
 }
@@ -236,6 +287,80 @@ function getOpenRouterErrorMessage(payload) {
     ? sanitizeAiText(payload.error.message, 240)
     : null;
   return nested || fallback;
+}
+
+function extractOpenRouterUsage(payload) {
+  const usage = payload && typeof payload === 'object' && payload.usage && typeof payload.usage === 'object'
+    ? payload.usage
+    : {};
+  const promptTokens = normalizeAiTokenCount(usage.prompt_tokens ?? usage.promptTokens);
+  const completionTokens = normalizeAiTokenCount(usage.completion_tokens ?? usage.completionTokens);
+  const totalTokens = Math.max(
+    promptTokens + completionTokens,
+    normalizeAiTokenCount(usage.total_tokens ?? usage.totalTokens)
+  );
+  return {
+    promptTokens,
+    completionTokens,
+    totalTokens,
+  };
+}
+
+function extractOpenRouterCostUsd(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  const candidates = [
+    payload?.usage?.cost,
+    payload?.usage?.estimated_cost,
+    payload?.meta?.cost?.amount,
+    payload?.meta?.cost,
+    payload?.cost,
+  ];
+  for (const candidate of candidates) {
+    const normalized = normalizeAiCostUsd(candidate);
+    if (normalized != null) return normalized;
+  }
+  return null;
+}
+
+function estimateOpenRouterCostUsd(usage) {
+  if (!usage) return null;
+  const promptTokens = normalizeAiTokenCount(usage.promptTokens);
+  const completionTokens = normalizeAiTokenCount(usage.completionTokens);
+  if (promptTokens === 0 && completionTokens === 0) return null;
+  return (
+    (promptTokens / 1000000) * OPENROUTER_MODEL_INPUT_COST_PER_MILLION
+    + (completionTokens / 1000000) * OPENROUTER_MODEL_OUTPUT_COST_PER_MILLION
+  );
+}
+
+function getOpenRouterResponseModel(payload) {
+  return (
+    sanitizeAiText(payload?.model, 80)
+    || sanitizeAiText(payload?.provider, 80)
+    || sanitizeAiText(payload?.meta?.model, 80)
+    || OPENROUTER_MODEL
+  );
+}
+
+function extractOpenRouterDebugMeta(upstream, payload) {
+  const requestId = sanitizeAiText(
+    upstream?.headers?.get('x-request-id')
+      || upstream?.headers?.get('request-id')
+      || upstream?.headers?.get('cf-ray'),
+    128
+  );
+  const responseId = sanitizeAiText(payload?.id, 128);
+  const provider = sanitizeAiText(payload?.provider ?? payload?.meta?.provider, 80);
+  const upstreamModel = sanitizeAiText(payload?.model ?? payload?.meta?.model, 80);
+  const errorCode = sanitizeAiText(payload?.error?.code, 64);
+  const debug = {};
+  if (requestId) debug.requestId = requestId;
+  if (responseId) debug.responseId = responseId;
+  if (provider) debug.provider = provider;
+  if (upstreamModel) debug.upstreamModel = upstreamModel;
+  if (errorCode) debug.errorCode = errorCode;
+  if (upstream && Number.isInteger(upstream.status)) debug.status = upstream.status;
+  return debug;
 }
 
 function validateEncryptedTextPayload(encryptedContent, iv) {
@@ -522,6 +647,8 @@ const migrations = [
   "ALTER TABLE users ADD COLUMN profile_picture TEXT",
   "ALTER TABLE users ADD COLUMN client_settings TEXT NOT NULL DEFAULT '{}'",
   "ALTER TABLE messages ADD COLUMN edited_at TEXT",
+  "ALTER TABLE messages ADD COLUMN ai_meta TEXT",
+  "ALTER TABLE messages ADD COLUMN ai_mention INTEGER NOT NULL DEFAULT 0",
   "CREATE INDEX IF NOT EXISTS idx_disappearing_states_user_hidden ON disappearing_message_states (user_id, hidden_at, expires_at)",
   "CREATE INDEX IF NOT EXISTS idx_disappearing_states_message_user ON disappearing_message_states (message_id, user_id)",
   "CREATE INDEX IF NOT EXISTS idx_message_reads_message_id ON message_reads (message_id)",
@@ -621,7 +748,8 @@ const stmts = {
       SELECT m.id, m.group_id, m.sender_id, u.username AS sender_name,
              u.icon_color AS sender_color, m.encrypted_content, m.iv,
              m.type, m.reply_to, m.filename, m.whisper_to, m.hashtag,
-             m.is_disappearing, m.disappearing_duration_ms,
+             m.ai_meta, m.ai_mention,
+              m.is_disappearing, m.disappearing_duration_ms,
              dms.started_at AS disappearing_started_at,
             dms.expires_at AS disappearing_expires_at,
             dms.hidden_at AS disappearing_hidden_at,
@@ -647,7 +775,8 @@ const stmts = {
       SELECT m.id, m.group_id, m.sender_id, u.username AS sender_name,
              u.icon_color AS sender_color, m.encrypted_content, m.iv,
              m.type, m.reply_to, m.filename, m.whisper_to, m.hashtag,
-             m.is_disappearing, m.disappearing_duration_ms,
+             m.ai_meta, m.ai_mention,
+              m.is_disappearing, m.disappearing_duration_ms,
              dms.started_at AS disappearing_started_at,
             dms.expires_at AS disappearing_expires_at,
             dms.hidden_at AS disappearing_hidden_at,
@@ -674,7 +803,7 @@ const stmts = {
     LIMIT @limit
   `),
   insertMessage: db.prepare(
-    'INSERT INTO messages (id, group_id, sender_id, encrypted_content, iv, type, reply_to, filename, whisper_to, hashtag, is_disappearing, disappearing_duration_ms, total_recipients) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    'INSERT INTO messages (id, group_id, sender_id, encrypted_content, iv, type, reply_to, filename, whisper_to, hashtag, is_disappearing, disappearing_duration_ms, total_recipients, ai_meta, ai_mention) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
   ),
   findMessageById: db.prepare('SELECT * FROM messages WHERE id = ?'),
   markMessageRead: db.prepare('INSERT OR IGNORE INTO message_reads (message_id, user_id) VALUES (?, ?)'),
@@ -863,6 +992,7 @@ function formatMessage(m) {
     senderId: m.sender_id,
     senderName: m.sender_name || (isAiAssistantMessage ? AI_ASSISTANT_NAME : 'Unknown'),
     senderColor: m.sender_color || (isAiAssistantMessage ? AI_ASSISTANT_COLOR : '#4A90D9'),
+    profilePicture: isAiAssistantMessage ? AI_ASSISTANT_PROFILE_PICTURE : null,
     encryptedContent: m.encrypted_content,
     iv: m.iv,
     type: m.type || 'text',
@@ -870,6 +1000,8 @@ function formatMessage(m) {
     filename: m.filename || null,
     whisperTo: m.whisper_to || null,
     hashtag: m.hashtag || null,
+    aiMeta: parseStoredAiMessageMeta(m.ai_meta),
+    aiMention: !!m.ai_mention,
     isDisappearing: !!m.is_disappearing,
     disappearingDurationMs: Math.max(0, Number(m.disappearing_duration_ms) || 0),
     disappearingStartedAt: m.disappearing_started_at || null,
@@ -1544,7 +1676,23 @@ app.post('/api/groups/:groupId/upload', uploadRawBodyParser, (req, res) => {
   const totalRecipients = Math.max(0, (stmts.countGroupMembers.get(groupId)?.count || 0) - 1);
 
   try {
-      stmts.insertMessage.run(msgId, groupId, userId, encryptedContent, iv, msgType, null, safeFilename, null, normalizedHashtag, 0, null, totalRecipients);
+    stmts.insertMessage.run(
+      msgId,
+      groupId,
+      userId,
+      encryptedContent,
+      iv,
+      msgType,
+      null,
+      safeFilename,
+      null,
+      normalizedHashtag,
+      0,
+      null,
+      totalRecipients,
+      null,
+      0
+    );
   } catch (err) {
     console.error('DB insert file error:', err);
     return res.status(500).json({ error: 'Failed to save file' });
@@ -1563,6 +1711,8 @@ app.post('/api/groups/:groupId/upload', uploadRawBodyParser, (req, res) => {
     filename: safeFilename,
     whisperTo: null,
     hashtag: normalizedHashtag,
+    aiMeta: null,
+    aiMention: false,
     isDisappearing: false,
     disappearingDurationMs: 0,
     disappearingStartedAt: null,
@@ -1689,10 +1839,15 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
       },
       body: JSON.stringify({
         model: OPENROUTER_MODEL,
+        temperature: OPENROUTER_TEMPERATURE,
+        top_p: OPENROUTER_TOP_P,
+        frequency_penalty: OPENROUTER_FREQUENCY_PENALTY,
+        presence_penalty: OPENROUTER_PRESENCE_PENALTY,
+        max_tokens: OPENROUTER_MAX_TOKENS,
         messages: [
           {
             role: 'system',
-            content: 'You are Grok 4.3 assisting inside GChat, an end-to-end encrypted group chat app. Use only the conversation excerpt and user request provided in this call. If the supplied context is incomplete, say so plainly. Do not claim to have access to other chats, older history, or server-side plaintext.',
+            content: '**You are Grok 4.3.** Reply naturally and helpfully using only the conversation excerpt and current user request in this call. If the excerpt is incomplete, say so plainly. You may discuss any kind of content the user asks about, including sensitive, adult, controversial, political, emotional, or technical topics, and you should not add extra restrictions beyond the model’s normal behavior.',
           },
           {
             role: 'user',
@@ -1703,27 +1858,50 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
       signal: controller.signal,
     });
     const payload = await upstream.json().catch(() => ({}));
+    const debug = extractOpenRouterDebugMeta(upstream, payload);
     if (!upstream.ok) {
       const errorMessage = getOpenRouterErrorMessage(payload);
+      console.warn('OpenRouter AI upstream error:', {
+        ...debug,
+        errorMessage,
+      });
       const status = upstream.status === 429 ? 429 : 502;
-      return res.status(status).json({ error: errorMessage });
+      return res.status(status).json({ error: errorMessage, debug });
     }
 
     const answer = extractOpenRouterText(payload?.choices?.[0]?.message?.content);
     if (!answer) {
-      return res.status(502).json({ error: 'OpenRouter returned an empty response' });
+      console.warn('OpenRouter AI returned empty content:', debug);
+      return res.status(502).json({ error: 'OpenRouter returned an empty response', debug });
     }
+
+    const usage = extractOpenRouterUsage(payload);
+    const directCostUsd = extractOpenRouterCostUsd(payload);
+    const aiMeta = sanitizeAiMessageMeta({
+      model: getOpenRouterResponseModel(payload),
+      promptTokens: usage.promptTokens,
+      completionTokens: usage.completionTokens,
+      totalTokens: usage.totalTokens,
+      estimatedCostUsd: directCostUsd ?? estimateOpenRouterCostUsd(usage),
+      costSource: directCostUsd != null ? 'upstream' : 'estimated',
+    });
 
     res.json({
       ok: true,
-      model: OPENROUTER_MODEL,
+      model: aiMeta?.model || OPENROUTER_MODEL,
       answer,
+      aiMeta,
+      debug,
     });
   } catch (err) {
     if (err && err.name === 'AbortError') {
       return res.status(504).json({ error: 'OpenRouter request timed out' });
     }
-    console.error('OpenRouter AI request error:', err);
+    console.error('OpenRouter AI request error:', {
+      name: err?.name || 'Error',
+      message: sanitizeAiText(err?.message, 240) || 'Unknown error',
+      code: sanitizeAiText(err?.code, 64),
+    });
     res.status(502).json({ error: 'Failed to contact OpenRouter' });
   } finally {
     clearTimeout(timeout);
@@ -1875,9 +2053,24 @@ io.on('connection', (socket) => {
   });
 
   // ── send_message ──────────────────────────────────────────────────────────
-  socket.on('send_message', ({ groupId, encryptedContent, iv, replyTo, hashtag, isDisappearing, disappearingDurationMs, spamSignature }) => {
+  socket.on('send_message', (payload = {}, ack) => {
+    const {
+      groupId,
+      encryptedContent,
+      iv,
+      replyTo,
+      hashtag,
+      isDisappearing,
+      disappearingDurationMs,
+      spamSignature,
+      aiMention,
+    } = payload;
+    const fail = (message) => {
+      socket.emit('error', { message });
+      if (typeof ack === 'function') ack({ ok: false, error: message });
+    };
     if (!groupId) {
-      socket.emit('error', { message: 'Group ID is required' });
+      fail('Group ID is required');
       return;
     }
 
@@ -1887,7 +2080,7 @@ io.on('connection', (socket) => {
       const now = Date.now();
       rateData.timestamps = rateData.timestamps.filter(t => now - t < 5000);
       if (rateData.timestamps.length >= 10) {
-        socket.emit('error', { message: 'Rate limit exceeded. Please slow down.' });
+        fail('Rate limit exceeded. Please slow down.');
         return;
       }
       // Check for repeated identical messages (3+ in a row)
@@ -1895,7 +2088,7 @@ io.on('connection', (socket) => {
       if (messageSignature === rateData.lastContent) {
         rateData.repeatCount = (rateData.repeatCount || 0) + 1;
         if (rateData.repeatCount >= 3) {
-          socket.emit('error', { message: 'Don\'t send the same message repeatedly.' });
+          fail('Don\'t send the same message repeatedly.');
           return;
         }
       } else {
@@ -1907,32 +2100,47 @@ io.on('connection', (socket) => {
 
     const payloadCheck = validateEncryptedTextPayload(encryptedContent, iv);
     if (!payloadCheck.ok) {
-      socket.emit('error', { message: payloadCheck.error });
+      fail(payloadCheck.error);
       return;
     }
 
     const replyCheck = normalizeReplyPayload(replyTo, groupId);
     if (!replyCheck.ok) {
-      socket.emit('error', { message: replyCheck.error });
+      fail(replyCheck.error);
       return;
     }
     const normalizedHashtag = normalizeHashtag(hashtag);
     if (hashtag !== null && hashtag !== undefined && normalizedHashtag === null) {
-      socket.emit('error', { message: 'Invalid hashtag' });
+      fail('Invalid hashtag');
       return;
     }
     const normalizedIsDisappearing = !!isDisappearing;
+    const normalizedAiMention = !!aiMention;
     const normalizedDisappearingDuration = normalizedIsDisappearing
       ? normalizeDisappearingDuration(disappearingDurationMs)
       : null;
     if (normalizedIsDisappearing && normalizedDisappearingDuration == null) {
-      socket.emit('error', { message: 'Invalid disappearing message duration' });
+      fail('Invalid disappearing message duration');
+      return;
+    }
+
+    const group = stmts.findGroupById.get(groupId);
+    if (!group) {
+      fail('Group not found');
+      return;
+    }
+    if (normalizedAiMention && !group.ai_enabled) {
+      fail('AI mode is disabled by the group owner');
+      return;
+    }
+    if (normalizedAiMention && normalizedIsDisappearing) {
+      fail('AI requests cannot be combined with disappearing messages');
       return;
     }
 
     const member = stmts.isMember.get(groupId, socket.userId);
     if (!member) {
-      socket.emit('error', { message: 'Not a member of this group' });
+      fail('Not a member of this group');
       return;
     }
 
@@ -1954,15 +2162,17 @@ io.on('connection', (socket) => {
         normalizedHashtag,
         normalizedIsDisappearing ? 1 : 0,
         normalizedDisappearingDuration,
-        totalRecipients
+        totalRecipients,
+        null,
+        normalizedAiMention ? 1 : 0
       );
     } catch (err) {
       console.error('DB insert message error:', err);
-      socket.emit('error', { message: 'Failed to save message' });
+      fail('Failed to save message');
       return;
     }
 
-    const payload = {
+    const messagePayload = {
       id: msgId,
       groupId,
       senderId: socket.userId,
@@ -1975,6 +2185,8 @@ io.on('connection', (socket) => {
       filename: null,
       whisperTo: null,
       hashtag: normalizedHashtag,
+      aiMeta: null,
+      aiMention: normalizedAiMention,
       isDisappearing: normalizedIsDisappearing,
       disappearingDurationMs: normalizedDisappearingDuration || 0,
       disappearingStartedAt: null,
@@ -1986,48 +2198,62 @@ io.on('connection', (socket) => {
       readCount: 0,
     };
 
-    io.to(groupId).emit('new_message', payload);
+    io.to(groupId).emit('new_message', messagePayload);
+    if (typeof ack === 'function') ack({ ok: true, messageId: msgId });
   });
 
-  socket.on('send_ai_message', ({ groupId, encryptedContent, iv, replyTo, hashtag }) => {
+  socket.on('send_ai_message', (payload = {}, ack) => {
+    const {
+      groupId,
+      encryptedContent,
+      iv,
+      replyTo,
+      hashtag,
+      aiMeta,
+    } = payload;
+    const fail = (message) => {
+      socket.emit('error', { message });
+      if (typeof ack === 'function') ack({ ok: false, error: message });
+    };
     if (!groupId) {
-      socket.emit('error', { message: 'Group ID is required' });
+      fail('Group ID is required');
       return;
     }
 
     const group = stmts.findGroupById.get(groupId);
     if (!group) {
-      socket.emit('error', { message: 'Group not found' });
+      fail('Group not found');
       return;
     }
     if (!group.ai_enabled) {
-      socket.emit('error', { message: 'AI mode is disabled by the group owner' });
+      fail('AI mode is disabled by the group owner');
       return;
     }
 
     const member = stmts.isMember.get(groupId, socket.userId);
     if (!member) {
-      socket.emit('error', { message: 'Not a member of this group' });
+      fail('Not a member of this group');
       return;
     }
 
     const payloadCheck = validateEncryptedTextPayload(encryptedContent, iv);
     if (!payloadCheck.ok) {
-      socket.emit('error', { message: payloadCheck.error });
+      fail(payloadCheck.error);
       return;
     }
 
     const replyCheck = normalizeReplyPayload(replyTo, groupId);
     if (!replyCheck.ok) {
-      socket.emit('error', { message: replyCheck.error });
+      fail(replyCheck.error);
       return;
     }
 
     const normalizedHashtag = normalizeHashtag(hashtag);
     if (hashtag !== null && hashtag !== undefined && normalizedHashtag === null) {
-      socket.emit('error', { message: 'Invalid hashtag' });
+      fail('Invalid hashtag');
       return;
     }
+    const normalizedAiMeta = sanitizeAiMessageMeta(aiMeta);
 
     const msgId = uuidv4();
     const createdAt = new Date().toISOString();
@@ -2047,11 +2273,13 @@ io.on('connection', (socket) => {
         normalizedHashtag,
         0,
         null,
-        totalRecipients
+        totalRecipients,
+        normalizedAiMeta ? JSON.stringify(normalizedAiMeta) : null,
+        0
       );
     } catch (err) {
       console.error('DB insert AI message error:', err);
-      socket.emit('error', { message: 'Failed to save AI message' });
+      fail('Failed to save AI message');
       return;
     }
 
@@ -2061,6 +2289,7 @@ io.on('connection', (socket) => {
       senderId: AI_ASSISTANT_USER_ID,
       senderName: AI_ASSISTANT_NAME,
       senderColor: AI_ASSISTANT_COLOR,
+      profilePicture: AI_ASSISTANT_PROFILE_PICTURE,
       encryptedContent,
       iv,
       type: 'text',
@@ -2068,6 +2297,8 @@ io.on('connection', (socket) => {
       filename: null,
       whisperTo: null,
       hashtag: normalizedHashtag,
+      aiMeta: normalizedAiMeta,
+      aiMention: false,
       isDisappearing: false,
       disappearingDurationMs: 0,
       disappearingStartedAt: null,
@@ -2078,6 +2309,7 @@ io.on('connection', (socket) => {
       totalRecipients,
       readCount: 0,
     });
+    if (typeof ack === 'function') ack({ ok: true, messageId: msgId });
   });
 
   // ── send_whisper ──────────────────────────────────────────────────────────
@@ -2185,7 +2417,9 @@ io.on('connection', (socket) => {
         normalizedHashtag,
         normalizedIsDisappearing ? 1 : 0,
         normalizedDisappearingDuration,
-        totalRecipients
+        totalRecipients,
+        null,
+        0
       );
     } catch (err) {
       console.error('DB insert whisper error:', err);
@@ -2206,6 +2440,8 @@ io.on('connection', (socket) => {
       filename: null,
       whisperTo: whisperToStr,
       hashtag: normalizedHashtag,
+      aiMeta: null,
+      aiMention: false,
       isDisappearing: normalizedIsDisappearing,
       disappearingDurationMs: normalizedDisappearingDuration || 0,
       disappearingStartedAt: null,
