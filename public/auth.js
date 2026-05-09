@@ -3,10 +3,30 @@ let csrfToken = null;
 const wallpaperTheme = window.GChatWallpaperTheme || null;
 const LEGACY_LOCAL_SETTINGS_KEY = wallpaperTheme ? wallpaperTheme.LEGACY_LOCAL_SETTINGS_KEY : 'gchat:local-settings';
 const ACTIVE_LOCAL_SETTINGS_KEY = wallpaperTheme ? wallpaperTheme.ACTIVE_LOCAL_SETTINGS_KEY : 'gchat:active-local-settings';
+const LOCAL_SETTINGS_KEY_PREFIX = 'gchat:local-settings:user:';
 
 function applyAuthWallpaperFromStorage() {
   if (!wallpaperTheme) return;
   wallpaperTheme.applyToRoot(wallpaperTheme.readSettingsFromStorage());
+}
+
+function persistUserWallpaperSettings(user) {
+  if (!wallpaperTheme || !user || typeof user !== 'object') return;
+  const normalized = wallpaperTheme.normalizeSettings(user.clientSettings || {});
+  const payload = JSON.stringify({
+    ...(user.clientSettings && typeof user.clientSettings === 'object' ? user.clientSettings : {}),
+    wallpaperDataUrl: normalized.wallpaperDataUrl,
+    wallpaperBlur: normalized.wallpaperBlur,
+    wallpaperTransparency: normalized.wallpaperTransparency,
+  });
+  try {
+    localStorage.setItem(ACTIVE_LOCAL_SETTINGS_KEY, payload);
+    if (user.id) localStorage.setItem(`${LOCAL_SETTINGS_KEY_PREFIX}${user.id}`, payload);
+    localStorage.removeItem(LEGACY_LOCAL_SETTINGS_KEY);
+  } catch {
+    // best effort only
+  }
+  wallpaperTheme.applyToRoot(normalized);
 }
 
 applyAuthWallpaperFromStorage();
@@ -86,6 +106,7 @@ document.getElementById('signin-form').addEventListener('submit', async (e) => {
     if (!res.ok) {
       errorEl.textContent = data.error || 'Sign in failed';
     } else {
+      persistUserWallpaperSettings(data);
       window.location.href = 'chat.html';
     }
   } catch {
@@ -126,6 +147,7 @@ document.getElementById('signup-form').addEventListener('submit', async (e) => {
     if (!res.ok) {
       errorEl.textContent = data.error || 'Registration failed';
     } else {
+      persistUserWallpaperSettings(data);
       window.location.href = 'chat.html';
     }
   } catch {
