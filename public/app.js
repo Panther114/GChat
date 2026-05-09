@@ -504,7 +504,7 @@ function isDisappearingMessage(msg) {
 
 function computeDisappearingDurationMs(text) {
   const normalized = String(text || '').trim();
-  const chars = Math.max(1, normalized.length);
+  const chars = normalized.length;
   return Math.max(
     MESSAGE_VIEW_BASE_DELAY_MS,
     Math.min(MESSAGE_VIEW_MAX_DELAY_MS, chars * MESSAGE_VIEW_PER_CHAR_MS)

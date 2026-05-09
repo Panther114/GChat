@@ -1155,6 +1155,9 @@ app.patch('/api/groups/:groupId/settings', (req, res) => {
   const group = stmts.findGroupById.get(groupId);
   if (!group) return res.status(404).json({ error: 'Group not found' });
   if (group.created_by !== userId) return res.status(403).json({ error: 'Only the group owner can change settings' });
+  const nextAllowMemberClear = allowMemberClear !== undefined
+    ? !!allowMemberClear
+    : !!group.allow_member_clear;
 
   if (allowMemberClear !== undefined) {
     stmts.updateGroupAllowMemberClear.run(allowMemberClear ? 1 : 0, groupId);
@@ -1162,7 +1165,7 @@ app.patch('/api/groups/:groupId/settings', (req, res) => {
       stmts.updateGroupAllowMemberClearTag.run(1, groupId);
     }
   }
-  if (allowMemberClearTag !== undefined && allowMemberClear !== true) {
+  if (allowMemberClearTag !== undefined && !nextAllowMemberClear) {
     stmts.updateGroupAllowMemberClearTag.run(allowMemberClearTag ? 1 : 0, groupId);
   }
   if (allowMemberExport !== undefined) {
