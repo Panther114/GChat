@@ -249,6 +249,9 @@ const AI_ASSISTANT_USER_ID = '__gchat_ai_grok__';
 const AI_ASSISTANT_NAME = 'Grok';
 const AI_ASSISTANT_COLOR = '#8d7bff';
 const AI_ASSISTANT_PROFILE_PICTURE = '/grok.webp';
+const APP_OWNER_USERNAME = 'Furina';
+const AI_RESET_TIME_LABEL = '4:00 AM Shanghai time';
+const AI_USAGE_RESET_LABEL = `Resets at ${AI_RESET_TIME_LABEL}`;
 const ALLOWED_UPLOAD_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const wallpaperTheme = window.GChatWallpaperTheme || null;
 const localTimeFormatter = new Intl.DateTimeFormat(undefined, {
@@ -569,6 +572,257 @@ function createAiMetaElement(meta) {
   return el;
 }
 
+function normalizeAiUsageSection(value) {
+  if (!value || typeof value !== 'object') return null;
+  const dailyLimit = Math.max(0, Math.round(Number(value.dailyLimit) || 0));
+  const usedTokens = Math.max(0, Math.round(Number(value.usedTokens) || 0));
+  return {
+    ...value,
+    dailyLimit,
+    usedTokens,
+    remainingTokens: Math.max(0, Number.isFinite(Number(value.remainingTokens)) ? Math.round(Number(value.remainingTokens)) : (dailyLimit - usedTokens)),
+    exceeded: !!value.exceeded || dailyLimit <= 0 || usedTokens >= dailyLimit,
+  };
+}
+
+function normalizeAiUsageSummary(value) {
+  if (!value || typeof value !== 'object') return null;
+  const currentUserUsage = normalizeAiUsageSection(value.currentUser);
+  const globalUsage = normalizeAiUsageSection(value.global);
+  return {
+    currentUser: currentUserUsage,
+    global: globalUsage,
+    window: value.window && typeof value.window === 'object' ? value.window : {},
+    canStartRequest: value.canStartRequest !== undefined
+      ? !!value.canStartRequest
+      : !(currentUserUsage?.exceeded || globalUsage?.exceeded),
+  };
+}
+
+function formatAiUsageValue(section) {
+  if (!section) return '0 / 0 tokens';
+  return `${integerFormatter.format(section.usedTokens)} / ${integerFormatter.format(section.dailyLimit)} tokens`;
+}
+
+function getAiUsagePercent(section) {
+  if (!section) return 0;
+  if (section.dailyLimit <= 0) return 100;
+  return Math.max(0, Math.min(100, (section.usedTokens / section.dailyLimit) * 100));
+}
+
+function getAiQuotaBlockedMessage(summary = aiUsageSummary) {
+  if (!summary) return '';
+  if (summary.global?.exceeded) return `Global daily AI token limit reached. Try again after ${AI_RESET_TIME_LABEL}.`;
+  if (summary.currentUser?.exceeded) return `Your daily AI token limit reached. Try again after ${AI_RESET_TIME_LABEL}.`;
+  return '';
+}
+
+function renderUsageBar(fillEl, valueEl, noteEl, section, options = {}) {
+  if (fillEl) fillEl.style.width = `${getAiUsagePercent(section)}%`;
+  if (valueEl) valueEl.textContent = formatAiUsageValue(section);
+  if (noteEl) {
+    const blockedMessage = options.blockedMessage || '';
+    noteEl.textContent = blockedMessage || options.note || AI_USAGE_RESET_LABEL;
+  }
+}
+
+function renderProfileAiUsage() {
+  const card = $('profile-ai-usage-card');
+  if (!card) return;
+  const blockedMessage = getAiQuotaBlockedMessage();
+  renderUsageBar(
+    $('profile-ai-usage-fill'),
+    $('profile-ai-usage-value'),
+    $('profile-ai-usage-note'),
+    aiUsageSummary?.currentUser || null,
+    { blockedMessage }
+  );
+  card.classList.toggle('is-blocked', !!blockedMessage);
+}
+
+function setAiUsageSummary(summary) {
+  aiUsageSummary = normalizeAiUsageSummary(summary);
+  renderProfileAiUsage();
+  updateAiControls();
+  if ($('user-management-modal') && !$('user-management-modal').hidden) {
+    void loadUserManagementSummary();
+  }
+}
+
+async function refreshAiUsageSummary() {
+  try {
+    const res = await fetch('/api/ai/usage');
+    if (!res.ok) return null;
+    const data = await res.json();
+    setAiUsageSummary(data);
+    return aiUsageSummary;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeManagedUserSummary(value) {
+  if (!value || typeof value !== 'object') return null;
+  return {
+    users: Array.isArray(value.users) ? value.users.map((user) => ({
+      id: user.id,
+      username: String(user.username || 'Unknown'),
+      iconColor: user.iconColor || '#4A90D9',
+      profilePicture: user.profilePicture || null,
+      aiDailyTokenLimit: Math.max(0, Math.round(Number(user.aiDailyTokenLimit) || 0)),
+      aiTokensUsedToday: Math.max(0, Math.round(Number(user.aiTokensUsedToday) || 0)),
+      aiLimitExceeded: !!user.aiLimitExceeded,
+    })) : [],
+    viewerCanManageAiLimits: !!value.viewerCanManageAiLimits,
+    viewerCanDeleteUsers: !!value.viewerCanDeleteUsers,
+    global: normalizeAiUsageSection(value.global),
+    window: value.window && typeof value.window === 'object' ? value.window : {},
+  };
+}
+
+function setUserManagementLoading(message = 'Loading users…') {
+  const list = $('user-management-list');
+  if (!list) return;
+  list.replaceChildren();
+  const empty = document.createElement('div');
+  empty.className = 'user-management-empty';
+  empty.textContent = message;
+  list.appendChild(empty);
+}
+
+function renderUserManagementPanel() {
+  const summary = userManagementSummary;
+  renderUsageBar(
+    $('user-management-global-fill'),
+    $('user-management-global-value'),
+    $('user-management-reset-note'),
+    summary?.global || null,
+    { blockedMessage: summary?.global?.exceeded ? 'Global limit reached until the next Shanghai reset.' : '' }
+  );
+  $('user-management-global-actions').hidden = !summary?.viewerCanManageAiLimits;
+  if (summary?.viewerCanManageAiLimits) {
+    $('user-management-global-limit-input').value = String(summary.global?.dailyLimit || 0);
+  }
+  const list = $('user-management-list');
+  if (!list) return;
+  list.replaceChildren();
+  const users = summary?.users || [];
+  if (!users.length) {
+    setUserManagementLoading('No users found');
+    return;
+  }
+  for (const user of users) {
+    const row = document.createElement('div');
+    row.className = 'user-management-user';
+    row.dataset.userId = user.id;
+
+    const avatar = document.createElement('div');
+    avatar.className = 'member-avatar';
+    renderAvatarElement(avatar, user);
+
+    const main = document.createElement('div');
+    main.className = 'user-management-user-main';
+
+    const head = document.createElement('div');
+    head.className = 'user-management-user-head';
+
+    const name = document.createElement('div');
+    name.className = 'user-management-user-name';
+    name.textContent = user.username;
+
+    const value = document.createElement('div');
+    value.className = 'user-management-user-value';
+    value.textContent = `${integerFormatter.format(user.aiTokensUsedToday)} / ${integerFormatter.format(user.aiDailyTokenLimit)} tokens`;
+
+    head.append(name, value);
+
+    const track = document.createElement('div');
+    track.className = 'usage-bar-track';
+    const fill = document.createElement('div');
+    fill.className = 'usage-bar-fill';
+    fill.style.width = `${getAiUsagePercent({
+      usedTokens: user.aiTokensUsedToday,
+      dailyLimit: user.aiDailyTokenLimit,
+    })}%`;
+    track.appendChild(fill);
+
+    main.append(head, track);
+
+    if (summary.viewerCanManageAiLimits || (summary.viewerCanDeleteUsers && user.username !== APP_OWNER_USERNAME)) {
+      const actions = document.createElement('div');
+      actions.className = 'user-management-user-actions';
+      if (summary.viewerCanManageAiLimits) {
+        const limitInput = document.createElement('input');
+        limitInput.type = 'number';
+        limitInput.min = '0';
+        limitInput.step = '1';
+        limitInput.value = String(user.aiDailyTokenLimit);
+        limitInput.setAttribute('aria-label', `${user.username} daily AI token limit`);
+        const saveBtn = document.createElement('button');
+        saveBtn.className = 'btn-primary btn-sm';
+        saveBtn.textContent = 'Save limit';
+        saveBtn.addEventListener('click', async () => {
+          $('user-management-error').textContent = '';
+          const res = await fetch(`/api/users/${encodeURIComponent(user.id)}/ai-limit`, {
+            method: 'PATCH',
+            headers: apiHeaders(),
+            body: JSON.stringify({ dailyLimit: limitInput.value }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            $('user-management-error').textContent = data.error || 'Failed to save user limit';
+            return;
+          }
+          await Promise.all([loadUserManagementSummary(), refreshAiUsageSummary()]);
+        });
+        actions.append(limitInput, saveBtn);
+      }
+      if (summary.viewerCanDeleteUsers && user.username !== APP_OWNER_USERNAME) {
+        const deleteBtn = document.createElement('button');
+        deleteBtn.className = 'btn-danger btn-sm user-management-delete-btn';
+        deleteBtn.textContent = 'Delete user';
+        deleteBtn.addEventListener('click', () => {
+          showConfirm('Delete User', `Delete ${user.username}? This cannot be undone.`, async () => {
+            const res = await fetch(`/api/users/${encodeURIComponent(user.id)}`, {
+              method: 'DELETE',
+              headers: apiHeaders(),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+              $('user-management-error').textContent = data.error || 'Failed to delete user';
+              return;
+            }
+            await Promise.all([loadUserManagementSummary(), refreshAiUsageSummary()]);
+          });
+        });
+        actions.appendChild(deleteBtn);
+      }
+      main.appendChild(actions);
+    }
+
+    row.append(avatar, main);
+    list.appendChild(row);
+  }
+}
+
+async function loadUserManagementSummary() {
+  try {
+    const res = await fetch('/api/users/management');
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      $('user-management-error').textContent = data.error || 'Failed to load users';
+      return null;
+    }
+    userManagementSummary = normalizeManagedUserSummary(data);
+    $('user-management-error').textContent = '';
+    renderUserManagementPanel();
+    return userManagementSummary;
+  } catch {
+    $('user-management-error').textContent = 'Failed to load users';
+    return null;
+  }
+}
+
 function clearMarkdownRenderState(target) {
   if (!target) return;
   target.classList.remove('markdown-rendered');
@@ -579,6 +833,16 @@ function renderPlainText(target, text) {
   if (!target) return;
   clearMarkdownRenderState(target);
   target.textContent = text || '';
+}
+
+function normalizeMarkdownLinkUrl(url) {
+  if (typeof url !== 'string') return null;
+  try {
+    const parsed = new URL(url);
+    return /^https?:$/.test(parsed.protocol) ? parsed.href : null;
+  } catch {
+    return null;
+  }
 }
 
 function appendMarkdownInline(target, text) {
@@ -623,9 +887,84 @@ function appendMarkdownInline(target, text) {
         continue;
       }
     }
+    if (source.startsWith('~~', i)) {
+      const end = source.indexOf('~~', i + 2);
+      if (end > i + 2) {
+        flushPlain();
+        const del = document.createElement('del');
+        del.textContent = source.slice(i + 2, end);
+        target.appendChild(del);
+        i = end + 1;
+        continue;
+      }
+    }
+    if (source[i] === '[') {
+      const labelEnd = source.indexOf(']', i + 1);
+      const hasUrl = labelEnd > i + 1 && source[labelEnd + 1] === '(';
+      if (hasUrl) {
+        const urlEnd = source.indexOf(')', labelEnd + 2);
+        if (urlEnd > labelEnd + 2) {
+          const href = normalizeMarkdownLinkUrl(source.slice(labelEnd + 2, urlEnd).trim());
+          if (href) {
+            flushPlain();
+            const link = document.createElement('a');
+            link.href = href;
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer';
+            link.textContent = source.slice(i + 1, labelEnd);
+            target.appendChild(link);
+            i = urlEnd;
+            continue;
+          }
+        }
+      }
+    }
     plain += source[i];
   }
   flushPlain();
+}
+
+function buildMarkdownTable(lines) {
+  const parseRow = (line) => (
+    line
+      .trim()
+      .replace(/^\|/, '')
+      .replace(/\|$/, '')
+      .split('|')
+      .map((cell) => cell.trim())
+  );
+  const wrap = document.createElement('div');
+  wrap.className = 'markdown-table-wrap';
+  const table = document.createElement('table');
+  const head = document.createElement('thead');
+  const body = document.createElement('tbody');
+  const headerCells = parseRow(lines[0] || '');
+  const headerRow = document.createElement('tr');
+  for (const cellText of headerCells) {
+    const cell = document.createElement('th');
+    appendMarkdownInline(cell, cellText);
+    headerRow.appendChild(cell);
+  }
+  head.appendChild(headerRow);
+  for (let i = 2; i < lines.length; i += 1) {
+    const row = document.createElement('tr');
+    for (const cellText of parseRow(lines[i])) {
+      const cell = document.createElement('td');
+      appendMarkdownInline(cell, cellText);
+      row.appendChild(cell);
+    }
+    body.appendChild(row);
+  }
+  table.append(head, body);
+  wrap.appendChild(table);
+  return wrap;
+}
+
+function renderMarkdownBlock(target, text) {
+  const wrapper = document.createElement('div');
+  renderMarkdown(wrapper, text);
+  wrapper.classList.remove('markdown-rendered');
+  target.append(...wrapper.childNodes);
 }
 
 function renderMarkdown(target, text) {
@@ -663,6 +1002,61 @@ function renderMarkdown(target, text) {
       const heading = document.createElement(`h${headingLevel}`);
       appendMarkdownInline(heading, headingMatch[2]);
       target.appendChild(heading);
+      continue;
+    }
+
+    if (/^```/.test(trimmed)) {
+      flushParagraph();
+      const codeLines = [];
+      i += 1;
+      while (i < lines.length && !/^```/.test(lines[i].trim())) {
+        codeLines.push(lines[i]);
+        i += 1;
+      }
+      const pre = document.createElement('pre');
+      const code = document.createElement('code');
+      code.textContent = codeLines.join('\n');
+      pre.appendChild(code);
+      target.appendChild(pre);
+      continue;
+    }
+
+    if (/^([-*_])(?:\s*\1){2,}$/.test(trimmed)) {
+      flushParagraph();
+      target.appendChild(document.createElement('hr'));
+      continue;
+    }
+
+    const separatorLine = lines[i + 1] ? lines[i + 1].trim() : '';
+    if (
+      trimmed.includes('|')
+      && /^\|?[\s:-]+\|[\s|:-]*$/.test(separatorLine)
+    ) {
+      flushParagraph();
+      const tableLines = [trimmed, separatorLine];
+      let tableIndex = i + 2;
+      while (tableIndex < lines.length) {
+        const candidate = lines[tableIndex].trim();
+        if (!candidate || !candidate.includes('|')) break;
+        tableLines.push(candidate);
+        tableIndex += 1;
+      }
+      target.appendChild(buildMarkdownTable(tableLines));
+      i = tableIndex - 1;
+      continue;
+    }
+
+    if (/^>\s?/.test(trimmed)) {
+      flushParagraph();
+      const quoteLines = [];
+      while (i < lines.length && /^>\s?/.test(lines[i].trim())) {
+        quoteLines.push(lines[i].trim().replace(/^>\s?/, ''));
+        i += 1;
+      }
+      i -= 1;
+      const blockquote = document.createElement('blockquote');
+      renderMarkdownBlock(blockquote, quoteLines.join('\n'));
+      target.appendChild(blockquote);
       continue;
     }
 
@@ -1058,15 +1452,8 @@ function isRowVisibleInMessagesViewport(row) {
   return rowRect.bottom > areaRect.top && rowRect.top < areaRect.bottom;
 }
 
-function resolveMessageViewportDelayMs(row) {
-  const stored = Number(row?.dataset?.readDelayMs) || 0;
-  if (stored > 0) return stored;
-  const text = row?.querySelector('.msg-text')?.textContent || '';
-  return computeMessageViewportDelayMs(text);
-}
-
 function completeViewportTrackingForRow(row) {
-  if (!row || !row.isConnected || !socket || !currentGroupId || document.visibilityState !== 'visible' || !document.hasFocus()) return;
+  if (!row || !row.isConnected || !socket || !currentGroupId || document.visibilityState !== 'visible') return;
   const messageId = row.dataset.msgId;
   if (!messageId) return;
 
@@ -1095,15 +1482,11 @@ function completeViewportTrackingForRow(row) {
 function syncViewportTrackingForRow(row, isIntersecting) {
   const messageId = row?.dataset?.msgId;
   if (!messageId) return;
-  if (!isIntersecting || document.visibilityState !== 'visible' || !document.hasFocus()) {
+  if (!isIntersecting || document.visibilityState !== 'visible') {
     clearMessageVisibilityTimer(messageId);
     return;
   }
-  if (messageVisibilityTimers.has(messageId)) return;
-  messageVisibilityTimers.set(messageId, setTimeout(() => {
-    messageVisibilityTimers.delete(messageId);
-    completeViewportTrackingForRow(row);
-  }, resolveMessageViewportDelayMs(row)));
+  completeViewportTrackingForRow(row);
 }
 
 function ensureReadObserver() {
@@ -1344,6 +1727,8 @@ let grokRequestInFlight = false;
 let grokResponseDraft = '';
 let grokResponseModel = '';
 let grokResponseMeta = null;
+let aiUsageSummary = null;
+let userManagementSummary = null;
 let aiMessageRequestInFlight = false;
 const composerTokens = {
   whisper: null,
@@ -1700,21 +2085,28 @@ function canUseAiInCurrentGroup({ showError = false } = {}) {
     if (showError) showToast(getAiDisabledMessage(), 'error');
     return false;
   }
+  const quotaMessage = getAiQuotaBlockedMessage();
+  if (quotaMessage) {
+    if (showError) showToast(quotaMessage, 'error');
+    return false;
+  }
   return true;
 }
 
 function updateAiControls() {
-  const enabled = !!currentGroupId && isAiModeEnabled();
+  const quotaMessage = getAiQuotaBlockedMessage();
+  const enabled = !!currentGroupId && isAiModeEnabled() && !quotaMessage;
+  const disabledReason = !isAiModeEnabled() ? getAiDisabledMessage() : quotaMessage;
   const askBtn = $('ask-grok-btn');
   if (askBtn) {
     askBtn.disabled = !enabled;
     askBtn.classList.toggle('is-disabled', !enabled);
-    askBtn.title = enabled ? 'Ask Grok 4.3' : getAiDisabledMessage();
+    askBtn.title = enabled ? 'Ask Grok 4.3' : (disabledReason || 'Ask Grok 4.3');
   }
   const slashAiBtn = $('slash-command-ai-item');
   if (slashAiBtn) {
     slashAiBtn.disabled = !enabled;
-    slashAiBtn.title = enabled ? 'AI' : getAiDisabledMessage();
+    slashAiBtn.title = enabled ? 'AI' : (disabledReason || 'AI');
   }
   if (!enabled && composerTokens.ai) {
     clearAiToken();
@@ -1729,6 +2121,11 @@ function messageMatchesActiveTag(msg) {
   return getMessageHashtagKey(msg) === activeTagFilter;
 }
 
+function rowMatchesActiveTag(row) {
+  if (!activeTagFilter) return true;
+  return String(row?.dataset?.hashtag || '') === activeTagFilter;
+}
+
 function applyActiveTagFilterToRenderedMessages() {
   const area = messagesArea();
   if (!area) return;
@@ -1736,8 +2133,7 @@ function applyActiveTagFilterToRenderedMessages() {
   for (const child of rows) {
     if (child.classList.contains('load-more-indicator')) continue;
     if (child.classList.contains('msg-row')) {
-      const msg = allMessages.find((entry) => String(entry.id) === child.dataset.msgId);
-      child.hidden = !messageMatchesActiveTag(msg);
+      child.hidden = !rowMatchesActiveTag(child);
       continue;
     }
     if (child.classList.contains('msg-system')) {
@@ -2506,6 +2902,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   $('app-version-label').textContent = appVersionLabel;
 
+  await refreshAiUsageSummary();
   await loadGroups();
   preloadAllGroups();
   initSocket();
@@ -2602,6 +2999,12 @@ function renderGroupList() {
   }
 }
 
+function formatUnreadBadgeCount(count) {
+  const safeCount = Math.max(0, Number(count) || 0);
+  if (safeCount <= 0) return '';
+  return safeCount > 99 ? '99+' : integerFormatter.format(safeCount);
+}
+
 function buildGroupItem(g) {
   const item = document.createElement('div');
   item.className = 'group-item' + (g.id === currentGroupId ? ' active' : '');
@@ -2630,8 +3033,8 @@ function buildGroupItem(g) {
   badge.className = 'group-item-badge';
   badge.id = 'badge-' + g.id;
   const cnt = unreadCounts[g.id] || 0;
-  badge.textContent = '';
-  badge.hidden = appLocalSettings.hideProfileDot || cnt === 0;
+  badge.textContent = formatUnreadBadgeCount(cnt);
+  badge.hidden = cnt === 0;
 
   item.append(av, info, badge);
   item.addEventListener('click', () => selectGroup(g.id));
@@ -2761,8 +3164,8 @@ function applyCurrentUserReadState(msg) {
 function updateUnreadBadge(groupId, count) {
   const badge = $('badge-' + groupId);
   if (!badge) return;
-  badge.textContent = '';
-  badge.hidden = appLocalSettings.hideProfileDot || count === 0;
+  badge.textContent = formatUnreadBadgeCount(count);
+  badge.hidden = (Number(count) || 0) === 0;
 }
 
 function updateGroupUnseenCount(groupId, messages = []) {
@@ -3122,21 +3525,6 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
   const textEl = document.createElement(isAiAssistant ? 'div' : 'span');
   textEl.className = 'msg-text';
   await renderMsgContent(msg, textEl, bubble, groupId);
-  row.dataset.readDelayMs = String(computeMessageViewportDelayMs(
-    textEl.textContent || getMessageTypePreviewLabel(msg) || msg.filename || 'Message'
-  ));
-
-  if (inlinePrefixChips.length) {
-    const inlineRow = document.createElement('div');
-    inlineRow.className = 'msg-inline-row';
-    inlineRow.append(...inlinePrefixChips, textEl);
-    bubble.appendChild(inlineRow);
-  } else {
-    bubble.appendChild(textEl);
-  }
-
-  const aiMetaEl = createAiMetaElement(msg.aiMeta);
-  if (aiMetaEl) bubble.appendChild(aiMetaEl);
 
   // Timestamp + delivery + edited badge
   const meta = document.createElement('span');
@@ -3158,7 +3546,33 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
     renderDeliveryTicks(del, total, read);
     meta.appendChild(del);
   }
-  bubble.appendChild(meta);
+
+  const inlineChipsForRow = isAiAssistant ? [] : inlinePrefixChips;
+  if (isAiAssistant && inlinePrefixChips.length) {
+    const prefix = document.createElement('div');
+    prefix.className = 'msg-text-prefix';
+    prefix.append(...inlinePrefixChips);
+    textEl.prepend(prefix);
+  }
+  if (msg.type === 'text') {
+    const bodyRow = document.createElement('div');
+    bodyRow.className = 'msg-body-row';
+    if (inlineChipsForRow.length) {
+      const inlineRow = document.createElement('div');
+      inlineRow.className = 'msg-inline-row';
+      inlineRow.append(...inlineChipsForRow, textEl);
+      bodyRow.append(inlineRow, meta);
+    } else {
+      bodyRow.append(textEl, meta);
+    }
+    bubble.appendChild(bodyRow);
+  } else {
+    bubble.appendChild(textEl);
+    bubble.appendChild(meta);
+  }
+
+  const aiMetaEl = createAiMetaElement(msg.aiMeta);
+  if (aiMetaEl) bubble.appendChild(aiMetaEl);
 
   content.appendChild(bubble);
 
@@ -3679,10 +4093,6 @@ async function startEditMessage(msg, currentPlaintext) {
 // ── Send message ──────────────────────────────────────────────────────────────
 async function doSend(text) {
   if (!currentGroupId || !socket) return;
-  if (aiMessageRequestInFlight) {
-    showToast('AI request already in progress', 'info');
-    return;
-  }
   const key = getGroupKey(currentGroupId);
   if (!key) return;
   const parsedMessage = parseComposerMessageInput(text);
@@ -3691,6 +4101,10 @@ async function doSend(text) {
     return;
   }
   if (parsedMessage.isAiPrompt) {
+    if (aiMessageRequestInFlight) {
+      showToast('AI request already in progress', 'info');
+      return;
+    }
     await sendAiPromptToChat(parsedMessage);
     return;
   }
@@ -4298,6 +4712,20 @@ function initSocket() {
     renderGroupList();
   });
 
+  socket.on('group_owner_transferred', ({ groupId, createdBy }) => {
+    const group = groups.find((g) => g.id === groupId);
+    if (group) group.createdBy = createdBy;
+    if (groupId === currentGroupId && currentGroupData) {
+      currentGroupData.createdBy = createdBy;
+      const isOwner = currentGroupData.createdBy === currentUser.id;
+      $('owner-actions').hidden = !isOwner;
+      $('set-group-color-btn').hidden = !isOwner;
+      updateGroupActionButtons(isOwner);
+      renderMembersList();
+    }
+    renderGroupList();
+  });
+
   socket.on('member_joined', ({ userId, username, iconColor, profilePicture, groupId }) => {
     const cache = ensureGroupCacheEntry(groupId);
     if (cache.members && !cache.members.find(m => m.id === userId)) {
@@ -4395,6 +4823,8 @@ function initSocket() {
       $('user-username').textContent = user.username;
       renderCurrentUserAvatar(user);
       syncProfilePictureModeUI();
+      renderProfileAiUsage();
+      updateAiControls();
     }
     // Update avatars and sender names in visible message bubbles
     document.querySelectorAll('.msg-row[data-sender-id="' + CSS.escape(String(user.id)) + '"]').forEach(row => {
@@ -4403,6 +4833,20 @@ function initSocket() {
       const nameEl = row.querySelector('.msg-sender-name');
       if (nameEl && user.username) nameEl.textContent = user.username;
     });
+    if (!$('user-management-modal').hidden) void loadUserManagementSummary();
+  });
+
+  socket.on('user_deleted', ({ userId }) => {
+    if (String(userId) === String(currentUser?.id)) {
+      window.location.href = 'index.html';
+      return;
+    }
+    if (!$('user-management-modal').hidden) void loadUserManagementSummary();
+  });
+
+  socket.on('account_deleted', ({ userId }) => {
+    if (String(userId) !== String(currentUser?.id)) return;
+    window.location.href = 'index.html';
   });
 
   socket.on('user_typing', ({ username }) => {
@@ -4712,11 +5156,15 @@ function openGrokModal() {
   $('grok-prompt-input').focus();
 }
 
-async function buildGrokContextMessages(groupId) {
+async function buildGrokContextMessages(groupId, options = {}) {
   const key = getGroupKey(groupId);
   if (!key) throw new Error('Set group key first');
 
-  const sourceMessages = (allMessages || []).slice(-GROK_CONTEXT_MESSAGE_LIMIT);
+  const normalizedTag = normalizeHashtagTopic(options.tagFilter || null);
+  const snapshot = Array.isArray(options.sourceMessages) ? options.sourceMessages : allMessages;
+  const sourceMessages = (snapshot || [])
+    .filter((msg) => !normalizedTag || getMessageHashtagKey(msg) === normalizedTag)
+    .slice(-GROK_CONTEXT_MESSAGE_LIMIT);
   const resolved = await Promise.all(sourceMessages.map(async (msg) => {
     if (!msg) return null;
     if (msg.type === 'whisper' || msg.type === 'image' || msg.type === 'file' || isDisappearingMessage(msg)) return null;
@@ -4758,7 +5206,7 @@ async function buildGrokContextMessages(groupId) {
 async function submitGrokPrompt() {
   if (grokRequestInFlight || !currentGroupId || !currentGroupData) return;
   if (!canUseAiInCurrentGroup()) {
-    $('grok-error').textContent = getAiDisabledMessage();
+    $('grok-error').textContent = getAiQuotaBlockedMessage() || getAiDisabledMessage();
     return;
   }
   const prompt = $('grok-prompt-input').value.trim();
@@ -4769,6 +5217,7 @@ async function submitGrokPrompt() {
 
   const groupId = currentGroupId;
   const groupName = currentGroupData.name;
+  const sourceMessagesSnapshot = [...allMessages];
   grokResponseDraft = '';
   grokResponseModel = '';
   grokResponseMeta = null;
@@ -4777,7 +5226,7 @@ async function submitGrokPrompt() {
   setGrokBusy(true, 'Decrypting recent messages…');
 
   try {
-    const contextMessages = await buildGrokContextMessages(groupId);
+    const contextMessages = await buildGrokContextMessages(groupId, { sourceMessages: sourceMessagesSnapshot });
     setGrokBusy(true, contextMessages.length ? 'Asking Grok 4.3…' : 'Asking Grok 4.3 without chat context…');
     const res = await fetch(`/api/groups/${groupId}/ai/chat`, {
       method: 'POST',
@@ -4794,11 +5243,15 @@ async function submitGrokPrompt() {
     grokResponseDraft = String(data.answer || '').trim();
     grokResponseModel = String(data.model || '');
     grokResponseMeta = normalizeAiMeta(data.aiMeta);
+    if (data.aiUsage) setAiUsageSummary(data.aiUsage);
     setGrokResponse(grokResponseDraft, grokResponseModel, grokResponseMeta);
     showToast('Grok response ready', 'success');
   } catch (err) {
     const message = String(err && err.message ? err.message : 'Grok request failed');
     $('grok-error').textContent = message;
+    if (/daily AI token limit/i.test(message) || /global daily AI token limit/i.test(message)) {
+      void refreshAiUsageSummary();
+    }
     setGrokResponse(message, '', null, { isError: true });
   } finally {
     setGrokBusy(false);
@@ -4815,6 +5268,7 @@ async function sendAiPromptToChat(parsedMessage) {
   const groupId = currentGroupId;
   const groupName = currentGroupData?.name || '';
   const key = getGroupKey(groupId);
+  const sourceMessagesSnapshot = [...allMessages];
   if (!key) {
     showToast('Set group key first', 'error');
     return;
@@ -4833,7 +5287,10 @@ async function sendAiPromptToChat(parsedMessage) {
       });
     }
 
-    const contextMessages = await buildGrokContextMessages(groupId);
+    const contextMessages = await buildGrokContextMessages(groupId, {
+      sourceMessages: sourceMessagesSnapshot,
+      tagFilter: parsedMessage.hashtag || null,
+    });
     const { encryptedContent: promptEncryptedContent, iv: promptIv } = await encryptMessage(parsedMessage.text, key, groupId);
     if (estimateBase64Bytes(promptEncryptedContent) > MAX_TEXT_MESSAGE_BYTES) {
       throw new Error('Message too large');
@@ -4868,6 +5325,7 @@ async function sendAiPromptToChat(parsedMessage) {
     if (!answer) throw new Error('Grok returned an empty response');
 
     const aiMeta = normalizeAiMeta(data.aiMeta);
+    if (data.aiUsage) setAiUsageSummary(data.aiUsage);
     const { encryptedContent, iv } = await encryptMessage(answer, key, groupId);
     if (estimateBase64Bytes(encryptedContent) > MAX_TEXT_MESSAGE_BYTES) {
       throw new Error('Grok response is too large to send');
@@ -4882,7 +5340,11 @@ async function sendAiPromptToChat(parsedMessage) {
       aiMeta,
     });
   } catch (err) {
-    showToast(String(err && err.message ? err.message : 'Grok request failed'), 'error');
+    const message = String(err && err.message ? err.message : 'Grok request failed');
+    if (/daily AI token limit/i.test(message) || /global daily AI token limit/i.test(message)) {
+      void refreshAiUsageSummary();
+    }
+    showToast(message, 'error');
   } finally {
     aiMessageRequestInFlight = false;
   }
@@ -4986,8 +5448,34 @@ function setupEventListeners() {
     setWallpaperSaveState(!wallpaperSettingsEqual(wallpaperDraft, appLocalSettings));
   });
 
+  $('user-list-btn').addEventListener('click', async () => {
+    $('user-management-error').textContent = '';
+    setUserManagementLoading();
+    $('user-management-modal').hidden = false;
+    await loadUserManagementSummary();
+  });
+  $('user-management-close-btn').addEventListener('click', () => { $('user-management-modal').hidden = true; });
+  $('user-management-modal').addEventListener('click', (e) => {
+    if (e.target !== $('user-management-modal')) return;
+    $('user-management-modal').hidden = true;
+  });
+  $('user-management-global-limit-save').addEventListener('click', async () => {
+    const res = await fetch('/api/ai/global-limit', {
+      method: 'PATCH',
+      headers: apiHeaders(),
+      body: JSON.stringify({ dailyLimit: $('user-management-global-limit-input').value }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      $('user-management-error').textContent = data.error || 'Failed to save global limit';
+      return;
+    }
+    await Promise.all([loadUserManagementSummary(), refreshAiUsageSummary()]);
+  });
+
   // Profile modal
   $('sidebar-user-btn').addEventListener('click', () => {
+    void refreshAiUsageSummary();
     $('profile-username').value = currentUser.username;
     $('profile-color').value = currentUser.iconColor;
     $('profile-error').textContent = '';
@@ -4999,6 +5487,7 @@ function setupEventListeners() {
       $('profile-picture-preview').hidden = true;
     }
     syncProfilePictureModeUI();
+    renderProfileAiUsage();
     $('profile-modal').hidden = false;
   });
   $('profile-close-btn').addEventListener('click', () => $('profile-modal').hidden = true);
@@ -5016,6 +5505,8 @@ function setupEventListeners() {
     $('user-username').textContent = d.username;
     renderCurrentUserAvatar(d);
     syncProfilePictureModeUI();
+    updateAiControls();
+    if (!$('user-management-modal').hidden) void loadUserManagementSummary();
     $('profile-error').textContent = '✓ Saved';
   });
 
@@ -5030,6 +5521,7 @@ function setupEventListeners() {
     currentUser = d;
     renderCurrentUserAvatar(d);
     syncProfilePictureModeUI();
+    if (!$('user-management-modal').hidden) void loadUserManagementSummary();
     $('profile-error').textContent = '✓ Saved';
   });
 
@@ -5089,6 +5581,7 @@ function setupEventListeners() {
       currentUser = d;
       renderCurrentUserAvatar(d);
       syncProfilePictureModeUI();
+      if (!$('user-management-modal').hidden) void loadUserManagementSummary();
       $('profile-error').textContent = '✓ Saved';
     };
     reader.readAsDataURL(file);
@@ -5107,6 +5600,7 @@ function setupEventListeners() {
     $('profile-picture-preview').hidden = true;
     $('profile-picture-input').value = '';
     syncProfilePictureModeUI();
+    if (!$('user-management-modal').hidden) void loadUserManagementSummary();
     $('profile-error').textContent = '✓ Removed';
   });
 

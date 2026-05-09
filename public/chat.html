@@ -25,6 +25,7 @@
       <div class="empty-groups" id="empty-groups">No groups yet.<br>Create or join one below!</div>
     </nav>
     <div class="sidebar-actions">
+      <button class="btn-action" id="user-list-btn" data-icon="users">User List</button>
       <button class="btn-action" id="new-group-btn" data-icon="plus">New Group</button>
       <button class="btn-action" id="join-group-btn" data-icon="log-in">Join Group</button>
     </div>
@@ -253,6 +254,16 @@
         <h2 data-icon="user">Profile</h2>
         <button class="btn-icon profile-close-btn" id="profile-close-btn" title="Close" aria-label="Close" data-icon="x" data-icon-only="true"></button>
       </div>
+      <div class="profile-ai-usage-card" id="profile-ai-usage-card">
+        <div class="profile-ai-usage-header">
+          <span>Daily AI usage</span>
+          <strong id="profile-ai-usage-value">0 / 0 tokens</strong>
+        </div>
+        <div class="usage-bar-track">
+          <div class="usage-bar-fill" id="profile-ai-usage-fill"></div>
+        </div>
+        <div class="profile-ai-usage-note" id="profile-ai-usage-note">Resets at 4:00 AM Shanghai time</div>
+      </div>
       <div class="form-group">
         <label>Change Username</label>
         <input type="text" id="profile-username" placeholder="New username" />
@@ -421,6 +432,35 @@
         <button class="btn-secondary" id="grok-insert-btn" disabled>Use as draft</button>
         <button class="btn-secondary" id="grok-cancel-btn">Close</button>
         <button class="btn-primary" id="grok-submit-btn">Ask Grok</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="user-management-modal" hidden>
+    <div class="modal user-management-modal">
+      <div class="modal-title-row">
+        <h2 data-icon="users">User List</h2>
+        <button class="btn-icon profile-close-btn" id="user-management-close-btn" title="Close" aria-label="Close" data-icon="x" data-icon-only="true"></button>
+      </div>
+      <div class="user-management-global-card">
+        <div class="user-management-global-head">
+          <div>
+            <div class="user-management-card-label">Global daily AI usage</div>
+            <div class="user-management-card-value" id="user-management-global-value">0 / 0 tokens</div>
+          </div>
+          <div class="user-management-reset-note" id="user-management-reset-note">Resets at 4:00 AM Shanghai time</div>
+        </div>
+        <div class="usage-bar-track usage-bar-track-global">
+          <div class="usage-bar-fill usage-bar-fill-global" id="user-management-global-fill"></div>
+        </div>
+        <div class="user-management-global-actions" id="user-management-global-actions" hidden>
+          <input type="number" id="user-management-global-limit-input" min="0" step="1" />
+          <button class="btn-primary btn-sm" id="user-management-global-limit-save">Save</button>
+        </div>
+      </div>
+      <p class="form-error" id="user-management-error"></p>
+      <div class="user-management-list" id="user-management-list">
+        <div class="user-management-empty">Loading users…</div>
       </div>
     </div>
   </div>

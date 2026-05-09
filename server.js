@@ -52,6 +52,19 @@ const AI_ASSISTANT_USER_ID = '__gchat_ai_grok__';
 const AI_ASSISTANT_NAME = 'Grok';
 const AI_ASSISTANT_COLOR = '#8d7bff';
 const AI_ASSISTANT_PROFILE_PICTURE = '/grok.webp';
+const APP_OWNER_USERNAME = 'Furina';
+const DEFAULT_USER_DAILY_AI_TOKEN_LIMIT = 20000;
+const DEFAULT_GLOBAL_DAILY_AI_TOKEN_LIMIT = 200000;
+const MAX_AI_DAILY_TOKEN_LIMIT = 100000000;
+const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000;
+const AI_RESET_HOUR_SHANGHAI = 4;
+const AI_RESET_TIME_LABEL = '4:00 AM Shanghai time';
+// Keep this aligned with DEFAULT_USER_DAILY_AI_TOKEN_LIMIT so repeatable schema
+// migrations keep the original default for already-deployed databases.
+const USER_AI_DAILY_TOKEN_LIMIT_MIGRATION_DEFAULT = 20000;
+if (USER_AI_DAILY_TOKEN_LIMIT_MIGRATION_DEFAULT !== DEFAULT_USER_DAILY_AI_TOKEN_LIMIT) {
+  throw new Error('User AI daily token migration default must match the runtime default');
+}
 
 // ── App & Server ──────────────────────────────────────────────────────────────
 const app = express();
@@ -178,6 +191,40 @@ function normalizeAiCostUsd(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) return null;
   return parsed;
+}
+
+function normalizeAiDailyTokenLimit(value, fallback = DEFAULT_USER_DAILY_AI_TOKEN_LIMIT) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return Math.min(MAX_AI_DAILY_TOKEN_LIMIT, Math.round(parsed));
+}
+
+function parseAiDailyTokenLimit(value, label) {
+  return parseBoundedInteger(value, 0, MAX_AI_DAILY_TOKEN_LIMIT, label);
+}
+
+function getAiUsageWindow(now = Date.now()) {
+  const shanghaiNow = new Date(now + SHANGHAI_OFFSET_MS);
+  let startLocalMs = Date.UTC(
+    shanghaiNow.getUTCFullYear(),
+    shanghaiNow.getUTCMonth(),
+    shanghaiNow.getUTCDate(),
+    AI_RESET_HOUR_SHANGHAI,
+    0,
+    0,
+    0
+  );
+  if (shanghaiNow.getUTCHours() < AI_RESET_HOUR_SHANGHAI) {
+    startLocalMs -= 24 * 60 * 60 * 1000;
+  }
+  const startUtcMs = startLocalMs - SHANGHAI_OFFSET_MS;
+  const endUtcMs = startUtcMs + (24 * 60 * 60 * 1000);
+  return {
+    timeZone: 'Asia/Shanghai',
+    resetHourLocal: AI_RESET_HOUR_SHANGHAI,
+    startIso: new Date(startUtcMs).toISOString(),
+    endIso: new Date(endUtcMs).toISOString(),
+  };
 }
 
 function sanitizeAiMessageMeta(value) {
@@ -647,12 +694,24 @@ const migrations = [
   "CREATE TABLE IF NOT EXISTS _config (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
   "ALTER TABLE users ADD COLUMN profile_picture TEXT",
   "ALTER TABLE users ADD COLUMN client_settings TEXT NOT NULL DEFAULT '{}'",
+  `ALTER TABLE users ADD COLUMN ai_daily_token_limit INTEGER NOT NULL DEFAULT ${USER_AI_DAILY_TOKEN_LIMIT_MIGRATION_DEFAULT}`,
   "ALTER TABLE messages ADD COLUMN edited_at TEXT",
   "ALTER TABLE messages ADD COLUMN ai_meta TEXT",
   "ALTER TABLE messages ADD COLUMN ai_mention INTEGER NOT NULL DEFAULT 0",
+  `CREATE TABLE IF NOT EXISTS ai_usage_events (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`,
   "CREATE INDEX IF NOT EXISTS idx_disappearing_states_user_hidden ON disappearing_message_states (user_id, hidden_at, expires_at)",
   "CREATE INDEX IF NOT EXISTS idx_disappearing_states_message_user ON disappearing_message_states (message_id, user_id)",
   "CREATE INDEX IF NOT EXISTS idx_message_reads_message_id ON message_reads (message_id)",
+  "CREATE INDEX IF NOT EXISTS idx_ai_usage_events_user_created_at ON ai_usage_events (user_id, created_at)",
+  "CREATE INDEX IF NOT EXISTS idx_ai_usage_events_created_at ON ai_usage_events (created_at)",
   "CREATE INDEX IF NOT EXISTS idx_group_members_user_group ON group_members (user_id, group_id)",
   "CREATE INDEX IF NOT EXISTS idx_group_members_group_joined_at ON group_members (group_id, joined_at ASC, user_id)",
   // Composite index to support efficient pagination ORDER BY (created_at DESC, id DESC)
@@ -660,6 +719,13 @@ const migrations = [
 ];
 for (const sql of migrations) {
   try { db.exec(sql); } catch { /* column/table already exists */ }
+}
+
+try {
+  db.prepare('INSERT OR IGNORE INTO _config (key, value) VALUES (?, ?)')
+    .run('global_ai_daily_token_limit', String(DEFAULT_GLOBAL_DAILY_AI_TOKEN_LIMIT));
+} catch (err) {
+  console.error('Failed to initialize AI config defaults:', err);
 }
 
 // Ensure a stable session secret persists across restarts even without SESSION_SECRET env var
@@ -694,6 +760,7 @@ const stmts = {
     SET
       username = COALESCE(@username, username),
       icon_color = COALESCE(@iconColor, icon_color),
+      ai_daily_token_limit = COALESCE(@aiDailyTokenLimit, ai_daily_token_limit),
       profile_picture = CASE
         WHEN @hasProfilePicture = 1 THEN @profilePicture
         ELSE profile_picture
@@ -703,6 +770,9 @@ const stmts = {
   updateUserSettings: db.prepare('UPDATE users SET client_settings = ? WHERE id = ?'),
   deleteUser: db.prepare('DELETE FROM users WHERE id = ?'),
   deleteUserMemberships: db.prepare('DELETE FROM group_members WHERE user_id = ?'),
+  deleteUserMessageReads: db.prepare('DELETE FROM message_reads WHERE user_id = ?'),
+  deleteUserDisappearingStates: db.prepare('DELETE FROM disappearing_message_states WHERE user_id = ?'),
+  deleteUserAiUsageEvents: db.prepare('DELETE FROM ai_usage_events WHERE user_id = ?'),
 
   // Groups
   insertGroup: db.prepare(
@@ -717,6 +787,8 @@ const stmts = {
   updateGroupAllowMemberKick: db.prepare('UPDATE group_chats SET allow_member_kick = ? WHERE id = ?'),
   updateGroupAiEnabled: db.prepare('UPDATE group_chats SET ai_enabled = ? WHERE id = ?'),
   updateGroupColor: db.prepare('UPDATE group_chats SET group_color = ? WHERE id = ?'),
+  updateGroupOwner: db.prepare('UPDATE group_chats SET created_by = ? WHERE id = ?'),
+  getGroupsCreatedByUser: db.prepare('SELECT id FROM group_chats WHERE created_by = ?'),
 
   // Members
   insertMember: db.prepare(
@@ -742,7 +814,41 @@ const stmts = {
   countGroupMembers: db.prepare('SELECT COUNT(*) AS count FROM group_members WHERE group_id = ?'),
 
   // Admin
-  getAllUsers: db.prepare('SELECT id, username, icon_color, created_at FROM users ORDER BY created_at DESC'),
+  getAllUsers: db.prepare(`
+    SELECT id, username, icon_color, profile_picture, created_at, ai_daily_token_limit
+    FROM users
+    ORDER BY created_at DESC
+  `),
+  getConfigValue: db.prepare('SELECT value FROM _config WHERE key = ?'),
+  upsertConfigValue: db.prepare(`
+    INSERT INTO _config (key, value)
+    VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `),
+  getUserAiUsageInWindow: db.prepare(`
+    SELECT
+      COALESCE(SUM(total_tokens), 0) AS total_tokens,
+      COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+      COALESCE(SUM(completion_tokens), 0) AS completion_tokens
+    FROM ai_usage_events
+    WHERE user_id = ?
+      AND created_at >= ?
+      AND created_at < ?
+  `),
+  getGlobalAiUsageInWindow: db.prepare(`
+    SELECT
+      COALESCE(SUM(total_tokens), 0) AS total_tokens,
+      COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+      COALESCE(SUM(completion_tokens), 0) AS completion_tokens
+    FROM ai_usage_events
+    WHERE created_at >= ?
+      AND created_at < ?
+  `),
+  insertAiUsageEvent: db.prepare(`
+    INSERT INTO ai_usage_events (
+      id, user_id, group_id, prompt_tokens, completion_tokens, total_tokens, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+  `),
 
   // Messages — DESC then reverse for last-N-in-order pattern
   getLastMessages: db.prepare(`
@@ -1016,6 +1122,82 @@ function formatMessage(m) {
   };
 }
 
+function isAppOwnerUser(user) {
+  return user && user.username === APP_OWNER_USERNAME;
+}
+
+function getGlobalAiDailyTokenLimit() {
+  const stored = stmts.getConfigValue.get('global_ai_daily_token_limit');
+  return normalizeAiDailyTokenLimit(stored?.value, DEFAULT_GLOBAL_DAILY_AI_TOKEN_LIMIT);
+}
+
+function setGlobalAiDailyTokenLimit(limit) {
+  stmts.upsertConfigValue.run('global_ai_daily_token_limit', String(limit));
+}
+
+function getUserAiDailyTokenLimit(user) {
+  return normalizeAiDailyTokenLimit(user?.ai_daily_token_limit, DEFAULT_USER_DAILY_AI_TOKEN_LIMIT);
+}
+
+function getAiUsageSnapshotForUser(userId) {
+  const user = stmts.findUserById.get(userId);
+  if (!user) return null;
+  const window = getAiUsageWindow();
+  const userUsage = stmts.getUserAiUsageInWindow.get(userId, window.startIso, window.endIso) || {};
+  const globalUsage = stmts.getGlobalAiUsageInWindow.get(window.startIso, window.endIso) || {};
+  const userLimit = getUserAiDailyTokenLimit(user);
+  const globalLimit = getGlobalAiDailyTokenLimit();
+  const userUsedTokens = normalizeAiTokenCount(userUsage.total_tokens);
+  const globalUsedTokens = normalizeAiTokenCount(globalUsage.total_tokens);
+  const userExceeded = userLimit <= 0 || userUsedTokens >= userLimit;
+  const globalExceeded = globalLimit <= 0 || globalUsedTokens >= globalLimit;
+  return {
+    window,
+    currentUser: {
+      userId,
+      username: user.username,
+      dailyLimit: userLimit,
+      usedTokens: userUsedTokens,
+      remainingTokens: Math.max(0, userLimit - userUsedTokens),
+      exceeded: userExceeded,
+    },
+    global: {
+      dailyLimit: globalLimit,
+      usedTokens: globalUsedTokens,
+      remainingTokens: Math.max(0, globalLimit - globalUsedTokens),
+      exceeded: globalExceeded,
+    },
+    canStartRequest: !userExceeded && !globalExceeded,
+  };
+}
+
+function getAiLimitError(summary) {
+  if (!summary) return 'Unable to verify AI token usage right now';
+  if (summary.global?.exceeded) {
+    return `The global daily AI token limit has been reached. Try again after ${AI_RESET_TIME_LABEL}.`;
+  }
+  if (summary.currentUser?.exceeded) {
+    return `Your daily AI token limit has been reached. Try again after ${AI_RESET_TIME_LABEL}.`;
+  }
+  return null;
+}
+
+function formatManagedUser(user, usageWindow) {
+  const usage = stmts.getUserAiUsageInWindow.get(user.id, usageWindow.startIso, usageWindow.endIso) || {};
+  const usedTokens = normalizeAiTokenCount(usage.total_tokens);
+  const dailyLimit = getUserAiDailyTokenLimit(user);
+  return {
+    id: user.id,
+    username: user.username,
+    iconColor: user.icon_color,
+    profilePicture: user.profile_picture || null,
+    createdAt: user.created_at,
+    aiDailyTokenLimit: dailyLimit,
+    aiTokensUsedToday: usedTokens,
+    aiLimitExceeded: dailyLimit <= 0 || usedTokens >= dailyLimit,
+  };
+}
+
 function setSessionPersistence(req, rememberMe) {
   if (rememberMe) {
     req.session.cookie.maxAge = REMEMBER_ME_MAX_AGE;
@@ -1227,6 +1409,7 @@ app.patch('/api/auth/profile', (req, res) => {
     stmts.updateUser.run({
       username: username || null,
       iconColor: iconColor || null,
+      aiDailyTokenLimit: null,
       profilePicture: hasProfilePictureUpdate ? profilePicture : null,
       hasProfilePicture: hasProfilePictureUpdate ? 1 : 0,
       userId,
@@ -1256,6 +1439,9 @@ app.patch('/api/auth/profile', (req, res) => {
 
 // DELETE /api/auth/account — delete account
 const deleteAccountTx = db.transaction((userId) => {
+  stmts.deleteUserMessageReads.run(userId);
+  stmts.deleteUserDisappearingStates.run(userId);
+  stmts.deleteUserAiUsageEvents.run(userId);
   stmts.deleteUserMemberships.run(userId);
   stmts.deleteUser.run(userId);
 });
@@ -1274,7 +1460,37 @@ app.delete('/api/auth/account', (req, res) => {
   }
 });
 
+app.get('/api/ai/usage', (req, res) => {
+  const summary = getAiUsageSnapshotForUser(req.session.userId);
+  if (!summary) return res.status(401).json({ error: 'Not authenticated' });
+  res.json(summary);
+});
+
 // ── Admin Routes ──────────────────────────────────────────────────────────────
+
+const adminDeleteUserTx = db.transaction((targetUserId, nextOwnerId) => {
+  const targetUser = stmts.findUserById.get(targetUserId);
+  if (!targetUser) return null;
+  const memberships = stmts.getUserGroupIds.all(targetUserId).map((row) => row.group_id);
+  const reassignedGroupIds = stmts.getGroupsCreatedByUser.all(targetUserId).map((row) => row.id);
+  const ownerJoinedGroupIds = [];
+  for (const groupId of reassignedGroupIds) {
+    stmts.updateGroupOwner.run(nextOwnerId, groupId);
+    const joined = stmts.insertMember.run(groupId, nextOwnerId);
+    if (joined.changes > 0) ownerJoinedGroupIds.push(groupId);
+  }
+  stmts.deleteUserMessageReads.run(targetUserId);
+  stmts.deleteUserDisappearingStates.run(targetUserId);
+  stmts.deleteUserAiUsageEvents.run(targetUserId);
+  stmts.deleteUserMemberships.run(targetUserId);
+  stmts.deleteUser.run(targetUserId);
+  return {
+    username: targetUser.username,
+    groupIds: memberships,
+    reassignedGroupIds,
+    ownerJoinedGroupIds,
+  };
+});
 
 app.get('/api/admin/users', (req, res) => {
   const secret = process.env.ADMIN_SECRET;
@@ -1298,6 +1514,121 @@ app.get('/api/admin/users', (req, res) => {
     iconColor: u.icon_color,
     createdAt: u.created_at,
   })));
+});
+
+app.get('/api/users/management', (req, res) => {
+  const viewer = stmts.findUserById.get(req.session.userId);
+  if (!viewer) return res.status(401).json({ error: 'Not authenticated' });
+  const canManage = isAppOwnerUser(viewer);
+  const usageWindow = getAiUsageWindow();
+  const globalUsage = stmts.getGlobalAiUsageInWindow.get(usageWindow.startIso, usageWindow.endIso) || {};
+  const globalLimit = getGlobalAiDailyTokenLimit();
+  const users = stmts.getAllUsers.all().map((user) => formatManagedUser(user, usageWindow));
+  res.json({
+    users,
+    viewerCanManageAiLimits: canManage,
+    viewerCanDeleteUsers: canManage,
+    global: {
+      dailyLimit: globalLimit,
+      usedTokens: normalizeAiTokenCount(globalUsage.total_tokens),
+      remainingTokens: Math.max(0, globalLimit - normalizeAiTokenCount(globalUsage.total_tokens)),
+      exceeded: globalLimit <= 0 || normalizeAiTokenCount(globalUsage.total_tokens) >= globalLimit,
+    },
+    window: usageWindow,
+  });
+});
+
+app.patch('/api/users/:userId/ai-limit', (req, res) => {
+  const viewer = stmts.findUserById.get(req.session.userId);
+  if (!isAppOwnerUser(viewer)) {
+    return res.status(403).json({ error: 'Only Furina can change user AI limits' });
+  }
+  const targetUser = stmts.findUserById.get(req.params.userId);
+  if (!targetUser) return res.status(404).json({ error: 'User not found' });
+  const parsedLimit = parseAiDailyTokenLimit(req.body.dailyLimit, 'Daily AI token limit');
+  if (!parsedLimit.ok) return res.status(400).json({ error: parsedLimit.error });
+
+  stmts.updateUser.run({
+    username: null,
+    iconColor: null,
+    aiDailyTokenLimit: parsedLimit.value,
+    profilePicture: null,
+    hasProfilePicture: 0,
+    userId: targetUser.id,
+  });
+
+  const updated = stmts.findUserById.get(targetUser.id);
+  res.json({
+    ok: true,
+    user: formatManagedUser(updated, getAiUsageWindow()),
+  });
+});
+
+app.patch('/api/ai/global-limit', (req, res) => {
+  const viewer = stmts.findUserById.get(req.session.userId);
+  if (!isAppOwnerUser(viewer)) {
+    return res.status(403).json({ error: 'Only Furina can change the global AI limit' });
+  }
+  const parsedLimit = parseAiDailyTokenLimit(req.body.dailyLimit, 'Global daily AI token limit');
+  if (!parsedLimit.ok) return res.status(400).json({ error: parsedLimit.error });
+  setGlobalAiDailyTokenLimit(parsedLimit.value);
+  const usageWindow = getAiUsageWindow();
+  const globalUsage = stmts.getGlobalAiUsageInWindow.get(usageWindow.startIso, usageWindow.endIso) || {};
+  res.json({
+    ok: true,
+    global: {
+      dailyLimit: parsedLimit.value,
+      usedTokens: normalizeAiTokenCount(globalUsage.total_tokens),
+      remainingTokens: Math.max(0, parsedLimit.value - normalizeAiTokenCount(globalUsage.total_tokens)),
+      exceeded: parsedLimit.value <= 0 || normalizeAiTokenCount(globalUsage.total_tokens) >= parsedLimit.value,
+    },
+    window: usageWindow,
+  });
+});
+
+app.delete('/api/users/:userId', (req, res) => {
+  const viewer = stmts.findUserById.get(req.session.userId);
+  if (!isAppOwnerUser(viewer)) {
+    return res.status(403).json({ error: 'Only Furina can delete users' });
+  }
+  const targetUser = stmts.findUserById.get(req.params.userId);
+  if (!targetUser) return res.status(404).json({ error: 'User not found' });
+  if (isAppOwnerUser(targetUser)) {
+    return res.status(400).json({ error: 'Furina cannot be deleted from the user list' });
+  }
+
+  const deleted = adminDeleteUserTx(targetUser.id, viewer.id);
+  if (!deleted) return res.status(404).json({ error: 'User not found' });
+
+  for (const groupId of deleted.ownerJoinedGroupIds) {
+    io.to(groupId).emit('member_joined', {
+      userId: viewer.id,
+      username: viewer.username,
+      iconColor: viewer.icon_color,
+      profilePicture: viewer.profile_picture || null,
+      groupId,
+    });
+  }
+  for (const groupId of deleted.reassignedGroupIds) {
+    io.to(groupId).emit('group_owner_transferred', {
+      groupId,
+      createdBy: viewer.id,
+    });
+  }
+  for (const groupId of deleted.groupIds) {
+    io.to(groupId).emit('member_left', {
+      userId: targetUser.id,
+      username: deleted.username,
+      groupId,
+    });
+  }
+  io.emit('user_deleted', { userId: targetUser.id });
+  for (const [, socket] of io.sockets.sockets) {
+    if (socket.userId !== targetUser.id) continue;
+    socket.emit('account_deleted', { userId: targetUser.id });
+    socket.disconnect(true);
+  }
+  res.json({ ok: true });
 });
 
 // ── Group Routes ──────────────────────────────────────────────────────────────
@@ -1814,6 +2145,12 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
     return res.status(400).json({ error: 'Prompt is required' });
   }
 
+  const quotaSummary = getAiUsageSnapshotForUser(userId);
+  const quotaError = getAiLimitError(quotaSummary);
+  if (quotaError) {
+    return res.status(429).json({ error: quotaError, aiUsage: quotaSummary });
+  }
+
   const normalizedContext = normalizeAiContextMessages(req.body.contextMessages);
   if (!normalizedContext.ok) {
     return res.status(400).json({ error: normalizedContext.error });
@@ -1887,11 +2224,29 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
       costSource: directCostUsd != null ? 'upstream' : 'estimated',
     });
 
+    if (aiMeta && aiMeta.totalTokens > 0) {
+      try {
+        stmts.insertAiUsageEvent.run(
+          uuidv4(),
+          userId,
+          groupId,
+          aiMeta.promptTokens,
+          aiMeta.completionTokens,
+          aiMeta.totalTokens,
+          new Date().toISOString()
+        );
+      } catch (recordErr) {
+        console.error('Failed to record AI token usage:', recordErr);
+      }
+    }
+    const updatedUsage = getAiUsageSnapshotForUser(userId);
+
     res.json({
       ok: true,
       model: aiMeta?.model || OPENROUTER_MODEL,
       answer,
       aiMeta,
+      aiUsage: updatedUsage,
       debug,
     });
   } catch (err) {
