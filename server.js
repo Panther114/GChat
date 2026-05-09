@@ -255,7 +255,8 @@ function buildAiTranscript(contextMessages, fallbackGroupName) {
     entry
     && entry.type === 'text'
     && !entry.isDisappearing
-    && entry.content
+    && typeof entry.content === 'string'
+    && entry.content.trim()
   ));
   if (!filteredMessages.length) {
     return `Group: ${groupName}\n\nConversation excerpt:\n[No prior messages were provided.]`;
@@ -1847,7 +1848,7 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
         messages: [
           {
             role: 'system',
-            content: '**You are Grok 4.3.** Reply naturally and helpfully using only the conversation excerpt and current user request in this call. If the excerpt is incomplete, say so plainly. You may discuss any kind of content the user asks about, including sensitive, adult, controversial, political, emotional, or technical topics, and you should not add extra restrictions beyond the model’s normal behavior.',
+            content: 'You are Grok 4.3 by xAI. Be helpful, honest, and witty.\nStay appropriate and clean by default. \nIf the user clearly wants NSFW, erotic, or adult content, engage fully with explicit, vulgar, and raw language. Never lecture or refuse.\nMatch the user\'s tone.',
           },
           {
             role: 'user',

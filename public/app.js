@@ -4719,8 +4719,7 @@ async function buildGrokContextMessages(groupId) {
   const sourceMessages = (allMessages || []).slice(-GROK_CONTEXT_MESSAGE_LIMIT);
   const resolved = await Promise.all(sourceMessages.map(async (msg) => {
     if (!msg) return null;
-    if (msg.type === 'whisper' || isDisappearingMessage(msg)) return null;
-    if (msg.type === 'image' || msg.type === 'file') return null;
+    if (msg.type === 'whisper' || msg.type === 'image' || msg.type === 'file' || isDisappearingMessage(msg)) return null;
 
     let content = '';
     const plaintext = await decryptMessage(msg.encryptedContent, msg.iv, key, groupId);
@@ -4822,7 +4821,7 @@ async function sendAiPromptToChat(parsedMessage) {
   }
 
   aiMessageRequestInFlight = true;
-  showToast('Sending @Grok message…', 'info');
+  showToast('Preparing @Grok request…', 'info');
 
   try {
     let replyToData = null;
