@@ -1420,6 +1420,12 @@ function getAiDisabledMessage() {
   return 'AI mode is disabled by the group owner';
 }
 
+function getWhisperCombinationError({ hasHashtag = false, hasAi = false } = {}) {
+  if (hasHashtag && hasAi) return 'AI requests and tags cannot be combined with whispers';
+  if (hasAi) return 'AI requests cannot be combined with whispers';
+  return 'Tags cannot be combined with whispers';
+}
+
 function canUseAiInCurrentGroup({ showError = false } = {}) {
   if (!currentGroupId || !currentGroupData) {
     if (showError) showToast('Select a group first', 'error');
@@ -1584,12 +1590,10 @@ function maybeTokenizeSlashCommand(input) {
   const whisperMatch = /^\/w\s+([^\s]+)\s$/.exec(input.value);
   if (whisperMatch) {
     if (composerTokens.hashtag || composerTokens.ai) {
-      showToast(
-        composerTokens.ai
-          ? 'AI requests and tags cannot be combined with whispers'
-          : 'Tags cannot be combined with whispers',
-        'error'
-      );
+      showToast(getWhisperCombinationError({
+        hasHashtag: !!composerTokens.hashtag,
+        hasAi: !!composerTokens.ai,
+      }), 'error');
       return false;
     }
     const member = resolveSlashWhisperTarget(whisperMatch[1]);
@@ -1678,7 +1682,7 @@ function parseComposerMessageInput(rawText) {
   }
 
   if (whisperRecipientIds.length && (hashtag || isAiPrompt)) {
-    return { ok: false, error: 'AI requests and tags cannot be combined with whispers' };
+    return { ok: false, error: getWhisperCombinationError({ hasHashtag: !!hashtag, hasAi: !!isAiPrompt }) };
   }
 
   if (!whisperRecipientIds.length && !hashtag) {
@@ -1717,7 +1721,13 @@ function parseComposerMessageInput(rawText) {
       }
     }
   } else if (whisperRecipientIds.length && (parseCommandToken(body, '#') || parseAiCommand(body))) {
-    return { ok: false, error: 'AI requests and tags cannot be combined with whispers' };
+    return {
+      ok: false,
+      error: getWhisperCombinationError({
+        hasHashtag: !!parseCommandToken(body, '#'),
+        hasAi: !!parseAiCommand(body),
+      }),
+    };
   } else {
     if (hashtag && !isAiPrompt) {
       const aiToken = parseAiCommand(body);

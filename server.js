@@ -618,10 +618,8 @@ const stmts = {
 
   // Messages — DESC then reverse for last-N-in-order pattern
   getLastMessages: db.prepare(`
-      SELECT m.id, m.group_id, m.sender_id,
-             COALESCE(u.username, CASE WHEN m.sender_id = '${AI_ASSISTANT_USER_ID}' THEN '${AI_ASSISTANT_NAME}' ELSE 'Unknown' END) AS sender_name,
-             COALESCE(u.icon_color, CASE WHEN m.sender_id = '${AI_ASSISTANT_USER_ID}' THEN '${AI_ASSISTANT_COLOR}' ELSE '#4A90D9' END) AS sender_color,
-             m.encrypted_content, m.iv,
+      SELECT m.id, m.group_id, m.sender_id, u.username AS sender_name,
+             u.icon_color AS sender_color, m.encrypted_content, m.iv,
              m.type, m.reply_to, m.filename, m.whisper_to, m.hashtag,
              m.is_disappearing, m.disappearing_duration_ms,
              dms.started_at AS disappearing_started_at,
@@ -646,10 +644,8 @@ const stmts = {
   `),
   getMessagesBefore: db.prepare(`
     WITH ref AS (SELECT created_at, id FROM messages WHERE id = @beforeId)
-      SELECT m.id, m.group_id, m.sender_id,
-             COALESCE(u.username, CASE WHEN m.sender_id = '${AI_ASSISTANT_USER_ID}' THEN '${AI_ASSISTANT_NAME}' ELSE 'Unknown' END) AS sender_name,
-             COALESCE(u.icon_color, CASE WHEN m.sender_id = '${AI_ASSISTANT_USER_ID}' THEN '${AI_ASSISTANT_COLOR}' ELSE '#4A90D9' END) AS sender_color,
-             m.encrypted_content, m.iv,
+      SELECT m.id, m.group_id, m.sender_id, u.username AS sender_name,
+             u.icon_color AS sender_color, m.encrypted_content, m.iv,
              m.type, m.reply_to, m.filename, m.whisper_to, m.hashtag,
              m.is_disappearing, m.disappearing_duration_ms,
              dms.started_at AS disappearing_started_at,
@@ -860,12 +856,13 @@ function formatUser(user) {
 }
 
 function formatMessage(m) {
+  const isAiAssistantMessage = m.sender_id === AI_ASSISTANT_USER_ID;
   return {
     id: m.id,
     groupId: m.group_id,
     senderId: m.sender_id,
-    senderName: m.sender_name,
-    senderColor: m.sender_color,
+    senderName: m.sender_name || (isAiAssistantMessage ? AI_ASSISTANT_NAME : 'Unknown'),
+    senderColor: m.sender_color || (isAiAssistantMessage ? AI_ASSISTANT_COLOR : '#4A90D9'),
     encryptedContent: m.encrypted_content,
     iv: m.iv,
     type: m.type || 'text',
@@ -1530,7 +1527,7 @@ app.post('/api/groups/:groupId/upload', uploadRawBodyParser, (req, res) => {
     return res.status(400).json({ error: 'Invalid filename' });
   }
   const normalizedHashtag = normalizeHashtag(hashtag);
-  if (hashtag != null && normalizedHashtag == null) {
+  if (hashtag !== null && hashtag !== undefined && normalizedHashtag === null) {
     return res.status(400).json({ error: 'Invalid hashtag' });
   }
 
@@ -1920,7 +1917,7 @@ io.on('connection', (socket) => {
       return;
     }
     const normalizedHashtag = normalizeHashtag(hashtag);
-    if (hashtag != null && normalizedHashtag == null) {
+    if (hashtag !== null && hashtag !== undefined && normalizedHashtag === null) {
       socket.emit('error', { message: 'Invalid hashtag' });
       return;
     }
@@ -2027,7 +2024,7 @@ io.on('connection', (socket) => {
     }
 
     const normalizedHashtag = normalizeHashtag(hashtag);
-    if (hashtag != null && normalizedHashtag == null) {
+    if (hashtag !== null && hashtag !== undefined && normalizedHashtag === null) {
       socket.emit('error', { message: 'Invalid hashtag' });
       return;
     }
@@ -2131,11 +2128,11 @@ io.on('connection', (socket) => {
       return;
     }
     const normalizedHashtag = normalizeHashtag(hashtag);
-    if (hashtag != null && normalizedHashtag == null) {
+    if (hashtag !== null && hashtag !== undefined && normalizedHashtag === null) {
       socket.emit('error', { message: 'Invalid hashtag' });
       return;
     }
-    if (hashtag != null) {
+    if (hashtag !== null && hashtag !== undefined) {
       socket.emit('error', { message: 'Tags cannot be combined with whispers' });
       return;
     }
