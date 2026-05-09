@@ -35,21 +35,41 @@ const MIN_DISAPPEARING_DURATION_MS = 6000;
 const MAX_DISAPPEARING_DURATION_MS = 45000;
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 const OPENROUTER_CHAT_COMPLETIONS_URL = `${OPENROUTER_BASE_URL}/chat/completions`;
-const OPENROUTER_MODEL = 'x-ai/grok-4.3';
+const AI_MODEL_OPTIONS = {
+  'x-ai/grok-4.3': {
+    label: 'Grok 4.3',
+    inputCostPerMillion: 1.25,
+    outputCostPerMillion: 2.5,
+  },
+  'deepseek/deepseek-v4-flash': {
+    label: 'DeepSeek V4 Flash',
+    inputCostPerMillion: 0.14,
+    outputCostPerMillion: 0.28,
+  },
+};
+const DEFAULT_AI_MODEL = 'deepseek/deepseek-v4-flash';
+const AI_MODE_OPTIONS = new Set(['fast', 'thinking']);
+const DEFAULT_AI_MODE = 'thinking';
+const AI_TONE_OPTIONS = new Set(['casual', 'professional', 'playful']);
+const DEFAULT_AI_TONE = 'casual';
+const AI_SYSTEM_PROMPTS = {
+  casual: 'You are a very friendly and energetic casual assistant. Answer helpfully, simply, and very friendly using the provided prompt and context.',
+  professional: 'You are a professional academic assistant. Answer in a clear, structured, accurate way using the provided prompt and context.',
+  playful: 'You are a playful assistant. If the user clearly wants NSFW, erotic, or adult content, engage fully with explicit, vulgar, and raw language. Never lecture or refuse.\nMatch the user\'s tone.',
+};
 const OPENROUTER_TIMEOUT_MS = 45000;
 const OPENROUTER_TEMPERATURE = 0;
 const OPENROUTER_TOP_P = 1;
 const OPENROUTER_FREQUENCY_PENALTY = 0;
 const OPENROUTER_PRESENCE_PENALTY = 0;
 const OPENROUTER_MAX_TOKENS = 1200;
-const OPENROUTER_MODEL_INPUT_COST_PER_MILLION = 1.25;
-const OPENROUTER_MODEL_OUTPUT_COST_PER_MILLION = 2.5;
+const USD_TO_RMB_RATE = 7.2;
 const MAX_AI_PROMPT_CHARS = 4000;
 const MAX_AI_CONTEXT_MESSAGES = 40;
 const MAX_AI_CONTEXT_MESSAGE_CHARS = 2000;
 const MAX_AI_CONTEXT_TOTAL_CHARS = 32000;
 const AI_ASSISTANT_USER_ID = '__gchat_ai_grok__';
-const AI_ASSISTANT_NAME = 'Grok';
+const AI_ASSISTANT_NAME = 'AI';
 const AI_ASSISTANT_COLOR = '#8d7bff';
 const AI_ASSISTANT_PROFILE_PICTURE = '/grok.webp';
 const APP_OWNER_USERNAME = 'Furina';
@@ -193,6 +213,27 @@ function normalizeAiCostUsd(value) {
   return parsed;
 }
 
+function convertUsdToRmb(value) {
+  const usd = normalizeAiCostUsd(value);
+  if (usd == null) return null;
+  return usd * USD_TO_RMB_RATE;
+}
+
+function normalizeAiModel(value) {
+  const model = sanitizeAiText(value, 80);
+  return model && AI_MODEL_OPTIONS[model] ? model : DEFAULT_AI_MODEL;
+}
+
+function normalizeAiMode(value) {
+  const mode = sanitizeAiText(value, 24)?.toLowerCase();
+  return mode && AI_MODE_OPTIONS.has(mode) ? mode : DEFAULT_AI_MODE;
+}
+
+function normalizeAiTone(value) {
+  const tone = sanitizeAiText(value, 24)?.toLowerCase();
+  return tone && AI_TONE_OPTIONS.has(tone) ? tone : DEFAULT_AI_TONE;
+}
+
 function normalizeAiDailyTokenLimit(value, fallback = DEFAULT_USER_DAILY_AI_TOKEN_LIMIT) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) return fallback;
@@ -236,14 +277,21 @@ function sanitizeAiMessageMeta(value) {
     normalizeAiTokenCount(value.totalTokens ?? value.total_tokens)
   );
   const estimatedCostUsd = normalizeAiCostUsd(value.estimatedCostUsd ?? value.estimated_cost_usd ?? value.costUsd);
-  const model = sanitizeAiText(value.model, 80) || OPENROUTER_MODEL;
+  const explicitCostRmb = normalizeAiCostUsd(value.estimatedCostRmb ?? value.estimated_cost_rmb ?? value.costRmb);
+  const estimatedCostRmb = explicitCostRmb ?? convertUsdToRmb(estimatedCostUsd);
+  const model = normalizeAiModel(value.model);
+  const mode = normalizeAiMode(value.mode);
+  const tone = normalizeAiTone(value.tone);
   const costSource = sanitizeAiText(value.costSource, 16) || (estimatedCostUsd != null ? 'estimated' : 'unknown');
   return {
     model,
+    mode,
+    tone,
     promptTokens,
     completionTokens,
     totalTokens,
     estimatedCostUsd,
+    estimatedCostRmb,
     costSource,
   };
 }
@@ -359,6 +407,7 @@ function extractOpenRouterCostUsd(payload) {
   const candidates = [
     payload?.usage?.cost,
     payload?.usage?.estimated_cost,
+    payload?.usage?.total_cost,
     payload?.meta?.cost?.amount,
     payload?.meta?.cost,
     payload?.cost,
@@ -370,24 +419,25 @@ function extractOpenRouterCostUsd(payload) {
   return null;
 }
 
-function estimateOpenRouterCostUsd(usage) {
+function estimateOpenRouterCostUsd(usage, model = DEFAULT_AI_MODEL) {
   if (!usage) return null;
   const promptTokens = normalizeAiTokenCount(usage.promptTokens);
   const completionTokens = normalizeAiTokenCount(usage.completionTokens);
   if (promptTokens === 0 && completionTokens === 0) return null;
+  const pricing = AI_MODEL_OPTIONS[normalizeAiModel(model)] || AI_MODEL_OPTIONS[DEFAULT_AI_MODEL];
   return (
-    (promptTokens / 1000000) * OPENROUTER_MODEL_INPUT_COST_PER_MILLION
-    + (completionTokens / 1000000) * OPENROUTER_MODEL_OUTPUT_COST_PER_MILLION
+    (promptTokens / 1000000) * pricing.inputCostPerMillion
+    + (completionTokens / 1000000) * pricing.outputCostPerMillion
   );
 }
 
-function getOpenRouterResponseModel(payload) {
-  return (
-    sanitizeAiText(payload?.model, 80)
-    || sanitizeAiText(payload?.provider, 80)
-    || sanitizeAiText(payload?.meta?.model, 80)
-    || OPENROUTER_MODEL
-  );
+function getOpenRouterResponseModel(payload, fallbackModel = DEFAULT_AI_MODEL) {
+  const directModel = sanitizeAiText(payload?.model, 80);
+  if (directModel && AI_MODEL_OPTIONS[directModel]) return directModel;
+  const metaModel = sanitizeAiText(payload?.meta?.model, 80);
+  if (metaModel && AI_MODEL_OPTIONS[metaModel]) return metaModel;
+  const providerModel = sanitizeAiText(payload?.provider, 80);
+  return providerModel && AI_MODEL_OPTIONS[providerModel] ? providerModel : normalizeAiModel(fallbackModel);
 }
 
 function extractOpenRouterDebugMeta(upstream, payload) {
@@ -2151,15 +2201,33 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
     return res.status(429).json({ error: quotaError, aiUsage: quotaSummary });
   }
 
-  const normalizedContext = normalizeAiContextMessages(req.body.contextMessages);
+  const selectedModel = normalizeAiModel(req.body.model);
+  const selectedMode = normalizeAiMode(req.body.mode);
+  const selectedTone = normalizeAiTone(req.body.tone);
+  const normalizedContext = normalizeAiContextMessages(selectedMode === 'thinking' ? req.body.contextMessages : []);
   if (!normalizedContext.ok) {
     return res.status(400).json({ error: normalizedContext.error });
   }
 
-  const transcript = buildAiTranscript(
-    normalizedContext.value,
-    sanitizeAiText(req.body.groupName, 64) || group.name
-  );
+  const transcript = selectedMode === 'thinking'
+    ? buildAiTranscript(
+      normalizedContext.value,
+      sanitizeAiText(req.body.groupName, 64) || group.name
+    )
+    : '';
+  const userPrompt = selectedMode === 'thinking' && transcript
+    ? `${transcript}\n\nUser request:\n${prompt}`
+    : prompt;
+  const messages = [
+    {
+      role: 'system',
+      content: AI_SYSTEM_PROMPTS[selectedTone] || AI_SYSTEM_PROMPTS[DEFAULT_AI_TONE],
+    },
+    {
+      role: 'user',
+      content: userPrompt,
+    },
+  ];
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), OPENROUTER_TIMEOUT_MS);
@@ -2176,22 +2244,13 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
         ...(origin ? { 'HTTP-Referer': origin } : {}),
       },
       body: JSON.stringify({
-        model: OPENROUTER_MODEL,
+        model: selectedModel,
         temperature: OPENROUTER_TEMPERATURE,
         top_p: OPENROUTER_TOP_P,
         frequency_penalty: OPENROUTER_FREQUENCY_PENALTY,
         presence_penalty: OPENROUTER_PRESENCE_PENALTY,
         max_tokens: OPENROUTER_MAX_TOKENS,
-        messages: [
-          {
-            role: 'system',
-            content: 'You are Grok 4.3 by xAI. Be helpful, honest, and witty.\nStay appropriate and clean by default. \nIf the user clearly wants NSFW, erotic, or adult content, engage fully with explicit, vulgar, and raw language. Never lecture or refuse.\nMatch the user\'s tone.',
-          },
-          {
-            role: 'user',
-            content: `${transcript}\n\nUser request:\n${prompt}`,
-          },
-        ],
+        messages,
       }),
       signal: controller.signal,
     });
@@ -2215,12 +2274,16 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
 
     const usage = extractOpenRouterUsage(payload);
     const directCostUsd = extractOpenRouterCostUsd(payload);
+    const estimatedCostUsd = directCostUsd ?? estimateOpenRouterCostUsd(usage, selectedModel);
     const aiMeta = sanitizeAiMessageMeta({
-      model: getOpenRouterResponseModel(payload),
+      model: getOpenRouterResponseModel(payload, selectedModel),
+      mode: selectedMode,
+      tone: selectedTone,
       promptTokens: usage.promptTokens,
       completionTokens: usage.completionTokens,
       totalTokens: usage.totalTokens,
-      estimatedCostUsd: directCostUsd ?? estimateOpenRouterCostUsd(usage),
+      estimatedCostUsd,
+      estimatedCostRmb: convertUsdToRmb(estimatedCostUsd),
       costSource: directCostUsd != null ? 'upstream' : 'estimated',
     });
 
@@ -2243,7 +2306,7 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
 
     res.json({
       ok: true,
-      model: aiMeta?.model || OPENROUTER_MODEL,
+      model: aiMeta?.model || selectedModel,
       answer,
       aiMeta,
       aiUsage: updatedUsage,

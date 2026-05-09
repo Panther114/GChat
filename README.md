@@ -4,6 +4,8 @@ Gchat is a client-side encrypted group chat application built with Node.js, Expr
 
 The hosted web app is the primary product. The desktop app is a native shell that loads the hosted Railway deployment.
 
+Current version: **v1.1.2**
+
 ---
 
 ## Features
@@ -18,6 +20,8 @@ The hosted web app is the primary product. The desktop app is a native shell tha
 - Client-side search and chat export (disappearing messages are excluded from exports)
 - Image viewer and automatic image compression
 - Emoji picker and mobile-responsive layout
+- Ask AI modal with default `DeepSeek V4 Flash / Thinking / Casual` selections
+- OpenRouter-backed multi-model AI replies with Fast vs Thinking mode, tone prompts, tag-aware context scoping, and RMB cost metadata
 
 ### Accounts and Groups
 
@@ -105,7 +109,7 @@ Important limitations:
 - Metadata such as usernames, group membership, timestamps, and message ownership is still visible to the server.
 - Disappearing-message metadata, timers, and per-user hidden-state records are also visible to the server so the app can keep access state consistent across reloads.
 - Short repeated-message spam detection hashes normalized short messages server-side, which can reveal when two short messages are identical even though the server still does not receive plaintext.
-- If a user explicitly uses the Grok assistant, the selected chat context is decrypted in the browser and sent to the Gchat server only for that one OpenRouter request.
+- If a user explicitly uses Ask AI, eligible chat context is decrypted in the browser and sent to the Gchat server only for that one OpenRouter request.
 - This is application-layer encryption, not a replacement for audited secure messaging infrastructure.
 
 ---
@@ -118,7 +122,7 @@ Important limitations:
 | `PORT` | No | Server port. Railway provides this automatically. |
 | `DB_PATH` | Recommended | SQLite database path. Use `/data/Gchat.db` with a Railway volume for persistence. |
 | `ADMIN_SECRET` | Optional | Enables the admin users endpoint when set. |
-| `OPENROUTER_API_KEY` | Optional | Enables the server-side Grok 4.3 integration. Keep this only in server/runtime environment variables such as Railway service variables. |
+| `OPENROUTER_API_KEY` | Optional | Enables the server-side Ask AI integration for Grok 4.3 and DeepSeek V4 Flash. Keep this only in server/runtime environment variables such as Railway service variables. |
 
 ---
 
@@ -166,6 +170,28 @@ http://localhost:3000
 ```
 
 The main application pages are served from `public/`.
+
+---
+
+## Ask AI (v1.1.2)
+
+- Typing `/ai ` in the chat composer or clicking **Ask AI** in the right panel opens the same modal before any AI request is sent.
+- The modal defaults to:
+  - Model: `DeepSeek V4 Flash`
+  - Mode: `Thinking`
+  - Tone: `Casual`
+- Model options:
+  - `DeepSeek V4 Flash` → `deepseek/deepseek-v4-flash`
+  - `Grok 4.3` → `x-ai/grok-4.3`
+- Mode behavior:
+  - `Fast` sends only the user prompt plus the selected system prompt.
+  - `Thinking` can include eligible decrypted chat context, while still respecting `/ai` vs `/# tag /ai` scoping rules.
+- Tone options map to built-in system prompts:
+  - `Casual`
+  - `Professional`
+  - `Playful`
+- No Ask AI mode performs web search.
+- AI replies show the selected model, mode, tone, token count, and estimated RMB cost in the response metadata line.
 
 ---
 
@@ -354,7 +380,7 @@ Relevant Electron Builder behavior:
 - SQLite database files should not be committed.
 - The server stores encrypted message payloads, not plaintext message content.
 - Group keys are client-managed and cannot be recovered by the server.
-- The browser never calls OpenRouter directly; Grok requests are proxied through `server.js` with `OPENROUTER_API_KEY` kept server-side.
+- The browser never calls OpenRouter directly; Ask AI requests are proxied through `server.js` with `OPENROUTER_API_KEY` kept server-side.
 - Large file handling should be reviewed carefully before public-scale deployment.
 
 ---
@@ -366,7 +392,7 @@ Before using Gchat with real users:
 - Set `SESSION_SECRET`.
 - Mount a Railway volume.
 - Set `DB_PATH=/data/Gchat.db`.
-- Set `OPENROUTER_API_KEY` if Grok 4.3 should be available.
+- Set `OPENROUTER_API_KEY` if Ask AI should be available.
 - Confirm login, group creation, message sending, and file upload behavior.
 - Test the desktop installer on a clean Windows machine.
 - Verify notification behavior in Windows settings.

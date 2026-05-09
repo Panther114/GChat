@@ -4,6 +4,18 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## v1.1.2
+
+- Added the new Ask AI modal flow for both `/ai ` and the right-panel Ask AI button.
+- Added model selection for `DeepSeek V4 Flash` and `Grok 4.3`, plus Fast/Thinking mode and Casual/Professional/Playful tone controls.
+- Updated the OpenRouter request payload so Fast mode skips chat context while Thinking mode keeps existing tag-aware context rules.
+- Added richer AI metadata with model, mode, tone, token totals, and estimated RMB cost display.
+- Replaced Ask Grok labels with Ask AI labels across the UI.
+- Removed lingering successful attachment upload placeholders without requiring a refresh.
+- Bumped the app version to **1.1.2**.
+
+---
+
 ## PR — Composer repair after v1.0.4
 
 **What was broken**

@@ -109,8 +109,8 @@
               <span class="slash-command-hint">/# topic</span>
             </button>
             <button class="slash-command-item" type="button" data-command="/ai " id="slash-command-ai-item">
-              <span class="slash-command-name">AI</span>
-              <span class="slash-command-hint">/ai prompt</span>
+              <span class="slash-command-name">Ask AI</span>
+              <span class="slash-command-hint">/ai opens Ask AI</span>
             </button>
             <button class="slash-command-item" type="button" data-command="/d ">
               <span class="slash-command-name">Disappearing</span>
@@ -144,7 +144,7 @@
       </div>
       <div class="right-panel-actions">
         <button class="btn-action-sm btn-panel-action btn-set-key" id="set-key-btn" data-icon="key-round" data-icon-only="true" data-icon-label="Set Key" title="Set Key" aria-label="Set Key"></button>
-        <button class="btn-action-sm btn-panel-action btn-grok" id="ask-grok-btn" data-icon="sparkles" data-icon-only="true" data-icon-label="Ask Grok 4.3" title="Ask Grok 4.3" aria-label="Ask Grok 4.3"></button>
+        <button class="btn-action-sm btn-panel-action btn-grok" id="ask-grok-btn" data-icon="sparkles" data-icon-only="true" data-icon-label="Ask AI" title="Ask AI" aria-label="Ask AI"></button>
         <button class="btn-action-sm btn-panel-action btn-enc-toggle" id="enc-toggle-btn" data-icon="lock" data-icon-only="true" data-icon-label="Hide Encryption" title="Hide Encryption" aria-label="Hide Encryption"></button>
         <button class="btn-action-sm btn-panel-action btn-forget-key" id="forget-key-btn" data-icon="key" data-icon-only="true" data-icon-label="Forget Key" title="Forget Key" aria-label="Forget Key"></button>
       </div>
@@ -405,17 +405,42 @@
   <div class="modal-overlay" id="grok-modal" hidden>
     <div class="modal grok-modal">
       <div class="modal-title-row">
-        <h2 data-icon="sparkles">Ask Grok 4.3</h2>
+        <h2 data-icon="sparkles">Ask AI</h2>
         <button class="btn-icon profile-close-btn" id="grok-close-btn" title="Close" aria-label="Close" data-icon="x" data-icon-only="true"></button>
       </div>
-      <p class="modal-desc">Recent messages are decrypted in your browser first. GChat only forwards that one temporary AI request to OpenRouter through the server.</p>
+      <p class="modal-desc">Thinking mode can include eligible chat context in a single temporary OpenRouter request. Fast mode sends only your prompt and the selected tone prompt. Web search is always off.</p>
       <div class="form-group">
         <label>Group</label>
         <div class="grok-group-name" id="grok-group-name">—</div>
       </div>
       <div class="form-group">
+        <label>Model</label>
+        <input type="hidden" id="grok-model-input" value="deepseek/deepseek-v4-flash" />
+        <div class="grok-model-toggle" role="group" aria-label="AI model">
+          <button type="button" class="grok-model-option" data-model="x-ai/grok-4.3">Grok 4.3</button>
+          <button type="button" class="grok-model-option active" data-model="deepseek/deepseek-v4-flash">DeepSeek V4 Flash</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="grok-mode-input">Mode</label>
+        <div class="grok-slider-labels">
+          <span class="grok-slider-label" id="grok-mode-fast-label">Fast</span>
+          <span class="grok-slider-label" id="grok-mode-thinking-label">Thinking</span>
+        </div>
+        <input type="range" id="grok-mode-input" min="0" max="1" step="1" value="1" aria-label="AI mode" />
+      </div>
+      <div class="form-group">
+        <label for="grok-tone-input">Tone</label>
+        <div class="grok-slider-labels grok-slider-labels-tone">
+          <span class="grok-slider-label" id="grok-tone-casual-label">Casual</span>
+          <span class="grok-slider-label" id="grok-tone-professional-label">Professional</span>
+          <span class="grok-slider-label" id="grok-tone-playful-label">Playful</span>
+        </div>
+        <input type="range" id="grok-tone-input" min="0" max="2" step="1" value="0" aria-label="AI tone" />
+      </div>
+      <div class="form-group">
         <label for="grok-prompt-input">Prompt</label>
-        <textarea id="grok-prompt-input" rows="5" placeholder="Summarize the recent chat, find action items, or draft a reply…"></textarea>
+        <textarea id="grok-prompt-input" rows="5" placeholder="Ask AI to summarize, explain, draft, brainstorm, or reply…"></textarea>
       </div>
       <div class="grok-status" id="grok-status" hidden></div>
       <p class="form-error" id="grok-error"></p>
@@ -431,7 +456,7 @@
         <button class="btn-secondary" id="grok-copy-btn" disabled>Copy</button>
         <button class="btn-secondary" id="grok-insert-btn" disabled>Use as draft</button>
         <button class="btn-secondary" id="grok-cancel-btn">Close</button>
-        <button class="btn-primary" id="grok-submit-btn">Ask Grok</button>
+        <button class="btn-primary" id="grok-submit-btn" disabled>Ask AI</button>
       </div>
     </div>
   </div>
