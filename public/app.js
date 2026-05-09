@@ -228,7 +228,8 @@ const DESKTOP_SIDEBAR_WIDTH_STORAGE_KEY = 'gchat:desktop-sidebar-width';
 const DESKTOP_RIGHT_PANEL_STORAGE_KEY = 'gchat:desktop-right-panel-expanded';
 const DESKTOP_DEFAULT_SIDEBAR_WIDTH = 260;
 const DESKTOP_MIN_SIDEBAR_WIDTH = 132;
-const DESKTOP_COMPACT_SIDEBAR_WIDTH = 172;
+const DESKTOP_NARROW_SIDEBAR_WIDTH = 172;
+const DESKTOP_COMPACT_SIDEBAR_WIDTH = 148;
 
 function readLocalGroupCache(groupId) {
   try {
@@ -1834,13 +1835,14 @@ function readDesktopSidebarWidth() {
 
 function applyDesktopSidebarState() {
   if (isMobileLayout()) {
-    document.body.classList.remove('sidebar-compact', 'sidebar-resizing');
+    document.body.classList.remove('sidebar-narrow', 'sidebar-compact', 'sidebar-resizing');
     document.documentElement.style.setProperty('--sidebar-width', `${DESKTOP_DEFAULT_SIDEBAR_WIDTH}px`);
     return;
   }
   const { min, max } = desktopSidebarBounds();
   desktopSidebarWidth = Math.min(max, Math.max(min, Math.round(desktopSidebarWidth || DESKTOP_DEFAULT_SIDEBAR_WIDTH)));
   document.documentElement.style.setProperty('--sidebar-width', `${desktopSidebarWidth}px`);
+  document.body.classList.toggle('sidebar-narrow', desktopSidebarWidth <= DESKTOP_NARROW_SIDEBAR_WIDTH);
   document.body.classList.toggle('sidebar-compact', desktopSidebarWidth <= DESKTOP_COMPACT_SIDEBAR_WIDTH);
   localStorage.setItem(DESKTOP_SIDEBAR_WIDTH_STORAGE_KEY, String(desktopSidebarWidth));
 }

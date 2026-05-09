@@ -498,7 +498,7 @@ body.sidebar-resizing * {
   -webkit-backdrop-filter: saturate(150%) blur(16px);
   box-shadow: inset 0 1px 0 rgba(255,255,255,.08);
 }
-.chat-topbar-info { flex: 1; min-width: 0; display: flex; align-items: center; }
+.chat-topbar-info { flex: 1; min-width: 0; }
 .chat-topbar-title-stack { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .chat-topbar-name { font-size: 15px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
 .chat-topbar-meta { font-size: 11px; color: var(--text-secondary); }
@@ -512,6 +512,8 @@ body.sidebar-resizing * {
   overflow-x: auto;
   padding: 2px 0;
   scrollbar-width: none;
+  mask-image: linear-gradient(90deg, transparent 0, #000 12px, #000 calc(100% - 12px), transparent 100%);
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 12px, #000 calc(100% - 12px), transparent 100%);
 }
 .chat-tag-filters::-webkit-scrollbar { display: none; }
 .chat-tag-filter-btn {
@@ -1361,19 +1363,21 @@ body.sidebar-compact .group-item {
   padding-left: 10px;
   padding-right: 10px;
 }
-body.sidebar-compact .group-item-info,
-body.sidebar-compact .brand-name,
-body.sidebar-compact .brand-version,
-body.sidebar-compact .sidebar-username,
-body.sidebar-compact .sidebar-actions .icon-label {
+body.sidebar-narrow .brand-name,
+body.sidebar-narrow .brand-version {
   display: none;
 }
-body.sidebar-compact .sidebar-brand {
+body.sidebar-narrow .sidebar-brand {
   padding-left: 12px;
   padding-right: 12px;
 }
-body.sidebar-compact .brand-cache-btn {
+body.sidebar-narrow .brand-cache-btn {
   margin-left: auto;
+}
+body.sidebar-compact .group-item-info,
+body.sidebar-compact .sidebar-username,
+body.sidebar-compact .sidebar-actions .icon-label {
+  display: none;
 }
 body.sidebar-compact .sidebar-actions .btn-action {
   justify-content: center;
@@ -1494,9 +1498,6 @@ body.sidebar-compact .sidebar-user {
   #right-panel-toggle-empty {
     right: 10px;
   }
-
-  /* Improve message bubble readability on mobile */
-  .msg-content { max-width: 80%; }
 
   .chat-topbar-info { min-width: 0; }
   .chat-tag-filters {
