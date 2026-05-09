@@ -569,6 +569,121 @@ function createAiMetaElement(meta) {
   return el;
 }
 
+function clearMarkdownRenderState(target) {
+  if (!target) return;
+  target.classList.remove('markdown-rendered');
+  delete target.dataset.markdownSource;
+}
+
+function renderPlainText(target, text) {
+  if (!target) return;
+  clearMarkdownRenderState(target);
+  target.textContent = text || '';
+}
+
+function appendMarkdownInline(target, text) {
+  const source = String(text || '');
+  const tokenPattern = /(\*\*[^*][\s\S]*?\*\*|\*[^*][\s\S]*?\*|`[^`\n]+`)/g;
+  let lastIndex = 0;
+  let match;
+  while ((match = tokenPattern.exec(source)) !== null) {
+    if (match.index > lastIndex) {
+      target.appendChild(document.createTextNode(source.slice(lastIndex, match.index)));
+    }
+    const token = match[0];
+    let node = null;
+    if (token.startsWith('**') && token.endsWith('**')) {
+      node = document.createElement('strong');
+      node.textContent = token.slice(2, -2);
+    } else if (token.startsWith('*') && token.endsWith('*')) {
+      node = document.createElement('em');
+      node.textContent = token.slice(1, -1);
+    } else if (token.startsWith('`') && token.endsWith('`')) {
+      node = document.createElement('code');
+      node.textContent = token.slice(1, -1);
+    }
+    if (node) target.appendChild(node);
+    lastIndex = tokenPattern.lastIndex;
+  }
+  if (lastIndex < source.length) {
+    target.appendChild(document.createTextNode(source.slice(lastIndex)));
+  }
+}
+
+function renderMarkdown(target, text) {
+  if (!target) return;
+  target.replaceChildren();
+  target.classList.add('markdown-rendered');
+  target.dataset.markdownSource = String(text || '');
+
+  const lines = String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  let paragraphLines = [];
+  const flushParagraph = () => {
+    if (!paragraphLines.length) return;
+    const paragraph = document.createElement('p');
+    appendMarkdownInline(paragraph, paragraphLines.join(' '));
+    target.appendChild(paragraph);
+    paragraphLines = [];
+  };
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const rawLine = lines[i];
+    const trimmed = rawLine.trim();
+    if (!trimmed) {
+      flushParagraph();
+      continue;
+    }
+
+    const headingMatch = /^(#{1,6})\s+(.*)$/.exec(trimmed);
+    if (headingMatch) {
+      flushParagraph();
+      const heading = document.createElement(`h${Math.min(6, headingMatch[1].length)}`);
+      appendMarkdownInline(heading, headingMatch[2]);
+      target.appendChild(heading);
+      continue;
+    }
+
+    const bulletMatch = /^[-*]\s+(.*)$/.exec(trimmed);
+    if (bulletMatch) {
+      flushParagraph();
+      const list = document.createElement('ul');
+      while (i < lines.length) {
+        const itemMatch = /^[-*]\s+(.*)$/.exec(lines[i].trim());
+        if (!itemMatch) break;
+        const item = document.createElement('li');
+        appendMarkdownInline(item, itemMatch[1]);
+        list.appendChild(item);
+        i += 1;
+      }
+      i -= 1;
+      target.appendChild(list);
+      continue;
+    }
+
+    const numberedMatch = /^\d+\.\s+(.*)$/.exec(trimmed);
+    if (numberedMatch) {
+      flushParagraph();
+      const list = document.createElement('ol');
+      while (i < lines.length) {
+        const itemMatch = /^\d+\.\s+(.*)$/.exec(lines[i].trim());
+        if (!itemMatch) break;
+        const item = document.createElement('li');
+        appendMarkdownInline(item, itemMatch[1]);
+        list.appendChild(item);
+        i += 1;
+      }
+      i -= 1;
+      target.appendChild(list);
+      continue;
+    }
+
+    paragraphLines.push(trimmed);
+  }
+
+  flushParagraph();
+  if (!target.childNodes.length) renderPlainText(target, text);
+}
+
 function emitSocketWithAck(event, payload, timeoutMs = 12000) {
   return new Promise((resolve, reject) => {
     if (!socket) {
@@ -2981,7 +3096,7 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
   }
 
   // Message content
-  const textEl = document.createElement('span');
+  const textEl = document.createElement(isAiAssistant ? 'div' : 'span');
   textEl.className = 'msg-text';
   await renderMsgContent(msg, textEl, bubble, groupId);
   row.dataset.readDelayMs = String(computeMessageViewportDelayMs(
@@ -3052,9 +3167,9 @@ async function renderMsgContent(msg, textEl, bubble, groupId = currentGroupId) {
   const key = groupId ? getGroupKey(groupId) : null;
 
   if (!encryptionVisible) {
-    if (msg.type === 'image') textEl.textContent = '[encrypted image]';
-    else if (msg.type === 'file') textEl.textContent = '[encrypted file: ' + (msg.filename || '') + ']';
-    else textEl.textContent = msg.encryptedContent || '[no content]';
+    if (msg.type === 'image') renderPlainText(textEl, '[encrypted image]');
+    else if (msg.type === 'file') renderPlainText(textEl, '[encrypted file: ' + (msg.filename || '') + ']');
+    else renderPlainText(textEl, msg.encryptedContent || '[no content]');
     return;
   }
 
@@ -3123,15 +3238,16 @@ async function renderMsgContent(msg, textEl, bubble, groupId = currentGroupId) {
 
   // Text message
   if (!key) {
-    textEl.textContent = MSG_NO_KEY;
+    renderPlainText(textEl, MSG_NO_KEY);
     return;
   }
 
   const plaintext = await decryptMessage(msg.encryptedContent, msg.iv, key, groupId);
   if (plaintext === null) {
-    textEl.textContent = MSG_DECRYPT_FAIL;
+    renderPlainText(textEl, MSG_DECRYPT_FAIL);
   } else {
-    textEl.textContent = plaintext;
+    if (isAiAssistantMessage(msg)) renderMarkdown(textEl, plaintext);
+    else renderPlainText(textEl, plaintext);
   }
 }
 
@@ -4456,8 +4572,9 @@ function searchMessages(term) {
   rows.forEach(row => {
     const textEl = row.querySelector('.msg-text');
     if (!textEl) return;
-    // Restore plain text first (remove marks)
-    textEl.textContent = textEl.textContent;
+    const markdownSource = textEl.dataset.markdownSource;
+    if (markdownSource != null) renderMarkdown(textEl, markdownSource);
+    else renderPlainText(textEl, textEl.textContent);
     if (!term) { row.style.display = ''; return; }
     const text = textEl.textContent;
     if (text.toLowerCase().includes(term.toLowerCase())) {
@@ -4511,7 +4628,7 @@ function resetGrokModalState() {
   $('grok-status').textContent = '';
   $('grok-status').hidden = true;
   $('grok-response-wrap').hidden = true;
-  $('grok-response').textContent = '';
+  renderPlainText($('grok-response'), '');
   $('grok-response').classList.remove('is-error');
   $('grok-response-model').textContent = '';
   $('grok-response-meta').textContent = '';
@@ -4538,7 +4655,8 @@ function setGrokBusy(isBusy, statusText = '') {
 
 function setGrokResponse(text, model = '', meta = null, { isError = false } = {}) {
   const response = $('grok-response');
-  response.textContent = text || '';
+  if (isError) renderPlainText(response, text || '');
+  else renderMarkdown(response, text || '');
   response.classList.toggle('is-error', !!isError);
   $('grok-response-wrap').hidden = !text;
   $('grok-response-model').textContent = model || '';

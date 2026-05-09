@@ -1096,6 +1096,43 @@ body.sidebar-resizing * {
   font-size: 11px;
   color: var(--bubble-meta);
 }
+.markdown-rendered {
+  white-space: normal;
+}
+.markdown-rendered p,
+.markdown-rendered ul,
+.markdown-rendered ol {
+  margin: 0 0 10px;
+}
+.markdown-rendered p:last-child,
+.markdown-rendered ul:last-child,
+.markdown-rendered ol:last-child {
+  margin-bottom: 0;
+}
+.markdown-rendered h1,
+.markdown-rendered h2,
+.markdown-rendered h3,
+.markdown-rendered h4,
+.markdown-rendered h5,
+.markdown-rendered h6 {
+  margin: 0 0 8px;
+  line-height: 1.3;
+  font-weight: 800;
+}
+.markdown-rendered h1 { font-size: 1.2em; }
+.markdown-rendered h2 { font-size: 1.12em; }
+.markdown-rendered h3 { font-size: 1.05em; }
+.markdown-rendered ul,
+.markdown-rendered ol {
+  padding-left: 20px;
+}
+.markdown-rendered li + li {
+  margin-top: 4px;
+}
+.markdown-rendered code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: .95em;
+}
 
 /* Key prompt bar */
 .key-prompt-bar {
@@ -1513,6 +1550,9 @@ body.sidebar-resizing * {
   padding: 14px;
   max-height: 320px;
   overflow: auto;
+}
+.grok-response.markdown-rendered {
+  white-space: normal;
 }
 .grok-response-meta {
   font-size: 12px;
