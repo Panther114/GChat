@@ -218,6 +218,8 @@ const MAX_WALLPAPER_BYTES = 10 * 1024 * 1024;
 const MAX_PROFILE_PICTURE_BYTES = 2 * 1024 * 1024;
 const MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024;
 const MAX_TEXT_MESSAGE_BYTES = 64 * 1024;
+const GROK_CONTEXT_MESSAGE_LIMIT = 40;
+const GROK_CONTEXT_TOTAL_CHARS = 24000;
 const ALLOWED_UPLOAD_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const wallpaperTheme = window.GChatWallpaperTheme || null;
 const localTimeFormatter = new Intl.DateTimeFormat(undefined, {
@@ -1083,6 +1085,9 @@ let wallpaperDraft = null;
 let desktopSidebarWidth = DESKTOP_DEFAULT_SIDEBAR_WIDTH;
 let desktopRightPanelExpanded = true;
 let activeTagFilter = null;
+let grokRequestInFlight = false;
+let grokResponseDraft = '';
+let grokResponseModel = '';
 const composerTokens = {
   whisper: null,
   hashtag: null,
@@ -1858,6 +1863,11 @@ const ICON_SPECS = {
     ['rect', { x: '3', y: '5', width: '18', height: '14', rx: '2' }],
     ['circle', { cx: '9', cy: '10', r: '1.5' }],
     ['path', { d: 'm21 15-5-5L5 21' }],
+  ],
+  sparkles: [
+    ['path', { d: 'M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6L12 3z' }],
+    ['path', { d: 'M18.5 14l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z' }],
+    ['path', { d: 'M5.5 13l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z' }],
   ],
   reply: [
     ['polyline', { points: '9 17 4 12 9 7' }],
@@ -4000,7 +4010,13 @@ function setupKeyboardShortcuts() {
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       // Close modals
-      document.querySelectorAll('.modal-overlay:not([hidden])').forEach(m => m.hidden = true);
+      document.querySelectorAll('.modal-overlay:not([hidden])').forEach((m) => {
+        if (m.id === 'grok-modal') {
+          closeGrokModal();
+          return;
+        }
+        m.hidden = true;
+      });
       $('ctx-menu').hidden = true;
       $('emoji-picker').hidden = true;
       $('whisper-picker').hidden = true;
@@ -4174,6 +4190,163 @@ async function exportChat() {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+function resetGrokModalState() {
+  grokResponseDraft = '';
+  grokResponseModel = '';
+  $('grok-prompt-input').value = '';
+  $('grok-error').textContent = '';
+  $('grok-status').textContent = '';
+  $('grok-status').hidden = true;
+  $('grok-response-wrap').hidden = true;
+  $('grok-response').textContent = '';
+  $('grok-response').classList.remove('is-error');
+  $('grok-response-model').textContent = '';
+  $('grok-copy-btn').disabled = true;
+  $('grok-insert-btn').disabled = true;
+  $('grok-submit-btn').disabled = false;
+  $('grok-submit-btn').textContent = 'Ask Grok';
+  $('grok-cancel-btn').disabled = false;
+  $('grok-close-btn').disabled = false;
+}
+
+function setGrokBusy(isBusy, statusText = '') {
+  grokRequestInFlight = !!isBusy;
+  $('grok-submit-btn').disabled = !!isBusy;
+  $('grok-submit-btn').textContent = isBusy ? 'Thinking…' : 'Ask Grok';
+  $('grok-cancel-btn').disabled = !!isBusy;
+  $('grok-close-btn').disabled = !!isBusy;
+  $('grok-copy-btn').disabled = isBusy || !grokResponseDraft;
+  $('grok-insert-btn').disabled = isBusy || !grokResponseDraft;
+  $('grok-status').textContent = statusText || '';
+  $('grok-status').hidden = !statusText;
+}
+
+function setGrokResponse(text, model = '', { isError = false } = {}) {
+  const response = $('grok-response');
+  response.textContent = text || '';
+  response.classList.toggle('is-error', !!isError);
+  $('grok-response-wrap').hidden = !text;
+  $('grok-response-model').textContent = model || '';
+  $('grok-copy-btn').disabled = !text || !!isError || grokRequestInFlight;
+  $('grok-insert-btn').disabled = !text || !!isError || grokRequestInFlight;
+}
+
+function closeGrokModal() {
+  if (grokRequestInFlight) return;
+  $('grok-modal').hidden = true;
+  resetGrokModalState();
+}
+
+function openGrokModal() {
+  if (!currentGroupId || !currentGroupData) {
+    showToast('Select a group first', 'error');
+    return;
+  }
+  if (!getGroupKey(currentGroupId)) {
+    showToast('Set group key first', 'error');
+    return;
+  }
+  resetGrokModalState();
+  $('grok-group-name').textContent = currentGroupData.name;
+  $('grok-modal').hidden = false;
+  $('grok-prompt-input').focus();
+}
+
+async function buildGrokContextMessages(groupId) {
+  const key = getGroupKey(groupId);
+  if (!key) throw new Error('Set group key first');
+
+  const sourceMessages = (allMessages || []).slice(-GROK_CONTEXT_MESSAGE_LIMIT);
+  const resolved = await Promise.all(sourceMessages.map(async (msg) => {
+    if (!msg) return null;
+
+    let content = '';
+    if (msg.type === 'image') {
+      content = 'Image attachment';
+    } else if (msg.type === 'file') {
+      content = `File attachment: ${msg.filename || 'file'}`;
+    } else {
+      const plaintext = await decryptMessage(msg.encryptedContent, msg.iv, key, groupId);
+      if (!plaintext) return null;
+      content = plaintext.trim();
+      if (!content) return null;
+    }
+
+    const prefixes = [];
+    if (msg.type === 'whisper') prefixes.push('[Whisper]');
+    const hashtag = getMessageHashtagKey(msg);
+    if (hashtag) prefixes.push(formatHashtagLabel(hashtag));
+    if (prefixes.length) content = `${prefixes.join(' ')} ${content}`;
+
+    return {
+      senderName: msg.senderName || 'Unknown',
+      createdAt: msg.createdAt || '',
+      content,
+      type: msg.type || 'text',
+      hashtag: hashtag || null,
+    };
+  }));
+
+  const compact = [];
+  let remaining = GROK_CONTEXT_TOTAL_CHARS;
+  for (let i = resolved.length - 1; i >= 0; i -= 1) {
+    const entry = resolved[i];
+    if (!entry || !entry.content) continue;
+    if (remaining <= 0) break;
+    const text = String(entry.content).trim();
+    if (!text) continue;
+    const trimmedContent = text.length > remaining ? text.slice(text.length - remaining) : text;
+    compact.push({ ...entry, content: trimmedContent });
+    remaining -= trimmedContent.length;
+  }
+  compact.reverse();
+  return compact;
+}
+
+async function submitGrokPrompt() {
+  if (grokRequestInFlight || !currentGroupId || !currentGroupData) return;
+  const prompt = $('grok-prompt-input').value.trim();
+  if (!prompt) {
+    $('grok-error').textContent = 'Prompt cannot be empty';
+    return;
+  }
+
+  const groupId = currentGroupId;
+  const groupName = currentGroupData.name;
+  grokResponseDraft = '';
+  grokResponseModel = '';
+  $('grok-error').textContent = '';
+  setGrokResponse('', '');
+  setGrokBusy(true, 'Decrypting recent messages…');
+
+  try {
+    const contextMessages = await buildGrokContextMessages(groupId);
+    setGrokBusy(true, contextMessages.length ? 'Asking Grok 4.3…' : 'Asking Grok 4.3 without chat context…');
+    const res = await fetch(`/api/groups/${groupId}/ai/chat`, {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify({
+        groupName,
+        prompt,
+        contextMessages,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Grok request failed');
+
+    grokResponseDraft = String(data.answer || '').trim();
+    grokResponseModel = String(data.model || '');
+    setGrokResponse(grokResponseDraft, grokResponseModel);
+    showToast('Grok response ready', 'success');
+  } catch (err) {
+    const message = String(err && err.message ? err.message : 'Grok request failed');
+    $('grok-error').textContent = message;
+    setGrokResponse(message, '', { isError: true });
+  } finally {
+    setGrokBusy(false);
+  }
 }
 
 // ── Event listeners ───────────────────────────────────────────────────────────
@@ -4469,6 +4642,43 @@ function setupEventListeners() {
     $('group-key-input').value = currentGroupId ? (getGroupKey(currentGroupId) || '') : '';
     $('group-key-error').textContent = '';
     $('group-key-modal').hidden = false;
+  });
+  $('ask-grok-btn').addEventListener('click', openGrokModal);
+  $('grok-close-btn').addEventListener('click', closeGrokModal);
+  $('grok-cancel-btn').addEventListener('click', closeGrokModal);
+  $('grok-modal').addEventListener('click', (e) => {
+    if (e.target !== $('grok-modal')) return;
+    closeGrokModal();
+  });
+  $('grok-submit-btn').addEventListener('click', () => { void submitGrokPrompt(); });
+  $('grok-prompt-input').addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      void submitGrokPrompt();
+    }
+  });
+  $('grok-copy-btn').addEventListener('click', async () => {
+    if (!grokResponseDraft) return;
+    try {
+      await navigator.clipboard.writeText(grokResponseDraft);
+      showToast('Copied to clipboard', 'success');
+    } catch {
+      showToast('Failed to copy response', 'error');
+    }
+  });
+  $('grok-insert-btn').addEventListener('click', () => {
+    if (!grokResponseDraft) return;
+    const input = $('message-input');
+    if (!input || input.disabled) {
+      showToast('Set group key first', 'error');
+      return;
+    }
+    input.value = input.value
+      ? `${input.value.trimEnd()}\n\n${grokResponseDraft}`
+      : grokResponseDraft;
+    autoResizeTextarea(input);
+    input.focus();
+    closeGrokModal();
   });
   $('group-key-cancel-btn').addEventListener('click', () => $('group-key-modal').hidden = true);
   $('group-key-save-btn').addEventListener('click', async () => {

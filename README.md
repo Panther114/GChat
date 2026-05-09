@@ -105,6 +105,7 @@ Important limitations:
 - Metadata such as usernames, group membership, timestamps, and message ownership is still visible to the server.
 - Disappearing-message metadata, timers, and per-user hidden-state records are also visible to the server so the app can keep access state consistent across reloads.
 - Short repeated-message spam detection hashes normalized short messages server-side, which can reveal when two short messages are identical even though the server still does not receive plaintext.
+- If a user explicitly uses the Grok assistant, the selected chat context is decrypted in the browser and sent to the Gchat server only for that one OpenRouter request.
 - This is application-layer encryption, not a replacement for audited secure messaging infrastructure.
 
 ---
@@ -117,6 +118,8 @@ Important limitations:
 | `PORT` | No | Server port. Railway provides this automatically. |
 | `DB_PATH` | Recommended | SQLite database path. Use `/data/Gchat.db` with a Railway volume for persistence. |
 | `ADMIN_SECRET` | Optional | Enables the admin users endpoint when set. |
+| `OPENROUTER_API_KEY` | Optional | Enables the server-side Grok 4.3 integration. Keep this only in server/runtime environment variables such as Railway service variables. |
+| `OPENROUTER_MODEL` | No | Optional OpenRouter model override. Defaults to `x-ai/grok-4.3`. |
 
 ---
 
@@ -177,6 +180,7 @@ The main application pages are served from `public/`.
 ```txt
 SESSION_SECRET=<long random secret>
 DB_PATH=/data/Gchat.db
+OPENROUTER_API_KEY=<openrouter api key>
 ```
 
 5. Deploy.
@@ -351,6 +355,7 @@ Relevant Electron Builder behavior:
 - SQLite database files should not be committed.
 - The server stores encrypted message payloads, not plaintext message content.
 - Group keys are client-managed and cannot be recovered by the server.
+- The browser never calls OpenRouter directly; Grok requests are proxied through `server.js` with `OPENROUTER_API_KEY` kept server-side.
 - Large file handling should be reviewed carefully before public-scale deployment.
 
 ---
@@ -362,6 +367,7 @@ Before using Gchat with real users:
 - Set `SESSION_SECRET`.
 - Mount a Railway volume.
 - Set `DB_PATH=/data/Gchat.db`.
+- Set `OPENROUTER_API_KEY` if Grok 4.3 should be available.
 - Confirm login, group creation, message sending, and file upload behavior.
 - Test the desktop installer on a clean Windows machine.
 - Verify notification behavior in Windows settings.
