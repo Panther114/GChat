@@ -65,6 +65,7 @@ const OPENROUTER_FREQUENCY_PENALTY = 0;
 const OPENROUTER_PRESENCE_PENALTY = 0;
 const OPENROUTER_MAX_TOKENS = 1200;
 const USD_TO_RMB_RATE = 7.2;
+const AI_TOKEN_AMOUNT_DECIMALS = 4;
 const MAX_AI_PROMPT_CHARS = 4000;
 const MAX_AI_CONTEXT_MESSAGES = 40;
 const MAX_AI_CONTEXT_MESSAGE_CHARS = 2000;
@@ -208,10 +209,11 @@ function normalizeAiTokenCount(value) {
   return Math.round(parsed);
 }
 
-function normalizeAiTokenAmount(value) {
+function roundAiTokenAmount(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) return 0;
-  return Math.round(parsed * 10000) / 10000;
+  const scale = 10 ** AI_TOKEN_AMOUNT_DECIMALS;
+  return Math.round(parsed * scale) / scale;
 }
 
 function normalizeAiCostUsd(value) {
@@ -277,11 +279,11 @@ function getAiUsageWindow(now = Date.now()) {
 
 function sanitizeAiMessageMeta(value) {
   if (!value || typeof value !== 'object') return null;
-  const promptTokens = normalizeAiTokenAmount(value.promptTokens ?? value.prompt_tokens);
-  const completionTokens = normalizeAiTokenAmount(value.completionTokens ?? value.completion_tokens);
+  const promptTokens = roundAiTokenAmount(value.promptTokens ?? value.prompt_tokens);
+  const completionTokens = roundAiTokenAmount(value.completionTokens ?? value.completion_tokens);
   const totalTokens = Math.max(
     promptTokens + completionTokens,
-    normalizeAiTokenAmount(value.totalTokens ?? value.total_tokens)
+    roundAiTokenAmount(value.totalTokens ?? value.total_tokens)
   );
   const rawPromptTokens = normalizeAiTokenCount(value.rawPromptTokens ?? value.raw_prompt_tokens);
   const rawCompletionTokens = normalizeAiTokenCount(value.rawCompletionTokens ?? value.raw_completion_tokens);
@@ -428,16 +430,16 @@ function convertModelUsageToStandardTokens(usage, model = DEFAULT_AI_MODEL) {
     rawPromptTokens + rawCompletionTokens,
     normalizeAiTokenCount(usage?.totalTokens ?? usage?.total_tokens)
   );
-  const promptTokens = normalizeAiTokenAmount(
+  const promptTokens = roundAiTokenAmount(
     rawPromptTokens * (pricing.inputCostPerMillion / standardPricing.inputCostPerMillion)
   );
-  const completionTokens = normalizeAiTokenAmount(
+  const completionTokens = roundAiTokenAmount(
     rawCompletionTokens * (pricing.outputCostPerMillion / standardPricing.outputCostPerMillion)
   );
   return {
     promptTokens,
     completionTokens,
-    totalTokens: normalizeAiTokenAmount(promptTokens + completionTokens),
+    totalTokens: roundAiTokenAmount(promptTokens + completionTokens),
     rawPromptTokens,
     rawCompletionTokens,
     rawTotalTokens,
@@ -1241,8 +1243,8 @@ function getAiUsageSnapshotForUser(userId) {
   const globalUsage = stmts.getGlobalAiUsageInWindow.get(window.startIso, window.endIso) || {};
   const userLimit = getUserAiDailyTokenLimit(user);
   const globalLimit = getGlobalAiDailyTokenLimit();
-  const userUsedTokens = normalizeAiTokenAmount(userUsage.total_tokens);
-  const globalUsedTokens = normalizeAiTokenAmount(globalUsage.total_tokens);
+  const userUsedTokens = roundAiTokenAmount(userUsage.total_tokens);
+  const globalUsedTokens = roundAiTokenAmount(globalUsage.total_tokens);
   const userExceeded = userLimit <= 0 || userUsedTokens >= userLimit;
   const globalExceeded = globalLimit <= 0 || globalUsedTokens >= globalLimit;
   return {
@@ -1252,13 +1254,13 @@ function getAiUsageSnapshotForUser(userId) {
       username: user.username,
       dailyLimit: userLimit,
       usedTokens: userUsedTokens,
-      remainingTokens: normalizeAiTokenAmount(Math.max(0, userLimit - userUsedTokens)),
+      remainingTokens: roundAiTokenAmount(Math.max(0, userLimit - userUsedTokens)),
       exceeded: userExceeded,
     },
     global: {
       dailyLimit: globalLimit,
       usedTokens: globalUsedTokens,
-      remainingTokens: normalizeAiTokenAmount(Math.max(0, globalLimit - globalUsedTokens)),
+      remainingTokens: roundAiTokenAmount(Math.max(0, globalLimit - globalUsedTokens)),
       exceeded: globalExceeded,
     },
     canStartRequest: !userExceeded && !globalExceeded,
@@ -1278,7 +1280,7 @@ function getAiLimitError(summary) {
 
 function formatManagedUser(user, usageWindow) {
   const usage = stmts.getUserAiUsageInWindow.get(user.id, usageWindow.startIso, usageWindow.endIso) || {};
-  const usedTokens = normalizeAiTokenAmount(usage.total_tokens);
+  const usedTokens = roundAiTokenAmount(usage.total_tokens);
   const dailyLimit = getUserAiDailyTokenLimit(user);
   return {
     id: user.id,
@@ -1624,9 +1626,9 @@ app.get('/api/users/management', (req, res) => {
     viewerCanDeleteUsers: canManage,
     global: {
       dailyLimit: globalLimit,
-      usedTokens: normalizeAiTokenAmount(globalUsage.total_tokens),
-      remainingTokens: normalizeAiTokenAmount(Math.max(0, globalLimit - normalizeAiTokenAmount(globalUsage.total_tokens))),
-      exceeded: globalLimit <= 0 || normalizeAiTokenAmount(globalUsage.total_tokens) >= globalLimit,
+      usedTokens: roundAiTokenAmount(globalUsage.total_tokens),
+      remainingTokens: roundAiTokenAmount(Math.max(0, globalLimit - roundAiTokenAmount(globalUsage.total_tokens))),
+      exceeded: globalLimit <= 0 || roundAiTokenAmount(globalUsage.total_tokens) >= globalLimit,
     },
     window: usageWindow,
   });
@@ -1672,9 +1674,9 @@ app.patch('/api/ai/global-limit', (req, res) => {
     ok: true,
     global: {
       dailyLimit: parsedLimit.value,
-      usedTokens: normalizeAiTokenAmount(globalUsage.total_tokens),
-      remainingTokens: normalizeAiTokenAmount(Math.max(0, parsedLimit.value - normalizeAiTokenAmount(globalUsage.total_tokens))),
-      exceeded: parsedLimit.value <= 0 || normalizeAiTokenAmount(globalUsage.total_tokens) >= parsedLimit.value,
+      usedTokens: roundAiTokenAmount(globalUsage.total_tokens),
+      remainingTokens: roundAiTokenAmount(Math.max(0, parsedLimit.value - roundAiTokenAmount(globalUsage.total_tokens))),
+      exceeded: parsedLimit.value <= 0 || roundAiTokenAmount(globalUsage.total_tokens) >= parsedLimit.value,
     },
     window: usageWindow,
   });

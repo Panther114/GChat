@@ -253,6 +253,10 @@ const APP_OWNER_USERNAME = 'Furina';
 const AI_RESET_TIME_LABEL = '4:00 AM Shanghai time';
 const AI_USAGE_RESET_LABEL = `Resets at ${AI_RESET_TIME_LABEL}`;
 const USD_TO_RMB_RATE = 7.2;
+const AI_TOKEN_AMOUNT_DECIMALS = 4;
+const MIN_DISPLAYABLE_TOKEN_AMOUNT = 0.01;
+const MIN_CURRENCY_DISPLAY_THRESHOLD = 0.01;
+const SMALL_CURRENCY_PRECISION = 4;
 const AI_MODEL_OPTIONS = {
   'deepseek/deepseek-v4-flash': 'DeepSeek V4 Flash',
   'x-ai/grok-4.3': 'Grok 4.3',
@@ -537,25 +541,26 @@ function isAiAssistantMessage(msg) {
   return String(msg?.senderId || '') === AI_ASSISTANT_USER_ID;
 }
 
-function normalizeAiTokenAmount(value) {
+function roundAiTokenAmount(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) return 0;
-  return Math.round(parsed * 10000) / 10000;
+  const scale = 10 ** AI_TOKEN_AMOUNT_DECIMALS;
+  return Math.round(parsed * scale) / scale;
 }
 
 function formatAiTokenAmount(value) {
-  const normalized = normalizeAiTokenAmount(value);
-  if (normalized > 0 && normalized < 0.01) return '<0.01';
+  const normalized = roundAiTokenAmount(value);
+  if (normalized > 0 && normalized < MIN_DISPLAYABLE_TOKEN_AMOUNT) return `<${MIN_DISPLAYABLE_TOKEN_AMOUNT.toFixed(2)}`;
   return tokenAmountFormatter.format(normalized);
 }
 
 function normalizeAiMeta(meta) {
   if (!meta || typeof meta !== 'object') return null;
-  const promptTokens = normalizeAiTokenAmount(meta.promptTokens);
-  const completionTokens = normalizeAiTokenAmount(meta.completionTokens);
+  const promptTokens = roundAiTokenAmount(meta.promptTokens);
+  const completionTokens = roundAiTokenAmount(meta.completionTokens);
   const totalTokens = Math.max(
     promptTokens + completionTokens,
-    normalizeAiTokenAmount(meta.totalTokens)
+    roundAiTokenAmount(meta.totalTokens)
   );
   const rawPromptTokens = Math.max(0, Math.round(Number(meta.rawPromptTokens) || 0));
   const rawCompletionTokens = Math.max(0, Math.round(Number(meta.rawCompletionTokens) || 0));
@@ -592,7 +597,9 @@ function normalizeAiMeta(meta) {
 function formatCurrencyValue(value, symbol) {
   const amount = Number(value);
   if (!Number.isFinite(amount) || amount < 0) return '';
-  if (amount > 0 && amount < 0.01) return `${symbol}${amount.toFixed(4)}`;
+  if (amount > 0 && amount < MIN_CURRENCY_DISPLAY_THRESHOLD) {
+    return `${symbol}${amount.toFixed(SMALL_CURRENCY_PRECISION)}`;
+  }
   return `${symbol}${amount.toFixed(2)}`;
 }
 
@@ -663,12 +670,12 @@ function createAiMetaElement(meta) {
 function normalizeAiUsageSection(value) {
   if (!value || typeof value !== 'object') return null;
   const dailyLimit = Math.max(0, Math.round(Number(value.dailyLimit) || 0));
-  const usedTokens = normalizeAiTokenAmount(value.usedTokens);
+  const usedTokens = roundAiTokenAmount(value.usedTokens);
   return {
     ...value,
     dailyLimit,
     usedTokens,
-    remainingTokens: normalizeAiTokenAmount(
+    remainingTokens: roundAiTokenAmount(
       Number.isFinite(Number(value.remainingTokens)) ? Number(value.remainingTokens) : (dailyLimit - usedTokens)
     ),
     exceeded: !!value.exceeded || dailyLimit <= 0 || usedTokens >= dailyLimit,
@@ -760,7 +767,7 @@ function normalizeManagedUserSummary(value) {
       iconColor: user.iconColor || '#4A90D9',
       profilePicture: user.profilePicture || null,
       aiDailyTokenLimit: Math.max(0, Math.round(Number(user.aiDailyTokenLimit) || 0)),
-      aiTokensUsedToday: normalizeAiTokenAmount(user.aiTokensUsedToday),
+      aiTokensUsedToday: roundAiTokenAmount(user.aiTokensUsedToday),
       aiLimitExceeded: !!user.aiLimitExceeded,
     })) : [],
     viewerCanManageAiLimits: !!value.viewerCanManageAiLimits,
