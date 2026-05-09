@@ -579,7 +579,7 @@ function normalizeAiUsageSection(value) {
     dailyLimit,
     usedTokens,
     remainingTokens: Math.max(0, Number.isFinite(Number(value.remainingTokens)) ? Math.round(Number(value.remainingTokens)) : (dailyLimit - usedTokens)),
-    exceeded: !!value.exceeded || (dailyLimit <= 0 ? true : usedTokens >= dailyLimit),
+    exceeded: !!value.exceeded || dailyLimit <= 0 || usedTokens >= dailyLimit,
   };
 }
 
@@ -2121,7 +2121,7 @@ function messageMatchesActiveTag(msg) {
 
 function rowMatchesActiveTag(row) {
   if (!activeTagFilter) return true;
-  return normalizeHashtagTopic(row?.dataset?.hashtag) === activeTagFilter;
+  return String(row?.dataset?.hashtag || '') === activeTagFilter;
 }
 
 function applyActiveTagFilterToRenderedMessages() {

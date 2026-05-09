@@ -687,7 +687,7 @@ const migrations = [
   "CREATE TABLE IF NOT EXISTS _config (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
   "ALTER TABLE users ADD COLUMN profile_picture TEXT",
   "ALTER TABLE users ADD COLUMN client_settings TEXT NOT NULL DEFAULT '{}'",
-  `ALTER TABLE users ADD COLUMN ai_daily_token_limit INTEGER NOT NULL DEFAULT ${DEFAULT_USER_DAILY_AI_TOKEN_LIMIT}`,
+  'ALTER TABLE users ADD COLUMN ai_daily_token_limit INTEGER NOT NULL DEFAULT 20000',
   "ALTER TABLE messages ADD COLUMN edited_at TEXT",
   "ALTER TABLE messages ADD COLUMN ai_meta TEXT",
   "ALTER TABLE messages ADD COLUMN ai_mention INTEGER NOT NULL DEFAULT 0",
@@ -1114,7 +1114,7 @@ function formatMessage(m) {
 }
 
 function isAppOwnerUser(user) {
-  return !!(user && user.username === APP_OWNER_USERNAME);
+  return user && user.username === APP_OWNER_USERNAME;
 }
 
 function getGlobalAiDailyTokenLimit() {
@@ -1140,8 +1140,8 @@ function getAiUsageSnapshotForUser(userId) {
   const globalLimit = getGlobalAiDailyTokenLimit();
   const userUsedTokens = normalizeAiTokenCount(userUsage.total_tokens);
   const globalUsedTokens = normalizeAiTokenCount(globalUsage.total_tokens);
-  const userExceeded = userLimit <= 0 ? true : userUsedTokens >= userLimit;
-  const globalExceeded = globalLimit <= 0 ? true : globalUsedTokens >= globalLimit;
+  const userExceeded = userLimit <= 0 || userUsedTokens >= userLimit;
+  const globalExceeded = globalLimit <= 0 || globalUsedTokens >= globalLimit;
   return {
     window,
     currentUser: {
@@ -1185,7 +1185,7 @@ function formatManagedUser(user, usageWindow) {
     createdAt: user.created_at,
     aiDailyTokenLimit: dailyLimit,
     aiTokensUsedToday: usedTokens,
-    aiLimitExceeded: dailyLimit <= 0 ? true : usedTokens >= dailyLimit,
+    aiLimitExceeded: dailyLimit <= 0 || usedTokens >= dailyLimit,
   };
 }
 
@@ -1514,7 +1514,7 @@ app.get('/api/users/management', (req, res) => {
       dailyLimit: globalLimit,
       usedTokens: normalizeAiTokenCount(globalUsage.total_tokens),
       remainingTokens: Math.max(0, globalLimit - normalizeAiTokenCount(globalUsage.total_tokens)),
-      exceeded: globalLimit <= 0 ? true : normalizeAiTokenCount(globalUsage.total_tokens) >= globalLimit,
+      exceeded: globalLimit <= 0 || normalizeAiTokenCount(globalUsage.total_tokens) >= globalLimit,
     },
     window: usageWindow,
   });
@@ -1562,7 +1562,7 @@ app.patch('/api/ai/global-limit', (req, res) => {
       dailyLimit: parsedLimit.value,
       usedTokens: normalizeAiTokenCount(globalUsage.total_tokens),
       remainingTokens: Math.max(0, parsedLimit.value - normalizeAiTokenCount(globalUsage.total_tokens)),
-      exceeded: parsedLimit.value <= 0 ? true : normalizeAiTokenCount(globalUsage.total_tokens) >= parsedLimit.value,
+      exceeded: parsedLimit.value <= 0 || normalizeAiTokenCount(globalUsage.total_tokens) >= parsedLimit.value,
     },
     window: usageWindow,
   });
