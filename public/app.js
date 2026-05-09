@@ -1835,6 +1835,7 @@ async function removeTagMessagesFromCache(groupId, hashtag) {
   if (!normalizedTag) return false;
   const cache = ensureGroupCacheEntry(groupId);
   if (!cache.messages) return false;
+  const isCurrentGroup = groupId === currentGroupId;
 
   const removedIds = [];
   cache.messages = cache.messages.filter((msg) => {
@@ -1845,16 +1846,23 @@ async function removeTagMessagesFromCache(groupId, hashtag) {
   if (removedIds.length === 0) return false;
 
   for (const messageId of removedIds) {
+    pendingReadMessageIds.delete(messageId);
+    pendingDisappearingStartMessageIds.delete(messageId);
     clearDisappearingTimer(messageId);
     clearMessageVisibilityTimer(messageId);
     hiddenDisappearingMessageIds.delete(messageId);
+    if (isCurrentGroup) {
+      const row = document.querySelector(`[data-msg-id="${CSS.escape(messageId)}"]`);
+      if (row) readObserver?.unobserve(row);
+    }
   }
   persistHiddenDisappearingMessageIds();
 
+  if (isCurrentGroup) allMessages = cache.messages;
   cache.oldestMessageId = cache.messages.length ? cache.messages[0].id : null;
   cache.rowsDirty = true;
-  updateGroupUnseenCount(groupId, cache.messages);
-  if (groupId === currentGroupId) {
+  syncGroupUnreadCount(groupId);
+  if (isCurrentGroup) {
     await rebuildGroupMessageRows(groupId);
     renderGroupFromCache(groupId);
     observeCurrentGroupRowsForRead();
