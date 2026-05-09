@@ -249,7 +249,9 @@ const AI_ASSISTANT_USER_ID = '__gchat_ai_grok__';
 const AI_ASSISTANT_NAME = 'Grok';
 const AI_ASSISTANT_COLOR = '#8d7bff';
 const AI_ASSISTANT_PROFILE_PICTURE = '/grok.webp';
-const AI_USAGE_RESET_LABEL = 'Resets at 4:00 AM Shanghai time';
+const APP_OWNER_USERNAME = 'Furina';
+const AI_RESET_TIME_LABEL = '4:00 AM Shanghai time';
+const AI_USAGE_RESET_LABEL = `Resets at ${AI_RESET_TIME_LABEL}`;
 const ALLOWED_UPLOAD_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const wallpaperTheme = window.GChatWallpaperTheme || null;
 const localTimeFormatter = new Intl.DateTimeFormat(undefined, {
@@ -610,8 +612,8 @@ function getAiUsagePercent(section) {
 
 function getAiQuotaBlockedMessage(summary = aiUsageSummary) {
   if (!summary) return '';
-  if (summary.global?.exceeded) return 'Global daily AI token limit reached. Try again after 4:00 AM Shanghai time.';
-  if (summary.currentUser?.exceeded) return 'Your daily AI token limit reached. Try again after 4:00 AM Shanghai time.';
+  if (summary.global?.exceeded) return `Global daily AI token limit reached. Try again after ${AI_RESET_TIME_LABEL}.`;
+  if (summary.currentUser?.exceeded) return `Your daily AI token limit reached. Try again after ${AI_RESET_TIME_LABEL}.`;
   return '';
 }
 
@@ -746,7 +748,7 @@ function renderUserManagementPanel() {
 
     main.append(head, track);
 
-    if (summary.viewerCanManageAiLimits || (summary.viewerCanDeleteUsers && user.username !== 'Furina')) {
+    if (summary.viewerCanManageAiLimits || (summary.viewerCanDeleteUsers && user.username !== APP_OWNER_USERNAME)) {
       const actions = document.createElement('div');
       actions.className = 'user-management-user-actions';
       if (summary.viewerCanManageAiLimits) {
@@ -775,7 +777,7 @@ function renderUserManagementPanel() {
         });
         actions.append(limitInput, saveBtn);
       }
-      if (summary.viewerCanDeleteUsers && user.username !== 'Furina') {
+      if (summary.viewerCanDeleteUsers && user.username !== APP_OWNER_USERNAME) {
         const deleteBtn = document.createElement('button');
         deleteBtn.className = 'btn-danger btn-sm user-management-delete-btn';
         deleteBtn.textContent = 'Delete user';
@@ -836,7 +838,7 @@ function renderPlainText(target, text) {
 function normalizeMarkdownLinkUrl(url) {
   if (typeof url !== 'string') return null;
   try {
-    const parsed = new URL(url, window.location.origin);
+    const parsed = new URL(url);
     return /^https?:$/.test(parsed.protocol) ? parsed.href : null;
   } catch {
     return null;

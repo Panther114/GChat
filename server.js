@@ -58,6 +58,10 @@ const DEFAULT_GLOBAL_DAILY_AI_TOKEN_LIMIT = 200000;
 const MAX_AI_DAILY_TOKEN_LIMIT = 100000000;
 const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000;
 const AI_RESET_HOUR_SHANGHAI = 4;
+const AI_RESET_TIME_LABEL = '4:00 AM Shanghai time';
+// Keep this aligned with DEFAULT_USER_DAILY_AI_TOKEN_LIMIT so repeatable schema
+// migrations keep the original default for already-deployed databases.
+const USER_AI_DAILY_TOKEN_LIMIT_MIGRATION_DEFAULT = 20000;
 
 // ── App & Server ──────────────────────────────────────────────────────────────
 const app = express();
@@ -687,7 +691,7 @@ const migrations = [
   "CREATE TABLE IF NOT EXISTS _config (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
   "ALTER TABLE users ADD COLUMN profile_picture TEXT",
   "ALTER TABLE users ADD COLUMN client_settings TEXT NOT NULL DEFAULT '{}'",
-  'ALTER TABLE users ADD COLUMN ai_daily_token_limit INTEGER NOT NULL DEFAULT 20000',
+  `ALTER TABLE users ADD COLUMN ai_daily_token_limit INTEGER NOT NULL DEFAULT ${USER_AI_DAILY_TOKEN_LIMIT_MIGRATION_DEFAULT}`,
   "ALTER TABLE messages ADD COLUMN edited_at TEXT",
   "ALTER TABLE messages ADD COLUMN ai_meta TEXT",
   "ALTER TABLE messages ADD COLUMN ai_mention INTEGER NOT NULL DEFAULT 0",
@@ -1165,10 +1169,10 @@ function getAiUsageSnapshotForUser(userId) {
 function getAiLimitError(summary) {
   if (!summary) return 'Unable to verify AI token usage right now';
   if (summary.global?.exceeded) {
-    return 'The global daily AI token limit has been reached. Try again after 4:00 AM Shanghai time.';
+    return `The global daily AI token limit has been reached. Try again after ${AI_RESET_TIME_LABEL}.`;
   }
   if (summary.currentUser?.exceeded) {
-    return 'Your daily AI token limit has been reached. Try again after 4:00 AM Shanghai time.';
+    return `Your daily AI token limit has been reached. Try again after ${AI_RESET_TIME_LABEL}.`;
   }
   return null;
 }
