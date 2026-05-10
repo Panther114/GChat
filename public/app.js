@@ -3896,6 +3896,9 @@ async function appendMessageBubble(msg, scroll, groupId = currentGroupId) {
 
   const area = messagesArea();
   const cache = ensureGroupCacheEntry(groupId);
+  const wasNearBottom = area
+    ? (area.scrollHeight - area.scrollTop - area.clientHeight < 150)
+    : false;
 
   if (!previousMessage || !isSameMessageDay(previousMessage.createdAt, msg.createdAt)) {
     const dayDivider = createDateDivider(msg.createdAt);
@@ -3924,8 +3927,7 @@ async function appendMessageBubble(msg, scroll, groupId = currentGroupId) {
       scrollToBottom(true);
       return row;
     }
-    const isAtBottom = area.scrollHeight - area.scrollTop - area.clientHeight < 150;
-    if (isAtBottom) {
+    if (wasNearBottom) {
       scrollToBottom();
     } else {
       // User is scrolled up — increment badge
