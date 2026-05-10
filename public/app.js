@@ -4663,6 +4663,7 @@ function initSocket() {
 
   socket.on('attachment_upload_progress', (payload) => {
     if (!payload || payload.groupId !== currentGroupId) return;
+    if (payload.senderId === currentUser?.id && !pendingAttachmentRows.has(payload.uploadId)) return;
     ensurePendingAttachmentRow(payload);
     updatePendingAttachmentProgress(payload.uploadId, payload.loadedBytes, payload.totalBytes);
   });
@@ -5115,9 +5116,6 @@ function setupKeyboardShortcuts() {
       replyingTo = null;
       $('reply-preview-bar').hidden = true;
     }
-    if (e.key === '?' && !e.ctrlKey && !e.metaKey && document.activeElement !== $('message-input')) {
-      $('shortcuts-modal').hidden = false;
-    }
   });
 }
 
@@ -5564,6 +5562,7 @@ async function submitGrokPrompt() {
   const groupId = currentGroupId;
   const groupName = currentGroupData.name;
   const sourceMessagesSnapshot = [...allMessages];
+  const requestSource = grokRequestSource;
   const model = getSelectedAiModel();
   const mode = getSelectedAiMode();
   const tone = getSelectedAiTone();
@@ -5610,7 +5609,7 @@ async function submitGrokPrompt() {
     closeGrokModal();
     showToast('AI request sent', 'success');
 
-    if (grokRequestSource === 'chat') {
+    if (requestSource === 'chat') {
       void sendAiReplyInBackground({
         groupId,
         groupName,
@@ -5648,7 +5647,7 @@ async function submitGrokPrompt() {
     if (/daily AI token limit/i.test(message) || /global daily AI token limit/i.test(message)) {
       void refreshAiUsageSummary();
     }
-    if (grokRequestSource === 'panel') setGrokResponse(message, '', null, { isError: true });
+    if (requestSource === 'panel') setGrokResponse(message, '', null, { isError: true });
     else showToast(message, 'error');
   } finally {
     setGrokBusy(false);
@@ -6248,9 +6247,6 @@ function setupEventListeners() {
     $('confirm-modal').hidden = true;
     if (confirmCallback) { confirmCallback(); confirmCallback = null; }
   });
-
-  // Shortcuts modal
-  $('shortcuts-close-btn').addEventListener('click', () => $('shortcuts-modal').hidden = true);
 
   // Context menu actions
   $('ctx-reply').addEventListener('click', () => {

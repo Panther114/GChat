@@ -1986,9 +1986,6 @@ body.sidebar-resizing * {
 #profile-modal .color-pick-row input[type="color"] { width: 36px; height: 36px; border-radius: 6px; cursor: pointer; border: 1px solid #2a2a3e; padding: 2px; background: transparent; }
 
 /* Shortcuts table */
-.shortcuts-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.shortcuts-table td { padding: 6px 8px; border-bottom: 1px solid #1a1a2e; }
-.shortcuts-table td:first-child { width: 130px; }
 kbd { background: #1a1a2e; border: 1px solid #333355; border-radius: 4px; padding: 2px 6px; font-size: 11px; font-family: monospace; }
 
 /* ── Context Menu ───────────────────────────────────────────────────── */
