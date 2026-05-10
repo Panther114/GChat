@@ -249,6 +249,14 @@ const AI_ASSISTANT_USER_ID = '__gchat_ai_grok__';
 const AI_ASSISTANT_NAME = 'AI';
 const AI_ASSISTANT_COLOR = '#8d7bff';
 const AI_ASSISTANT_PROFILE_PICTURE = '/grok.webp';
+const AI_MODEL_PROFILE_PICTURES = {
+  'deepseek/deepseek-v4-flash': '/deepseek.webp',
+  'x-ai/grok-4.3': '/grok.webp',
+};
+const AI_MODEL_TAGS = {
+  'deepseek/deepseek-v4-flash': 'deepseek',
+  'x-ai/grok-4.3': 'grok',
+};
 const APP_OWNER_USERNAME = 'Furina';
 const AI_RESET_TIME_LABEL = '4:00 AM Shanghai time';
 const AI_USAGE_RESET_LABEL = `Resets at ${AI_RESET_TIME_LABEL}`;
@@ -264,7 +272,8 @@ const AI_MODEL_OPTIONS = {
 const DEFAULT_AI_MODEL = 'deepseek/deepseek-v4-flash';
 const AI_MODE_LABELS = {
   fast: 'Fast',
-  thinking: 'Thinking',
+  thinking: 'Context',
+  context: 'Context',
 };
 const DEFAULT_AI_MODE = 'thinking';
 const AI_TONE_LABELS = {
@@ -611,12 +620,35 @@ function getAiModelLabel(model) {
   return AI_MODEL_OPTIONS[String(model || '').trim()] || String(model || '').trim() || AI_MODEL_OPTIONS[DEFAULT_AI_MODEL];
 }
 
+function getAiModelTag(model) {
+  const normalizedModel = String(model || '').trim();
+  if (AI_MODEL_TAGS[normalizedModel]) return AI_MODEL_TAGS[normalizedModel];
+  return getAiModelLabel(normalizedModel).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'ai';
+}
+
 function getAiModeLabel(mode) {
   return AI_MODE_LABELS[String(mode || '').trim().toLowerCase()] || AI_MODE_LABELS[DEFAULT_AI_MODE];
 }
 
+function getAiModeTag(mode) {
+  const normalizedMode = String(mode || '').trim().toLowerCase();
+  if (normalizedMode === 'thinking' || normalizedMode === 'context') return 'context';
+  return normalizedMode === 'fast' ? 'fast' : 'context';
+}
+
 function getAiToneLabel(tone) {
   return AI_TONE_LABELS[String(tone || '').trim().toLowerCase()] || AI_TONE_LABELS[DEFAULT_AI_TONE];
+}
+
+function getAiAssistantProfilePicture(model) {
+  const normalizedModel = String(model || '').trim();
+  return AI_MODEL_PROFILE_PICTURES[normalizedModel] || AI_ASSISTANT_PROFILE_PICTURE;
+}
+
+function buildAiMentionLabel(meta) {
+  const normalized = normalizeAiMeta(meta);
+  if (!normalized) return '@AI';
+  return `@${getAiModelTag(normalized.model)}-${getAiModeTag(normalized.mode)}-${normalized.tone}`;
 }
 
 function buildAiMetaDisplay(meta) {
@@ -645,10 +677,10 @@ function formatAiMetaSummary(meta) {
   return [display.info, display.stats].filter(Boolean).join(' — ');
 }
 
-function createAiMentionChip() {
+function createAiMentionChip(meta) {
   const chip = document.createElement('span');
   chip.className = 'msg-ai-chip';
-  chip.textContent = '@AI';
+  chip.textContent = buildAiMentionLabel(meta);
   return chip;
 }
 
@@ -858,7 +890,7 @@ function renderUserManagementPanel() {
         limitInput.value = String(user.aiDailyTokenLimit);
         limitInput.setAttribute('aria-label', `${user.username} daily AI token limit`);
         const saveBtn = document.createElement('button');
-        saveBtn.className = 'btn-primary btn-sm';
+        saveBtn.className = 'btn-primary btn-sm user-management-save-btn';
         saveBtn.textContent = 'Save limit';
         saveBtn.addEventListener('click', async () => {
           $('user-management-error').textContent = '';
@@ -3244,7 +3276,7 @@ function updateGroupPreview(groupId, text, time) {
 
 async function getMessagePreviewText(msg, groupId = msg.groupId) {
   if (!msg) return '';
-  const aiMentionPrefix = msg.aiMention ? '@AI ' : '';
+  const aiMentionPrefix = msg.aiMention ? `${buildAiMentionLabel(msg.aiMeta)} ` : '';
   const prefix = getMessageHashtagPrefix(msg);
   const typeLabel = getMessageTypePreviewLabel(msg);
   if (typeLabel) return aiMentionPrefix + prefix + typeLabel;
@@ -3601,7 +3633,9 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
   renderAvatarElement(av, {
     username: memberProfile?.username || msg.senderName,
     iconColor: memberProfile?.iconColor || msg.senderColor,
-    profilePicture: memberProfile?.profilePicture || null,
+    profilePicture: isAiAssistant
+      ? getAiAssistantProfilePicture(msg.aiMeta?.model)
+      : (memberProfile?.profilePicture || msg.profilePicture || null),
   });
 
   const content = document.createElement('div');
@@ -3644,7 +3678,7 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
   }
 
   const inlinePrefixChips = [];
-  if (msg.aiMention && msg.type === 'text') inlinePrefixChips.push(createAiMentionChip());
+  if (msg.aiMention && msg.type === 'text') inlinePrefixChips.push(createAiMentionChip(msg.aiMeta));
   if (msg.hashtag && msg.type === 'text') inlinePrefixChips.push(createHashtagChip(msg.hashtag));
 
   if (msg.hashtag && msg.type !== 'text') {
@@ -3717,7 +3751,7 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
     bubble.appendChild(meta);
   }
 
-  const aiMetaEl = createAiMetaElement(msg.aiMeta);
+  const aiMetaEl = isAiAssistant ? createAiMetaElement(msg.aiMeta) : null;
   if (aiMetaEl) bubble.appendChild(aiMetaEl);
 
   content.appendChild(bubble);
@@ -5310,7 +5344,7 @@ function updateAskAiSubmitButton() {
 
 function setGrokBusy(isBusy, statusText = '') {
   grokRequestInFlight = !!isBusy;
-  $('grok-submit-btn').textContent = isBusy ? 'Thinking…' : 'Ask AI';
+  $('grok-submit-btn').textContent = isBusy ? 'Working…' : 'Ask AI';
   $('grok-cancel-btn').disabled = !!isBusy;
   $('grok-close-btn').disabled = !!isBusy;
   $('grok-copy-btn').disabled = isBusy || !grokResponseDraft;
@@ -5436,13 +5470,15 @@ async function requestAiResponse(groupId, options = {}) {
       tagFilter: options.tagFilter || null,
     })
     : [];
-  const modelLabel = getAiModelLabel(model);
-  const modeLabel = getAiModeLabel(mode);
-  setGrokBusy(true, mode === 'thinking'
-    ? (contextMessages.length
-      ? `Asking ${modelLabel} in ${modeLabel} mode…`
-      : `Asking ${modelLabel} in ${modeLabel} mode without chat context…`)
-    : `Asking ${modelLabel} in ${modeLabel} mode…`);
+  if (!options.skipBusyUi) {
+    const modelLabel = getAiModelLabel(model);
+    const modeLabel = getAiModeLabel(mode);
+    setGrokBusy(true, mode === 'thinking'
+      ? (contextMessages.length
+        ? `Asking ${modelLabel} in ${modeLabel} mode…`
+        : `Asking ${modelLabel} in ${modeLabel} mode without chat context…`)
+      : `Asking ${modelLabel} in ${modeLabel} mode…`);
+  }
   const res = await fetch(`/api/groups/${groupId}/ai/chat`, {
     method: 'POST',
     headers: apiHeaders(),
@@ -5465,6 +5501,44 @@ async function requestAiResponse(groupId, options = {}) {
   };
 }
 
+async function sendAiReplyInBackground(request) {
+  try {
+    const result = await requestAiResponse(request.groupId, {
+      groupName: request.groupName,
+      prompt: request.prompt,
+      model: request.model,
+      mode: request.mode,
+      tone: request.tone,
+      tagFilter: request.tagFilter,
+      sourceMessages: request.sourceMessages,
+      skipBusyUi: true,
+    });
+    if (!result.answer) throw new Error('AI returned an empty response');
+    if (result.aiUsage) setAiUsageSummary(result.aiUsage);
+
+    const { encryptedContent, iv } = await encryptMessage(result.answer, request.key, request.groupId);
+    if (estimateBase64Bytes(encryptedContent) > MAX_TEXT_MESSAGE_BYTES) {
+      throw new Error('AI response is too large to send');
+    }
+
+    await emitSocketWithAck('send_ai_message', {
+      groupId: request.groupId,
+      encryptedContent,
+      iv,
+      replyTo: request.replyToData,
+      hashtag: request.tagFilter || null,
+      aiMeta: result.aiMeta,
+    });
+    showToast('AI reply sent', 'success');
+  } catch (err) {
+    const message = String(err && err.message ? err.message : 'AI request failed');
+    if (/daily AI token limit/i.test(message) || /global daily AI token limit/i.test(message)) {
+      void refreshAiUsageSummary();
+    }
+    showToast(message, 'error');
+  }
+}
+
 async function submitGrokPrompt() {
   if (grokRequestInFlight || !currentGroupId || !currentGroupData) return;
   if (!canUseAiInCurrentGroup()) {
@@ -5484,80 +5558,76 @@ async function submitGrokPrompt() {
   const model = getSelectedAiModel();
   const mode = getSelectedAiMode();
   const tone = getSelectedAiTone();
-  if (grokRequestSource === 'chat' && aiMessageRequestInFlight) {
-    $('grok-error').textContent = 'AI request already in progress';
-    return;
-  }
+  const tagFilter = grokRequestHashtag || null;
   grokResponseDraft = '';
   grokResponseModel = '';
   grokResponseMeta = null;
   $('grok-error').textContent = '';
   setGrokResponse('', '', null);
-  setGrokBusy(true, mode === 'thinking' ? 'Decrypting recent messages…' : 'Preparing AI request…');
+  setGrokBusy(true, 'Sending AI request…');
 
   try {
+    const key = getGroupKey(groupId);
+    if (!key) throw new Error('Set group key first');
+
+    let replyToData = null;
+    if (replyingTo) {
+      replyToData = JSON.stringify({
+        id: replyingTo.id,
+        senderName: replyingTo.senderName,
+        preview: replyingTo.preview,
+      });
+    }
+
+    const { encryptedContent: promptEncryptedContent, iv: promptIv } = await encryptMessage(prompt, key, groupId);
+    if (estimateBase64Bytes(promptEncryptedContent) > MAX_TEXT_MESSAGE_BYTES) {
+      throw new Error('Message too large');
+    }
+
+    await emitSocketWithAck('send_message', {
+      groupId,
+      encryptedContent: promptEncryptedContent,
+      iv: promptIv,
+      replyTo: replyToData,
+      hashtag: tagFilter,
+      isDisappearing: false,
+      disappearingDurationMs: 0,
+      aiMention: true,
+      aiMeta: { model, mode, tone },
+    });
+
+    resetComposerAfterSend();
+    setGrokBusy(false);
+    closeGrokModal();
+    showToast('AI request sent', 'success');
+
+    if (grokRequestSource === 'chat') {
+      void sendAiReplyInBackground({
+        groupId,
+        groupName,
+        prompt,
+        model,
+        mode,
+        tone,
+        tagFilter,
+        sourceMessages: sourceMessagesSnapshot,
+        replyToData,
+        key,
+      });
+      return;
+    }
+
     const result = await requestAiResponse(groupId, {
       groupName,
       prompt,
       model,
       mode,
       tone,
-      tagFilter: grokRequestHashtag,
+      tagFilter,
       sourceMessages: sourceMessagesSnapshot,
     });
     if (!result.answer) throw new Error('AI returned an empty response');
     if (result.aiUsage) setAiUsageSummary(result.aiUsage);
-
-    if (grokRequestSource === 'chat') {
-      const key = getGroupKey(groupId);
-      if (!key) throw new Error('Set group key first');
-      aiMessageRequestInFlight = true;
-
-      let replyToData = null;
-      if (replyingTo) {
-        replyToData = JSON.stringify({
-          id: replyingTo.id,
-          senderName: replyingTo.senderName,
-          preview: replyingTo.preview,
-        });
-      }
-
-      const { encryptedContent: promptEncryptedContent, iv: promptIv } = await encryptMessage(prompt, key, groupId);
-      if (estimateBase64Bytes(promptEncryptedContent) > MAX_TEXT_MESSAGE_BYTES) {
-        throw new Error('Message too large');
-      }
-
-      await emitSocketWithAck('send_message', {
-        groupId,
-        encryptedContent: promptEncryptedContent,
-        iv: promptIv,
-        replyTo: replyToData,
-        hashtag: grokRequestHashtag || null,
-        isDisappearing: false,
-        disappearingDurationMs: 0,
-        aiMention: true,
-      });
-
-      const { encryptedContent, iv } = await encryptMessage(result.answer, key, groupId);
-      if (estimateBase64Bytes(encryptedContent) > MAX_TEXT_MESSAGE_BYTES) {
-        throw new Error('AI response is too large to send');
-      }
-
-      await emitSocketWithAck('send_ai_message', {
-        groupId,
-        encryptedContent,
-        iv,
-        replyTo: replyToData,
-        hashtag: grokRequestHashtag || null,
-        aiMeta: result.aiMeta,
-      });
-      resetComposerAfterSend();
-      setGrokBusy(false);
-      closeGrokModal();
-      showToast('AI reply sent', 'success');
-      return;
-    }
-
     grokResponseDraft = result.answer;
     grokResponseModel = result.model;
     grokResponseMeta = result.aiMeta;
@@ -5573,7 +5643,6 @@ async function submitGrokPrompt() {
     else showToast(message, 'error');
   } finally {
     setGrokBusy(false);
-    aiMessageRequestInFlight = false;
   }
 }
 
@@ -5903,7 +5972,7 @@ function setupEventListeners() {
     $('group-key-error').textContent = '';
     $('group-key-modal').hidden = false;
   });
-  $('ask-grok-btn').addEventListener('click', () => openGrokModal({ source: 'panel' }));
+  $('ask-grok-btn').addEventListener('click', () => openGrokModal({ source: 'chat' }));
   $('grok-close-btn').addEventListener('click', closeGrokModal);
   $('grok-cancel-btn').addEventListener('click', closeGrokModal);
   $('grok-modal').addEventListener('click', (e) => {

@@ -49,7 +49,11 @@ const AI_MODEL_OPTIONS = {
 };
 const STANDARD_AI_TOKEN_MODEL = 'x-ai/grok-4.3';
 const DEFAULT_AI_MODEL = 'deepseek/deepseek-v4-flash';
-const AI_MODE_OPTIONS = new Set(['fast', 'thinking']);
+const AI_MODEL_PROFILE_PICTURES = {
+  'deepseek/deepseek-v4-flash': '/deepseek.webp',
+  'x-ai/grok-4.3': '/grok.webp',
+};
+const AI_MODE_OPTIONS = new Set(['fast', 'thinking', 'context']);
 const DEFAULT_AI_MODE = 'thinking';
 const AI_TONE_OPTIONS = new Set(['casual', 'professional', 'playful']);
 const DEFAULT_AI_TONE = 'casual';
@@ -235,6 +239,7 @@ function normalizeAiModel(value) {
 
 function normalizeAiMode(value) {
   const mode = sanitizeAiText(value, 24)?.toLowerCase();
+  if (mode === 'context') return 'thinking';
   return mode && AI_MODE_OPTIONS.has(mode) ? mode : DEFAULT_AI_MODE;
 }
 
@@ -312,6 +317,11 @@ function sanitizeAiMessageMeta(value) {
     estimatedCostRmb,
     costSource,
   };
+}
+
+function getAiAssistantProfilePicture(model) {
+  const normalizedModel = normalizeAiModel(model);
+  return AI_MODEL_PROFILE_PICTURES[normalizedModel] || AI_ASSISTANT_PROFILE_PICTURE;
 }
 
 function parseStoredAiMessageMeta(raw) {
@@ -1189,13 +1199,14 @@ function formatUser(user) {
 
 function formatMessage(m) {
   const isAiAssistantMessage = m.sender_id === AI_ASSISTANT_USER_ID;
+  const aiMeta = parseStoredAiMessageMeta(m.ai_meta);
   return {
     id: m.id,
     groupId: m.group_id,
     senderId: m.sender_id,
     senderName: m.sender_name || (isAiAssistantMessage ? AI_ASSISTANT_NAME : 'Unknown'),
     senderColor: m.sender_color || (isAiAssistantMessage ? AI_ASSISTANT_COLOR : '#4A90D9'),
-    profilePicture: isAiAssistantMessage ? AI_ASSISTANT_PROFILE_PICTURE : null,
+    profilePicture: isAiAssistantMessage ? getAiAssistantProfilePicture(aiMeta?.model) : null,
     encryptedContent: m.encrypted_content,
     iv: m.iv,
     type: m.type || 'text',
@@ -1203,7 +1214,7 @@ function formatMessage(m) {
     filename: m.filename || null,
     whisperTo: m.whisper_to || null,
     hashtag: m.hashtag || null,
-    aiMeta: parseStoredAiMessageMeta(m.ai_meta),
+    aiMeta,
     aiMention: !!m.ai_mention,
     isDisappearing: !!m.is_disappearing,
     disappearingDurationMs: Math.max(0, Number(m.disappearing_duration_ms) || 0),
@@ -2533,6 +2544,7 @@ io.on('connection', (socket) => {
       disappearingDurationMs,
       spamSignature,
       aiMention,
+      aiMeta,
     } = payload;
     const fail = (message) => {
       socket.emit('error', { message });
@@ -2583,6 +2595,7 @@ io.on('connection', (socket) => {
       fail('Invalid hashtag');
       return;
     }
+    const normalizedAiMeta = sanitizeAiMessageMeta(aiMeta);
     const normalizedIsDisappearing = !!isDisappearing;
     const normalizedAiMention = !!aiMention;
     const normalizedDisappearingDuration = normalizedIsDisappearing
@@ -2632,7 +2645,7 @@ io.on('connection', (socket) => {
         normalizedIsDisappearing ? 1 : 0,
         normalizedDisappearingDuration,
         totalRecipients,
-        null,
+        normalizedAiMeta ? JSON.stringify(normalizedAiMeta) : null,
         normalizedAiMention ? 1 : 0
       );
     } catch (err) {
@@ -2654,7 +2667,7 @@ io.on('connection', (socket) => {
       filename: null,
       whisperTo: null,
       hashtag: normalizedHashtag,
-      aiMeta: null,
+      aiMeta: normalizedAiMeta,
       aiMention: normalizedAiMention,
       isDisappearing: normalizedIsDisappearing,
       disappearingDurationMs: normalizedDisappearingDuration || 0,
@@ -2758,7 +2771,7 @@ io.on('connection', (socket) => {
       senderId: AI_ASSISTANT_USER_ID,
       senderName: AI_ASSISTANT_NAME,
       senderColor: AI_ASSISTANT_COLOR,
-      profilePicture: AI_ASSISTANT_PROFILE_PICTURE,
+      profilePicture: getAiAssistantProfilePicture(normalizedAiMeta?.model),
       encryptedContent,
       iv,
       type: 'text',

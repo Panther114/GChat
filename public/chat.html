@@ -25,7 +25,7 @@
       <div class="empty-groups" id="empty-groups">No groups yet.<br>Create or join one below!</div>
     </nav>
     <div class="sidebar-actions">
-      <button class="btn-action" id="user-list-btn" data-icon="users" title="Open user list" aria-label="Open user list">User List</button>
+      <button class="btn-action" id="user-list-btn" data-icon="user" title="Open user list" aria-label="Open user list">User List</button>
       <button class="btn-action" id="new-group-btn" data-icon="plus">New Group</button>
       <button class="btn-action" id="join-group-btn" data-icon="log-in">Join Group</button>
     </div>
@@ -409,7 +409,7 @@
         <h2 data-icon="sparkles">Ask AI</h2>
         <button class="btn-icon profile-close-btn" id="grok-close-btn" title="Close" aria-label="Close" data-icon="x" data-icon-only="true"></button>
       </div>
-      <p class="modal-desc">Thinking mode can include eligible chat context in a single temporary OpenRouter request. Fast mode sends only your prompt and the selected tone prompt. Web search is always off.</p>
+      <p class="modal-desc">Context mode can include eligible chat context in a single temporary OpenRouter request. Fast mode sends only your prompt and the selected tone prompt. Web search is always off.</p>
       <div class="form-group">
         <label>Group</label>
         <div class="grok-group-name" id="grok-group-name">—</div>
@@ -426,7 +426,7 @@
         <label for="grok-mode-input">Mode</label>
         <div class="grok-slider-labels">
           <span class="grok-slider-label" id="grok-mode-fast-label">Fast</span>
-          <span class="grok-slider-label" id="grok-mode-thinking-label">Thinking</span>
+          <span class="grok-slider-label" id="grok-mode-thinking-label">Context</span>
         </div>
         <input type="range" id="grok-mode-input" min="0" max="1" step="1" value="1" aria-label="AI mode" />
       </div>

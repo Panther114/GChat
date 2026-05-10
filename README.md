@@ -4,7 +4,7 @@ Gchat is a client-side encrypted group chat application built with Node.js, Expr
 
 The hosted web app is the primary product. The desktop app is a native shell that loads the hosted Railway deployment.
 
-Current version: **v1.1.2**
+Current version: **v1.1.3**
 
 ---
 
@@ -20,8 +20,8 @@ Current version: **v1.1.2**
 - Client-side search and chat export (disappearing messages are excluded from exports)
 - Image viewer and automatic image compression
 - Emoji picker and mobile-responsive layout
-- Ask AI modal with default `DeepSeek V4 Flash / Thinking / Casual` selections
-- OpenRouter-backed multi-model AI replies with Fast vs Thinking mode, tone prompts, tag-aware context scoping, and RMB cost metadata
+- Ask AI modal with default `DeepSeek V4 Flash / Context / Casual` selections
+- OpenRouter-backed multi-model AI replies with Fast vs Context mode, tone prompts, tag-aware context scoping, asynchronous chat replies, and RMB cost metadata
 
 ### Accounts and Groups
 
@@ -173,24 +173,25 @@ The main application pages are served from `public/`.
 
 ---
 
-## Ask AI (v1.1.2)
+## Ask AI (v1.1.3)
 
-- Typing `/ai ` in the chat composer or clicking **Ask AI** in the right panel opens the same modal before any AI request is sent.
+- Typing `/ai ` in the chat composer or clicking **Ask AI** in the right panel opens the same modal before the AI-tagged prompt is sent into chat.
 - The modal defaults to:
   - Model: `DeepSeek V4 Flash`
-  - Mode: `Thinking`
+  - Mode: `Context`
   - Tone: `Casual`
 - Model options:
   - `DeepSeek V4 Flash` → `deepseek/deepseek-v4-flash`
   - `Grok 4.3` → `x-ai/grok-4.3`
 - Mode behavior:
   - `Fast` sends only the user prompt plus the selected system prompt.
-  - `Thinking` can include eligible decrypted chat context, while still respecting `/ai` vs `/# tag /ai` scoping rules.
+  - `Context` can include eligible decrypted chat context, while still respecting `/ai` vs `/# tag /ai` scoping rules.
 - Tone options map to built-in system prompts:
   - `Casual`
   - `Professional`
   - `Playful`
 - No Ask AI mode performs web search.
+- Submitted Ask AI prompts are tagged in chat with model/mode/tone labels such as `@deepseek-context-casual`, and the AI reply is posted when the background request completes.
 - AI replies show the selected model, mode, tone, token count, and estimated RMB cost in the response metadata line.
 
 ---
