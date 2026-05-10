@@ -619,10 +619,18 @@ function getAiModelLabel(model) {
   return AI_MODEL_OPTIONS[String(model || '').trim()] || String(model || '').trim() || AI_MODEL_OPTIONS[DEFAULT_AI_MODEL];
 }
 
+function slugifyAiTagPart(value, fallback = 'ai') {
+  const slug = String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return slug || fallback;
+}
+
 function getAiModelTag(model) {
   const normalizedModel = String(model || '').trim();
   if (AI_MODEL_TAGS[normalizedModel]) return AI_MODEL_TAGS[normalizedModel];
-  return getAiModelLabel(normalizedModel).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'ai';
+  return slugifyAiTagPart(getAiModelLabel(normalizedModel));
 }
 
 function getAiModeLabel(mode) {
@@ -5565,7 +5573,7 @@ async function submitGrokPrompt() {
   grokResponseMeta = null;
   $('grok-error').textContent = '';
   setGrokResponse('', '', null);
-  setGrokBusy(true, 'Sending AI request…');
+  setGrokBusy(true, 'Preparing AI message…');
 
   try {
     const key = getGroupKey(groupId);
