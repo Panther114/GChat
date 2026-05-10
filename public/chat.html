@@ -393,7 +393,7 @@
         <h2 data-icon="sparkles">Ask AI</h2>
         <button class="btn-icon profile-close-btn" id="grok-close-btn" title="Close" aria-label="Close" data-icon="x" data-icon-only="true"></button>
       </div>
-      <p class="modal-desc">Context mode can include eligible chat context in a single temporary OpenRouter request. Fast mode sends only your prompt and the selected tone prompt. Web search is always off.</p>
+      <p class="modal-desc">Fast mode sends only your prompt. Context mode can include eligible chat context. Turn on Search the web when you want current public information.</p>
       <div class="form-group">
         <label>Group</label>
         <div class="grok-group-name" id="grok-group-name">—</div>
@@ -422,6 +422,16 @@
           <span class="grok-slider-label" id="grok-tone-playful-label">Playful</span>
         </div>
         <input type="range" id="grok-tone-input" min="0" max="2" step="1" value="0" aria-label="AI tone" />
+      </div>
+      <div class="form-group">
+        <label class="toggle-label toggle-switch-row grok-toggle-row" for="grok-web-search-toggle">
+          <span class="grok-toggle-copy">
+            <span class="grok-toggle-title">Search the web</span>
+            <span class="grok-toggle-help">Uses OpenRouter web search when the prompt needs current public information. May increase cost.</span>
+          </span>
+          <input type="checkbox" id="grok-web-search-toggle" />
+          <span class="toggle-switch-ui" aria-hidden="true"></span>
+        </label>
       </div>
       <div class="form-group">
         <label for="grok-prompt-input">Prompt</label>

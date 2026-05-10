@@ -4,7 +4,7 @@ Gchat is a client-side encrypted group chat application built with Node.js, Expr
 
 The hosted web app is the primary product. The desktop app is a native shell that loads the hosted Railway deployment.
 
-Current version: **v1.1.3**
+Current version: **v1.1.4**
 
 ---
 
@@ -173,7 +173,7 @@ The main application pages are served from `public/`.
 
 ---
 
-## Ask AI (v1.1.3)
+## Ask AI (v1.1.4)
 
 - Typing `/ai ` in the chat composer or clicking **Ask AI** in the right panel opens the same modal before the AI-tagged prompt is sent into chat.
 - The modal defaults to:
@@ -184,13 +184,16 @@ The main application pages are served from `public/`.
   - `DeepSeek V4 Flash` → `deepseek/deepseek-v4-flash`
   - `Grok 4.3` → `x-ai/grok-4.3`
 - Mode behavior:
-  - `Fast` sends only the user prompt plus the selected system prompt.
+  - `Fast` normally sends only the user prompt plus the selected system prompt.
   - `Context` can include eligible decrypted chat context, while still respecting `/ai` vs `/# tag /ai` scoping rules.
 - Tone options map to built-in system prompts:
   - `Casual`
   - `Professional`
   - `Playful`
-- No Ask AI mode performs web search.
+- `Search the web` is a manual toggle and defaults to OFF.
+- When `Search the web` is ON, web search can be used in both `Fast` and `Context` mode.
+- Web search works for both `DeepSeek V4 Flash` and `Grok 4.3` through the existing server-side OpenRouter integration.
+- Web search may increase OpenRouter cost.
 - Submitted Ask AI prompts are tagged in chat with model/mode/tone labels such as `@deepseek-context-casual`, and the AI reply is posted when the background request completes.
 - AI replies show the selected model, mode, tone, token count, and estimated RMB cost in the response metadata line.
 
