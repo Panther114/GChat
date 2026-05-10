@@ -587,10 +587,16 @@ function normalizeAiMeta(meta) {
   const modelKey = String(meta.model || '').trim();
   const modeKey = String(meta.mode || '').trim().toLowerCase();
   const toneKey = String(meta.tone || '').trim().toLowerCase();
+  const webSearchRequestsRaw = Number(meta.webSearchRequests ?? meta.web_search_requests);
+  const webSearchRequests = Number.isFinite(webSearchRequestsRaw) && webSearchRequestsRaw > 0
+    ? Math.max(0, Math.round(webSearchRequestsRaw))
+    : 0;
   return {
     model: modelKey || DEFAULT_AI_MODEL,
     mode: AI_MODE_LABELS[modeKey] ? modeKey : DEFAULT_AI_MODE,
     tone: AI_TONE_LABELS[toneKey] ? toneKey : DEFAULT_AI_TONE,
+    webSearchEnabled: meta.webSearchEnabled === true || meta.web_search_enabled === true,
+    webSearchRequests,
     promptTokens,
     completionTokens,
     totalTokens,
@@ -674,6 +680,11 @@ function buildAiMetaDisplay(meta) {
   }
   const costText = formatRmbCost(normalized.estimatedCostRmb);
   if (costText) statsParts.push(costText);
+  if (normalized.webSearchRequests > 0) {
+    statsParts.push(`${normalized.webSearchRequests} web search${normalized.webSearchRequests === 1 ? '' : 'es'}`);
+  } else if (normalized.webSearchEnabled) {
+    statsParts.push('web search enabled');
+  }
   return {
     info: infoParts.join(', '),
     stats: statsParts.join(' — '),
@@ -5289,6 +5300,7 @@ function resetGrokModalState() {
   $('grok-model-input').value = DEFAULT_AI_MODEL;
   $('grok-mode-input').value = '1';
   $('grok-tone-input').value = '0';
+  $('grok-web-search-toggle').checked = false;
   $('grok-error').textContent = '';
   $('grok-status').textContent = '';
   $('grok-status').hidden = true;
@@ -5321,6 +5333,10 @@ function getSelectedAiTone() {
   if (value === '1') return 'professional';
   if (value === '2') return 'playful';
   return 'casual';
+}
+
+function getSelectedAiWebSearchEnabled() {
+  return !!$('grok-web-search-toggle').checked;
 }
 
 function syncAiModalSelectionUi() {
@@ -5471,6 +5487,7 @@ async function requestAiResponse(groupId, options = {}) {
   const mode = options.mode || DEFAULT_AI_MODE;
   const model = options.model || DEFAULT_AI_MODEL;
   const tone = options.tone || DEFAULT_AI_TONE;
+  const webSearchEnabled = !!options.webSearchEnabled;
   const contextMessages = mode === 'thinking'
     ? await buildGrokContextMessages(groupId, {
       sourceMessages: options.sourceMessages,
@@ -5496,6 +5513,7 @@ async function requestAiResponse(groupId, options = {}) {
       model,
       mode,
       tone,
+      webSearchEnabled,
     }),
   });
   const data = await res.json().catch(() => ({}));
@@ -5516,6 +5534,7 @@ async function sendAiReplyInBackground(request) {
       model: request.model,
       mode: request.mode,
       tone: request.tone,
+      webSearchEnabled: request.webSearchEnabled,
       tagFilter: request.tagFilter,
       sourceMessages: request.sourceMessages,
       skipBusyUi: true,
@@ -5566,6 +5585,7 @@ async function submitGrokPrompt() {
   const model = getSelectedAiModel();
   const mode = getSelectedAiMode();
   const tone = getSelectedAiTone();
+  const webSearchEnabled = getSelectedAiWebSearchEnabled();
   const tagFilter = grokRequestHashtag || null;
   grokResponseDraft = '';
   grokResponseModel = '';
@@ -5601,7 +5621,7 @@ async function submitGrokPrompt() {
       isDisappearing: false,
       disappearingDurationMs: 0,
       aiMention: true,
-      aiMeta: { model, mode, tone },
+      aiMeta: { model, mode, tone, webSearchEnabled },
     });
 
     resetComposerAfterSend();
@@ -5617,6 +5637,7 @@ async function submitGrokPrompt() {
         model,
         mode,
         tone,
+        webSearchEnabled,
         tagFilter,
         sourceMessages: sourceMessagesSnapshot,
         replyToData,
@@ -5631,6 +5652,7 @@ async function submitGrokPrompt() {
       model,
       mode,
       tone,
+      webSearchEnabled,
       tagFilter,
       sourceMessages: sourceMessagesSnapshot,
     });

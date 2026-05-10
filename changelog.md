@@ -4,6 +4,15 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## v1.1.4
+
+- Added a manual `Search the web` toggle to the Ask AI modal for both DeepSeek V4 Flash and Grok 4.3 in both Fast and Context mode.
+- Kept Fast mode context-free, preserved existing Context-mode chat scoping, and added server-side OpenRouter web-search tools plus prompt privacy guidance only when the toggle is enabled.
+- Extended Ask AI metadata/rendering so messages can show when web search was enabled and how many web searches were used when OpenRouter reports it.
+- Updated Ask AI documentation and bumped the app version to **1.1.4**.
+
+---
+
 ## v1.1.3
 
 - Replaced the plain `@AI` composer/message tag with model-mode-tone tags like `@grok-fast-playful` without changing the existing AI request logic.

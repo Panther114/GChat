@@ -68,6 +68,15 @@ const OPENROUTER_TOP_P = 1;
 const OPENROUTER_FREQUENCY_PENALTY = 0;
 const OPENROUTER_PRESENCE_PENALTY = 0;
 const OPENROUTER_MAX_TOKENS = 1200;
+const OPENROUTER_WEB_SEARCH_TOOL = {
+  type: 'openrouter:web_search',
+  parameters: {
+    engine: 'auto',
+    max_results: 5,
+    max_total_results: 10,
+    search_context_size: 'medium',
+  },
+};
 const USD_TO_RMB_RATE = 7.2;
 const AI_TOKEN_AMOUNT_DECIMALS = 4;
 const MAX_AI_PROMPT_CHARS = 4000;
@@ -226,6 +235,10 @@ function normalizeAiCostUsd(value) {
   return parsed;
 }
 
+function normalizeAiBoolean(value) {
+  return value === true || value === 1 || value === '1' || value === 'true';
+}
+
 function convertUsdToRmb(value) {
   const usd = normalizeAiCostUsd(value);
   if (usd == null) return null;
@@ -248,6 +261,12 @@ function normalizeAiMode(value) {
 function normalizeAiTone(value) {
   const tone = sanitizeAiText(value, 24)?.toLowerCase();
   return tone && AI_TONE_OPTIONS.has(tone) ? tone : DEFAULT_AI_TONE;
+}
+
+function normalizeAiWebSearchRequests(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return 0;
+  return Math.round(parsed);
 }
 
 function normalizeAiDailyTokenLimit(value, fallback = DEFAULT_USER_DAILY_AI_TOKEN_LIMIT) {
@@ -304,11 +323,20 @@ function sanitizeAiMessageMeta(value) {
   const model = normalizeAiModel(value.model);
   const mode = normalizeAiMode(value.mode);
   const tone = normalizeAiTone(value.tone);
+  const webSearchEnabled = normalizeAiBoolean(value.webSearchEnabled ?? value.web_search_enabled);
+  const webSearchRequests = normalizeAiWebSearchRequests(
+    value.webSearchRequests
+    ?? value.web_search_requests
+    ?? value.webSearchRequestCount
+    ?? value.web_search_request_count
+  );
   const costSource = sanitizeAiText(value.costSource, 16) || (estimatedCostUsd != null ? 'estimated' : 'unknown');
   return {
     model,
     mode,
     tone,
+    webSearchEnabled,
+    webSearchRequests,
     promptTokens,
     completionTokens,
     totalTokens,
@@ -432,6 +460,23 @@ function extractOpenRouterUsage(payload) {
   };
 }
 
+function extractOpenRouterWebSearchRequests(payload) {
+  if (!payload || typeof payload !== 'object') return 0;
+  const candidates = [
+    payload?.usage?.server_tool_use?.web_search_requests,
+    payload?.usage?.server_tool_use?.webSearchRequests,
+    payload?.usage?.server_tool_use?.web_search_request_count,
+    payload?.usage?.server_tool_use?.webSearchRequestCount,
+    payload?.usage?.web_search_requests,
+    payload?.usage?.webSearchRequests,
+  ];
+  for (const candidate of candidates) {
+    const normalized = normalizeAiWebSearchRequests(candidate);
+    if (normalized > 0) return normalized;
+  }
+  return 0;
+}
+
 function convertModelUsageToStandardTokens(usage, model = DEFAULT_AI_MODEL) {
   const normalizedModel = normalizeAiModel(model);
   const pricing = AI_MODEL_OPTIONS[normalizedModel] || AI_MODEL_OPTIONS[DEFAULT_AI_MODEL];
@@ -496,6 +541,26 @@ function getOpenRouterResponseModel(payload, fallbackModel = DEFAULT_AI_MODEL) {
   if (metaModel && AI_MODEL_OPTIONS[metaModel]) return metaModel;
   const providerModel = sanitizeAiText(payload?.provider, 80);
   return providerModel && AI_MODEL_OPTIONS[providerModel] ? providerModel : normalizeAiModel(fallbackModel);
+}
+
+function buildAiSystemPrompt(tone = DEFAULT_AI_TONE, { webSearchEnabled = false } = {}) {
+  const basePrompt = AI_SYSTEM_PROMPTS[tone] || AI_SYSTEM_PROMPTS[DEFAULT_AI_TONE];
+  const policyLines = webSearchEnabled
+    ? [
+      'Web search is enabled for this request.',
+      'Use web search for current, recent, time-sensitive, factual, public, local, price, schedule, product, legal, political, sports, technical-version, or otherwise changeable information.',
+      'You should search when the user asks "latest," "today," "current," "recent," "news," "price," "schedule," "release," "version," "who is," "where is," "what happened," or anything likely to have changed.',
+      'You may skip web search only when the request clearly does not need it, such as pure translation, rewriting, summarizing provided text, simple math, creative writing, or code editing that depends only on provided code.',
+      'Never include private chat content, group names, usernames, personal details, message text, or decrypted conversation context in a web-search query unless the user explicitly asks to search for that exact public information.',
+      'If web search is used, cite sources with markdown links in the answer.',
+      'If web search is not used despite the toggle being on, do not pretend that you searched.',
+    ]
+    : [
+      'Web search is disabled for this request.',
+      'Answer using the prompt and any provided context only.',
+      'Do not claim to have searched the web.',
+    ];
+  return `${basePrompt}\n\n${policyLines.join('\n')}`;
 }
 
 function extractOpenRouterDebugMeta(upstream, payload) {
@@ -2263,6 +2328,7 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
   const selectedModel = normalizeAiModel(req.body.model);
   const selectedMode = normalizeAiMode(req.body.mode);
   const selectedTone = normalizeAiTone(req.body.tone);
+  const webSearchEnabled = normalizeAiBoolean(req.body.webSearchEnabled);
   const normalizedContext = normalizeAiContextMessages(selectedMode === 'thinking' ? req.body.contextMessages : []);
   if (!normalizedContext.ok) {
     return res.status(400).json({ error: normalizedContext.error });
@@ -2280,7 +2346,7 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
   const messages = [
     {
       role: 'system',
-      content: AI_SYSTEM_PROMPTS[selectedTone] || AI_SYSTEM_PROMPTS[DEFAULT_AI_TONE],
+      content: buildAiSystemPrompt(selectedTone, { webSearchEnabled }),
     },
     {
       role: 'user',
@@ -2310,6 +2376,7 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
         presence_penalty: OPENROUTER_PRESENCE_PENALTY,
         max_tokens: OPENROUTER_MAX_TOKENS,
         messages,
+        ...(webSearchEnabled ? { tools: [OPENROUTER_WEB_SEARCH_TOOL] } : {}),
       }),
       signal: controller.signal,
     });
@@ -2332,6 +2399,7 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
     }
 
     const usage = extractOpenRouterUsage(payload);
+    const webSearchRequests = extractOpenRouterWebSearchRequests(payload);
     const standardizedUsage = convertModelUsageToStandardTokens(usage, selectedModel);
     const directCostUsd = extractOpenRouterCostUsd(payload);
     const estimatedCostUsd = directCostUsd ?? estimateOpenRouterCostUsd(usage, selectedModel);
@@ -2339,6 +2407,8 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
       model: getOpenRouterResponseModel(payload, selectedModel),
       mode: selectedMode,
       tone: selectedTone,
+      webSearchEnabled,
+      webSearchRequests,
       promptTokens: standardizedUsage.promptTokens,
       completionTokens: standardizedUsage.completionTokens,
       totalTokens: standardizedUsage.totalTokens,

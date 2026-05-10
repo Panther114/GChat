@@ -1749,6 +1749,26 @@ body.sidebar-resizing * {
   color: #d9e5ff;
   font-weight: 700;
 }
+.grok-toggle-row {
+  align-items: flex-start;
+  gap: 14px;
+}
+.grok-toggle-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+}
+.grok-toggle-title {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+.grok-toggle-help {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
 .grok-slider-labels-tone .grok-slider-label:nth-child(2) {
   text-align: center;
   flex: 1;
