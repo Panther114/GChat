@@ -273,7 +273,6 @@ const DEFAULT_AI_MODEL = 'deepseek/deepseek-v4-flash';
 const AI_MODE_LABELS = {
   fast: 'Fast',
   thinking: 'Context',
-  context: 'Context',
 };
 const DEFAULT_AI_MODE = 'thinking';
 const AI_TONE_LABELS = {
@@ -627,7 +626,9 @@ function getAiModelTag(model) {
 }
 
 function getAiModeLabel(mode) {
-  return AI_MODE_LABELS[String(mode || '').trim().toLowerCase()] || AI_MODE_LABELS[DEFAULT_AI_MODE];
+  const normalizedMode = String(mode || '').trim().toLowerCase();
+  if (normalizedMode === 'context') return AI_MODE_LABELS.thinking;
+  return AI_MODE_LABELS[normalizedMode] || AI_MODE_LABELS[DEFAULT_AI_MODE];
 }
 
 function getAiModeTag(mode) {

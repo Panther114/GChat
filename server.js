@@ -53,7 +53,7 @@ const AI_MODEL_PROFILE_PICTURES = {
   'deepseek/deepseek-v4-flash': '/deepseek.webp',
   'x-ai/grok-4.3': '/grok.webp',
 };
-const AI_MODE_OPTIONS = new Set(['fast', 'thinking', 'context']);
+const AI_MODE_OPTIONS = new Set(['fast', 'thinking']);
 const DEFAULT_AI_MODE = 'thinking';
 const AI_TONE_OPTIONS = new Set(['casual', 'professional', 'playful']);
 const DEFAULT_AI_TONE = 'casual';
