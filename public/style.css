@@ -1978,8 +1978,6 @@ body.sidebar-resizing * {
 .user-management-save-btn,
 .user-management-delete-btn {
   width: 108px;
-}
-.user-management-delete-btn {
   white-space: nowrap;
 }
 

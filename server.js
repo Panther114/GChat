@@ -239,6 +239,8 @@ function normalizeAiModel(value) {
 
 function normalizeAiMode(value) {
   const mode = sanitizeAiText(value, 24)?.toLowerCase();
+  // The UI now says "Context", but the stored/requested mode remains "thinking"
+  // so existing AI request logic and persisted metadata keep working unchanged.
   if (mode === 'context') return 'thinking';
   return mode && AI_MODE_OPTIONS.has(mode) ? mode : DEFAULT_AI_MODE;
 }
