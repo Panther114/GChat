@@ -1427,6 +1427,10 @@ body.sidebar-resizing * {
   position: relative;
 }
 .btn-panel-action.has-icon .ui-icon { margin-right: 0; }
+.btn-panel-action .ui-icon {
+  width: 24px;
+  height: 24px;
+}
 .btn-panel-action::after {
   content: attr(data-icon-label);
   position: absolute;
@@ -1840,7 +1844,7 @@ body.sidebar-resizing * {
   margin-top: -6px;
 }
 .user-management-modal {
-  max-width: 760px;
+  max-width: 860px;
 }
 .user-management-global-card {
   display: flex;
@@ -1899,7 +1903,7 @@ body.sidebar-resizing * {
 .user-management-list {
   display: flex;
   flex-direction: column;
-   gap: 8px;
+   gap: 6px;
 }
 .user-management-empty {
   padding: 20px 0;
@@ -1909,8 +1913,8 @@ body.sidebar-resizing * {
 .user-management-user {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
+   gap: 8px;
+   padding: 8px 14px;
   border-radius: 12px;
   border: 1px solid rgba(255,255,255,.08);
   background: rgba(255,255,255,.03);
@@ -1925,7 +1929,7 @@ body.sidebar-resizing * {
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  gap: 12px;
+   gap: 10px;
   width: 100%;
   min-width: 0;
 }
@@ -1941,7 +1945,7 @@ body.sidebar-resizing * {
 .user-management-user-usage {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+   gap: 6px;
   min-width: 0;
   margin-left: auto;
 }
@@ -1951,26 +1955,29 @@ body.sidebar-resizing * {
   white-space: nowrap;
 }
 .user-management-user-track {
-  width: 64px;
+  width: 96px;
   height: 6px;
   flex-shrink: 0;
 }
 .user-management-user-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+   gap: 6px;
   flex-wrap: nowrap;
+  margin-left: 12px;
 }
 .user-management-user-actions input {
-  width: 112px;
+  width: 128px;
   background: #0d0d18;
   border: 1px solid #2a2a3e;
   border-radius: 8px;
   color: var(--text-primary);
   font-size: 13px;
-  padding: 6px 8px;
+   padding: 5px 8px;
 }
+.user-management-save-btn,
 .user-management-delete-btn {
+  width: 108px;
   white-space: nowrap;
 }
 

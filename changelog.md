@@ -4,6 +4,17 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## v1.1.3
+
+- Replaced the plain `@AI` composer/message tag with model-mode-tone tags like `@grok-fast-playful` without changing the existing AI request logic.
+- Renamed the visible Ask AI `Thinking` mode label to `Context` across the modal and chat metadata.
+- Changed Ask AI chat submits to send the user's AI prompt immediately, close the modal, and post the AI reply later when the background request finishes.
+- Added model-aware AI avatars so DeepSeek replies use the new `deepseek.webp` icon while Grok replies keep the Grok icon.
+- Tightened the user list layout and right-panel action icon sizing, and fixed the User List button to show an icon in the left sidebar.
+- Bumped the app version to **1.1.3**.
+
+---
+
 ## v1.1.2
 
 - Added the new Ask AI modal flow for both `/ai ` and the right-panel Ask AI button.
