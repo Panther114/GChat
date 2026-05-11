@@ -1029,6 +1029,7 @@ const stmts = {
   `),
   countGroupMembers: db.prepare('SELECT COUNT(*) AS count FROM group_members WHERE group_id = ?'),
   getGroupMemberIds: db.prepare('SELECT user_id FROM group_members WHERE group_id = ?'),
+  getOtherGroupMemberIds: db.prepare('SELECT user_id FROM group_members WHERE group_id = ? AND user_id != ?'),
 
   // Admin
   getAllUsers: db.prepare(`
@@ -1542,10 +1543,10 @@ function queueUnreadPushNotifications(userIds = []) {
   const uniqueUserIds = [...new Set(userIds.map(String).filter(Boolean))];
   if (!uniqueUserIds.length) return;
   void (async () => {
-    for (const userId of uniqueUserIds) {
+    await Promise.all(uniqueUserIds.map(async (userId) => {
       const totalUnreadCount = getTotalUnreadCountForUser(userId);
       await sendPushToUser(userId, totalUnreadCount);
-    }
+    }));
   })();
 }
 
@@ -2472,9 +2473,8 @@ app.post('/api/groups/:groupId/upload', uploadRawBodyParser, (req, res) => {
 
   io.to(groupId).emit('new_message', payload);
   queueUnreadPushNotifications(
-    stmts.getGroupMemberIds.all(groupId)
+    stmts.getOtherGroupMemberIds.all(groupId, userId)
       .map((row) => row.user_id)
-      .filter((recipientUserId) => String(recipientUserId) !== String(userId))
   );
   res.json({ messageId: msgId });
 });
@@ -2998,9 +2998,8 @@ io.on('connection', (socket) => {
 
     io.to(groupId).emit('new_message', messagePayload);
     queueUnreadPushNotifications(
-      stmts.getGroupMemberIds.all(groupId)
+      stmts.getOtherGroupMemberIds.all(groupId, socket.userId)
         .map((row) => row.user_id)
-        .filter((recipientUserId) => String(recipientUserId) !== String(socket.userId))
     );
     if (typeof ack === 'function') ack({ ok: true, messageId: msgId });
   });
