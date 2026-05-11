@@ -5211,7 +5211,7 @@ function updateReconnectBanner() {
   if (!socketDiagnostics.isBrowserOnline) {
     parts.push('Offline');
   } else if (socketDiagnostics.reconnectFailed) {
-    parts.push('Connection lost');
+    parts.push('Reconnect failed');
   } else if (socketDiagnostics.reconnectAttempts > 0) {
     parts.push(`Reconnecting… (${socketDiagnostics.reconnectAttempts})`);
   } else {
@@ -5326,11 +5326,8 @@ function closeDiagnosticsModal() {
 
 async function refreshCurrentGroupAfterReconnect() {
   try {
-    if (!currentGroupId) {
-      await loadGroups();
-      return;
-    }
     await loadGroups();
+    if (!currentGroupId) return;
     await Promise.all([loadMessages(currentGroupId), loadMembers(currentGroupId)]);
     if (currentGroupId) {
       renderGroupFromCache(currentGroupId);
@@ -5357,11 +5354,11 @@ function bindOnlineOfflineListeners() {
   const syncOnlineState = () => {
     socketDiagnostics.isBrowserOnline = navigator.onLine !== false;
     if (!socketDiagnostics.isBrowserOnline) {
-      updateConnectionStatusUi('offline', 'Offline');
+      updateConnectionStatusUi('offline');
     } else if (socket?.connected) {
-      updateConnectionStatusUi('connected', 'Connected');
+      updateConnectionStatusUi('connected');
     } else {
-      updateConnectionStatusUi('connecting', 'Reconnecting…');
+      updateConnectionStatusUi(socketDiagnostics.reconnectAttempts > 0 ? 'reconnecting' : 'connecting');
       if (socket) socket.connect();
     }
     renderDiagnosticsPanel();
