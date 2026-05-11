@@ -2352,7 +2352,7 @@ async function ensureGroupDataPreloaded(groupId) {
 // Decryption failure text constants (must match renderMsgContent output)
 const MSG_NO_KEY = '[No key — set group key to decrypt]';
 const MSG_DECRYPT_FAIL = '[Unable to decrypt]';
-const GROUP_PREVIEW_EMPTY = 'No messages yet';
+const GROUP_PREVIEW_EMPTY_TEXT = 'No messages yet';
 
 // Scroll threshold (px from top) that triggers loading older messages
 const SCROLL_LOAD_THRESHOLD = 1;
@@ -3262,10 +3262,11 @@ function syncAppViewportHeight() {
   const activeTag = document.activeElement?.tagName || '';
   const editing = /^(INPUT|TEXTAREA|SELECT)$/.test(activeTag);
   const fallbackHeight = window.innerHeight || document.documentElement.clientHeight || 0;
-  const visualHeight = vv ? Math.round(vv.height) : 0;
-  const nextHeight = isMobileLayout() && editing && visualHeight > 0
-    ? visualHeight
-    : Math.max(fallbackHeight, visualHeight || 0);
+  const nextHeight = getViewportHeightForLayout({
+    visualViewport: vv,
+    fallbackHeight,
+    editing,
+  });
   document.documentElement.style.setProperty('--app-viewport-height', `${Math.max(320, nextHeight)}px`);
 }
 
@@ -3575,7 +3576,7 @@ function buildGroupItem(g) {
   const preview = document.createElement('div');
   preview.className = 'group-item-preview';
   preview.id = 'preview-' + g.id;
-  preview.textContent = g._lastPreviewText || GROUP_PREVIEW_EMPTY;
+  preview.textContent = g._lastPreviewText ?? GROUP_PREVIEW_EMPTY_TEXT;
 
   row.append(name, time);
   info.append(row, preview);
@@ -3676,7 +3677,7 @@ function canCurrentUserKickMember(targetUserId) {
 function updateGroupPreview(groupId, text, time) {
   const el = $('preview-' + groupId);
   const timeLabel = time ? formatTime(time) : '';
-  const previewText = truncate(text, 35) || GROUP_PREVIEW_EMPTY;
+  const previewText = truncate(text, 35) || GROUP_PREVIEW_EMPTY_TEXT;
   if (el) el.textContent = previewText;
   const timeEl = $('preview-time-' + groupId);
   if (timeEl) {
@@ -6967,4 +6968,9 @@ async function loadOlderMessages() {
     loadingOlder = false;
     if (indicator) indicator.hidden = true;
   }
+}
+function getViewportHeightForLayout({ visualViewport, fallbackHeight, editing }) {
+  const visualHeight = visualViewport ? Math.round(visualViewport.height) : 0;
+  if (isMobileLayout() && editing && visualHeight > 0) return visualHeight;
+  return Math.max(fallbackHeight, visualHeight || 0);
 }

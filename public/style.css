@@ -482,7 +482,7 @@ body.sidebar-resizing * {
 .group-item-info { flex: 1; min-width: 0; }
 .group-item-row {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
   min-width: 0;
