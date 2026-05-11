@@ -2352,6 +2352,7 @@ async function ensureGroupDataPreloaded(groupId) {
 // Decryption failure text constants (must match renderMsgContent output)
 const MSG_NO_KEY = '[No key — set group key to decrypt]';
 const MSG_DECRYPT_FAIL = '[Unable to decrypt]';
+const GROUP_PREVIEW_EMPTY = 'No messages yet';
 
 // Scroll threshold (px from top) that triggers loading older messages
 const SCROLL_LOAD_THRESHOLD = 1;
@@ -3574,7 +3575,7 @@ function buildGroupItem(g) {
   const preview = document.createElement('div');
   preview.className = 'group-item-preview';
   preview.id = 'preview-' + g.id;
-  preview.textContent = g._lastPreviewText || g._lastPreview || 'No messages yet';
+  preview.textContent = g._lastPreviewText || g._lastPreview || GROUP_PREVIEW_EMPTY;
 
   row.append(name, time);
   info.append(row, preview);
@@ -3675,7 +3676,7 @@ function canCurrentUserKickMember(targetUserId) {
 function updateGroupPreview(groupId, text, time) {
   const el = $('preview-' + groupId);
   const timeLabel = time ? formatTime(time) : '';
-  const previewText = truncate(text, 35) || 'No messages yet';
+  const previewText = truncate(text, 35) || GROUP_PREVIEW_EMPTY;
   if (el) el.textContent = previewText;
   const timeEl = $('preview-time-' + groupId);
   if (timeEl) {
