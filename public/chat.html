@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="description" content="Encrypted group messaging" />
   <meta name="application-name" content="GChat" />
   <meta name="theme-color" content="#0a0a0f" />
@@ -273,6 +273,21 @@
           <div class="usage-bar-fill" id="profile-ai-usage-fill"></div>
         </div>
         <div class="profile-ai-usage-note" id="profile-ai-usage-note">Resets at 4:00 AM Shanghai time</div>
+      </div>
+      <div class="profile-push-card" id="profile-push-card">
+        <div class="profile-push-header">
+          <div>
+            <div class="profile-push-title">Notifications</div>
+            <div class="profile-push-status" id="push-status-text">Checking support…</div>
+          </div>
+          <span class="profile-push-permission" id="push-permission-pill">Default</span>
+        </div>
+        <p class="profile-push-hint" id="push-platform-hint" hidden></p>
+        <div class="profile-push-meta" id="push-unread-meta">Unread badge sync is available when supported by your browser.</div>
+        <div class="profile-push-actions">
+          <button class="btn-primary btn-sm" id="enable-push-btn" type="button">Enable notifications</button>
+          <button class="btn-secondary btn-sm" id="disable-push-btn" type="button" hidden>Disable notifications</button>
+        </div>
       </div>
       <div class="form-group">
         <label>Change Username</label>

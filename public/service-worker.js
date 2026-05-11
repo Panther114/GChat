@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_CACHE = 'gchat-pwa-v1';
+const APP_CACHE = 'gchat-pwa-v2';
 const APP_SHELL_ASSETS = [
   '/',
   '/index.html',
@@ -22,6 +22,45 @@ const APP_SHELL_ASSETS = [
 
 function isCacheableResponse(response) {
   return !!response && response.ok && (response.type === 'basic' || response.type === 'default');
+}
+
+function getGenericNotificationBody(unreadCount) {
+  const safeCount = Math.max(0, Number(unreadCount) || 0);
+  if (safeCount > 0) {
+    return `You have ${safeCount} unread message${safeCount === 1 ? '' : 's'} in GChat.`;
+  }
+  return 'You have unread messages in GChat.';
+}
+
+function parsePushPayload(event) {
+  if (!event.data) return {};
+  try {
+    const parsed = event.data.json();
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    try {
+      return JSON.parse(event.data.text());
+    } catch {
+      return {};
+    }
+  }
+}
+
+async function updateWorkerAppBadge(count) {
+  const safeCount = Math.max(0, Number(count) || 0);
+  const badgeTarget = self.navigator || null;
+  if (safeCount > 0 && typeof badgeTarget?.setAppBadge === 'function') {
+    await badgeTarget.setAppBadge(safeCount).catch(() => {});
+    return;
+  }
+  if (typeof badgeTarget?.clearAppBadge === 'function') {
+    await badgeTarget.clearAppBadge().catch(() => {});
+  }
+}
+
+async function broadcastToClients(message) {
+  const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  await Promise.all(clients.map((client) => client.postMessage(message)));
 }
 
 self.addEventListener('install', (event) => {
@@ -95,4 +134,54 @@ self.addEventListener('fetch', (event) => {
   }
 
   event.respondWith(handleAsset(request));
+});
+
+self.addEventListener('push', (event) => {
+  const payload = parsePushPayload(event);
+  const totalUnreadCount = Math.max(0, Number(payload.totalUnreadCount) || 0);
+  const notificationPromise = self.registration.showNotification(payload.title || 'GChat', {
+    body: typeof payload.body === 'string' && payload.body ? payload.body : getGenericNotificationBody(totalUnreadCount),
+    icon: '/icons/icon-192.png',
+    badge: '/icons/icon-192.png',
+    tag: payload.tag || 'gchat-unread',
+    renotify: true,
+    data: {
+      url: typeof payload.url === 'string' && payload.url ? payload.url : '/chat.html',
+      totalUnreadCount,
+    },
+  });
+  event.waitUntil(Promise.all([
+    notificationPromise,
+    updateWorkerAppBadge(totalUnreadCount),
+    broadcastToClients({ type: 'push-unread-count', totalUnreadCount }),
+  ]));
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const targetUrl = event.notification?.data?.url || '/chat.html';
+  event.waitUntil((async () => {
+    const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const client of clients) {
+      if (!client || !('focus' in client)) continue;
+      try {
+        const url = new URL(client.url);
+        if (url.origin === self.location.origin) {
+          if ('navigate' in client && url.pathname !== targetUrl) await client.navigate(targetUrl);
+          await client.focus();
+          return;
+        }
+      } catch {
+        // Ignore malformed client URLs.
+      }
+    }
+    if (self.clients.openWindow) {
+      await self.clients.openWindow(targetUrl);
+    }
+  })());
+});
+
+self.addEventListener('notificationclose', (event) => {
+  const totalUnreadCount = Math.max(0, Number(event.notification?.data?.totalUnreadCount) || 0);
+  event.waitUntil(updateWorkerAppBadge(totalUnreadCount));
 });

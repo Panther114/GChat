@@ -4,7 +4,7 @@ Gchat is a client-side encrypted group chat application built with Node.js, Expr
 
 The hosted web app is the primary product. The desktop app is a native shell that loads the hosted Railway deployment.
 
-Current version: **v1.1.4**
+Current version: **v1.2.0**
 
 ---
 
@@ -124,6 +124,9 @@ Important limitations:
 | `DB_PATH` | Recommended | SQLite database path. Use `/data/Gchat.db` with a Railway volume for persistence. |
 | `ADMIN_SECRET` | Optional | Enables the admin users endpoint when set. |
 | `OPENROUTER_API_KEY` | Optional | Enables the server-side Ask AI integration for Grok 4.3 and DeepSeek V4 Flash. Keep this only in server/runtime environment variables such as Railway service variables. |
+| `VAPID_PUBLIC_KEY` | Optional | Public VAPID key used by the hosted PWA to subscribe to Web Push notifications. |
+| `VAPID_PRIVATE_KEY` | Optional | Private VAPID key used only on the server to send Web Push notifications. Never expose this to clients. |
+| `VAPID_SUBJECT` | Optional | VAPID contact subject such as `mailto:admin@example.com` or an HTTPS URL. |
 
 ---
 
@@ -174,7 +177,7 @@ The main application pages are served from `public/`.
 
 ---
 
-## Ask AI (v1.1.4)
+## Ask AI (v1.2.0)
 
 - Typing `/ai ` in the chat composer or clicking **Ask AI** in the right panel opens the same modal before the AI-tagged prompt is sent into chat.
 - The modal defaults to:
@@ -238,10 +241,10 @@ The hosted web app at `https://gchat.up.railway.app` can be installed as a free 
 ### Android (Chrome / Chromium)
 
 1. Open `https://gchat.up.railway.app`.
-2. Sign in if needed.
-3. Open the browser menu.
-4. Tap **Install app** or **Add to Home screen**.
-5. Confirm the install prompt.
+2. Open the browser menu.
+3. Tap **Install app** or **Add to Home screen**.
+4. Confirm the install prompt.
+5. Open GChat from the installed home screen or app icon.
 
 ### iPhone / iPad (Safari)
 
@@ -250,6 +253,40 @@ The hosted web app at `https://gchat.up.railway.app` can be installed as a free 
 3. Tap **Add to Home Screen**.
 4. Optionally rename `GChat`.
 5. Tap **Add**.
+6. Open GChat from the Home Screen icon.
+
+### Notification setup
+
+1. Install and open the GChat PWA from its icon.
+2. Sign in.
+3. Open the **Profile** panel.
+4. Tap **Enable notifications**.
+5. Allow the system permission prompt.
+6. To disable notifications later, return to the same Profile section and tap **Disable notifications**.
+
+### Platform limitations
+
+- iPhone and iPad push notifications require the Home Screen web app on supported iOS/iPadOS versions.
+- Android notification support depends on browser and installed PWA support.
+- Notification sound is controlled by the operating system, mute switch, Focus / Do Not Disturb, and notification settings.
+- App icon badge support varies by browser and platform. GChat still works when the Badging API is unavailable.
+- Notification payloads are privacy-preserving and generic. They do not contain decrypted message content, sender names, or group names.
+
+### VAPID key generation
+
+Generate VAPID keys before enabling Web Push on the server:
+
+```bash
+npx web-push generate-vapid-keys
+```
+
+Then set:
+
+```txt
+VAPID_PUBLIC_KEY=<public key>
+VAPID_PRIVATE_KEY=<private key>
+VAPID_SUBJECT=mailto:admin@example.com
+```
 
 ### Update behavior
 

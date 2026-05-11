@@ -15,6 +15,7 @@ const bcrypt = require('bcrypt');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const crypto = require('crypto');
+const webpush = require('web-push');
 const packageJson = require('./package.json');
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -31,6 +32,9 @@ const MAX_SOCKET_PAYLOAD_BYTES = 256 * 1024;
 const IV_BYTES = 12;
 const SAFE_IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const APP_VERSION = packageJson.version || '0.0.0';
+const VAPID_PUBLIC_KEY = typeof process.env.VAPID_PUBLIC_KEY === 'string' ? process.env.VAPID_PUBLIC_KEY.trim() : '';
+const VAPID_PRIVATE_KEY = typeof process.env.VAPID_PRIVATE_KEY === 'string' ? process.env.VAPID_PRIVATE_KEY.trim() : '';
+const VAPID_SUBJECT = typeof process.env.VAPID_SUBJECT === 'string' ? process.env.VAPID_SUBJECT.trim() : '';
 const MIN_DISAPPEARING_DURATION_MS = 6000;
 const MAX_DISAPPEARING_DURATION_MS = 45000;
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
@@ -99,6 +103,18 @@ const AI_RESET_TIME_LABEL = '4:00 AM Shanghai time';
 const USER_AI_DAILY_TOKEN_LIMIT_MIGRATION_DEFAULT = 20000;
 if (USER_AI_DAILY_TOKEN_LIMIT_MIGRATION_DEFAULT !== DEFAULT_USER_DAILY_AI_TOKEN_LIMIT) {
   throw new Error('User AI daily token migration default must match the runtime default');
+}
+
+function isPushConfigured() {
+  return !!(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY && VAPID_SUBJECT);
+}
+
+if (isPushConfigured()) {
+  try {
+    webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+  } catch (err) {
+    console.error('Failed to initialize Web Push VAPID details:', err);
+  }
 }
 
 // ── App & Server ──────────────────────────────────────────────────────────────
@@ -846,6 +862,17 @@ db.exec(`
     hidden_at TEXT,
     PRIMARY KEY (message_id, user_id)
   );
+
+  CREATE TABLE IF NOT EXISTS push_subscriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    endpoint TEXT NOT NULL UNIQUE,
+    subscription_json TEXT NOT NULL,
+    user_agent TEXT,
+    platform TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 // Safe migrations — each wrapped in try/catch so re-runs are harmless
@@ -887,6 +914,8 @@ const migrations = [
   "CREATE INDEX IF NOT EXISTS idx_ai_usage_events_created_at ON ai_usage_events (created_at)",
   "CREATE INDEX IF NOT EXISTS idx_group_members_user_group ON group_members (user_id, group_id)",
   "CREATE INDEX IF NOT EXISTS idx_group_members_group_joined_at ON group_members (group_id, joined_at ASC, user_id)",
+  "CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user_id ON push_subscriptions (user_id)",
+  "CREATE INDEX IF NOT EXISTS idx_push_subscriptions_updated_at ON push_subscriptions (updated_at)",
   // Composite index to support efficient pagination ORDER BY (created_at DESC, id DESC)
   "CREATE INDEX IF NOT EXISTS idx_messages_group_pagination ON messages (group_id, created_at DESC, id DESC)",
 ];
@@ -946,6 +975,7 @@ const stmts = {
   deleteUserMessageReads: db.prepare('DELETE FROM message_reads WHERE user_id = ?'),
   deleteUserDisappearingStates: db.prepare('DELETE FROM disappearing_message_states WHERE user_id = ?'),
   deleteUserAiUsageEvents: db.prepare('DELETE FROM ai_usage_events WHERE user_id = ?'),
+  deleteUserPushSubscriptions: db.prepare('DELETE FROM push_subscriptions WHERE user_id = ?'),
 
   // Groups
   insertGroup: db.prepare(
@@ -971,7 +1001,20 @@ const stmts = {
     'SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?'
   ),
   getUserGroups: db.prepare(`
-    SELECT g.id, g.name, g.code, g.created_by, g.created_at, g.allow_member_clear, g.allow_member_clear_tag, g.allow_member_export, g.allow_member_kick, g.ai_enabled, g.group_color
+    SELECT g.id, g.name, g.code, g.created_by, g.created_at, g.allow_member_clear, g.allow_member_clear_tag, g.allow_member_export, g.allow_member_kick, g.ai_enabled, g.group_color,
+           (
+             SELECT COUNT(*)
+             FROM messages m
+             LEFT JOIN message_reads mr
+               ON mr.message_id = m.id AND mr.user_id = gm.user_id
+             LEFT JOIN disappearing_message_states dms
+               ON dms.message_id = m.id AND dms.user_id = gm.user_id
+             WHERE m.group_id = g.id
+               AND m.sender_id != gm.user_id
+               AND mr.message_id IS NULL
+               AND (m.type != 'whisper' OR m.whisper_to LIKE '%"' || gm.user_id || '"%')
+               AND (m.is_disappearing = 0 OR dms.hidden_at IS NULL)
+           ) AS unread_count
     FROM group_chats g
     JOIN group_members gm ON g.id = gm.group_id
     WHERE gm.user_id = ?
@@ -985,6 +1028,7 @@ const stmts = {
     ORDER BY gm.joined_at ASC
   `),
   countGroupMembers: db.prepare('SELECT COUNT(*) AS count FROM group_members WHERE group_id = ?'),
+  getGroupMemberIds: db.prepare('SELECT user_id FROM group_members WHERE group_id = ?'),
 
   // Admin
   getAllUsers: db.prepare(`
@@ -1017,6 +1061,31 @@ const stmts = {
     WHERE created_at >= ?
       AND created_at < ?
   `),
+  getTotalUnreadCountForUser: db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM messages m
+    JOIN group_members gm ON gm.group_id = m.group_id AND gm.user_id = ?
+    LEFT JOIN message_reads mr ON mr.message_id = m.id AND mr.user_id = gm.user_id
+    LEFT JOIN disappearing_message_states dms ON dms.message_id = m.id AND dms.user_id = gm.user_id
+    WHERE m.sender_id != gm.user_id
+      AND mr.message_id IS NULL
+      AND (m.type != 'whisper' OR m.whisper_to LIKE '%"' || gm.user_id || '"%')
+      AND (m.is_disappearing = 0 OR dms.hidden_at IS NULL)
+  `),
+  upsertPushSubscription: db.prepare(`
+    INSERT INTO push_subscriptions (user_id, endpoint, subscription_json, user_agent, platform, created_at, updated_at)
+    VALUES (@userId, @endpoint, @subscriptionJson, @userAgent, @platform, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    ON CONFLICT(endpoint) DO UPDATE SET
+      user_id = excluded.user_id,
+      subscription_json = excluded.subscription_json,
+      user_agent = excluded.user_agent,
+      platform = excluded.platform,
+      updated_at = CURRENT_TIMESTAMP
+  `),
+  getPushSubscriptionsForUser: db.prepare('SELECT id, endpoint, subscription_json FROM push_subscriptions WHERE user_id = ?'),
+  countPushSubscriptionsForUser: db.prepare('SELECT COUNT(*) AS count FROM push_subscriptions WHERE user_id = ?'),
+  deletePushSubscriptionById: db.prepare('DELETE FROM push_subscriptions WHERE id = ?'),
+  deletePushSubscriptionByEndpointForUser: db.prepare('DELETE FROM push_subscriptions WHERE user_id = ? AND endpoint = ?'),
   insertAiUsageEvent: db.prepare(`
     INSERT INTO ai_usage_events (
       id, user_id, group_id, prompt_tokens, completion_tokens, total_tokens, created_at
@@ -1377,6 +1446,109 @@ function formatManagedUser(user, usageWindow) {
   };
 }
 
+function sanitizePushMetadata(value, maxLength = 255) {
+  if (typeof value !== 'string') return null;
+  const normalized = value.replace(/[\u0000-\u001F\u007F]/g, ' ').trim();
+  return normalized ? normalized.slice(0, maxLength) : null;
+}
+
+function validatePushSubscriptionPayload(value) {
+  if (!value || typeof value !== 'object') {
+    return { ok: false, error: 'Invalid push subscription payload' };
+  }
+  const endpoint = sanitizePushMetadata(value.endpoint, 2048);
+  const p256dh = sanitizePushMetadata(value.keys?.p256dh, 1024);
+  const auth = sanitizePushMetadata(value.keys?.auth, 256);
+  if (!endpoint || !p256dh || !auth) {
+    return { ok: false, error: 'Invalid push subscription payload' };
+  }
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(endpoint);
+  } catch {
+    return { ok: false, error: 'Invalid push subscription endpoint' };
+  }
+  const isSecureEndpoint = parsedUrl.protocol === 'https:' || parsedUrl.hostname === 'localhost';
+  if (!isSecureEndpoint) {
+    return { ok: false, error: 'Invalid push subscription endpoint' };
+  }
+  if (!/^[A-Za-z0-9_-]+$/.test(p256dh) || !/^[A-Za-z0-9_-]+$/.test(auth)) {
+    return { ok: false, error: 'Invalid push subscription keys' };
+  }
+  return {
+    ok: true,
+    value: {
+      endpoint,
+      expirationTime: value.expirationTime ?? null,
+      keys: { p256dh, auth },
+    },
+  };
+}
+
+function getSafePushEndpointHost(endpoint) {
+  try {
+    return new URL(endpoint).host;
+  } catch {
+    return 'invalid-endpoint';
+  }
+}
+
+function getTotalUnreadCountForUser(userId) {
+  markExpiredDisappearingMessagesHidden(userId);
+  return Math.max(0, Number(stmts.getTotalUnreadCountForUser.get(userId)?.count) || 0);
+}
+
+function buildGenericPushPayload(totalUnreadCount) {
+  const normalizedCount = Math.max(0, Number(totalUnreadCount) || 0);
+  return {
+    title: 'GChat',
+    body: normalizedCount > 0
+      ? `You have ${normalizedCount} unread message${normalizedCount === 1 ? '' : 's'} in GChat.`
+      : 'You have unread messages in GChat.',
+    tag: 'gchat-unread',
+    totalUnreadCount: normalizedCount,
+    url: '/chat.html',
+  };
+}
+
+async function sendPushToUser(userId, totalUnreadCount) {
+  if (!isPushConfigured() || !userId) return;
+  const subscriptions = stmts.getPushSubscriptionsForUser.all(userId);
+  if (!subscriptions.length) return;
+  const payload = JSON.stringify(buildGenericPushPayload(totalUnreadCount));
+  await Promise.allSettled(subscriptions.map(async (subscriptionRow) => {
+    let parsedSubscription;
+    try {
+      parsedSubscription = JSON.parse(subscriptionRow.subscription_json);
+    } catch {
+      stmts.deletePushSubscriptionById.run(subscriptionRow.id);
+      return;
+    }
+    try {
+      await webpush.sendNotification(parsedSubscription, payload);
+    } catch (err) {
+      const statusCode = Number(err?.statusCode) || 0;
+      if (statusCode === 404 || statusCode === 410) {
+        stmts.deletePushSubscriptionById.run(subscriptionRow.id);
+        return;
+      }
+      console.error(`Push send failed [status=${statusCode || 'unknown'} host=${getSafePushEndpointHost(subscriptionRow.endpoint)}]`);
+    }
+  }));
+}
+
+function queueUnreadPushNotifications(userIds = []) {
+  if (!isPushConfigured()) return;
+  const uniqueUserIds = [...new Set(userIds.map(String).filter(Boolean))];
+  if (!uniqueUserIds.length) return;
+  void (async () => {
+    for (const userId of uniqueUserIds) {
+      const totalUnreadCount = getTotalUnreadCountForUser(userId);
+      await sendPushToUser(userId, totalUnreadCount);
+    }
+  })();
+}
+
 function setSessionPersistence(req, rememberMe) {
   if (rememberMe) {
     req.session.cookie.maxAge = REMEMBER_ME_MAX_AGE;
@@ -1621,6 +1793,7 @@ const deleteAccountTx = db.transaction((userId) => {
   stmts.deleteUserMessageReads.run(userId);
   stmts.deleteUserDisappearingStates.run(userId);
   stmts.deleteUserAiUsageEvents.run(userId);
+  stmts.deleteUserPushSubscriptions.run(userId);
   stmts.deleteUserMemberships.run(userId);
   stmts.deleteUser.run(userId);
 });
@@ -1645,6 +1818,63 @@ app.get('/api/ai/usage', (req, res) => {
   res.json(summary);
 });
 
+app.get('/api/push/vapid-public-key', (req, res) => {
+  if (!isPushConfigured()) {
+    return res.status(503).json({ error: 'Push notifications are not configured on this server' });
+  }
+  res.json({ publicKey: VAPID_PUBLIC_KEY });
+});
+
+app.get('/api/push/status', (req, res) => {
+  const userId = req.session.userId;
+  res.json({
+    configured: isPushConfigured(),
+    subscriptionActive: Math.max(0, Number(stmts.countPushSubscriptionsForUser.get(userId)?.count) || 0) > 0,
+    vapidPublicKey: isPushConfigured() ? VAPID_PUBLIC_KEY : '',
+    totalUnreadCount: getTotalUnreadCountForUser(userId),
+  });
+});
+
+app.post('/api/push/subscribe', (req, res) => {
+  if (!isPushConfigured()) {
+    return res.status(503).json({ error: 'Push notifications are not configured on this server' });
+  }
+  const parsedSubscription = validatePushSubscriptionPayload(req.body?.subscription);
+  if (!parsedSubscription.ok) {
+    return res.status(400).json({ error: parsedSubscription.error });
+  }
+  try {
+    stmts.upsertPushSubscription.run({
+      userId: req.session.userId,
+      endpoint: parsedSubscription.value.endpoint,
+      subscriptionJson: JSON.stringify(parsedSubscription.value),
+      userAgent: sanitizePushMetadata(req.body?.userAgent, 512),
+      platform: sanitizePushMetadata(req.body?.platform, 255),
+    });
+    res.json({
+      ok: true,
+      subscriptionActive: true,
+      totalUnreadCount: getTotalUnreadCountForUser(req.session.userId),
+    });
+  } catch (err) {
+    console.error('Push subscription save error:', err);
+    res.status(500).json({ error: 'Failed to save push subscription' });
+  }
+});
+
+app.post('/api/push/unsubscribe', (req, res) => {
+  const endpoint = sanitizePushMetadata(req.body?.endpoint, 2048);
+  if (!endpoint) {
+    return res.status(400).json({ error: 'Subscription endpoint is required' });
+  }
+  stmts.deletePushSubscriptionByEndpointForUser.run(req.session.userId, endpoint);
+  res.json({
+    ok: true,
+    subscriptionActive: Math.max(0, Number(stmts.countPushSubscriptionsForUser.get(req.session.userId)?.count) || 0) > 0,
+    totalUnreadCount: getTotalUnreadCountForUser(req.session.userId),
+  });
+});
+
 // ── Admin Routes ──────────────────────────────────────────────────────────────
 
 const adminDeleteUserTx = db.transaction((targetUserId, nextOwnerId) => {
@@ -1661,6 +1891,7 @@ const adminDeleteUserTx = db.transaction((targetUserId, nextOwnerId) => {
   stmts.deleteUserMessageReads.run(targetUserId);
   stmts.deleteUserDisappearingStates.run(targetUserId);
   stmts.deleteUserAiUsageEvents.run(targetUserId);
+  stmts.deleteUserPushSubscriptions.run(targetUserId);
   stmts.deleteUserMemberships.run(targetUserId);
   stmts.deleteUser.run(targetUserId);
   return {
@@ -1842,6 +2073,7 @@ app.post('/api/groups/create', (req, res) => {
     name: group.name,
     code: group.code,
     createdBy: group.created_by,
+    unreadCount: 0,
     allowMemberClear: group.allow_member_clear || 0,
     allowMemberClearTag: group.allow_member_clear_tag || 0,
     allowMemberExport: group.allow_member_export || 0,
@@ -1884,6 +2116,7 @@ app.post('/api/groups/join', (req, res) => {
     code: group.code,
     createdBy: group.created_by,
     alreadyJoined: joined.changes === 0,
+    unreadCount: 0,
     allowMemberClear: group.allow_member_clear || 0,
     allowMemberClearTag: group.allow_member_clear_tag || 0,
     allowMemberExport: group.allow_member_export || 0,
@@ -1902,6 +2135,7 @@ app.get('/api/groups/mine', (req, res) => {
       name: g.name,
       code: g.code,
       createdBy: g.created_by,
+      unreadCount: Math.max(0, Number(g.unread_count) || 0),
       allowMemberClear: g.allow_member_clear || 0,
       allowMemberClearTag: g.allow_member_clear_tag || 0,
       allowMemberExport: g.allow_member_export || 0,
@@ -2237,6 +2471,11 @@ app.post('/api/groups/:groupId/upload', uploadRawBodyParser, (req, res) => {
   };
 
   io.to(groupId).emit('new_message', payload);
+  queueUnreadPushNotifications(
+    stmts.getGroupMemberIds.all(groupId)
+      .map((row) => row.user_id)
+      .filter((recipientUserId) => String(recipientUserId) !== String(userId))
+  );
   res.json({ messageId: msgId });
 });
 
@@ -2758,6 +2997,11 @@ io.on('connection', (socket) => {
     };
 
     io.to(groupId).emit('new_message', messagePayload);
+    queueUnreadPushNotifications(
+      stmts.getGroupMemberIds.all(groupId)
+        .map((row) => row.user_id)
+        .filter((recipientUserId) => String(recipientUserId) !== String(socket.userId))
+    );
     if (typeof ack === 'function') ack({ ok: true, messageId: msgId });
   });
 
@@ -2868,6 +3112,9 @@ io.on('connection', (socket) => {
       totalRecipients,
       readCount: 0,
     });
+    queueUnreadPushNotifications(
+      stmts.getGroupMemberIds.all(groupId).map((row) => row.user_id)
+    );
     if (typeof ack === 'function') ack({ ok: true, messageId: msgId });
   });
 
@@ -3021,6 +3268,7 @@ io.on('connection', (socket) => {
         s.emit('new_message', payload);
       }
     }
+    queueUnreadPushNotifications(recipientsExcludingSender);
   });
 
   socket.on('mark_message_read', ({ groupId, messageId }) => {
