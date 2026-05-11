@@ -2594,7 +2594,7 @@ body.chat-body.mobile-layout .sidebar-overlay {
   }
   .message-input-bar textarea {
     min-height: 28px;
-    max-height: min(22dvh, 112px);
+    max-height: min(26dvh, 144px);
   }
   .messages-area {
     padding-left: calc(10px + var(--safe-area-left));

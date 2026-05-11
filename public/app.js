@@ -3261,7 +3261,7 @@ function syncAppViewportHeight() {
   const activeTag = document.activeElement?.tagName || '';
   const editing = /^(INPUT|TEXTAREA|SELECT)$/.test(activeTag);
   const fallbackHeight = window.innerHeight || document.documentElement.clientHeight || 0;
-  const visualHeight = vv ? Math.round(vv.height + vv.offsetTop) : 0;
+  const visualHeight = vv ? Math.round(vv.height) : 0;
   const nextHeight = isMobileLayout() && editing && visualHeight > 0
     ? visualHeight
     : Math.max(fallbackHeight, visualHeight || 0);
