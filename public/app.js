@@ -991,10 +991,15 @@ function isStandalonePwaMode() {
   return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
 }
 
+function getClientPlatformLabel() {
+  return navigator.userAgentData?.platform || navigator.platform || '';
+}
+
 function getPushPlatformHint() {
   const userAgent = navigator.userAgent || '';
+  const platform = getClientPlatformLabel();
   const isAppleMobile = /iPad|iPhone|iPod/.test(userAgent)
-    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    || (platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   if (isAppleMobile && !isStandalonePwaMode()) {
     return 'Install GChat to Home Screen and open it from the icon before enabling notifications on iPhone or iPad.';
   }
@@ -1115,7 +1120,7 @@ async function enablePushNotifications() {
       body: JSON.stringify({
         subscription: subscription.toJSON(),
         userAgent: navigator.userAgent || '',
-        platform: navigator.platform || '',
+        platform: getClientPlatformLabel(),
       }),
     });
     const data = await res.json().catch(() => ({}));

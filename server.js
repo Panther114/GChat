@@ -1085,6 +1085,7 @@ const stmts = {
     WHERE push_subscriptions.user_id = excluded.user_id
   `),
   getPushSubscriptionsForUser: db.prepare('SELECT id, endpoint, subscription_json FROM push_subscriptions WHERE user_id = ?'),
+  getPushSubscriptionOwnerByEndpoint: db.prepare('SELECT user_id FROM push_subscriptions WHERE endpoint = ?'),
   countPushSubscriptionsForUser: db.prepare('SELECT COUNT(*) AS count FROM push_subscriptions WHERE user_id = ?'),
   deletePushSubscriptionById: db.prepare('DELETE FROM push_subscriptions WHERE id = ?'),
   deletePushSubscriptionByEndpointForUser: db.prepare('DELETE FROM push_subscriptions WHERE user_id = ? AND endpoint = ?'),
@@ -1844,6 +1845,10 @@ app.post('/api/push/subscribe', (req, res) => {
   const parsedSubscription = validatePushSubscriptionPayload(req.body?.subscription);
   if (!parsedSubscription.ok) {
     return res.status(400).json({ error: parsedSubscription.error });
+  }
+  const existingSubscription = stmts.getPushSubscriptionOwnerByEndpoint.get(parsedSubscription.value.endpoint);
+  if (existingSubscription && String(existingSubscription.user_id) !== String(req.session.userId)) {
+    return res.status(409).json({ error: 'This device subscription is already attached to another account. Disable notifications on that account first.' });
   }
   try {
     const result = stmts.upsertPushSubscription.run({
