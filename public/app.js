@@ -846,6 +846,15 @@ function setUserManagementLoading(message = 'Loading users…') {
   const list = $('user-management-list');
   if (!list) return;
   list.replaceChildren();
+  if (message === 'Loading users…') {
+    for (let i = 0; i < 4; i += 1) {
+      const row = document.createElement('div');
+      row.className = 'user-management-user user-management-user-skeleton';
+      row.innerHTML = '<div class="member-avatar"></div><div class="user-management-user-main"><div class="user-management-user-head"><div class="user-management-user-summary"><div class="user-management-skeleton-line user-management-skeleton-line-title"></div><div class="user-management-skeleton-line"></div></div></div></div>';
+      list.appendChild(row);
+    }
+    return;
+  }
   const empty = document.createElement('div');
   empty.className = 'user-management-empty';
   empty.textContent = message;
@@ -2158,11 +2167,21 @@ const composerTokens = {
   ai: null,
 };
 const socketDiagnostics = {
+  connectionState: 'connecting',
   healthStatus: 'unknown',
   healthLatencyMs: null,
+  healthCheckedAt: '',
+  healthEdge: '',
+  healthRequestId: '',
+  healthServerTime: '',
+  healthEnvironment: '',
   socketTransport: 'unknown',
+  socketId: '',
+  lastConnectAt: '',
   lastDisconnectReason: '',
+  lastDisconnectAt: '',
   lastConnectError: '',
+  lastConnectErrorAt: '',
   reconnectAttempts: 0,
   reconnectFailed: false,
   isBrowserOnline: typeof navigator !== 'undefined' ? navigator.onLine !== false : true,
@@ -3039,6 +3058,9 @@ const ICON_SPECS = {
     ['line', { x1: '12', y1: '16', x2: '12', y2: '12' }],
     ['line', { x1: '12', y1: '8', x2: '12.01', y2: '8' }],
   ],
+  activity: [
+    ['polyline', { points: '22 12 18 12 15 21 9 3 6 12 2 12' }],
+  ],
   'arrow-left': [
     ['line', { x1: '19', y1: '12', x2: '5', y2: '12' }],
     ['polyline', { points: '12 19 5 12 12 5' }],
@@ -3262,6 +3284,7 @@ function syncMobileNavigationState() {
   sidebar.classList.toggle('open', mobile && view === 'list');
   rightPanel.classList.toggle('open', mobile && view === 'details');
   overlay.hidden = true;
+  if (!mobile || view !== 'list') closeMobileActionMenu();
   updateChatNavigationButton();
   updateDetailsNavigationButton();
   updateRightPanelToggleButtons();
@@ -3271,6 +3294,25 @@ function syncMobileNavigationState() {
 function setMobileView(view) {
   mobileViewState = normalizeMobileView(view);
   syncMobileNavigationState();
+}
+
+function closeMobileActionMenu() {
+  const menu = $('mobile-sidebar-actions-menu');
+  const toggle = $('sidebar-mobile-actions-btn');
+  if (!menu || !toggle) return;
+  menu.hidden = true;
+  toggle.classList.remove('active');
+  toggle.setAttribute('aria-expanded', 'false');
+}
+
+function toggleMobileActionMenu() {
+  const menu = $('mobile-sidebar-actions-menu');
+  const toggle = $('sidebar-mobile-actions-btn');
+  if (!menu || !toggle) return;
+  const nextHidden = !menu.hidden;
+  menu.hidden = nextHidden;
+  toggle.classList.toggle('active', !nextHidden);
+  toggle.setAttribute('aria-expanded', nextHidden ? 'false' : 'true');
 }
 
 function isEditableElement(el = document.activeElement) {
@@ -3409,6 +3451,7 @@ function closeSidebar() {
 }
 
 function closeRightPanel() {
+  closeMobileActionMenu();
   if (isMobileLayout()) {
     setMobileView(currentGroupId ? 'chat' : 'list');
     return;
@@ -3417,15 +3460,18 @@ function closeRightPanel() {
 }
 
 function closeMobilePanels() {
+  closeMobileActionMenu();
   setMobileView(currentGroupId ? 'chat' : 'list');
 }
 
 function toggleSidebar() {
   if (!isMobileLayout()) return;
+  closeMobileActionMenu();
   setMobileView('list');
 }
 
 function toggleRightPanel() {
+  closeMobileActionMenu();
   if (!isMobileLayout()) {
     desktopRightPanelExpanded = !desktopRightPanelExpanded;
     localStorage.setItem(DESKTOP_RIGHT_PANEL_STORAGE_KEY, desktopRightPanelExpanded ? '1' : '0');
@@ -3441,6 +3487,7 @@ function syncResponsiveUiState() {
     document.body.classList.remove('mobile-layout', 'mobile-list-view', 'mobile-chat-view', 'mobile-details-view');
     $('sidebar')?.classList.remove('open');
     $('right-panel')?.classList.remove('open');
+    closeMobileActionMenu();
   } else if (!currentGroupId && mobileViewState !== 'list') {
     mobileViewState = 'list';
   }
@@ -3885,6 +3932,7 @@ async function selectGroup(groupId) {
   scrollToBottom(true);
   $('scroll-bottom-btn').hidden = true;
 
+  closeMobileActionMenu();
   if (isMobileLayout()) setMobileView('chat');
 }
 
@@ -5099,8 +5147,56 @@ function formatDiagnosticsValue(value) {
   return String(value);
 }
 
+function formatDiagnosticsTime(value) {
+  if (!value) return '—';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString();
+}
+
+function getDisplayModeLabel() {
+  if (window.matchMedia?.('(display-mode: standalone)').matches || navigator.standalone === true) return 'standalone';
+  if (window.matchMedia?.('(display-mode: minimal-ui)').matches) return 'minimal-ui';
+  if (window.matchMedia?.('(display-mode: fullscreen)').matches) return 'fullscreen';
+  return 'browser';
+}
+
+function getServiceWorkerStatusLabel() {
+  if (!('serviceWorker' in navigator)) return 'unsupported';
+  return navigator.serviceWorker.controller ? 'controlled' : 'not controlled';
+}
+
+function getViewportSizeLabel() {
+  return `${window.innerWidth} × ${window.innerHeight}`;
+}
+
+function getVisualViewportSizeLabel() {
+  const vv = window.visualViewport;
+  if (!vv) return 'unavailable';
+  return `${Math.round(vv.width)} × ${Math.round(vv.height)} @ ${Math.round(vv.offsetTop)}`;
+}
+
+function getSafeAreaLabel() {
+  const style = getComputedStyle(document.documentElement);
+  return [
+    `top ${style.getPropertyValue('--safe-area-top').trim() || '0px'}`,
+    `right ${style.getPropertyValue('--safe-area-right').trim() || '0px'}`,
+    `bottom ${style.getPropertyValue('--safe-area-bottom').trim() || '0px'}`,
+    `left ${style.getPropertyValue('--safe-area-left').trim() || '0px'}`,
+  ].join(' · ');
+}
+
+function resolveConnectionStateLabel() {
+  if (socket?.connected) return { state: 'connected', label: 'Connected' };
+  if (!socketDiagnostics.isBrowserOnline) return { state: 'offline', label: 'Offline' };
+  if (socketDiagnostics.reconnectFailed) return { state: 'disconnected', label: 'Reconnect failed' };
+  if (socketDiagnostics.reconnectAttempts > 0) return { state: 'reconnecting', label: `Reconnecting (${socketDiagnostics.reconnectAttempts})` };
+  if (socketDiagnostics.lastConnectError) return { state: 'connecting', label: 'Connection error' };
+  return { state: 'connecting', label: 'Connecting…' };
+}
+
 function updateConnectionTransport() {
   socketDiagnostics.socketTransport = socket?.io?.engine?.transport?.name || 'unknown';
+  socketDiagnostics.socketId = socket?.id || '';
 }
 
 function updateReconnectBanner() {
@@ -5115,7 +5211,7 @@ function updateReconnectBanner() {
   if (!socketDiagnostics.isBrowserOnline) {
     parts.push('Offline');
   } else if (socketDiagnostics.reconnectFailed) {
-    parts.push('Reconnect failed');
+    parts.push('Connection lost');
   } else if (socketDiagnostics.reconnectAttempts > 0) {
     parts.push(`Reconnecting… (${socketDiagnostics.reconnectAttempts})`);
   } else {
@@ -5128,9 +5224,19 @@ function updateReconnectBanner() {
   banner.hidden = false;
 }
 
-function updateConnectionStatusUi(label, connected) {
-  $('conn-dot').className = connected ? 'conn-dot connected' : 'conn-dot';
-  $('conn-label').textContent = label;
+function updateConnectionStatusUi(stateOverride, labelOverride) {
+  const stateInfo = stateOverride
+    ? { state: stateOverride, label: labelOverride || resolveConnectionStateLabel().label }
+    : resolveConnectionStateLabel();
+  socketDiagnostics.connectionState = stateInfo.state;
+  const status = $('conn-status');
+  const label = $('conn-label');
+  $('conn-dot').className = stateInfo.state === 'connected' ? 'conn-dot connected' : 'conn-dot';
+  if (status) {
+    status.dataset.state = stateInfo.state;
+    status.classList.add('is-actionable');
+  }
+  if (label) label.textContent = stateInfo.label;
   updateReconnectBanner();
 }
 
@@ -5139,17 +5245,30 @@ function renderDiagnosticsPanel() {
   if (!grid) return;
   const fields = [
     ['App version', appVersionLabel],
+    ['Display mode', getDisplayModeLabel()],
+    ['Current URL', window.location.href],
+    ['Service worker', getServiceWorkerStatusLabel()],
+    ['Online status', socketDiagnostics.isBrowserOnline ? 'online' : 'offline'],
     ['Health status', socketDiagnostics.healthStatus],
     ['Health latency', socketDiagnostics.healthLatencyMs == null ? '—' : `${socketDiagnostics.healthLatencyMs} ms`],
+    ['Health checked', formatDiagnosticsTime(socketDiagnostics.healthCheckedAt)],
+    ['Health edge', socketDiagnostics.healthEdge || '—'],
+    ['Health request id', socketDiagnostics.healthRequestId || '—'],
+    ['Server time', formatDiagnosticsTime(socketDiagnostics.healthServerTime)],
+    ['Railway environment', socketDiagnostics.healthEnvironment || '—'],
     ['Socket connected', socket?.connected ? 'true' : 'false'],
-    ['Socket id', socket?.id || '—'],
+    ['Socket id', socketDiagnostics.socketId || '—'],
     ['Transport', socketDiagnostics.socketTransport],
-    ['Last disconnect', socketDiagnostics.lastDisconnectReason || '—'],
+    ['Last connect', formatDiagnosticsTime(socketDiagnostics.lastConnectAt)],
+    ['Last disconnect', formatDiagnosticsTime(socketDiagnostics.lastDisconnectAt)],
+    ['Last disconnect reason', socketDiagnostics.lastDisconnectReason || '—'],
     ['Last connect error', socketDiagnostics.lastConnectError || '—'],
-    ['Current URL', window.location.href],
+    ['Last error time', formatDiagnosticsTime(socketDiagnostics.lastConnectErrorAt)],
+    ['Reconnect attempts', socketDiagnostics.reconnectAttempts],
+    ['Viewport', getViewportSizeLabel()],
+    ['Visual viewport', getVisualViewportSizeLabel()],
+    ['Safe area', getSafeAreaLabel()],
     ['User agent', navigator.userAgent],
-    ['Service worker', navigator.serviceWorker?.controller ? 'controlled' : 'not controlled'],
-    ['Online status', socketDiagnostics.isBrowserOnline ? 'online' : 'offline'],
   ];
   grid.innerHTML = '';
   for (const [label, value] of fields) {
@@ -5172,13 +5291,24 @@ async function refreshDiagnosticsHealth() {
     const res = await fetch('/api/health', { cache: 'no-store' });
     const latency = Math.max(0, Math.round(performance.now() - startedAt));
     const data = await res.json().catch(() => ({}));
+    const diagnostics = data?.diagnostics && typeof data.diagnostics === 'object' ? data.diagnostics : {};
     if (res.ok && data.ok === true) socketDiagnostics.healthStatus = 'ok';
     else if (res.ok) socketDiagnostics.healthStatus = 'degraded';
     else socketDiagnostics.healthStatus = 'error';
     socketDiagnostics.healthLatencyMs = latency;
+    socketDiagnostics.healthCheckedAt = data?.checkedAt || new Date().toISOString();
+    socketDiagnostics.healthEdge = diagnostics.railwayEdge || '';
+    socketDiagnostics.healthRequestId = diagnostics.railwayRequestId || '';
+    socketDiagnostics.healthServerTime = diagnostics.serverTime || '';
+    socketDiagnostics.healthEnvironment = diagnostics.railwayEnvironment || '';
   } catch {
     socketDiagnostics.healthStatus = 'unreachable';
     socketDiagnostics.healthLatencyMs = null;
+    socketDiagnostics.healthCheckedAt = new Date().toISOString();
+    socketDiagnostics.healthEdge = '';
+    socketDiagnostics.healthRequestId = '';
+    socketDiagnostics.healthServerTime = '';
+    socketDiagnostics.healthEnvironment = '';
   }
   renderDiagnosticsPanel();
 }
@@ -5195,8 +5325,9 @@ function closeDiagnosticsModal() {
 }
 
 async function refreshCurrentGroupAfterReconnect() {
-  if (!currentGroupId) return;
   try {
+    await loadGroups();
+    if (!currentGroupId) return;
     await Promise.all([loadMessages(currentGroupId), loadMembers(currentGroupId)]);
     if (currentGroupId) {
       renderGroupFromCache(currentGroupId);
@@ -5212,7 +5343,9 @@ function manualReconnectSocket() {
   if (!socket) return;
   socketDiagnostics.reconnectAttempts = 0;
   socketDiagnostics.reconnectFailed = false;
-  updateReconnectBanner();
+  socketDiagnostics.lastConnectError = '';
+  socketDiagnostics.lastConnectErrorAt = '';
+  updateConnectionStatusUi('connecting', 'Reconnecting…');
   socket.disconnect();
   socket.connect();
 }
@@ -5221,11 +5354,11 @@ function bindOnlineOfflineListeners() {
   const syncOnlineState = () => {
     socketDiagnostics.isBrowserOnline = navigator.onLine !== false;
     if (!socketDiagnostics.isBrowserOnline) {
-      updateConnectionStatusUi('Offline', false);
+      updateConnectionStatusUi('offline', 'Offline');
     } else if (socket?.connected) {
-      updateConnectionStatusUi('Connected', true);
+      updateConnectionStatusUi('connected', 'Connected');
     } else {
-      updateConnectionStatusUi('Reconnecting…', false);
+      updateConnectionStatusUi('connecting', 'Reconnecting…');
       if (socket) socket.connect();
     }
     renderDiagnosticsPanel();
@@ -5249,11 +5382,14 @@ function initSocket() {
   renderDiagnosticsPanel();
 
   socket.on('connect', () => {
+    socketDiagnostics.connectionState = 'connected';
     socketDiagnostics.lastConnectError = '';
+    socketDiagnostics.lastConnectErrorAt = '';
+    socketDiagnostics.lastConnectAt = new Date().toISOString();
     socketDiagnostics.reconnectAttempts = 0;
     socketDiagnostics.reconnectFailed = false;
     updateConnectionTransport();
-    updateConnectionStatusUi('Connected', true);
+    updateConnectionStatusUi('connected', 'Connected');
     console.info('[socket] connect', {
       id: socket.id,
       transport: socketDiagnostics.socketTransport,
@@ -5265,8 +5401,9 @@ function initSocket() {
 
   socket.on('disconnect', (reason) => {
     socketDiagnostics.lastDisconnectReason = reason || 'unknown';
+    socketDiagnostics.lastDisconnectAt = new Date().toISOString();
     updateConnectionTransport();
-    updateConnectionStatusUi(socketDiagnostics.isBrowserOnline ? 'Disconnected' : 'Offline', false);
+    updateConnectionStatusUi(socketDiagnostics.isBrowserOnline ? 'disconnected' : 'offline', socketDiagnostics.isBrowserOnline ? 'Disconnected' : 'Offline');
     console.warn('[socket] disconnect', { reason });
     pendingDisappearingStartMessageIds = new Set();
     clearAllMessageVisibilityTimers();
@@ -5275,13 +5412,15 @@ function initSocket() {
 
   socket.on('connect_error', (error) => {
     socketDiagnostics.lastConnectError = error?.message || 'unknown';
-    updateConnectionStatusUi(socketDiagnostics.isBrowserOnline ? 'Connection error' : 'Offline', false);
+    socketDiagnostics.lastConnectErrorAt = new Date().toISOString();
+    updateConnectionStatusUi(socketDiagnostics.isBrowserOnline ? 'connecting' : 'offline', socketDiagnostics.isBrowserOnline ? 'Connection error' : 'Offline');
     console.warn('[socket] connect_error', { message: socketDiagnostics.lastConnectError });
     renderDiagnosticsPanel();
   });
 
   socket.io.on('reconnect_attempt', (attempt) => {
     socketDiagnostics.reconnectAttempts = Number(attempt) || socketDiagnostics.reconnectAttempts + 1;
+    updateConnectionStatusUi('reconnecting');
     updateReconnectBanner();
     console.info('[socket] reconnect_attempt', { attempt: socketDiagnostics.reconnectAttempts });
     renderDiagnosticsPanel();
@@ -5291,6 +5430,7 @@ function initSocket() {
     socketDiagnostics.reconnectAttempts = Number(attempt) || 0;
     socketDiagnostics.reconnectFailed = false;
     updateConnectionTransport();
+    updateConnectionStatusUi('connected', 'Connected');
     console.info('[socket] reconnect', {
       attempt: socketDiagnostics.reconnectAttempts,
       transport: socketDiagnostics.socketTransport,
@@ -5300,6 +5440,7 @@ function initSocket() {
 
   socket.io.on('reconnect_failed', () => {
     socketDiagnostics.reconnectFailed = true;
+    updateConnectionStatusUi('disconnected', 'Reconnect failed');
     updateReconnectBanner();
     console.warn('[socket] reconnect_failed');
     renderDiagnosticsPanel();
@@ -6068,6 +6209,26 @@ function openGrokModal(options = {}) {
   $('grok-prompt-input').focus();
 }
 
+function openProfileModal() {
+  void refreshAiUsageSummary();
+  void loadPushStatus();
+  $('profile-username').value = currentUser.username;
+  $('profile-color').value = currentUser.iconColor;
+  $('profile-error').textContent = '';
+  $('profile-picture-input').value = '';
+  if (currentUser.profilePicture) {
+    $('profile-picture-preview-img').src = currentUser.profilePicture;
+    $('profile-picture-preview').hidden = false;
+  } else {
+    $('profile-picture-preview').hidden = true;
+  }
+  syncProfilePictureModeUI();
+  renderProfileAiUsage();
+  renderPushSettings();
+  $('profile-modal').hidden = false;
+  closeMobileActionMenu();
+}
+
 async function buildGrokContextMessages(groupId, options = {}) {
   const key = getGroupKey(groupId);
   if (!key) throw new Error('Set group key first');
@@ -6409,6 +6570,10 @@ function setupEventListeners() {
     e.stopPropagation();
     openDiagnosticsModal();
   });
+  $('conn-status').addEventListener('click', (event) => {
+    if (event.target.closest('#open-diagnostics-btn')) return;
+    openDiagnosticsModal();
+  });
   $('reconnect-diagnostics-btn').addEventListener('click', openDiagnosticsModal);
   $('reconnect-now-btn').addEventListener('click', () => {
     manualReconnectSocket();
@@ -6428,6 +6593,31 @@ function setupEventListeners() {
   $('diagnostics-modal').addEventListener('click', (e) => {
     if (e.target !== $('diagnostics-modal')) return;
     closeDiagnosticsModal();
+  });
+  $('sidebar-mobile-profile-btn').addEventListener('click', openProfileModal);
+  $('sidebar-mobile-actions-btn').addEventListener('click', (event) => {
+    event.stopPropagation();
+    toggleMobileActionMenu();
+  });
+  $('mobile-new-group-btn').addEventListener('click', () => {
+    closeMobileActionMenu();
+    $('new-group-btn').click();
+  });
+  $('mobile-join-group-btn').addEventListener('click', () => {
+    closeMobileActionMenu();
+    $('join-group-btn').click();
+  });
+  $('mobile-user-list-btn').addEventListener('click', () => {
+    closeMobileActionMenu();
+    $('user-list-btn').click();
+  });
+  $('mobile-diagnostics-btn').addEventListener('click', () => {
+    closeMobileActionMenu();
+    openDiagnosticsModal();
+  });
+  document.addEventListener('click', (event) => {
+    if (event.target.closest('#mobile-sidebar-actions-menu') || event.target.closest('#sidebar-mobile-actions-btn')) return;
+    closeMobileActionMenu();
   });
 
   $('user-list-btn').addEventListener('click', async () => {
@@ -6456,25 +6646,9 @@ function setupEventListeners() {
   });
 
   // Profile modal
-  $('sidebar-user-btn').addEventListener('click', () => {
-    void refreshAiUsageSummary();
-    void loadPushStatus();
-    $('profile-username').value = currentUser.username;
-    $('profile-color').value = currentUser.iconColor;
-    $('profile-error').textContent = '';
-    $('profile-picture-input').value = '';
-    if (currentUser.profilePicture) {
-      $('profile-picture-preview-img').src = currentUser.profilePicture;
-      $('profile-picture-preview').hidden = false;
-    } else {
-      $('profile-picture-preview').hidden = true;
-    }
-    syncProfilePictureModeUI();
-    renderProfileAiUsage();
-    renderPushSettings();
-    $('profile-modal').hidden = false;
-  });
+  $('sidebar-user-btn').addEventListener('click', openProfileModal);
   $('profile-close-btn').addEventListener('click', () => $('profile-modal').hidden = true);
+  $('profile-diagnostics-btn').addEventListener('click', openDiagnosticsModal);
   $('enable-push-btn').addEventListener('click', () => { void enablePushNotifications(); });
   $('disable-push-btn').addEventListener('click', () => { void disablePushNotifications(); });
 

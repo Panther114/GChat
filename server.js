@@ -1317,25 +1317,40 @@ app.get('/api/meta/version', (_req, res) => {
   res.json({ version: APP_VERSION });
 });
 
-app.get('/api/health', (_req, res) => {
+function buildHealthDiagnostics(req) {
+  return {
+    serverTime: new Date().toISOString(),
+    railwayEdge: req.get('x-railway-edge') || null,
+    railwayRequestId: req.get('x-railway-request-id') || null,
+    railwayEnvironment: process.env.RAILWAY_ENVIRONMENT || null,
+    forwardedProto: req.get('x-forwarded-proto') || req.protocol || null,
+    forwardedHost: req.get('x-forwarded-host') || req.get('host') || null,
+  };
+}
+
+app.get('/api/health', (req, res) => {
   try {
     const dbCheck = db.prepare('SELECT 1 AS ok').get();
     const ok = !!dbCheck && dbCheck.ok === 1;
+    res.setHeader('Cache-Control', 'no-store');
     res.status(ok ? 200 : 503).json({
       ok,
       version: APP_VERSION,
       uptimeSec: Math.floor(process.uptime()),
       checkedAt: new Date().toISOString(),
       database: ok ? 'ok' : 'error',
+      diagnostics: buildHealthDiagnostics(req),
     });
   } catch (err) {
     console.error('Healthcheck failed:', err);
+    res.setHeader('Cache-Control', 'no-store');
     res.status(503).json({
       ok: false,
       version: APP_VERSION,
       uptimeSec: Math.floor(process.uptime()),
       checkedAt: new Date().toISOString(),
       database: 'error',
+      diagnostics: buildHealthDiagnostics(req),
     });
   }
 });
