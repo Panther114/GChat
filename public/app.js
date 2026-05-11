@@ -3575,7 +3575,7 @@ function buildGroupItem(g) {
   const preview = document.createElement('div');
   preview.className = 'group-item-preview';
   preview.id = 'preview-' + g.id;
-  preview.textContent = g._lastPreviewText || g._lastPreview || GROUP_PREVIEW_EMPTY;
+  preview.textContent = g._lastPreviewText || GROUP_PREVIEW_EMPTY;
 
   row.append(name, time);
   info.append(row, preview);
@@ -3687,7 +3687,6 @@ function updateGroupPreview(groupId, text, time) {
   if (g) {
     g._lastPreviewTime = timeLabel;
     g._lastPreviewText = previewText;
-    g._lastPreview = `${timeLabel ? `${timeLabel} ` : ''}${previewText}`.trim();
   }
 }
 
