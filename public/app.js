@@ -5326,8 +5326,11 @@ function closeDiagnosticsModal() {
 
 async function refreshCurrentGroupAfterReconnect() {
   try {
+    if (!currentGroupId) {
+      await loadGroups();
+      return;
+    }
     await loadGroups();
-    if (!currentGroupId) return;
     await Promise.all([loadMessages(currentGroupId), loadMembers(currentGroupId)]);
     if (currentGroupId) {
       renderGroupFromCache(currentGroupId);

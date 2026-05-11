@@ -2463,17 +2463,6 @@ body.chat-body.mobile-layout .sidebar-overlay {
 
 /* ── Responsive ─────────────────────────────────────────────────────── */
 @media (max-width: 768px) {
-  :root {
-    --mobile-space-1: 6px;
-    --mobile-space-2: 10px;
-    --mobile-space-3: 14px;
-    --mobile-space-4: 18px;
-    --mobile-font-body: 16px;
-    --mobile-font-meta: 12px;
-    --mobile-row-height: 72px;
-    --mobile-topbar-height: 52px;
-    --mobile-composer-min-height: 58px;
-  }
   body {
     overscroll-behavior-y: contain;
   }
