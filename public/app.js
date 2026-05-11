@@ -305,6 +305,10 @@ const DESKTOP_DEFAULT_SIDEBAR_WIDTH = 260;
 const DESKTOP_MIN_SIDEBAR_WIDTH = 132;
 const DESKTOP_BRAND_ONLY_SIDEBAR_WIDTH = 172;
 const DESKTOP_ICON_ONLY_SIDEBAR_WIDTH = 148;
+const GENERIC_NOTIFICATION_TITLE = 'GChat';
+const GENERIC_NOTIFICATION_FALLBACK_BODY = 'You have unread messages in GChat.';
+const PUSH_NOTIFICATION_TAG = 'gchat-unread';
+const APP_BADGE_UNSUPPORTED = Symbol('app-badge-unsupported');
 
 function readLocalGroupCache(groupId) {
   try {
@@ -980,6 +984,192 @@ async function loadUserManagementSummary() {
   } catch {
     $('user-management-error').textContent = 'Failed to load users';
     return null;
+  }
+}
+
+function isStandalonePwaMode() {
+  return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+}
+
+function getClientPlatformLabel() {
+  return navigator.userAgentData?.platform || navigator.platform || '';
+}
+
+function getPushPlatformHint() {
+  const userAgent = navigator.userAgent || '';
+  const platform = getClientPlatformLabel();
+  const isAppleMobile = /iPad|iPhone|iPod/.test(userAgent)
+    || (platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  if (isAppleMobile && !isStandalonePwaMode()) {
+    return 'Install GChat to Home Screen and open it from the icon before enabling notifications on iPhone or iPad.';
+  }
+  return '';
+}
+
+function normalizePushStatusPayload(value) {
+  const notificationSupported = 'Notification' in window;
+  const serviceWorkerSupported = 'serviceWorker' in navigator;
+  const pushManagerSupported = 'PushManager' in window;
+  return {
+    supported: notificationSupported && serviceWorkerSupported && pushManagerSupported,
+    configured: !!value?.configured,
+    permission: getNotificationPermissionState(),
+    subscriptionActive: !!value?.subscriptionActive,
+    vapidPublicKey: typeof value?.vapidPublicKey === 'string' ? value.vapidPublicKey : '',
+    totalUnreadCount: Math.max(0, Number(value?.totalUnreadCount) || 0),
+  };
+}
+
+function renderPushSettings() {
+  const statusEl = $('push-status-text');
+  const permissionEl = $('push-permission-pill');
+  const hintEl = $('push-platform-hint');
+  const metaEl = $('push-unread-meta');
+  const enableBtn = $('enable-push-btn');
+  const disableBtn = $('disable-push-btn');
+  if (!statusEl || !permissionEl || !hintEl || !metaEl || !enableBtn || !disableBtn) return;
+
+  const badgeSupported = typeof navigator.setAppBadge === 'function' || typeof navigator.clearAppBadge === 'function';
+  const installHint = getPushPlatformHint();
+  let statusText = 'Notifications are unavailable on this browser.';
+  if (pushStatus.supported && !pushStatus.configured) {
+    statusText = 'Push notifications are not configured on this server yet.';
+  } else if (pushStatus.subscriptionActive) {
+    statusText = 'Notifications are enabled for this device.';
+  } else if (pushStatus.permission === 'denied') {
+    statusText = 'Notifications are blocked in browser settings for this device.';
+  } else if (pushStatus.supported) {
+    statusText = 'Notifications are available but currently disabled.';
+  }
+
+  statusEl.textContent = statusText;
+  permissionEl.textContent = pushStatus.permission === 'unsupported' ? 'Unsupported' : pushStatus.permission;
+  hintEl.hidden = !installHint;
+  hintEl.textContent = installHint;
+  metaEl.textContent = `${pushStatus.totalUnreadCount > 0 ? `${pushStatus.totalUnreadCount} unread message${pushStatus.totalUnreadCount === 1 ? '' : 's'} total.` : 'No unread messages right now.'} ${badgeSupported ? 'App icon badges update when your browser supports them.' : 'App icon badges are not supported on this browser.'}`;
+  enableBtn.disabled = !pushStatus.supported || !pushStatus.configured || pushStatus.permission === 'denied' || (!!installHint);
+  disableBtn.hidden = !pushStatus.subscriptionActive;
+  enableBtn.hidden = pushStatus.subscriptionActive;
+}
+
+async function loadPushStatus() {
+  pushStatus = normalizePushStatusPayload(pushStatus);
+  renderPushSettings();
+  try {
+    const res = await fetch('/api/push/status');
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Failed to load notification status');
+    pushStatus = normalizePushStatusPayload(data);
+    renderPushSettings();
+    if (Object.keys(unreadCounts).length === 0) syncUnreadIndicators(pushStatus.totalUnreadCount);
+    return pushStatus;
+  } catch {
+    renderPushSettings();
+    return pushStatus;
+  }
+}
+
+function urlBase64ToUint8Array(base64String) {
+  // Web Push exposes the VAPID applicationServerKey in base64url form.
+  // PushManager.subscribe requires the decoded Uint8Array bytes instead.
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = atob(base64);
+  return Uint8Array.from(rawData, (char) => char.charCodeAt(0));
+}
+
+async function enablePushNotifications() {
+  if (!pushStatus.supported) {
+    showToast('This browser does not support push notifications', 'error');
+    return;
+  }
+  if (!pushStatus.configured) {
+    showToast('Push notifications are not configured on this server', 'error');
+    return;
+  }
+  const installHint = getPushPlatformHint();
+  if (installHint) {
+    showToast(installHint, 'info');
+    renderPushSettings();
+    return;
+  }
+  try {
+    const permission = await Notification.requestPermission();
+    pushStatus.permission = permission || getNotificationPermissionState();
+    renderPushSettings();
+    if (permission !== 'granted') {
+      showToast('Notification permission was not granted', 'info');
+      return;
+    }
+    const registration = await navigator.serviceWorker.ready;
+    const vapidPublicKey = pushStatus.vapidPublicKey || await fetch('/api/push/vapid-public-key')
+      .then(async (res) => {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'Failed to load VAPID key');
+        return String(data.publicKey || '');
+      });
+    if (!vapidPublicKey) throw new Error('Push key is unavailable');
+    const existingSubscription = await registration.pushManager.getSubscription();
+    const subscription = existingSubscription || await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(vapidPublicKey),
+    });
+    const res = await fetch('/api/push/subscribe', {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify({
+        subscription: subscription.toJSON(),
+        userAgent: navigator.userAgent || '',
+        platform: getClientPlatformLabel(),
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Failed to save push subscription');
+    pushStatus = normalizePushStatusPayload({
+      ...pushStatus,
+      configured: true,
+      subscriptionActive: true,
+      vapidPublicKey,
+      totalUnreadCount: data.totalUnreadCount,
+    });
+    renderPushSettings();
+    syncUnreadIndicators(pushStatus.totalUnreadCount);
+    showToast('Notifications enabled', 'success');
+  } catch (err) {
+    showToast(String(err && err.message ? err.message : 'Failed to enable notifications'), 'error');
+    void loadPushStatus();
+  }
+}
+
+async function disablePushNotifications() {
+  try {
+    const registration = await navigator.serviceWorker.ready;
+    const subscription = await registration.pushManager.getSubscription();
+    const endpoint = subscription?.endpoint || null;
+    if (!endpoint) {
+      pushStatus = normalizePushStatusPayload({ ...pushStatus, subscriptionActive: false });
+      renderPushSettings();
+      showToast('Notifications are already disabled', 'info');
+      return;
+    }
+    const res = await fetch('/api/push/unsubscribe', {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify({ endpoint }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Failed to disable notifications');
+    if (subscription) await subscription.unsubscribe().catch(() => {});
+    pushStatus = normalizePushStatusPayload({
+      ...pushStatus,
+      subscriptionActive: false,
+      totalUnreadCount: data.totalUnreadCount,
+    });
+    renderPushSettings();
+    showToast('Notifications disabled', 'success');
+  } catch (err) {
+    showToast(String(err && err.message ? err.message : 'Failed to disable notifications'), 'error');
+    void loadPushStatus();
   }
 }
 
@@ -1716,35 +1906,80 @@ function playNotifSound() {
 }
 
 // ── Native OS Notifications (browser + Electron desktop) ─────────────────────
-function requestNotificationPermission() {
-  if ('Notification' in window && Notification.permission === 'default') {
-    Notification.requestPermission().catch(() => {});
+function getNotificationPermissionState() {
+  if (!('Notification' in window)) return 'unsupported';
+  return Notification.permission || 'default';
+}
+
+function isNotificationPermissionGranted() {
+  return getNotificationPermissionState() === 'granted';
+}
+
+function getGenericUnreadNotificationBody(unreadCount) {
+  const safeCount = Math.max(0, Number(unreadCount) || 0);
+  if (safeCount > 0) {
+    return `You have ${safeCount} unread message${safeCount === 1 ? '' : 's'} in GChat.`;
+  }
+  return GENERIC_NOTIFICATION_FALLBACK_BODY;
+}
+
+function getTotalUnreadCount() {
+  return Object.values(unreadCounts).reduce((sum, count) => sum + Math.max(0, Number(count) || 0), 0);
+}
+
+async function updateAppBadge(count) {
+  const safeCount = Math.max(0, Number(count) || 0);
+  const badgeTarget = typeof navigator !== 'undefined' && navigator ? navigator : null;
+  if (!badgeTarget) return;
+  if (safeCount > 0 && typeof badgeTarget.setAppBadge === 'function') {
+    try {
+      await badgeTarget.setAppBadge(safeCount);
+      badgeApiState = safeCount;
+    } catch {
+      badgeApiState = APP_BADGE_UNSUPPORTED;
+    }
+    return;
+  }
+  if (typeof badgeTarget.clearAppBadge === 'function') {
+    try {
+      await badgeTarget.clearAppBadge();
+      badgeApiState = 0;
+    } catch {
+      badgeApiState = APP_BADGE_UNSUPPORTED;
+    }
   }
 }
 
-function sendNativeNotification(title, body, groupId) {
-  // In Electron the main process handles it via IPC for full OS integration
-  // (Action Center, notification click → focus window + group).
+function syncUnreadIndicators(forcedTotal = null) {
+  const totalUnread = forcedTotal == null
+    ? getTotalUnreadCount()
+    : Math.max(0, Number(forcedTotal) || 0);
+  void updateAppBadge(totalUnread);
+  window.electronAPI?.setUnreadCount(totalUnread);
+  return totalUnread;
+}
+
+function sendNativeNotification(unreadCount, groupId) {
   if (window.electronAPI) {
-    window.electronAPI.showNotification({ title, body, groupId });
+    window.electronAPI.showNotification({
+      title: GENERIC_NOTIFICATION_TITLE,
+      body: getGenericUnreadNotificationBody(unreadCount),
+      groupId,
+    });
     return;
   }
-  // In a plain browser fall back to the Web Notification API.
+  if (pushStatus.subscriptionActive || !isNotificationPermissionGranted()) return;
   if ('Notification' in window && Notification.permission === 'granted') {
     try {
-      const n = new Notification(title, { body, icon: '/gchat_icon.png', tag: groupId });
+      const n = new Notification(GENERIC_NOTIFICATION_TITLE, {
+        body: getGenericUnreadNotificationBody(unreadCount),
+        icon: '/icons/icon-192.png',
+        badge: '/icons/icon-192.png',
+        tag: PUSH_NOTIFICATION_TAG,
+      });
       n.addEventListener('click', () => { window.focus(); });
     } catch { /* notifications not supported */ }
   }
-}
-
-// Build the notification body text for a message, using the decrypted preview
-// when available and falling back to type-based labels for media/encrypted content.
-function getNotificationBody(msg, preview) {
-  if (msg && msg.type === 'whisper') return '[Whisper]';
-  const typeLabel = getMessageTypePreviewLabel(msg);
-  if (typeLabel) return preview && preview !== '[encrypted]' ? preview : typeLabel;
-  return preview !== '[encrypted]' ? preview : 'New message';
 }
 
 // ── Page title notification ──────────────────────────────────────────────────
@@ -1768,8 +2003,6 @@ function updatePageTitleNotification() {
     }
     document.title = originalPageTitle;
   }
-  // Keep Electron taskbar badge in sync with total unread count
-  window.electronAPI?.setUnreadCount(unreadNotificationCount);
 }
 
 function clearPageTitleNotification() {
@@ -1871,6 +2104,15 @@ let hiddenDisappearingMessageIds = new Set();
 const disappearingMessageTimers = new Map();
 const messageVisibilityTimers = new Map();
 let imageViewerZoom = 1;
+let pushStatus = {
+  supported: false,
+  configured: false,
+  permission: 'default',
+  subscriptionActive: false,
+  vapidPublicKey: '',
+  totalUnreadCount: 0,
+};
+let badgeApiState = APP_BADGE_UNSUPPORTED;
 const appLocalSettings = {
   wallpaperDataUrl: null,
   wallpaperBlur: DEFAULT_WALLPAPER_BLUR,
@@ -2932,6 +3174,21 @@ function isMobileLayout() {
   return window.innerWidth <= MOBILE_BREAKPOINT;
 }
 
+function syncAppViewportHeight() {
+  const height = window.visualViewport?.height || window.innerHeight || document.documentElement.clientHeight;
+  document.documentElement.style.setProperty('--app-viewport-height', `${Math.max(320, Math.round(height))}px`);
+}
+
+function bindViewportHeightTracking() {
+  syncAppViewportHeight();
+  window.addEventListener('resize', syncAppViewportHeight);
+  window.addEventListener('orientationchange', syncAppViewportHeight);
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', syncAppViewportHeight);
+    window.visualViewport.addEventListener('scroll', syncAppViewportHeight);
+  }
+}
+
 function desktopSidebarBounds() {
   const maxWidth = Math.max(DESKTOP_MIN_SIDEBAR_WIDTH, Math.floor(window.innerWidth / 3));
   return {
@@ -3045,6 +3302,7 @@ function toggleRightPanel() {
 // ── Init ──────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
   applyStaticIcons();
+  bindViewportHeightTracking();
   desktopSidebarWidth = readDesktopSidebarWidth();
   desktopRightPanelExpanded = localStorage.getItem(DESKTOP_RIGHT_PANEL_STORAGE_KEY) !== '0';
   loadMergedLocalSettings();
@@ -3076,8 +3334,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   $('app-version-label').textContent = appVersionLabel;
 
+  await loadPushStatus();
   await refreshAiUsageSummary();
   await loadGroups();
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.addEventListener('message', (event) => {
+      if (event.data?.type !== 'push-unread-count') return;
+      pushStatus.totalUnreadCount = Math.max(0, Number(event.data.totalUnreadCount) || 0);
+      syncUnreadIndicators(pushStatus.totalUnreadCount);
+      renderPushSettings();
+    });
+  }
   preloadAllGroups();
   initSocket();
   setupEventListeners();
@@ -3090,9 +3357,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   applyDesktopSidebarState();
   applyDesktopRightPanelState();
   startHostedAppUpdatePolling();
-
-  // Request permission to show native OS notifications
-  requestNotificationPermission();
 
   // When running in the Electron desktop app, listen for notification-click
   // events from the main process so we can switch to the right group.
@@ -3154,7 +3418,13 @@ async function loadGroups() {
     const res = await fetch('/api/groups/mine');
     if (!res.ok) return;
     groups = await res.json();
+    unreadCounts = {};
+    for (const group of groups) {
+      unreadCounts[group.id] = Math.max(0, Number(group.unreadCount) || 0);
+    }
+    pushStatus.totalUnreadCount = getTotalUnreadCount();
     renderGroupList();
+    syncUnreadIndicators();
   } catch(err) { console.error('loadGroups error:', err); }
 }
 
@@ -3354,9 +3624,11 @@ function setLocalMessageReadState(groupId, messageId, hasRead = true) {
 
 function updateUnreadBadge(groupId, count) {
   const badge = $('badge-' + groupId);
-  if (!badge) return;
-  badge.textContent = formatUnreadBadgeCount(count);
-  badge.hidden = (Number(count) || 0) === 0;
+  if (badge) {
+    badge.textContent = formatUnreadBadgeCount(count);
+    badge.hidden = (Number(count) || 0) === 0;
+  }
+  pushStatus.totalUnreadCount = syncUnreadIndicators();
 }
 
 function updateGroupUnseenCount(groupId, messages = []) {
@@ -4733,15 +5005,11 @@ function initSocket() {
       // Update last message preview
       const preview = await getMessagePreviewText(msg, msg.groupId);
       updateGroupPreview(msg.groupId, preview, msg.createdAt);
-      // Send native OS notification when a message arrives in a background group
+      // Send native OS notification when a message arrives in a background group.
       if (msg.senderId !== currentUser.id) {
-        const groupData = groups.find(g => g.id === msg.groupId);
-        const groupName = groupData ? groupData.name : 'GChat';
-        sendNativeNotification(
-          `${msg.senderName} in ${groupName}`,
-          getNotificationBody(msg, preview),
-          msg.groupId
-        );
+        const totalUnread = getTotalUnreadCount();
+        pushStatus.totalUnreadCount = totalUnread;
+        sendNativeNotification(totalUnread, msg.groupId);
       }
       return;
     }
@@ -4756,13 +5024,9 @@ function initSocket() {
     updateGroupPreview(msg.groupId, preview2, msg.createdAt);
     // Send native OS notification when the window is not focused (active group)
     if (!document.hasFocus() && msg.senderId !== currentUser.id) {
-      const groupData = groups.find(g => g.id === msg.groupId);
-      const groupName = groupData ? groupData.name : 'GChat';
-      sendNativeNotification(
-        `${msg.senderName} in ${groupName}`,
-        getNotificationBody(msg, preview2),
-        msg.groupId
-      );
+      const totalUnread = getTotalUnreadCount();
+      pushStatus.totalUnreadCount = totalUnread;
+      sendNativeNotification(totalUnread, msg.groupId);
     }
   });
 
@@ -4976,6 +5240,8 @@ function initSocket() {
     if (userId === currentUser.id) {
       // We were kicked
       groups = groups.filter(g => g.id !== groupId);
+      delete unreadCounts[groupId];
+      pushStatus.totalUnreadCount = syncUnreadIndicators();
       renderGroupList();
       if (groupId === currentGroupId) {
         currentGroupId = null; currentGroupData = null;
@@ -4994,6 +5260,8 @@ function initSocket() {
 
   socket.on('group_disbanded', ({ groupId }) => {
     groups = groups.filter(g => g.id !== groupId);
+    delete unreadCounts[groupId];
+    pushStatus.totalUnreadCount = syncUnreadIndicators();
     renderGroupList();
     if (groupId === currentGroupId) {
       currentGroupId = null; currentGroupData = null;
@@ -5813,6 +6081,7 @@ function setupEventListeners() {
   // Profile modal
   $('sidebar-user-btn').addEventListener('click', () => {
     void refreshAiUsageSummary();
+    void loadPushStatus();
     $('profile-username').value = currentUser.username;
     $('profile-color').value = currentUser.iconColor;
     $('profile-error').textContent = '';
@@ -5825,9 +6094,12 @@ function setupEventListeners() {
     }
     syncProfilePictureModeUI();
     renderProfileAiUsage();
+    renderPushSettings();
     $('profile-modal').hidden = false;
   });
   $('profile-close-btn').addEventListener('click', () => $('profile-modal').hidden = true);
+  $('enable-push-btn').addEventListener('click', () => { void enablePushNotifications(); });
+  $('disable-push-btn').addEventListener('click', () => { void disablePushNotifications(); });
 
   $('profile-save-username').addEventListener('click', async () => {
     const username = $('profile-username').value.trim();
@@ -5970,7 +6242,9 @@ function setupEventListeners() {
     if (!res.ok) { $('create-error').textContent = d.error || 'Failed'; return; }
     $('create-modal').hidden = true;
     groups.unshift(d);
+    unreadCounts[d.id] = Math.max(0, Number(d.unreadCount) || 0);
     renderGroupList();
+    syncUnreadIndicators();
     await selectGroup(d.id);
     addSystemMessage('Group "' + d.name + '" created.');
   });
@@ -6002,7 +6276,12 @@ function setupEventListeners() {
     const d = await res.json();
     if (!res.ok) { $('join-error').textContent = d.error || 'Failed'; return; }
     $('join-modal').hidden = true;
-    if (!groups.find(g => g.id === d.id)) { groups.unshift(d); renderGroupList(); }
+    if (!groups.find(g => g.id === d.id)) {
+      groups.unshift(d);
+      unreadCounts[d.id] = Math.max(0, Number(d.unreadCount) || 0);
+      renderGroupList();
+      syncUnreadIndicators();
+    }
     await selectGroup(d.id);
     addSystemMessage('You joined "' + d.name + '".');
   });
@@ -6258,7 +6537,9 @@ function setupEventListeners() {
         method: 'DELETE', headers: apiHeaders(),
       });
       if (res.ok) {
+        delete unreadCounts[currentGroupId];
         groups = groups.filter(g => g.id !== currentGroupId);
+        pushStatus.totalUnreadCount = syncUnreadIndicators();
         renderGroupList();
         currentGroupId = null; currentGroupData = null;
         $('chat-active').hidden = true;

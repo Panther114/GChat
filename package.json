@@ -1,6 +1,6 @@
 {
   "name": "Gchat",
-  "version": "1.1.4",
+  "version": "1.2.0",
   "description": "End-to-end encrypted group chat app",
   "main": "server.js",
   "scripts": {
@@ -26,7 +26,8 @@
     "express": "^4.18.2",
     "express-session": "^1.17.3",
     "socket.io": "^4.7.2",
-    "uuid": "^9.0.0"
+    "uuid": "^9.0.0",
+    "web-push": "^3.6.7"
   },
   "devDependencies": {
     "cross-env": "^7.0.3",
