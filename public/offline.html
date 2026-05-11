@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0a0a0f" />
+  <title>GChat — Offline</title>
+  <link rel="icon" href="/gchat_icon.png" type="image/png" />
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0a0a0f;
+      color: #f5f7ff;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background:
+        radial-gradient(circle at top, rgba(104, 82, 255, 0.22), transparent 38%),
+        linear-gradient(180deg, #0a0a0f 0%, #131523 100%);
+      padding: 24px;
+    }
+
+    .offline-card {
+      width: min(100%, 420px);
+      padding: 32px 28px;
+      border-radius: 24px;
+      background: rgba(19, 21, 35, 0.9);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+      text-align: center;
+    }
+
+    .offline-card img {
+      width: 88px;
+      height: 88px;
+      border-radius: 22px;
+      margin-bottom: 18px;
+    }
+
+    h1 {
+      margin: 0 0 10px;
+      font-size: 1.8rem;
+    }
+
+    p {
+      margin: 0 0 18px;
+      line-height: 1.55;
+      color: rgba(245, 247, 255, 0.8);
+    }
+
+    .offline-actions {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    a,
+    button {
+      appearance: none;
+      border: 0;
+      border-radius: 999px;
+      padding: 12px 18px;
+      font: inherit;
+      font-weight: 600;
+      text-decoration: none;
+      cursor: pointer;
+    }
+
+    .btn-primary {
+      background: #6d5efc;
+      color: #fff;
+    }
+
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.08);
+      color: #f5f7ff;
+    }
+  </style>
+</head>
+<body>
+  <main class="offline-card">
+    <img src="/icons/icon-192.png" alt="GChat logo" />
+    <h1>You're offline</h1>
+    <p>GChat needs an internet connection to sync messages. Reconnect and reopen the app to load the latest hosted version.</p>
+    <div class="offline-actions">
+      <button class="btn-primary" type="button" onclick="window.location.reload()">Try again</button>
+      <a class="btn-secondary" href="/index.html">Open sign in</a>
+    </div>
+  </main>
+</body>
+</html>

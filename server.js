@@ -1147,6 +1147,11 @@ app.use(express.static(path.join(__dirname, 'public'), {
   lastModified: true,
   setHeaders(res, filePath) {
     const ext = path.extname(filePath).toLowerCase();
+    const name = path.basename(filePath).toLowerCase();
+    if (name === 'service-worker.js' || name === 'manifest.json') {
+      res.setHeader('Cache-Control', 'no-cache');
+      return;
+    }
     if (ext === '.html') {
       res.setHeader('Cache-Control', 'no-cache');
       return;

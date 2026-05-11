@@ -386,6 +386,15 @@ async function clearBrowserRuntimeCaches({ includeLocalData = false } = {}) {
     }
   }
 
+  if ('serviceWorker' in navigator) {
+    try {
+      const registrations = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(registrations.map((registration) => registration.unregister()));
+    } catch {
+      // best effort only
+    }
+  }
+
   if (!includeLocalData) return;
 
   const preservedLocalEntries = capturePreservedLocalStorageEntries();
