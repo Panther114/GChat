@@ -6213,6 +6213,7 @@ function openGrokModal(options = {}) {
 }
 
 function openProfileModal() {
+  closeMobileActionMenu();
   void refreshAiUsageSummary();
   void loadPushStatus();
   $('profile-username').value = currentUser.username;
@@ -6229,7 +6230,6 @@ function openProfileModal() {
   renderProfileAiUsage();
   renderPushSettings();
   $('profile-modal').hidden = false;
-  closeMobileActionMenu();
 }
 
 async function buildGrokContextMessages(groupId, options = {}) {
