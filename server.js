@@ -1204,12 +1204,13 @@ const stmts = {
 const sessionMiddleware = session({
   store: new SQLiteStore({ db: 'sessions.db', dir: SESSIONS_DIR }),
   secret: SESSION_SECRET,
+  proxy: true,
   resave: false,
   saveUninitialized: false,
   cookie: {
     httpOnly: true,
     sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production' || process.env.RAILWAY_ENVIRONMENT != null,
+    secure: 'auto',
   },
 });
 
@@ -1237,6 +1238,10 @@ app.use(express.static(path.join(__dirname, 'public'), {
 }));
 app.use(express.json({ limit: MAX_JSON_BODY_BYTES, strict: true }));
 app.use(sessionMiddleware);
+app.use('/api/auth', (_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+});
 const uploadRawBodyParser = express.raw({ type: 'application/octet-stream', limit: MAX_ATTACHMENT_BODY_BYTES });
 
 // ── CSRF Protection ───────────────────────────────────────────────────────────
