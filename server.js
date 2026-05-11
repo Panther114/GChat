@@ -123,6 +123,13 @@ app.set('trust proxy', 1);
 const server = http.createServer(app);
 const io = new Server(server, {
   maxHttpBufferSize: MAX_SOCKET_PAYLOAD_BYTES,
+  transports: ['polling', 'websocket'],
+  pingInterval: 25000,
+  pingTimeout: 30000,
+  connectionStateRecovery: {
+    maxDisconnectionDuration: 2 * 60 * 1000,
+    skipMiddlewares: true,
+  },
 });
 
 // ── Content Security Policy + HSTS ───────────────────────────────────────────

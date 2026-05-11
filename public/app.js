@@ -2065,7 +2065,7 @@ function isMessagesPinnedToBottom() {
 function pinMessagesToBottom(instant = true) {
   const area = messagesArea();
   if (!area) return;
-  area.scrollTo({ top: area.scrollHeight, behavior: instant ? 'instant' : 'smooth' });
+  area.scrollTo({ top: area.scrollHeight, behavior: instant ? 'auto' : 'smooth' });
 }
 
 function createAvatarImage(src) {
@@ -2156,6 +2156,16 @@ const composerTokens = {
   whisper: null,
   hashtag: null,
   ai: null,
+};
+const socketDiagnostics = {
+  healthStatus: 'unknown',
+  healthLatencyMs: null,
+  socketTransport: 'unknown',
+  lastDisconnectReason: '',
+  lastConnectError: '',
+  reconnectAttempts: 0,
+  reconnectFailed: false,
+  isBrowserOnline: typeof navigator !== 'undefined' ? navigator.onLine !== false : true,
 };
 
 function renderCurrentUserAvatar(user = currentUser) {
@@ -2357,8 +2367,12 @@ const GROUP_PREVIEW_EMPTY_TEXT = 'No messages yet';
 // Scroll threshold (px from top) that triggers loading older messages
 const SCROLL_LOAD_THRESHOLD = 1;
 const MOBILE_BREAKPOINT = 768;
+const MOBILE_KEYBOARD_MIN_HEIGHT = 120;
 let mobileViewState = 'list';
 let viewportHeightSyncFrame = 0;
+let viewportHeightSyncTimer = 0;
+let largestViewportHeight = 0;
+let composerNearBottomBeforeFocus = true;
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -3257,32 +3271,58 @@ function setMobileView(view) {
   syncMobileNavigationState();
 }
 
+function isEditableElement(el = document.activeElement) {
+  const tag = el?.tagName || '';
+  return /^(INPUT|TEXTAREA|SELECT)$/.test(tag);
+}
+
+function updateKeyboardInset() {
+  const vv = window.visualViewport;
+  if (!isMobileLayout() || !vv) {
+    document.documentElement.style.setProperty('--keyboard-inset', '0px');
+    return 0;
+  }
+  const fallbackHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+  const layoutHeight = Math.max(largestViewportHeight || 0, fallbackHeight || 0, Math.round(vv.height) || 0);
+  const visibleBottom = Math.round(vv.height + vv.offsetTop);
+  const overlap = Math.max(0, Math.round(layoutHeight - visibleBottom));
+  const keyboardOpen = isEditableElement() && overlap >= MOBILE_KEYBOARD_MIN_HEIGHT;
+  const inset = keyboardOpen ? overlap : 0;
+  document.documentElement.style.setProperty('--keyboard-inset', `${inset}px`);
+  return inset;
+}
+
 function syncAppViewportHeight() {
   const vv = window.visualViewport;
-  const activeTag = document.activeElement?.tagName || '';
-  const editing = /^(INPUT|TEXTAREA|SELECT)$/.test(activeTag);
   const fallbackHeight = window.innerHeight || document.documentElement.clientHeight || 0;
-  const nextHeight = getViewportHeightForLayout({
-    visualViewport: vv,
-    fallbackHeight,
-    editing,
-  });
-  document.documentElement.style.setProperty('--app-viewport-height', `${Math.max(320, nextHeight)}px`);
+  const nextHeight = getViewportHeightForLayout({ visualViewport: vv, fallbackHeight });
+  if (isEditableElement()) {
+    largestViewportHeight = Math.max(largestViewportHeight || 0, nextHeight || 0);
+  } else {
+    largestViewportHeight = Math.max(320, nextHeight || 0);
+  }
+  document.documentElement.style.setProperty('--app-viewport-height', `${Math.max(320, nextHeight, largestViewportHeight)}px`);
+  updateKeyboardInset();
 }
 
 function bindViewportHeightTracking() {
   const scheduleViewportSync = () => {
-    if (viewportHeightSyncFrame) cancelAnimationFrame(viewportHeightSyncFrame);
-    viewportHeightSyncFrame = requestAnimationFrame(() => {
-      viewportHeightSyncFrame = 0;
-      syncAppViewportHeight();
-    });
+    if (viewportHeightSyncTimer) clearTimeout(viewportHeightSyncTimer);
+    viewportHeightSyncTimer = setTimeout(() => {
+      viewportHeightSyncTimer = 0;
+      if (viewportHeightSyncFrame) cancelAnimationFrame(viewportHeightSyncFrame);
+      viewportHeightSyncFrame = requestAnimationFrame(() => {
+        viewportHeightSyncFrame = 0;
+        syncAppViewportHeight();
+      });
+    }, 45);
   };
   scheduleViewportSync();
   window.addEventListener('resize', scheduleViewportSync);
   window.addEventListener('orientationchange', scheduleViewportSync);
   if (window.visualViewport) {
     window.visualViewport.addEventListener('resize', scheduleViewportSync);
+    window.visualViewport.addEventListener('scroll', scheduleViewportSync);
   }
 }
 
@@ -3452,6 +3492,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   preloadAllGroups();
   initSocket();
+  bindOnlineOfflineListeners();
   setupEventListeners();
   syncProfilePictureModeUI();
   setupEmojiPicker();
@@ -4370,7 +4411,7 @@ function updateScrollBadge() {
 function scrollToBottom(instant) {
   const area = messagesArea();
   if (!area) return;
-  area.scrollTo({ top: area.scrollHeight, behavior: instant ? 'instant' : 'smooth' });
+  area.scrollTo({ top: area.scrollHeight, behavior: instant ? 'auto' : 'smooth' });
   scrollUnreadCount = 0;
   updateScrollBadge();
   $('scroll-bottom-btn').hidden = true;
@@ -5049,28 +5090,207 @@ async function handleFileUpload(file) {
   }
 }
 
+function formatDiagnosticsValue(value) {
+  if (value == null || value === '') return '—';
+  return String(value);
+}
+
+function updateConnectionTransport() {
+  socketDiagnostics.socketTransport = socket?.io?.engine?.transport?.name || 'unknown';
+}
+
+function updateReconnectBanner() {
+  const banner = $('reconnect-banner');
+  const text = $('reconnect-banner-text');
+  if (!banner || !text) return;
+  if (socket?.connected) {
+    banner.hidden = true;
+    return;
+  }
+  const parts = [];
+  if (!socketDiagnostics.isBrowserOnline) {
+    parts.push('Offline');
+  } else if (socketDiagnostics.reconnectFailed) {
+    parts.push('Reconnect failed');
+  } else if (socketDiagnostics.reconnectAttempts > 0) {
+    parts.push(`Reconnecting… (${socketDiagnostics.reconnectAttempts})`);
+  } else {
+    parts.push('Reconnecting…');
+  }
+  if (socketDiagnostics.lastDisconnectReason) {
+    parts.push(socketDiagnostics.lastDisconnectReason);
+  }
+  text.textContent = parts.filter(Boolean).join(' · ');
+  banner.hidden = false;
+}
+
+function updateConnectionStatusUi(label, connected) {
+  $('conn-dot').className = connected ? 'conn-dot connected' : 'conn-dot';
+  $('conn-label').textContent = label;
+  updateReconnectBanner();
+}
+
+function renderDiagnosticsPanel() {
+  const grid = $('diagnostics-grid');
+  if (!grid) return;
+  const fields = [
+    ['App version', appVersionLabel],
+    ['Health status', socketDiagnostics.healthStatus],
+    ['Health latency', socketDiagnostics.healthLatencyMs == null ? '—' : `${socketDiagnostics.healthLatencyMs} ms`],
+    ['Socket connected', socket?.connected ? 'true' : 'false'],
+    ['Socket id', socket?.id || '—'],
+    ['Transport', socketDiagnostics.socketTransport],
+    ['Last disconnect', socketDiagnostics.lastDisconnectReason || '—'],
+    ['Last connect error', socketDiagnostics.lastConnectError || '—'],
+    ['Current URL', window.location.href],
+    ['User agent', navigator.userAgent],
+    ['Service worker', navigator.serviceWorker?.controller ? 'controlled' : 'not controlled'],
+    ['Online status', socketDiagnostics.isBrowserOnline ? 'online' : 'offline'],
+  ];
+  grid.innerHTML = '';
+  for (const [label, value] of fields) {
+    const item = document.createElement('div');
+    item.className = 'diagnostics-item';
+    item.innerHTML = `<span class="diagnostics-label">${escapeHtml(label)}</span><span class="diagnostics-value">${escapeHtml(formatDiagnosticsValue(value))}</span>`;
+    grid.appendChild(item);
+  }
+}
+
+async function refreshDiagnosticsHealth() {
+  const startedAt = performance.now();
+  try {
+    const res = await fetch('/api/health', { cache: 'no-store' });
+    const latency = Math.max(0, Math.round(performance.now() - startedAt));
+    const data = await res.json().catch(() => ({}));
+    socketDiagnostics.healthStatus = res.ok && data.ok ? 'ok' : 'error';
+    socketDiagnostics.healthLatencyMs = latency;
+  } catch {
+    socketDiagnostics.healthStatus = 'unreachable';
+    socketDiagnostics.healthLatencyMs = null;
+  }
+  renderDiagnosticsPanel();
+}
+
+function openDiagnosticsModal() {
+  $('diagnostics-modal').hidden = false;
+  updateConnectionTransport();
+  renderDiagnosticsPanel();
+  void refreshDiagnosticsHealth();
+}
+
+function closeDiagnosticsModal() {
+  $('diagnostics-modal').hidden = true;
+}
+
+async function refreshCurrentGroupAfterReconnect() {
+  if (!currentGroupId) return;
+  try {
+    await Promise.all([loadMessages(currentGroupId), loadMembers(currentGroupId)]);
+    if (currentGroupId) {
+      renderGroupFromCache(currentGroupId);
+      observeCurrentGroupRowsForRead();
+      if (composerNearBottomBeforeFocus || isNearBottom()) scrollToBottom(true);
+    }
+  } catch (err) {
+    console.warn('Failed to refresh current group after reconnect:', err);
+  }
+}
+
+function manualReconnectSocket() {
+  if (!socket) return;
+  socketDiagnostics.reconnectAttempts = 0;
+  socketDiagnostics.reconnectFailed = false;
+  updateReconnectBanner();
+  socket.disconnect();
+  socket.connect();
+}
+
+function bindOnlineOfflineListeners() {
+  const syncOnlineState = () => {
+    socketDiagnostics.isBrowserOnline = navigator.onLine !== false;
+    if (!socketDiagnostics.isBrowserOnline) {
+      updateConnectionStatusUi('Offline', false);
+    } else if (socket?.connected) {
+      updateConnectionStatusUi('Connected', true);
+    } else {
+      updateConnectionStatusUi('Reconnecting…', false);
+      if (socket) socket.connect();
+    }
+    renderDiagnosticsPanel();
+  };
+  window.addEventListener('online', syncOnlineState);
+  window.addEventListener('offline', syncOnlineState);
+  syncOnlineState();
+}
+
 // ── Socket.IO ─────────────────────────────────────────────────────────────────
 function initSocket() {
-  socket = io({ transports: ['polling', 'websocket'] });
+  socket = io({
+    transports: ['polling', 'websocket'],
+    reconnection: true,
+    reconnectionAttempts: Infinity,
+    reconnectionDelay: 900,
+    reconnectionDelayMax: 8000,
+    timeout: 20000,
+  });
+  updateConnectionTransport();
+  renderDiagnosticsPanel();
 
   socket.on('connect', () => {
-    $('conn-dot').className = 'conn-dot connected';
-    $('conn-label').textContent = 'Connected';
-    $('reconnect-banner').hidden = true;
+    socketDiagnostics.lastConnectError = '';
+    socketDiagnostics.reconnectAttempts = 0;
+    socketDiagnostics.reconnectFailed = false;
+    updateConnectionTransport();
+    updateConnectionStatusUi('Connected', true);
+    console.info('[socket] connect', {
+      id: socket.id,
+      transport: socketDiagnostics.socketTransport,
+    });
     if (currentGroupId) socket.emit('join_room', currentGroupId);
+    void refreshCurrentGroupAfterReconnect();
+    renderDiagnosticsPanel();
   });
 
-  socket.on('disconnect', () => {
-    $('conn-dot').className = 'conn-dot';
-    $('conn-label').textContent = 'Disconnected';
-    $('reconnect-banner').hidden = false;
+  socket.on('disconnect', (reason) => {
+    socketDiagnostics.lastDisconnectReason = reason || 'unknown';
+    updateConnectionTransport();
+    updateConnectionStatusUi(socketDiagnostics.isBrowserOnline ? 'Disconnected' : 'Offline', false);
+    console.warn('[socket] disconnect', { reason });
     pendingDisappearingStartMessageIds = new Set();
     clearAllMessageVisibilityTimers();
+    renderDiagnosticsPanel();
   });
 
-  socket.on('connect_error', () => {
-    $('conn-dot').className = 'conn-dot';
-    $('conn-label').textContent = 'Connection error';
+  socket.on('connect_error', (error) => {
+    socketDiagnostics.lastConnectError = error?.message || 'unknown';
+    updateConnectionStatusUi(socketDiagnostics.isBrowserOnline ? 'Connection error' : 'Offline', false);
+    console.warn('[socket] connect_error', { message: socketDiagnostics.lastConnectError });
+    renderDiagnosticsPanel();
+  });
+
+  socket.io.on('reconnect_attempt', (attempt) => {
+    socketDiagnostics.reconnectAttempts = Number(attempt) || socketDiagnostics.reconnectAttempts + 1;
+    updateReconnectBanner();
+    console.info('[socket] reconnect_attempt', { attempt: socketDiagnostics.reconnectAttempts });
+    renderDiagnosticsPanel();
+  });
+
+  socket.io.on('reconnect', (attempt) => {
+    socketDiagnostics.reconnectAttempts = Number(attempt) || 0;
+    socketDiagnostics.reconnectFailed = false;
+    updateConnectionTransport();
+    console.info('[socket] reconnect', {
+      attempt: socketDiagnostics.reconnectAttempts,
+      transport: socketDiagnostics.socketTransport,
+    });
+    renderDiagnosticsPanel();
+  });
+
+  socket.io.on('reconnect_failed', () => {
+    socketDiagnostics.reconnectFailed = true;
+    updateReconnectBanner();
+    console.warn('[socket] reconnect_failed');
+    renderDiagnosticsPanel();
   });
 
   socket.on('attachment_upload_progress', (payload) => {
@@ -6173,6 +6393,30 @@ function setupEventListeners() {
     applyWallpaperDraftPreview();
     setWallpaperSaveState(!wallpaperSettingsEqual(wallpaperDraft, appLocalSettings));
   });
+  $('open-diagnostics-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    openDiagnosticsModal();
+  });
+  $('reconnect-diagnostics-btn').addEventListener('click', openDiagnosticsModal);
+  $('reconnect-now-btn').addEventListener('click', () => {
+    manualReconnectSocket();
+    void refreshDiagnosticsHealth();
+  });
+  $('diagnostics-refresh-btn').addEventListener('click', () => {
+    updateConnectionTransport();
+    renderDiagnosticsPanel();
+    void refreshDiagnosticsHealth();
+  });
+  $('diagnostics-reconnect-btn').addEventListener('click', () => {
+    manualReconnectSocket();
+    void refreshDiagnosticsHealth();
+  });
+  $('diagnostics-close-btn').addEventListener('click', closeDiagnosticsModal);
+  $('diagnostics-close-footer-btn').addEventListener('click', closeDiagnosticsModal);
+  $('diagnostics-modal').addEventListener('click', (e) => {
+    if (e.target !== $('diagnostics-modal')) return;
+    closeDiagnosticsModal();
+  });
 
   $('user-list-btn').addEventListener('click', async () => {
     $('user-management-error').textContent = '';
@@ -6792,9 +7036,21 @@ function setupEventListeners() {
     }
   });
 
+  msgInput.addEventListener('focus', () => {
+    composerNearBottomBeforeFocus = isNearBottom();
+    if (!isMobileLayout()) return;
+    setTimeout(() => {
+      syncAppViewportHeight();
+      window.scrollTo(0, 0);
+      if (composerNearBottomBeforeFocus) scrollToBottom(true);
+    }, 80);
+  });
+
   msgInput.addEventListener('blur', () => {
     clearTimeout(window._myTypingTimer);
     if (currentGroupId && socket) socket.emit('stop_typing', { groupId: currentGroupId });
+    composerNearBottomBeforeFocus = true;
+    syncAppViewportHeight();
   });
 
   msgInput.addEventListener('keydown', (e) => {
@@ -6969,8 +7225,7 @@ async function loadOlderMessages() {
     if (indicator) indicator.hidden = true;
   }
 }
-function getViewportHeightForLayout({ visualViewport, fallbackHeight, editing }) {
+function getViewportHeightForLayout({ visualViewport, fallbackHeight }) {
   const visualHeight = visualViewport ? Math.round(visualViewport.height) : 0;
-  if (isMobileLayout() && editing && visualHeight > 0) return visualHeight;
   return Math.max(fallbackHeight, visualHeight || 0);
 }

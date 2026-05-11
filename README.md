@@ -232,6 +232,13 @@ The recommended healthcheck endpoint is:
 
 It verifies that the Express process is running and that SQLite is responding before Railway marks the deployment healthy.
 
+For users in mainland China, deployment reliability recommendations:
+
+- Prefer a Railway region closer to users (for example Singapore) when available.
+- Keep Socket.IO fallback transports enabled (`polling` + `websocket`) for unstable networks.
+- Prefer a stable custom domain if access to `*.railway.app` is inconsistent on local networks.
+- Validate connectivity using Wi-Fi, mobile hotspot, VPN off, and VPN on.
+
 ---
 
 ## Hosted PWA Installation
@@ -272,6 +279,7 @@ The hosted web app at `https://gchat.up.railway.app` can be installed as a free 
 - Notification sound is controlled by the operating system, mute switch, Focus / Do Not Disturb, and notification settings.
 - App icon badge support varies by browser and platform. GChat still works when the Badging API is unavailable.
 - Notification payloads are privacy-preserving and generic. They do not contain decrypted message content, sender names, or group names.
+- GChat keeps form controls at 16px+ on mobile to avoid iOS input auto-zoom and does not force `user-scalable=no` by default to preserve accessibility zoom.
 
 ### VAPID key generation
 

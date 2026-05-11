@@ -29,6 +29,7 @@
     <div class="conn-status" id="conn-status">
       <span class="conn-dot" id="conn-dot"></span>
       <span class="conn-label" id="conn-label">Connecting…</span>
+      <button class="btn-icon conn-diagnostics-btn" id="open-diagnostics-btn" title="Connection diagnostics" aria-label="Connection diagnostics" data-icon="activity" data-icon-only="true"></button>
     </div>
     <nav class="group-list" id="group-list">
       <div class="empty-groups" id="empty-groups">No groups yet.<br>Create or join one below!</div>
@@ -71,7 +72,11 @@
 
       <button class="unread-jump-btn" id="unread-jump-btn" hidden data-icon="arrow-up">Go to first unread</button>
 
-      <div class="reconnect-banner" id="reconnect-banner" hidden data-icon="refresh-cw">Reconnecting…</div>
+      <div class="reconnect-banner" id="reconnect-banner" hidden>
+        <span class="reconnect-banner-text" id="reconnect-banner-text">Reconnecting…</span>
+        <button class="btn-secondary reconnect-action-btn" id="reconnect-now-btn" type="button">Reconnect</button>
+        <button class="btn-secondary reconnect-action-btn" id="reconnect-diagnostics-btn" type="button">Diagnostics</button>
+      </div>
 
       <div class="messages-area" id="messages-area">
         <div class="load-more-indicator" id="load-more-indicator" hidden>Loading older messages…</div>
@@ -543,6 +548,22 @@
       <p class="form-error" id="user-management-error"></p>
       <div class="user-management-list" id="user-management-list">
         <div class="user-management-empty">Loading users…</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="diagnostics-modal" hidden>
+    <div class="modal modal-page diagnostics-modal">
+      <div class="modal-title-row">
+        <h2 data-icon="activity">Connection Diagnostics</h2>
+        <button class="btn-icon profile-close-btn" id="diagnostics-close-btn" title="Close" aria-label="Close" data-icon="x" data-icon-only="true"></button>
+      </div>
+      <div class="diagnostics-grid" id="diagnostics-grid"></div>
+      <p class="diagnostics-note">Diagnostics never include message content.</p>
+      <div class="modal-actions">
+        <button class="btn-secondary" id="diagnostics-refresh-btn" type="button">Refresh</button>
+        <button class="btn-secondary" id="diagnostics-reconnect-btn" type="button">Reconnect</button>
+        <button class="btn-primary" id="diagnostics-close-footer-btn" type="button">Close</button>
       </div>
     </div>
   </div>
