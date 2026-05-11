@@ -2062,10 +2062,10 @@ function isMessagesPinnedToBottom() {
   return area.scrollHeight - area.scrollTop - area.clientHeight < 40;
 }
 
-function pinMessagesToBottom(instant = true) {
+function pinMessagesToBottom(skipAnimation = true) {
   const area = messagesArea();
   if (!area) return;
-  area.scrollTo({ top: area.scrollHeight, behavior: instant ? 'auto' : 'smooth' });
+  area.scrollTo({ top: area.scrollHeight, behavior: skipAnimation ? 'auto' : 'smooth' });
 }
 
 function createAvatarImage(src) {
@@ -2368,6 +2368,8 @@ const GROUP_PREVIEW_EMPTY_TEXT = 'No messages yet';
 const SCROLL_LOAD_THRESHOLD = 1;
 const MOBILE_BREAKPOINT = 768;
 const MOBILE_KEYBOARD_MIN_HEIGHT = 120;
+const VIEWPORT_SYNC_DEBOUNCE_MS = 45;
+const MOBILE_KEYBOARD_FOCUS_DELAY_MS = 80;
 let mobileViewState = 'list';
 let viewportHeightSyncFrame = 0;
 let viewportHeightSyncTimer = 0;
@@ -3273,10 +3275,10 @@ function setMobileView(view) {
 
 function isEditableElement(el = document.activeElement) {
   const tag = el?.tagName || '';
-  return /^(INPUT|TEXTAREA|SELECT)$/.test(tag);
+  return /^(INPUT|TEXTAREA|SELECT)$/.test(tag) || el?.isContentEditable === true;
 }
 
-function updateKeyboardInset() {
+function updateKeyboardInset(activeElement = document.activeElement) {
   const vv = window.visualViewport;
   if (!isMobileLayout() || !vv) {
     document.documentElement.style.setProperty('--keyboard-inset', '0px');
@@ -3286,7 +3288,7 @@ function updateKeyboardInset() {
   const layoutHeight = Math.max(largestViewportHeight || 0, fallbackHeight || 0, Math.round(vv.height) || 0);
   const visibleBottom = Math.round(vv.height + vv.offsetTop);
   const overlap = Math.max(0, Math.round(layoutHeight - visibleBottom));
-  const keyboardOpen = isEditableElement() && overlap >= MOBILE_KEYBOARD_MIN_HEIGHT;
+  const keyboardOpen = isEditableElement(activeElement) && overlap >= MOBILE_KEYBOARD_MIN_HEIGHT;
   const inset = keyboardOpen ? overlap : 0;
   document.documentElement.style.setProperty('--keyboard-inset', `${inset}px`);
   return inset;
@@ -3295,14 +3297,16 @@ function updateKeyboardInset() {
 function syncAppViewportHeight() {
   const vv = window.visualViewport;
   const fallbackHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+  const activeElement = document.activeElement;
   const nextHeight = getViewportHeightForLayout({ visualViewport: vv, fallbackHeight });
-  if (isEditableElement()) {
+  if (isEditableElement(activeElement)) {
     largestViewportHeight = Math.max(largestViewportHeight || 0, nextHeight || 0);
   } else {
     largestViewportHeight = Math.max(320, nextHeight || 0);
   }
-  document.documentElement.style.setProperty('--app-viewport-height', `${Math.max(320, nextHeight, largestViewportHeight)}px`);
-  updateKeyboardInset();
+  const stableLayoutHeight = Math.max(320, nextHeight, largestViewportHeight);
+  document.documentElement.style.setProperty('--app-viewport-height', `${stableLayoutHeight}px`);
+  updateKeyboardInset(activeElement);
 }
 
 function bindViewportHeightTracking() {
@@ -3315,7 +3319,7 @@ function bindViewportHeightTracking() {
         viewportHeightSyncFrame = 0;
         syncAppViewportHeight();
       });
-    }, 45);
+    }, VIEWPORT_SYNC_DEBOUNCE_MS);
   };
   scheduleViewportSync();
   window.addEventListener('resize', scheduleViewportSync);
@@ -4408,10 +4412,10 @@ function updateScrollBadge() {
   badge.hidden = scrollUnreadCount === 0;
 }
 
-function scrollToBottom(instant) {
+function scrollToBottom(skipAnimation) {
   const area = messagesArea();
   if (!area) return;
-  area.scrollTo({ top: area.scrollHeight, behavior: instant ? 'auto' : 'smooth' });
+  area.scrollTo({ top: area.scrollHeight, behavior: skipAnimation ? 'auto' : 'smooth' });
   scrollUnreadCount = 0;
   updateScrollBadge();
   $('scroll-bottom-btn').hidden = true;
@@ -5151,7 +5155,13 @@ function renderDiagnosticsPanel() {
   for (const [label, value] of fields) {
     const item = document.createElement('div');
     item.className = 'diagnostics-item';
-    item.innerHTML = `<span class="diagnostics-label">${escapeHtml(label)}</span><span class="diagnostics-value">${escapeHtml(formatDiagnosticsValue(value))}</span>`;
+    const labelEl = document.createElement('span');
+    labelEl.className = 'diagnostics-label';
+    labelEl.textContent = label;
+    const valueEl = document.createElement('span');
+    valueEl.className = 'diagnostics-value';
+    valueEl.textContent = formatDiagnosticsValue(value);
+    item.append(labelEl, valueEl);
     grid.appendChild(item);
   }
 }
@@ -5162,7 +5172,9 @@ async function refreshDiagnosticsHealth() {
     const res = await fetch('/api/health', { cache: 'no-store' });
     const latency = Math.max(0, Math.round(performance.now() - startedAt));
     const data = await res.json().catch(() => ({}));
-    socketDiagnostics.healthStatus = res.ok && data.ok ? 'ok' : 'error';
+    if (res.ok && data.ok === true) socketDiagnostics.healthStatus = 'ok';
+    else if (res.ok) socketDiagnostics.healthStatus = 'degraded';
+    else socketDiagnostics.healthStatus = 'error';
     socketDiagnostics.healthLatencyMs = latency;
   } catch {
     socketDiagnostics.healthStatus = 'unreachable';
@@ -7043,7 +7055,7 @@ function setupEventListeners() {
       syncAppViewportHeight();
       window.scrollTo(0, 0);
       if (composerNearBottomBeforeFocus) scrollToBottom(true);
-    }, 80);
+    }, MOBILE_KEYBOARD_FOCUS_DELAY_MS);
   });
 
   msgInput.addEventListener('blur', () => {
@@ -7227,5 +7239,7 @@ async function loadOlderMessages() {
 }
 function getViewportHeightForLayout({ visualViewport, fallbackHeight }) {
   const visualHeight = visualViewport ? Math.round(visualViewport.height) : 0;
+  // Keep layout viewport stable; keyboard movement is handled separately via
+  // --keyboard-inset so iOS focus does not collapse the full app shell.
   return Math.max(fallbackHeight, visualHeight || 0);
 }
