@@ -1065,6 +1065,8 @@ async function loadPushStatus() {
 }
 
 function urlBase64ToUint8Array(base64String) {
+  // Web Push exposes the VAPID applicationServerKey in base64url form.
+  // PushManager.subscribe requires the decoded Uint8Array bytes instead.
   const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
   const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
   const rawData = atob(base64);
