@@ -25,11 +25,19 @@
       <span class="brand-name">GChat</span>
       <button class="btn-icon brand-cache-btn" id="clear-cache-btn" title="Clear cache and restart" aria-label="Clear cache and restart" data-icon="refresh-cw" data-icon-only="true"></button>
       <span class="brand-version" id="app-version-label">v—</span>
+      <button class="btn-icon sidebar-mobile-profile-btn" id="sidebar-mobile-profile-btn" title="Profile and settings" aria-label="Profile and settings" data-icon="user" data-icon-only="true"></button>
+      <button class="btn-icon sidebar-mobile-actions-btn" id="sidebar-mobile-actions-btn" title="More actions" aria-label="More actions" data-icon="plus" data-icon-only="true"></button>
     </div>
     <div class="conn-status" id="conn-status">
       <span class="conn-dot" id="conn-dot"></span>
       <span class="conn-label" id="conn-label">Connecting…</span>
       <button class="btn-icon conn-diagnostics-btn" id="open-diagnostics-btn" title="Connection diagnostics" aria-label="Connection diagnostics" data-icon="activity" data-icon-only="true"></button>
+    </div>
+    <div class="mobile-sidebar-actions-menu" id="mobile-sidebar-actions-menu" hidden>
+      <button class="btn-action mobile-sidebar-action" id="mobile-new-group-btn" data-icon="plus">New Group</button>
+      <button class="btn-action mobile-sidebar-action" id="mobile-join-group-btn" data-icon="log-in">Join Group</button>
+      <button class="btn-action mobile-sidebar-action" id="mobile-user-list-btn" data-icon="user">User List</button>
+      <button class="btn-action mobile-sidebar-action" id="mobile-diagnostics-btn" data-icon="activity">Diagnostics</button>
     </div>
     <nav class="group-list" id="group-list">
       <div class="empty-groups" id="empty-groups">No groups yet.<br>Create or join one below!</div>
@@ -314,6 +322,7 @@
               <button class="btn-secondary btn-sm" id="disable-push-btn" type="button" hidden>Disable notifications</button>
             </div>
           </div>
+          <button class="btn-secondary btn-sm profile-diagnostics-btn" id="profile-diagnostics-btn" type="button" data-icon="activity">Connection diagnostics</button>
         </section>
         <section class="profile-section">
           <div class="profile-section-title">AI usage</div>
