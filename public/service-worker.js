@@ -7,10 +7,12 @@ const APP_SHELL_ASSETS = [
   '/chat.html',
   '/offline.html',
   '/manifest.json',
+  '/pwa.js',
   '/style.css',
   '/theme-init.js',
   '/auth.js',
   '/app.js',
+  '/socket.io/socket.io.js',
   '/gchat_icon.png',
   '/favicon.svg',
   '/icons/icon-192.png',
@@ -57,8 +59,7 @@ async function handleNavigation(request) {
     return await cacheResponse(url.pathname, response);
   } catch {
     const cache = await caches.open(APP_CACHE);
-    return (await cache.match(url.pathname))
-      || (await cache.match('/offline.html'));
+    return (await cache.match('/offline.html'));
   }
 }
 
