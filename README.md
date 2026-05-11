@@ -20,6 +20,7 @@ Current version: **v1.1.4**
 - Client-side search and chat export (disappearing messages are excluded from exports)
 - Image viewer and automatic image compression
 - Emoji picker and mobile-responsive layout
+- Installable hosted PWA for Android Chrome/Chromium and iPhone/iPad Safari home screen
 - Ask AI modal with default `DeepSeek V4 Flash / Context / Casual` selections
 - OpenRouter-backed multi-model AI replies with Fast vs Context mode, tone prompts, tag-aware context scoping, asynchronous chat replies, and RMB cost metadata
 
@@ -230,6 +231,35 @@ It verifies that the Express process is running and that SQLite is responding be
 
 ---
 
+## Hosted PWA Installation
+
+The hosted web app at `https://gchat.up.railway.app` can be installed as a free Progressive Web App without building native Android or iOS packages.
+
+### Android (Chrome / Chromium)
+
+1. Open `https://gchat.up.railway.app`.
+2. Sign in if needed.
+3. Open the browser menu.
+4. Tap **Install app** or **Add to Home screen**.
+5. Confirm the install prompt.
+
+### iPhone / iPad (Safari)
+
+1. Open `https://gchat.up.railway.app` in Safari.
+2. Tap the **Share** button.
+3. Tap **Add to Home Screen**.
+4. Optionally rename `GChat`.
+5. Tap **Add**.
+
+### Update behavior
+
+- Normal product updates still deploy through Railway.
+- Installed users do not need to reinstall after normal web app updates.
+- When online, the PWA fetches the newest hosted version on refresh or reopen.
+- When offline, a cached fallback page is available until connectivity returns.
+
+---
+
 ## Scaling Limits of the Current Architecture
 
 The current hosted app is designed for a single Node.js instance with local SQLite storage.
@@ -369,8 +399,11 @@ Relevant Electron Builder behavior:
     ├── index.html               # Sign-in/sign-up page
     ├── chat.html                # Main chat UI
     ├── app.js                   # Client-side application logic
+    ├── manifest.json            # Hosted PWA manifest
+    ├── service-worker.js        # Hosted PWA offline/update handling
     ├── style.css                # Web UI styling
     ├── gchat_icon.png           # App icon asset
+    ├── icons/                   # Android/iOS PWA icon set
     └── promo.html               # Static promotional page
 ```
 

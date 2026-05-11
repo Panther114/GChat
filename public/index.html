@@ -3,7 +3,16 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <link rel="icon" href="gchat_icon.png" type="image/png" />
+  <meta name="description" content="Encrypted group messaging" />
+  <meta name="application-name" content="GChat" />
+  <meta name="theme-color" content="#0a0a0f" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="GChat" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" href="/gchat_icon.png" type="image/png" />
+  <link rel="apple-touch-icon" href="/icons/icon-192.png" />
   <title>GChat  — Sign In</title>
   <script src="theme-init.js"></script>
   <link rel="stylesheet" href="style.css" />
@@ -12,7 +21,7 @@
   <div class="auth-card">
     <!-- Logo / Brand -->
     <div class="auth-logo">
-      <img class="auth-logo-icon" src="gchat_icon.png" alt="GChat logo" />
+      <img class="auth-logo-icon" src="/gchat_icon.png" alt="GChat logo" />
       <h1 class="auth-title">GChat <span></span></h1>
       <p class="auth-subtitle">Encrypted Group Messaging</p>
     </div>
@@ -97,6 +106,7 @@
     </form>
   </div>
 
+  <script src="/pwa.js"></script>
   <script src="auth.js"></script>
 </body>
 </html>

@@ -3,7 +3,16 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <link rel="icon" href="gchat_icon.png" type="image/png" />
+  <meta name="description" content="Encrypted group messaging" />
+  <meta name="application-name" content="GChat" />
+  <meta name="theme-color" content="#0a0a0f" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="GChat" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" href="/gchat_icon.png" type="image/png" />
+  <link rel="apple-touch-icon" href="/icons/icon-192.png" />
   <title>GChat </title>
   <script src="theme-init.js"></script>
   <link rel="stylesheet" href="style.css" />
@@ -12,7 +21,7 @@
 
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-brand">
-      <img class="brand-icon" src="gchat_icon.png" alt="GChat logo" />
+      <img class="brand-icon" src="/gchat_icon.png" alt="GChat logo" />
       <span class="brand-name">GChat</span>
       <button class="btn-icon brand-cache-btn" id="clear-cache-btn" title="Clear cache and restart" aria-label="Clear cache and restart" data-icon="refresh-cw" data-icon-only="true"></button>
       <span class="brand-version" id="app-version-label">v—</span>
@@ -42,7 +51,7 @@
     <div class="chat-empty" id="chat-empty">
       <button class="btn-icon sidebar-toggle mobile-only-toggle" id="sidebar-toggle-empty" title="Menu" aria-label="Menu" data-icon="menu" data-icon-only="true"></button>
       <button class="btn-icon right-panel-toggle mobile-only-toggle" id="right-panel-toggle-empty" title="Group details" aria-label="Group details" data-icon="panel-right" data-icon-only="true"></button>
-      <img class="chat-empty-icon" src="gchat_icon.png" alt="GChat logo" />
+      <img class="chat-empty-icon" src="/gchat_icon.png" alt="GChat logo" />
       <p class="chat-empty-title">Select a group to start chatting</p>
       <p class="chat-empty-sub">Your messages are end-to-end encrypted</p>
     </div>
@@ -489,6 +498,7 @@
   <div class="sidebar-overlay" id="sidebar-overlay" hidden></div>
 
   <script src="/socket.io/socket.io.js"></script>
+  <script src="/pwa.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
