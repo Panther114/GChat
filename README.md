@@ -4,7 +4,7 @@ Gchat is a client-side encrypted group chat application built with Node.js, Expr
 
 The hosted web app is the primary product. The desktop app is a native shell that loads the hosted Railway deployment.
 
-Current version: **v1.2.0**
+Current version: **v1.2.1**
 
 ---
 
@@ -177,7 +177,7 @@ The main application pages are served from `public/`.
 
 ---
 
-## Ask AI (v1.2.0)
+## Ask AI (v1.2.1)
 
 - Typing `/ai ` in the chat composer or clicking **Ask AI** in the right panel opens the same modal before the AI-tagged prompt is sent into chat.
 - The modal defaults to:
@@ -259,10 +259,11 @@ The hosted web app at `https://gchat.up.railway.app` can be installed as a free 
 
 1. Install and open the GChat PWA from its icon.
 2. Sign in.
-3. Open the **Profile** panel.
-4. Tap **Enable notifications**.
-5. Allow the system permission prompt.
-6. To disable notifications later, return to the same Profile section and tap **Disable notifications**.
+3. Keep **Remember Me** enabled so the installed PWA keeps a native-app-like signed-in session.
+4. Open the **Profile** panel.
+5. Tap **Enable notifications**.
+6. Allow the system permission prompt.
+7. To disable notifications later, return to the same Profile section and tap **Disable notifications**.
 
 ### Platform limitations
 

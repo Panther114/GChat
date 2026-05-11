@@ -888,6 +888,9 @@ function renderUserManagementPanel() {
     const head = document.createElement('div');
     head.className = 'user-management-user-head';
 
+    const summaryText = document.createElement('div');
+    summaryText.className = 'user-management-user-summary';
+
     const name = document.createElement('div');
     name.className = 'user-management-user-name';
     name.textContent = user.username;
@@ -909,10 +912,27 @@ function renderUserManagementPanel() {
     track.appendChild(fill);
     usage.append(value, track);
 
-    head.append(name, usage);
+    summaryText.append(name);
+    head.append(summaryText, usage);
     main.append(head);
 
     if (summary.viewerCanManageAiLimits || (summary.viewerCanDeleteUsers && user.username !== APP_OWNER_USERNAME)) {
+      const toggleBtn = document.createElement('button');
+      toggleBtn.type = 'button';
+      toggleBtn.className = 'btn-icon user-management-expand-btn';
+      toggleBtn.setAttribute('aria-expanded', 'false');
+      setElementIcon(toggleBtn, 'panel-right', {
+        iconOnly: true,
+        label: `Show actions for ${user.username}`,
+      });
+      toggleBtn.addEventListener('click', () => {
+        const expanded = row.classList.toggle('expanded');
+        toggleBtn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        toggleBtn.setAttribute('aria-label', `${expanded ? 'Hide' : 'Show'} actions for ${user.username}`);
+        toggleBtn.title = `${expanded ? 'Hide' : 'Show'} actions for ${user.username}`;
+      });
+      head.appendChild(toggleBtn);
+
       const actions = document.createElement('div');
       actions.className = 'user-management-user-actions';
       if (summary.viewerCanManageAiLimits) {
@@ -2332,10 +2352,13 @@ async function ensureGroupDataPreloaded(groupId) {
 // Decryption failure text constants (must match renderMsgContent output)
 const MSG_NO_KEY = '[No key — set group key to decrypt]';
 const MSG_DECRYPT_FAIL = '[Unable to decrypt]';
+const GROUP_PREVIEW_EMPTY_TEXT = 'No messages yet';
 
 // Scroll threshold (px from top) that triggers loading older messages
 const SCROLL_LOAD_THRESHOLD = 1;
 const MOBILE_BREAKPOINT = 768;
+let mobileViewState = 'list';
+let viewportHeightSyncFrame = 0;
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -3000,6 +3023,10 @@ const ICON_SPECS = {
     ['line', { x1: '12', y1: '16', x2: '12', y2: '12' }],
     ['line', { x1: '12', y1: '8', x2: '12.01', y2: '8' }],
   ],
+  'arrow-left': [
+    ['line', { x1: '19', y1: '12', x2: '5', y2: '12' }],
+    ['polyline', { points: '12 19 5 12 12 5' }],
+  ],
   'arrow-up': [
     ['line', { x1: '12', y1: '19', x2: '12', y2: '5' }],
     ['polyline', { points: '5 12 12 5 19 12' }],
@@ -3174,18 +3201,88 @@ function isMobileLayout() {
   return window.innerWidth <= MOBILE_BREAKPOINT;
 }
 
+function normalizeMobileView(view) {
+  if (view === 'details' && currentGroupId) return 'details';
+  if (view === 'chat' && currentGroupId) return 'chat';
+  return 'list';
+}
+
+function syncRightPanelMobileTitle() {
+  const title = $('right-panel-mobile-title');
+  if (!title) return;
+  title.textContent = currentGroupData?.name || 'Details';
+}
+
+function updateChatNavigationButton() {
+  const button = $('sidebar-toggle');
+  if (!button) return;
+  setElementIcon(button, isMobileLayout() ? 'arrow-left' : 'menu', {
+    iconOnly: true,
+    label: isMobileLayout() ? 'Back to chats' : 'Menu',
+  });
+}
+
+function updateDetailsNavigationButton() {
+  const button = $('right-panel-close');
+  if (!button) return;
+  setElementIcon(button, isMobileLayout() ? 'arrow-left' : 'x', {
+    iconOnly: true,
+    label: isMobileLayout() ? 'Back to chat' : 'Close details',
+  });
+}
+
+function syncMobileNavigationState() {
+  const body = document.body;
+  const sidebar = $('sidebar');
+  const rightPanel = $('right-panel');
+  const overlay = $('sidebar-overlay');
+  if (!body || !sidebar || !rightPanel || !overlay) return;
+  const mobile = isMobileLayout();
+  const view = normalizeMobileView(mobileViewState);
+  body.classList.toggle('mobile-layout', mobile);
+  body.classList.toggle('mobile-list-view', mobile && view === 'list');
+  body.classList.toggle('mobile-chat-view', mobile && view === 'chat');
+  body.classList.toggle('mobile-details-view', mobile && view === 'details');
+  sidebar.classList.toggle('open', mobile && view === 'list');
+  rightPanel.classList.toggle('open', mobile && view === 'details');
+  overlay.hidden = true;
+  updateChatNavigationButton();
+  updateDetailsNavigationButton();
+  updateRightPanelToggleButtons();
+  syncRightPanelMobileTitle();
+}
+
+function setMobileView(view) {
+  mobileViewState = normalizeMobileView(view);
+  syncMobileNavigationState();
+}
+
 function syncAppViewportHeight() {
-  const height = window.visualViewport?.height || window.innerHeight || document.documentElement.clientHeight;
-  document.documentElement.style.setProperty('--app-viewport-height', `${Math.max(320, Math.round(height))}px`);
+  const vv = window.visualViewport;
+  const activeTag = document.activeElement?.tagName || '';
+  const editing = /^(INPUT|TEXTAREA|SELECT)$/.test(activeTag);
+  const fallbackHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+  const nextHeight = getViewportHeightForLayout({
+    visualViewport: vv,
+    fallbackHeight,
+    editing,
+  });
+  document.documentElement.style.setProperty('--app-viewport-height', `${Math.max(320, nextHeight)}px`);
 }
 
 function bindViewportHeightTracking() {
-  syncAppViewportHeight();
-  window.addEventListener('resize', syncAppViewportHeight);
-  window.addEventListener('orientationchange', syncAppViewportHeight);
+  const scheduleViewportSync = () => {
+    if (viewportHeightSyncFrame) cancelAnimationFrame(viewportHeightSyncFrame);
+    viewportHeightSyncFrame = requestAnimationFrame(() => {
+      viewportHeightSyncFrame = 0;
+      syncAppViewportHeight();
+    });
+  };
+  scheduleViewportSync();
+  window.addEventListener('resize', scheduleViewportSync);
+  window.addEventListener('orientationchange', scheduleViewportSync);
   if (window.visualViewport) {
-    window.visualViewport.addEventListener('resize', syncAppViewportHeight);
-    window.visualViewport.addEventListener('scroll', syncAppViewportHeight);
+    window.visualViewport.addEventListener('resize', scheduleViewportSync);
   }
 }
 
@@ -3218,7 +3315,7 @@ function applyDesktopSidebarState() {
 
 function updateRightPanelToggleButtons() {
   const expanded = isMobileLayout()
-    ? $('right-panel').classList.contains('open')
+    ? normalizeMobileView(mobileViewState) === 'details'
     : desktopRightPanelExpanded;
   ['right-panel-toggle', 'right-panel-toggle-empty'].forEach((id) => {
     const button = $(id);
@@ -3256,33 +3353,32 @@ function startSidebarResize(event) {
 }
 
 function updateMobilePanelOverlay() {
-  const isOpen = $('sidebar').classList.contains('open') || $('right-panel').classList.contains('open');
-  $('sidebar-overlay').hidden = !isMobileLayout() || !isOpen;
-  updateRightPanelToggleButtons();
+  syncMobileNavigationState();
 }
 
 function closeSidebar() {
+  if (isMobileLayout()) {
+    setMobileView(currentGroupId ? 'chat' : 'list');
+    return;
+  }
   $('sidebar').classList.remove('open');
-  updateMobilePanelOverlay();
 }
 
 function closeRightPanel() {
+  if (isMobileLayout()) {
+    setMobileView(currentGroupId ? 'chat' : 'list');
+    return;
+  }
   $('right-panel').classList.remove('open');
-  updateMobilePanelOverlay();
 }
 
 function closeMobilePanels() {
-  closeSidebar();
-  closeRightPanel();
+  setMobileView(currentGroupId ? 'chat' : 'list');
 }
 
 function toggleSidebar() {
   if (!isMobileLayout()) return;
-  const sidebar = $('sidebar');
-  const opening = !sidebar.classList.contains('open');
-  closeRightPanel();
-  if (opening) sidebar.classList.add('open');
-  updateMobilePanelOverlay();
+  setMobileView('list');
 }
 
 function toggleRightPanel() {
@@ -3292,11 +3388,21 @@ function toggleRightPanel() {
     applyDesktopRightPanelState();
     return;
   }
-  const panel = $('right-panel');
-  const opening = !panel.classList.contains('open');
-  closeSidebar();
-  if (opening) panel.classList.add('open');
-  updateMobilePanelOverlay();
+  if (!currentGroupId) return;
+  setMobileView(normalizeMobileView(mobileViewState) === 'details' ? 'chat' : 'details');
+}
+
+function syncResponsiveUiState() {
+  if (!isMobileLayout()) {
+    document.body.classList.remove('mobile-layout', 'mobile-list-view', 'mobile-chat-view', 'mobile-details-view');
+    $('sidebar')?.classList.remove('open');
+    $('right-panel')?.classList.remove('open');
+  } else if (!currentGroupId && mobileViewState !== 'list') {
+    mobileViewState = 'list';
+  }
+  applyDesktopSidebarState();
+  applyDesktopRightPanelState();
+  syncMobileNavigationState();
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -3306,11 +3412,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   desktopSidebarWidth = readDesktopSidebarWidth();
   desktopRightPanelExpanded = localStorage.getItem(DESKTOP_RIGHT_PANEL_STORAGE_KEY) !== '0';
   loadMergedLocalSettings();
-  applyDesktopSidebarState();
-  applyDesktopRightPanelState();
+  syncResponsiveUiState();
   await fetchCsrfToken();
   try {
-    const res = await fetch('/api/auth/me');
+    const res = await fetch('/api/auth/me', { cache: 'no-store' });
     if (res.status === 401) { window.location.href = 'index.html'; return; }
     if (!res.ok) throw new Error();
     currentUser = await res.json();
@@ -3353,9 +3458,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupKeyboardShortcuts();
   updateWhisperBtn();
   toggleEncryptionButton();
-  updateMobilePanelOverlay();
-  applyDesktopSidebarState();
-  applyDesktopRightPanelState();
+  syncResponsiveUiState();
   startHostedAppUpdatePolling();
 
   // When running in the Electron desktop app, listen for notification-click
@@ -3385,13 +3488,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     clearAllMessageVisibilityTimers();
   });
   window.addEventListener('resize', () => {
-    if (!isMobileLayout()) {
-      $('sidebar').classList.remove('open');
-      $('right-panel').classList.remove('open');
-    }
-    updateMobilePanelOverlay();
-    applyDesktopSidebarState();
-    applyDesktopRightPanelState();
+    syncResponsiveUiState();
   });
   window.addEventListener('storage', (event) => {
     const userKey = getUserSettingsStorageKey(currentUser && currentUser.id);
@@ -3425,6 +3522,7 @@ async function loadGroups() {
     pushStatus.totalUnreadCount = getTotalUnreadCount();
     renderGroupList();
     syncUnreadIndicators();
+    if (isMobileLayout() && !currentGroupId) setMobileView('list');
   } catch(err) { console.error('loadGroups error:', err); }
 }
 
@@ -3462,16 +3560,26 @@ function buildGroupItem(g) {
   const info = document.createElement('div');
   info.className = 'group-item-info';
 
+  const row = document.createElement('div');
+  row.className = 'group-item-row';
+
   const name = document.createElement('div');
   name.className = 'group-item-name';
   name.textContent = g.name;
 
+  const time = document.createElement('div');
+  time.className = 'group-item-time';
+  time.id = 'preview-time-' + g.id;
+  time.textContent = g._lastPreviewTime || '';
+  time.hidden = !g._lastPreviewTime;
+
   const preview = document.createElement('div');
   preview.className = 'group-item-preview';
   preview.id = 'preview-' + g.id;
-  preview.textContent = g._lastPreview || '';
+  preview.textContent = g._lastPreviewText ?? GROUP_PREVIEW_EMPTY_TEXT;
 
-  info.append(name, preview);
+  row.append(name, time);
+  info.append(row, preview);
 
   const badge = document.createElement('span');
   badge.className = 'group-item-badge';
@@ -3568,9 +3676,19 @@ function canCurrentUserKickMember(targetUserId) {
 
 function updateGroupPreview(groupId, text, time) {
   const el = $('preview-' + groupId);
-  if (el) el.textContent = (time ? formatTime(time) + ' ' : '') + truncate(text, 35);
+  const timeLabel = time ? formatTime(time) : '';
+  const previewText = truncate(text, 35) || GROUP_PREVIEW_EMPTY_TEXT;
+  if (el) el.textContent = previewText;
+  const timeEl = $('preview-time-' + groupId);
+  if (timeEl) {
+    timeEl.textContent = timeLabel;
+    timeEl.hidden = !timeLabel;
+  }
   const g = groups.find(x => x.id === groupId);
-  if (g) g._lastPreview = (time ? formatTime(time) + ' ' : '') + truncate(text, 35);
+  if (g) {
+    g._lastPreviewTime = timeLabel;
+    g._lastPreviewText = previewText;
+  }
 }
 
 async function getMessagePreviewText(msg, groupId = msg.groupId) {
@@ -3679,6 +3797,7 @@ async function selectGroup(groupId) {
   $('chat-group-name').textContent = currentGroupData ? currentGroupData.name : '';
   $('edit-group-name-input').value = currentGroupData ? currentGroupData.name : '';
   $('right-group-code').textContent = currentGroupData ? currentGroupData.code : '';
+  syncRightPanelMobileTitle();
   $('right-panel-content').hidden = false;
   $('right-panel-empty').hidden = true;
   renderTagFilters();
@@ -3721,8 +3840,7 @@ async function selectGroup(groupId) {
   scrollToBottom(true);
   $('scroll-bottom-btn').hidden = true;
 
-  // Close mobile panels
-  if (isMobileLayout()) closeMobilePanels();
+  if (isMobileLayout()) setMobileView('chat');
 }
 
 function updateKeyState() {
@@ -5151,6 +5269,7 @@ function initSocket() {
     if (groupId === currentGroupId) {
       $('chat-group-name').textContent = newName;
       $('edit-group-name-input').value = newName;
+      syncRightPanelMobileTitle();
     }
     renderGroupList();
   });
@@ -5247,6 +5366,7 @@ function initSocket() {
         currentGroupId = null; currentGroupData = null;
         $('chat-active').hidden = true;
         $('chat-empty').hidden = false;
+        setMobileView('list');
       }
       return;
     }
@@ -5270,6 +5390,7 @@ function initSocket() {
       $('chat-empty').hidden = false;
       $('right-panel-content').hidden = true;
       $('right-panel-empty').hidden = false;
+      setMobileView('list');
       addSystemMessage('This group has been disbanded');
     }
   });
@@ -6546,7 +6667,7 @@ function setupEventListeners() {
         $('chat-empty').hidden = false;
         $('right-panel-content').hidden = true;
         $('right-panel-empty').hidden = false;
-        closeRightPanel();
+        setMobileView('list');
         showToast('Left group', 'success');
       } else {
         const d = await res.json().catch(() => ({}));
@@ -6847,4 +6968,9 @@ async function loadOlderMessages() {
     loadingOlder = false;
     if (indicator) indicator.hidden = true;
   }
+}
+function getViewportHeightForLayout({ visualViewport, fallbackHeight, editing }) {
+  const visualHeight = visualViewport ? Math.round(visualViewport.height) : 0;
+  if (isMobileLayout() && editing && visualHeight > 0) return visualHeight;
+  return Math.max(fallbackHeight, visualHeight || 0);
 }

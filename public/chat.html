@@ -96,11 +96,13 @@
 
       <div class="message-input-bar" id="message-input-bar">
         <p class="visually-hidden" id="composer-blocked-status" aria-live="polite"></p>
-        <button class="btn-icon btn-whisper-mode" id="whisper-mode-btn" title="Message mode" aria-label="Message mode"></button>
-        <button class="btn-icon btn-emoji" id="emoji-btn" title="Emoji" aria-label="Emoji" data-icon="smile" data-icon-only="true"></button>
-        <label class="btn-icon btn-attach" title="Attach file">
-          <span class="attach-icon" data-icon="paperclip" data-icon-only="true" aria-hidden="true"></span><input type="file" id="file-input" accept="*/*" hidden />
-        </label>
+        <div class="message-input-tools" id="message-input-tools">
+          <button class="btn-icon btn-whisper-mode message-tool-btn" id="whisper-mode-btn" title="Message mode" aria-label="Message mode"></button>
+          <button class="btn-icon btn-emoji message-tool-btn" id="emoji-btn" title="Emoji" aria-label="Emoji" data-icon="smile" data-icon-only="true"></button>
+          <label class="btn-icon btn-attach message-tool-btn" title="Attach file">
+            <span class="attach-icon" data-icon="paperclip" data-icon-only="true" aria-hidden="true"></span><input type="file" id="file-input" accept="*/*" hidden />
+          </label>
+        </div>
         <div class="message-composer-shell" id="message-composer-shell">
           <div class="message-token-strip" id="message-token-strip" hidden></div>
           <textarea
@@ -129,44 +131,60 @@
           </div>
         </div>
         <button class="btn-send" id="send-btn" title="Send" aria-label="Send" data-icon="send" data-icon-only="true"></button>
+        <div class="whisper-picker" id="whisper-picker" hidden>
+          <div class="whisper-picker-header" data-icon="message-square">Whisper to:</div>
+          <div class="whisper-picker-list" id="whisper-picker-list"></div>
+        </div>
+        <div class="emoji-picker" id="emoji-picker" hidden></div>
       </div>
-
-      <div class="whisper-picker" id="whisper-picker" hidden>
-        <div class="whisper-picker-header" data-icon="message-square">Whisper to:</div>
-        <div class="whisper-picker-list" id="whisper-picker-list"></div>
-      </div>
-
-      <div class="emoji-picker" id="emoji-picker" hidden></div>
 
     </div>
   </main>
 
   <aside class="right-panel" id="right-panel">
-    <button class="btn-icon mobile-panel-close" id="right-panel-close" title="Close details" aria-label="Close details" data-icon="x" data-icon-only="true"></button>
+    <div class="right-panel-mobile-header">
+      <button class="btn-icon mobile-panel-close" id="right-panel-close" title="Close details" aria-label="Close details" data-icon="arrow-left" data-icon-only="true"></button>
+      <div class="right-panel-mobile-header-copy">
+        <span class="right-panel-mobile-eyebrow">Group details</span>
+        <span class="right-panel-mobile-title" id="right-panel-mobile-title">Details</span>
+      </div>
+    </div>
     <div class="right-panel-inner" id="right-panel-content" hidden>
-      <div class="right-panel-group-name-row">
-        <input type="text" class="right-panel-title-input" id="edit-group-name-input" value="Group" />
+      <div class="panel-section panel-section-identity">
+        <div class="panel-section-label">Group</div>
+        <div class="right-panel-group-name-row">
+          <input type="text" class="right-panel-title-input" id="edit-group-name-input" value="Group" />
+        </div>
+        <button class="btn-action-sm btn-group-color" id="set-group-color-btn" data-icon="palette">Set Group Color</button>
+        <div class="right-panel-code">
+          <span>Code: </span><strong id="right-group-code">—</strong>
+          <button class="btn-copy" id="copy-code-btn" title="Copy code" aria-label="Copy code" data-icon="copy" data-icon-only="true"></button>
+        </div>
       </div>
-      <button class="btn-action-sm btn-group-color" id="set-group-color-btn" data-icon="palette">Set Group Color</button>
-      <div class="right-panel-code">
-        <span>Code: </span><strong id="right-group-code">—</strong>
-        <button class="btn-copy" id="copy-code-btn" title="Copy code" aria-label="Copy code" data-icon="copy" data-icon-only="true"></button>
+      <div class="panel-section">
+        <div class="panel-section-label">Security & AI</div>
+        <div class="right-panel-actions">
+          <button class="btn-action-sm btn-panel-action btn-set-key" id="set-key-btn" data-icon="key-round" data-icon-only="true" data-icon-label="Set Key" title="Set Key" aria-label="Set Key"></button>
+          <button class="btn-action-sm btn-panel-action btn-grok" id="ask-grok-btn" data-icon="sparkles" data-icon-only="true" data-icon-label="Ask AI" title="Ask AI" aria-label="Ask AI"></button>
+          <button class="btn-action-sm btn-panel-action btn-enc-toggle" id="enc-toggle-btn" data-icon="lock" data-icon-only="true" data-icon-label="Hide Encryption" title="Hide Encryption" aria-label="Hide Encryption"></button>
+          <button class="btn-action-sm btn-panel-action btn-forget-key" id="forget-key-btn" data-icon="key" data-icon-only="true" data-icon-label="Forget Key" title="Forget Key" aria-label="Forget Key"></button>
+        </div>
       </div>
-      <div class="right-panel-actions">
-        <button class="btn-action-sm btn-panel-action btn-set-key" id="set-key-btn" data-icon="key-round" data-icon-only="true" data-icon-label="Set Key" title="Set Key" aria-label="Set Key"></button>
-        <button class="btn-action-sm btn-panel-action btn-grok" id="ask-grok-btn" data-icon="sparkles" data-icon-only="true" data-icon-label="Ask AI" title="Ask AI" aria-label="Ask AI"></button>
-        <button class="btn-action-sm btn-panel-action btn-enc-toggle" id="enc-toggle-btn" data-icon="lock" data-icon-only="true" data-icon-label="Hide Encryption" title="Hide Encryption" aria-label="Hide Encryption"></button>
-        <button class="btn-action-sm btn-panel-action btn-forget-key" id="forget-key-btn" data-icon="key" data-icon-only="true" data-icon-label="Forget Key" title="Forget Key" aria-label="Forget Key"></button>
+      <div class="panel-section">
+        <div class="panel-section-label">Search</div>
+        <div class="search-bar">
+          <span class="search-icon" data-icon="search" data-icon-only="true" aria-hidden="true"></span>
+          <input type="text" id="search-input" placeholder="Search messages" />
+          <button class="btn-clear-search" id="clear-search-btn" aria-label="Clear search" data-icon="x" data-icon-only="true"></button>
+          <span class="search-results-count" id="search-results-count"></span>
+        </div>
       </div>
-      <div class="search-bar">
-        <span class="search-icon" data-icon="search" data-icon-only="true" aria-hidden="true"></span>
-        <input type="text" id="search-input" placeholder="Search messages" />
-        <button class="btn-clear-search" id="clear-search-btn" aria-label="Clear search" data-icon="x" data-icon-only="true"></button>
-        <span class="search-results-count" id="search-results-count"></span>
+      <div class="panel-section">
+        <div class="panel-section-label">Members</div>
+        <ul class="members-list" id="members-list"></ul>
       </div>
-      <h4 class="members-title">Members</h4>
-      <ul class="members-list" id="members-list"></ul>
-      <div class="right-panel-owner-actions" id="owner-actions" hidden>
+      <div class="panel-section right-panel-owner-actions" id="owner-actions" hidden>
+        <div class="panel-section-label">Owner controls</div>
         <label class="toggle-label toggle-switch-row" for="allow-member-clear-toggle">
           <span>Members can clear</span>
           <input type="checkbox" id="allow-member-clear-toggle" />
@@ -193,7 +211,8 @@
           <span class="toggle-switch-ui" aria-hidden="true"></span>
         </label>
       </div>
-      <div class="right-panel-common-actions" id="common-actions" hidden>
+      <div class="panel-section right-panel-common-actions" id="common-actions" hidden>
+        <div class="panel-section-label">Quick actions</div>
         <div class="quick-actions-row">
           <button class="btn-quick-action btn-export" id="export-btn" title="Export chat as TXT" aria-label="Export chat as TXT" data-icon="download" data-icon-only="true"></button>
           <button class="btn-quick-action btn-clear-history" id="clear-history-btn" title="Clear chat history" aria-label="Clear chat history" data-icon="trash-2" data-icon-only="true"></button>
@@ -259,68 +278,86 @@
   </div>
 
   <div class="modal-overlay" id="profile-modal" hidden>
-    <div class="modal">
+    <div class="modal modal-page">
       <div class="modal-title-row">
         <h2 data-icon="user">Profile</h2>
         <button class="btn-icon profile-close-btn" id="profile-close-btn" title="Close" aria-label="Close" data-icon="x" data-icon-only="true"></button>
       </div>
-      <div class="profile-ai-usage-card" id="profile-ai-usage-card">
-        <div class="profile-ai-usage-header">
-          <span>Daily AI usage</span>
-          <strong id="profile-ai-usage-value">0 / 0 tokens</strong>
-        </div>
-        <div class="usage-bar-track">
-          <div class="usage-bar-fill" id="profile-ai-usage-fill"></div>
-        </div>
-        <div class="profile-ai-usage-note" id="profile-ai-usage-note">Resets at 4:00 AM Shanghai time</div>
-      </div>
-      <div class="profile-push-card" id="profile-push-card">
-        <div class="profile-push-header">
-          <div>
-            <div class="profile-push-title">Notifications</div>
-            <div class="profile-push-status" id="push-status-text">Checking support…</div>
+      <div class="profile-sections">
+        <section class="profile-section">
+          <div class="profile-section-title">Account</div>
+          <div class="form-group">
+            <label>Change Username</label>
+            <input type="text" id="profile-username" placeholder="New username" />
+            <button class="btn-primary btn-sm" id="profile-save-username">Save</button>
           </div>
-          <span class="profile-push-permission" id="push-permission-pill">Default</span>
-        </div>
-        <p class="profile-push-hint" id="push-platform-hint" hidden></p>
-        <div class="profile-push-meta" id="push-unread-meta">Unread badge sync is available when supported by your browser.</div>
-        <div class="profile-push-actions">
-          <button class="btn-primary btn-sm" id="enable-push-btn" type="button">Enable notifications</button>
-          <button class="btn-secondary btn-sm" id="disable-push-btn" type="button" hidden>Disable notifications</button>
-        </div>
-      </div>
-      <div class="form-group">
-        <label>Change Username</label>
-        <input type="text" id="profile-username" placeholder="New username" />
-        <button class="btn-primary btn-sm" id="profile-save-username">Save</button>
-      </div>
-      <div class="form-group">
-        <label>Profile Picture</label>
-        <div class="profile-picture-mode">
-          <span class="profile-mode-label" id="profile-mode-color-label">Color</span>
-          <input type="range" id="profile-picture-mode-slider" min="0" max="1" step="1" value="0" />
-          <span class="profile-mode-label" id="profile-mode-image-label">Upload Image</span>
-        </div>
-        <div id="profile-picture-color-section">
-          <label>Icon Color</label>
-          <div class="color-pick-row">
-            <input type="color" id="profile-color" value="#4A90D9" />
-            <button class="btn-primary btn-sm" id="profile-save-color">Save</button>
+        </section>
+        <section class="profile-section">
+          <div class="profile-section-title">Notifications</div>
+          <div class="profile-push-card" id="profile-push-card">
+            <div class="profile-push-header">
+              <div>
+                <div class="profile-push-title">Notifications</div>
+                <div class="profile-push-status" id="push-status-text">Checking support…</div>
+              </div>
+              <span class="profile-push-permission" id="push-permission-pill">Default</span>
+            </div>
+            <p class="profile-push-hint" id="push-platform-hint" hidden></p>
+            <div class="profile-push-meta" id="push-unread-meta">Unread badge sync is available when supported by your browser.</div>
+            <div class="profile-push-actions">
+              <button class="btn-primary btn-sm" id="enable-push-btn" type="button">Enable notifications</button>
+              <button class="btn-secondary btn-sm" id="disable-push-btn" type="button" hidden>Disable notifications</button>
+            </div>
           </div>
-        </div>
-        <div id="profile-picture-upload-section" hidden>
-          <label>Upload Profile Picture (max 2MB)</label>
-          <input type="file" id="profile-picture-input" accept="image/*" />
-          <div id="profile-picture-preview" hidden>
-            <img id="profile-picture-preview-img" src="" alt="Preview" style="max-width: 100px; max-height: 100px; border-radius: 50%;" />
+        </section>
+        <section class="profile-section">
+          <div class="profile-section-title">AI usage</div>
+          <div class="profile-ai-usage-card" id="profile-ai-usage-card">
+            <div class="profile-ai-usage-header">
+              <span>Daily AI usage</span>
+              <strong id="profile-ai-usage-value">0 / 0 tokens</strong>
+            </div>
+            <div class="usage-bar-track">
+              <div class="usage-bar-fill" id="profile-ai-usage-fill"></div>
+            </div>
+            <div class="profile-ai-usage-note" id="profile-ai-usage-note">Resets at 4:00 AM Shanghai time</div>
           </div>
-          <button class="btn-primary btn-sm" id="profile-save-picture">Save Picture</button>
-          <button class="btn-secondary btn-sm" id="profile-remove-picture">Remove Picture</button>
-        </div>
+        </section>
+        <section class="profile-section">
+          <div class="profile-section-title">Appearance & profile picture</div>
+          <div class="form-group">
+            <label>Profile Picture</label>
+            <div class="profile-picture-mode">
+              <span class="profile-mode-label" id="profile-mode-color-label">Color</span>
+              <input type="range" id="profile-picture-mode-slider" min="0" max="1" step="1" value="0" />
+              <span class="profile-mode-label" id="profile-mode-image-label">Upload Image</span>
+            </div>
+            <div id="profile-picture-color-section">
+              <label>Icon Color</label>
+              <div class="color-pick-row">
+                <input type="color" id="profile-color" value="#4A90D9" />
+                <button class="btn-primary btn-sm" id="profile-save-color">Save</button>
+              </div>
+            </div>
+            <div id="profile-picture-upload-section" hidden>
+              <label>Upload Profile Picture (max 2MB)</label>
+              <input type="file" id="profile-picture-input" accept="image/*" />
+              <div id="profile-picture-preview" hidden>
+                <img id="profile-picture-preview-img" src="" alt="Preview" style="max-width: 100px; max-height: 100px; border-radius: 50%;" />
+              </div>
+              <div class="profile-picture-actions">
+                <button class="btn-primary btn-sm" id="profile-save-picture">Save Picture</button>
+                <button class="btn-secondary btn-sm" id="profile-remove-picture">Remove Picture</button>
+              </div>
+            </div>
+          </div>
+        </section>
+        <p class="form-error" id="profile-error"></p>
+        <section class="profile-section profile-section-danger">
+          <div class="profile-section-title">Danger zone</div>
+          <button class="btn-danger" id="profile-delete-btn" data-icon="trash-2">Delete Account</button>
+        </section>
       </div>
-      <p class="form-error" id="profile-error"></p>
-      <hr class="modal-divider" />
-      <button class="btn-danger" id="profile-delete-btn" data-icon="trash-2">Delete Account</button>
     </div>
   </div>
 
@@ -412,7 +449,7 @@
   </div>
 
   <div class="modal-overlay" id="grok-modal" hidden>
-    <div class="modal grok-modal">
+    <div class="modal modal-page grok-modal">
       <div class="modal-title-row">
         <h2 data-icon="sparkles">Ask AI</h2>
         <button class="btn-icon profile-close-btn" id="grok-close-btn" title="Close" aria-label="Close" data-icon="x" data-icon-only="true"></button>
@@ -482,7 +519,7 @@
   </div>
 
   <div class="modal-overlay" id="user-management-modal" hidden>
-    <div class="modal user-management-modal">
+    <div class="modal modal-page user-management-modal">
       <div class="modal-title-row">
         <h2 data-icon="users">User List</h2>
         <button class="btn-icon profile-close-btn" id="user-management-close-btn" title="Close" aria-label="Close" data-icon="x" data-icon-only="true"></button>
