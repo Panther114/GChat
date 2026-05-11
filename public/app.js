@@ -5190,7 +5190,7 @@ function resolveConnectionStateLabel() {
   if (!socketDiagnostics.isBrowserOnline) return { state: 'offline', label: 'Offline' };
   if (socketDiagnostics.reconnectFailed) return { state: 'disconnected', label: 'Reconnect failed' };
   if (socketDiagnostics.reconnectAttempts > 0) return { state: 'reconnecting', label: `Reconnecting (${socketDiagnostics.reconnectAttempts})` };
-  if (socketDiagnostics.lastConnectError) return { state: 'connecting', label: 'Connection error' };
+  if (socketDiagnostics.lastConnectError) return { state: 'error', label: 'Connection error' };
   return { state: 'connecting', label: 'Connecting…' };
 }
 
@@ -5416,7 +5416,7 @@ function initSocket() {
   socket.on('connect_error', (error) => {
     socketDiagnostics.lastConnectError = error?.message || 'unknown';
     socketDiagnostics.lastConnectErrorAt = new Date().toISOString();
-    updateConnectionStatusUi(socketDiagnostics.isBrowserOnline ? 'connecting' : 'offline', socketDiagnostics.isBrowserOnline ? 'Connection error' : 'Offline');
+    updateConnectionStatusUi(socketDiagnostics.isBrowserOnline ? 'error' : 'offline', socketDiagnostics.isBrowserOnline ? 'Connection error' : 'Offline');
     console.warn('[socket] connect_error', { message: socketDiagnostics.lastConnectError });
     renderDiagnosticsPanel();
   });

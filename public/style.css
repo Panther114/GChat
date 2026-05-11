@@ -2670,6 +2670,11 @@ body.chat-body.mobile-layout .sidebar-overlay {
     border-color: rgba(96,165,250,.22);
     color: #bfdbfe;
   }
+  .conn-status[data-state="error"] {
+    background: rgba(255,170,51,.14);
+    border-color: rgba(255,170,51,.2);
+    color: #ffd7a4;
+  }
   .conn-status[data-state="offline"],
   .conn-status[data-state="disconnected"] {
     display: flex;
