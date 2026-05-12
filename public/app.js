@@ -2538,7 +2538,7 @@ function getUniqueWhisperRecipientIds(ids = []) {
     const key = normalizeId(id);
     if (!key || seen.has(key)) continue;
     seen.add(key);
-    result.push(id);
+    result.push(key);
   }
   return result;
 }
@@ -2551,14 +2551,14 @@ function getActiveWhisperRecipientIds() {
   );
 }
 
-function getWhisperRecipientMembers(recipientIds = getActiveWhisperRecipientIds(), groupId = currentGroupId) {
-  return recipientIds
+function getWhisperRecipientMembers(recipientIds, groupId = currentGroupId) {
+  return (recipientIds || getActiveWhisperRecipientIds())
     .map((id) => getMemberProfile(groupId, id))
     .filter(Boolean);
 }
 
-function formatWhisperRecipientLabel(recipientIds = getActiveWhisperRecipientIds(), groupId = currentGroupId, { fallback = 'Whisper', prefix = 'Whisper → ' } = {}) {
-  const names = getWhisperRecipientMembers(recipientIds, groupId)
+function formatWhisperRecipientLabel(recipientIds, groupId = currentGroupId, { fallback = 'Whisper', prefix = 'Whisper → ' } = {}) {
+  const names = getWhisperRecipientMembers(recipientIds || getActiveWhisperRecipientIds(), groupId)
     .map((member) => member.username)
     .filter(Boolean);
   if (!names.length) return fallback;
@@ -2632,6 +2632,10 @@ function scheduleDesktopPointerEffect() {
   desktopPointerEffectFrame = requestAnimationFrame(flushDesktopPointerEffect);
 }
 
+function calculateDesktopPointerShift(pointerPosition, viewportSize) {
+  return Math.round((((pointerPosition / viewportSize) - DESKTOP_POINTER_CENTER_OFFSET) * DESKTOP_POINTER_SHIFT_MULTIPLIER) * DESKTOP_POINTER_SHIFT_PRECISION) / DESKTOP_POINTER_SHIFT_PRECISION;
+}
+
 function handleDesktopPointerMove(event) {
   if (!document.body.classList.contains('electron-desktop-effects')) return;
   // Use a 1px floor so the normalized cursor math never divides by zero during resize edge cases.
@@ -2641,8 +2645,8 @@ function handleDesktopPointerMove(event) {
   const pointerY = Math.max(0, Math.min(height, event.clientY));
   desktopPointerEffectState.pointerX = pointerX;
   desktopPointerEffectState.pointerY = pointerY;
-  desktopPointerEffectState.shiftX = Math.round((((pointerX / width) - DESKTOP_POINTER_CENTER_OFFSET) * DESKTOP_POINTER_SHIFT_MULTIPLIER) * DESKTOP_POINTER_SHIFT_PRECISION) / DESKTOP_POINTER_SHIFT_PRECISION;
-  desktopPointerEffectState.shiftY = Math.round((((pointerY / height) - DESKTOP_POINTER_CENTER_OFFSET) * DESKTOP_POINTER_SHIFT_MULTIPLIER) * DESKTOP_POINTER_SHIFT_PRECISION) / DESKTOP_POINTER_SHIFT_PRECISION;
+  desktopPointerEffectState.shiftX = calculateDesktopPointerShift(pointerX, width);
+  desktopPointerEffectState.shiftY = calculateDesktopPointerShift(pointerY, height);
   scheduleDesktopPointerEffect();
 }
 
