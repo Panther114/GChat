@@ -286,6 +286,7 @@ function getVisibleWhisperRecipientIds(msg) {
     const parsed = JSON.parse(msg.whisperTo);
     return Array.isArray(parsed) ? parsed.map((id) => String(id)) : [];
   } catch {
+    // Keep older cached payloads readable if they still store whisper IDs as CSV.
     return String(msg.whisperTo)
       .split(',')
       .map((value) => value.trim())
@@ -297,7 +298,7 @@ function canCurrentUserAccessMessage(msg, userId = currentUser?.id) {
   if (!msg || !userId) return false;
   if (msg.senderId === userId) return true;
   if (msg.type !== 'whisper') return true;
-  return getVisibleWhisperRecipientIds(msg)?.includes(String(userId)) === true;
+  return getVisibleWhisperRecipientIds(msg).includes(String(userId));
 }
 
 function filterMessagesVisibleToCurrentUser(messages = [], userId = currentUser?.id) {
