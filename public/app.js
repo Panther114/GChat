@@ -1607,6 +1607,10 @@ function normalizeCommandUsername(value) {
   return String(value || '').trim().replace(/\s+/g, '_').toLowerCase();
 }
 
+function normalizeId(value) {
+  return String(value || '');
+}
+
 function normalizeHashtagTopic(value) {
   if (value == null || value === '') return null;
   const trimmed = String(value).trim().replace(/^#/, '').toLowerCase();
@@ -2507,6 +2511,11 @@ const MOBILE_BREAKPOINT = 768;
 const MOBILE_KEYBOARD_MIN_HEIGHT = 120;
 const VIEWPORT_SYNC_DEBOUNCE_MS = 45;
 const MOBILE_KEYBOARD_FOCUS_DELAY_MS = 80;
+const WHISPER_COMMAND_PENDING_PATTERN = /(?:^|\s)(\/w\s)$/;
+const WHISPER_COMMAND_TARGET_PATTERN = /(?:^|\s)\/w\s+([^\s]+)\s$/;
+const DESKTOP_POINTER_CENTER_OFFSET = 0.5;
+const DESKTOP_POINTER_SHIFT_MULTIPLIER = 10;
+const DESKTOP_POINTER_SHIFT_PRECISION = 100;
 let mobileViewState = 'list';
 let viewportHeightSyncFrame = 0;
 let viewportHeightSyncTimer = 0;
@@ -2526,7 +2535,7 @@ function getUniqueWhisperRecipientIds(ids = []) {
   const seen = new Set();
   const result = [];
   for (const id of ids) {
-    const key = String(id);
+    const key = normalizeId(id);
     if (!key || seen.has(key)) continue;
     seen.add(key);
     result.push(id);
@@ -2592,15 +2601,14 @@ function hideWhisperPicker() {
   pendingWhisperCommandStart = null;
 }
 
-function syncWhisperPickerStatus() {
+function syncWhisperPickerStatus(recipientCount = getActiveWhisperRecipientIds().length, hasPendingCommand = pendingWhisperCommandStart != null) {
   const status = $('whisper-picker-status');
   if (!status) return;
-  const count = getActiveWhisperRecipientIds().length;
-  if (!count) {
-    status.textContent = pendingWhisperCommandStart != null ? 'Select recipients' : 'No recipients selected';
+  if (!recipientCount) {
+    status.textContent = hasPendingCommand ? 'Select recipients' : 'No recipients selected';
     return;
   }
-  status.textContent = count === 1 ? '1 recipient selected' : `${count} recipients selected`;
+  status.textContent = recipientCount === 1 ? '1 recipient selected' : `${recipientCount} recipients selected`;
 }
 
 function setDesktopEffectsEnabled(enabled) {
@@ -2626,14 +2634,15 @@ function scheduleDesktopPointerEffect() {
 
 function handleDesktopPointerMove(event) {
   if (!document.body.classList.contains('electron-desktop-effects')) return;
+  // Use a 1px floor so the normalized cursor math never divides by zero during resize edge cases.
   const width = Math.max(window.innerWidth, 1);
   const height = Math.max(window.innerHeight, 1);
   const pointerX = Math.max(0, Math.min(width, event.clientX));
   const pointerY = Math.max(0, Math.min(height, event.clientY));
   desktopPointerEffectState.pointerX = pointerX;
   desktopPointerEffectState.pointerY = pointerY;
-  desktopPointerEffectState.shiftX = Math.round((((pointerX / width) - 0.5) * 10) * 100) / 100;
-  desktopPointerEffectState.shiftY = Math.round((((pointerY / height) - 0.5) * 10) * 100) / 100;
+  desktopPointerEffectState.shiftX = Math.round((((pointerX / width) - DESKTOP_POINTER_CENTER_OFFSET) * DESKTOP_POINTER_SHIFT_MULTIPLIER) * DESKTOP_POINTER_SHIFT_PRECISION) / DESKTOP_POINTER_SHIFT_PRECISION;
+  desktopPointerEffectState.shiftY = Math.round((((pointerY / height) - DESKTOP_POINTER_CENTER_OFFSET) * DESKTOP_POINTER_SHIFT_MULTIPLIER) * DESKTOP_POINTER_SHIFT_PRECISION) / DESKTOP_POINTER_SHIFT_PRECISION;
   scheduleDesktopPointerEffect();
 }
 
@@ -2662,7 +2671,7 @@ function setComposerShellDisabled(disabled) {
 
 function setWhisperTokenFromMember(member, rawTarget = member && member.username) {
   if (!member) return false;
-  if (!whisperRecipients.some((id) => String(id) === String(member.id))) {
+  if (!whisperRecipients.some((id) => normalizeId(id) === normalizeId(member.id))) {
     whisperRecipients.push(member.id);
   }
   composerTokens.whisper = {
@@ -2974,7 +2983,7 @@ function handleComposerBackspace(input) {
 
 function maybeTokenizeSlashCommand(input) {
   if (!input) return false;
-  const pendingWhisperMatch = /(?:^|\s)(\/w\s)$/.exec(input.value);
+  const pendingWhisperMatch = WHISPER_COMMAND_PENDING_PATTERN.exec(input.value);
   if (pendingWhisperMatch) {
     if (composerTokens.hashtag || composerTokens.ai) {
       showToast(getWhisperCombinationError({
@@ -2989,7 +2998,7 @@ function maybeTokenizeSlashCommand(input) {
   if (pendingWhisperCommandStart != null && whisperPickerMode === 'command') {
     hideWhisperPicker();
   }
-  const whisperMatch = /(?:^|\s)\/w\s+([^\s]+)\s$/.exec(input.value);
+  const whisperMatch = WHISPER_COMMAND_TARGET_PATTERN.exec(input.value);
   if (whisperMatch) {
     if (composerTokens.hashtag || composerTokens.ai) {
       showToast(getWhisperCombinationError({
@@ -4414,7 +4423,8 @@ function renderWhisperPicker() {
   const list = $('whisper-picker-list');
   if (!list) return;
   list.innerHTML = '';
-  syncWhisperPickerStatus();
+  const activeRecipientIds = getActiveWhisperRecipientIds();
+  syncWhisperPickerStatus(activeRecipientIds.length, pendingWhisperCommandStart != null);
   for (const m of members) {
     if (m.id === currentUser.id) continue;
     const item = document.createElement('div');
@@ -4423,14 +4433,14 @@ function renderWhisperPicker() {
     cb.type = 'checkbox';
     cb.id = 'wp-' + m.id;
     cb.value = m.id;
-    cb.checked = getActiveWhisperRecipientIds().some((id) => String(id) === String(m.id));
+    cb.checked = activeRecipientIds.some((id) => normalizeId(id) === normalizeId(m.id));
     cb.addEventListener('change', () => {
       if (pendingWhisperCommandStart != null) consumePendingWhisperCommand();
       if (cb.checked) {
         setWhisperTokenFromMember(m);
       } else {
-        whisperRecipients = whisperRecipients.filter((id) => String(id) !== String(m.id));
-        if (composerTokens.whisper && String(composerTokens.whisper.memberId) === String(m.id)) {
+        whisperRecipients = whisperRecipients.filter((id) => normalizeId(id) !== normalizeId(m.id));
+        if (composerTokens.whisper && normalizeId(composerTokens.whisper.memberId) === normalizeId(m.id)) {
           composerTokens.whisper = null;
         }
         if (!whisperRecipients.length && !composerTokens.whisper) messageMode = 'normal';
