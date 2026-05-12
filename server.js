@@ -2899,7 +2899,10 @@ io.on('connection', (socket) => {
 
     const member = stmts.isMember.get(normalizedGroupId, String(socket.userId));
     if (!member) {
-      socket.emit('group_join_denied', { groupId: normalizedGroupId });
+      socket.emit('group_join_denied', {
+        groupId: normalizedGroupId,
+        message: 'Not a member of this group',
+      });
       return;
     }
 
