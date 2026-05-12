@@ -1114,6 +1114,13 @@ async function loadUserManagementSummary() {
   }
 }
 
+async function openUserManagementModal() {
+  $('user-management-error').textContent = '';
+  setUserManagementLoading();
+  $('user-management-modal').hidden = false;
+  await loadUserManagementSummary();
+}
+
 function isStandalonePwaMode() {
   return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
 }
@@ -7001,7 +7008,10 @@ function setupEventListeners() {
     if (e.target !== $('diagnostics-modal')) return;
     closeDiagnosticsModal();
   });
-  $('sidebar-mobile-profile-btn').addEventListener('click', openProfileModal);
+  $('sidebar-mobile-user-list-btn').addEventListener('click', () => {
+    closeMobileActionMenu();
+    void openUserManagementModal();
+  });
   $('sidebar-mobile-actions-btn').addEventListener('click', (event) => {
     event.stopPropagation();
     toggleMobileActionMenu();
@@ -7014,10 +7024,6 @@ function setupEventListeners() {
     closeMobileActionMenu();
     $('join-group-btn').click();
   });
-  $('mobile-user-list-btn').addEventListener('click', () => {
-    closeMobileActionMenu();
-    $('user-list-btn').click();
-  });
   $('mobile-diagnostics-btn').addEventListener('click', () => {
     closeMobileActionMenu();
     openDiagnosticsModal();
@@ -7027,12 +7033,6 @@ function setupEventListeners() {
     closeMobileActionMenu();
   });
 
-  $('user-list-btn').addEventListener('click', async () => {
-    $('user-management-error').textContent = '';
-    setUserManagementLoading();
-    $('user-management-modal').hidden = false;
-    await loadUserManagementSummary();
-  });
   $('user-management-close-btn').addEventListener('click', () => { $('user-management-modal').hidden = true; });
   $('user-management-modal').addEventListener('click', (e) => {
     if (e.target !== $('user-management-modal')) return;
