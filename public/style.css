@@ -987,7 +987,7 @@ body.sidebar-resizing * {
   padding-right: 34px;
 }
 .msg-text.is-collapsed::after {
-  content: '… more';
+  content: '... more';
   position: absolute;
   right: 0;
   bottom: 0;

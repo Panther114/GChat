@@ -1114,13 +1114,6 @@ async function loadUserManagementSummary() {
   }
 }
 
-async function openUserManagementModal() {
-  $('user-management-error').textContent = '';
-  setUserManagementLoading();
-  $('user-management-modal').hidden = false;
-  await loadUserManagementSummary();
-}
-
 function isStandalonePwaMode() {
   return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
 }
@@ -7013,7 +7006,10 @@ function setupEventListeners() {
   });
   $('sidebar-mobile-user-list-btn').addEventListener('click', () => {
     closeMobileActionMenu();
-    void openUserManagementModal();
+    $('user-management-error').textContent = '';
+    setUserManagementLoading();
+    $('user-management-modal').hidden = false;
+    void loadUserManagementSummary();
   });
   $('sidebar-mobile-actions-btn').addEventListener('click', (event) => {
     event.stopPropagation();
