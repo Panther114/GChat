@@ -54,7 +54,7 @@
       "!node_modules/{bcrypt,better-sqlite3,connect-sqlite3,express,express-session,socket.io,uuid}/**"
     ],
     "win": {
-      "icon": "build/icon.ico",
+      "icon": "public/gchat_icon.png",
       "target": [
         {
           "target": "nsis",
@@ -83,7 +83,7 @@
       "target": [
         "dmg"
       ],
-      "icon": "build/icon.icns",
+      "icon": "public/gchat_icon.png",
       "category": "public.app-category.social-networking"
     },
     "linux": {
@@ -91,7 +91,7 @@
         "AppImage",
         "deb"
       ],
-      "icon": "build/icons",
+      "icon": "public/gchat_icon.png",
       "maintainer": "Gchat",
       "category": "Network"
     },

@@ -1586,13 +1586,19 @@ function getMessageTextLineHeight(textEl) {
 function updateCollapsibleMessageState(textEl) {
   if (!textEl || !textEl.isConnected) return;
   textEl.classList.remove('is-collapsed', 'is-collapsible');
+  textEl.style.removeProperty('--msg-collapsed-height');
+  textEl.style.removeProperty('--msg-expanded-height');
   const lineHeight = getMessageTextLineHeight(textEl);
-  const shouldCollapse = textEl.scrollHeight > (lineHeight * COLLAPSIBLE_MESSAGE_LINE_THRESHOLD) + 2;
+  const collapsedHeight = Math.ceil((lineHeight * COLLAPSIBLE_MESSAGE_LINE_THRESHOLD) + COLLAPSIBLE_MESSAGE_HEIGHT_TOLERANCE);
+  const expandedHeight = Math.ceil(textEl.scrollHeight);
+  textEl.style.setProperty('--msg-collapsed-height', `${collapsedHeight}px`);
+  const shouldCollapse = expandedHeight > collapsedHeight + COLLAPSIBLE_MESSAGE_HEIGHT_TOLERANCE;
   if (!shouldCollapse) {
     delete textEl.dataset.collapsed;
     return;
   }
   textEl.classList.add('is-collapsible');
+  textEl.style.setProperty('--msg-expanded-height', `${expandedHeight}px`);
   if (textEl.dataset.collapsed === undefined) {
     textEl.dataset.collapsed = '1';
   }
@@ -1970,22 +1976,24 @@ function isRowVisibleInMessagesViewport(row) {
 }
 
 function completeViewportTrackingForRow(row) {
-  if (!row || !row.isConnected || !socket || !currentGroupId || document.visibilityState !== 'visible') return;
+  if (!row || !row.isConnected || !socket || document.visibilityState !== 'visible') return;
   const messageId = row.dataset.msgId;
+  const rowGroupId = String(row.dataset.groupId || currentGroupId || '');
+  if (!rowGroupId) return;
   if (!messageId) return;
 
   if (!pendingReadMessageIds.has(messageId) && row.dataset.hasRead !== '1') {
     pendingReadMessageIds.add(messageId);
     row.classList.remove('unseen');
     row.dataset.hasRead = '1';
-    setLocalMessageReadState(currentGroupId, messageId, true);
-    syncGroupUnreadCount(currentGroupId);
-    socket.emit('mark_message_read', { groupId: currentGroupId, messageId });
+    setLocalMessageReadState(rowGroupId, messageId, true);
+    syncGroupUnreadCount(rowGroupId);
+    socket.emit('mark_message_read', { groupId: rowGroupId, messageId });
   }
 
   if (row.dataset.disappearing === '1' && row.dataset.senderId !== String(currentUser?.id) && row.dataset.disappearingHidden !== '1') {
     row.dataset.disappearingHidden = '1';
-    void hideDisappearingMessageLocally(messageId, currentGroupId, { notifyServer: true });
+    void hideDisappearingMessageLocally(messageId, rowGroupId, { notifyServer: true });
     return;
   }
 
@@ -2140,8 +2148,8 @@ function sendNativeNotification(unreadCount, groupId) {
     try {
       const n = new Notification(GENERIC_NOTIFICATION_TITLE, {
         body: getGenericUnreadNotificationBody(unreadCount),
-        icon: '/icons/icon-192-v124.png',
-        badge: '/icons/icon-192-v124.png',
+        icon: '/gchat_icon.png',
+        badge: '/gchat_icon.png',
         tag: PUSH_NOTIFICATION_TAG,
       });
       n.addEventListener('click', () => { window.focus(); });
@@ -2552,7 +2560,8 @@ const WHISPER_COMMAND_TARGET_PATTERN = /(?:^|\s)\/w\s+([^\s]+)\s$/;
 const DESKTOP_POINTER_CENTER_OFFSET = 0.5;
 const DESKTOP_POINTER_SHIFT_MULTIPLIER = 10;
 const DESKTOP_POINTER_SHIFT_PRECISION = 100;
-const COLLAPSIBLE_MESSAGE_LINE_THRESHOLD = 5;
+const COLLAPSIBLE_MESSAGE_HEIGHT_TOLERANCE = 2;
+const COLLAPSIBLE_MESSAGE_LINE_THRESHOLD = 1;
 let mobileViewState = 'list';
 let viewportHeightSyncFrame = 0;
 let viewportHeightSyncTimer = 0;
@@ -3274,8 +3283,8 @@ async function hideDisappearingMessageLocally(messageId, groupId = currentGroupI
   clearMessageVisibilityTimer(normalizedId);
   hiddenDisappearingMessageIds.add(normalizedId);
   persistHiddenDisappearingMessageIds();
-  if (options.notifyServer && socket && currentGroupId) {
-    socket.emit('hide_disappearing_message', { groupId: groupId || currentGroupId, messageId: normalizedId });
+  if (options.notifyServer && socket && groupId) {
+    socket.emit('hide_disappearing_message', { groupId, messageId: normalizedId });
   }
 
   const row = document.querySelector(`[data-msg-id="${CSS.escape(normalizedId)}"]`);
@@ -4244,8 +4253,10 @@ function syncGroupUnreadCount(groupId) {
 
 // ── Select group ──────────────────────────────────────────────────────────────
 async function selectGroup(groupId) {
-  currentGroupId = groupId;
-  currentGroupData = groups.find(g => g.id === groupId) || null;
+  const normalizedGroupId = String(groupId || '');
+  if (!normalizedGroupId) return;
+  currentGroupId = normalizedGroupId;
+  currentGroupData = groups.find(g => String(g.id) === normalizedGroupId) || null;
   replyingTo = null;
   pendingAttachmentRows.clear();
   whisperRecipients = [];
@@ -4262,7 +4273,7 @@ async function selectGroup(groupId) {
 
   // Update sidebar active state
   document.querySelectorAll('.group-item').forEach(el => {
-    el.classList.toggle('active', el.dataset.groupId === groupId);
+    el.classList.toggle('active', el.dataset.groupId === normalizedGroupId);
   });
 
   // Show chat area
@@ -4299,20 +4310,20 @@ async function selectGroup(groupId) {
   updateKeyState();
 
   // Socket room
-  if (socket) socket.emit('join_room', groupId);
+  if (socket) socket.emit('join_room', normalizedGroupId);
 
-  const cache = ensureGroupCacheEntry(groupId);
+  const cache = ensureGroupCacheEntry(normalizedGroupId);
   if (!cache.messages || !cache.members || !cache.messageRows) {
     messagesArea().replaceChildren(createLoadMoreIndicator());
     members = [];
     renderMembersList();
     renderWhisperPicker();
     $('chat-member-count').textContent = 'Loading…';
-    await ensureGroupDataPreloaded(groupId);
-    if (currentGroupId !== groupId) return;
+    await ensureGroupDataPreloaded(normalizedGroupId);
+    if (currentGroupId !== normalizedGroupId) return;
   }
-  renderGroupFromCache(groupId);
-  updateGroupUnseenCount(groupId, allMessages);
+  renderGroupFromCache(normalizedGroupId);
+  updateGroupUnseenCount(normalizedGroupId, allMessages);
   observeCurrentGroupRowsForRead();
   scrollToBottom(true);
   $('scroll-bottom-btn').hidden = true;
@@ -4531,6 +4542,7 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
     + (msg.type === 'whisper' ? ' whisper' : '')
     + (isDisappearingMessage(msg) ? ' disappearing' : '');
   row.dataset.msgId = msg.id;
+  row.dataset.groupId = groupId;
   row.dataset.senderId = msg.senderId;
   row.dataset.hashtag = getMessageHashtagKey(msg) || '';
   row.dataset.disappearing = isDisappearingMessage(msg) ? '1' : '0';
@@ -6174,6 +6186,24 @@ function initSocket() {
       setMobileView('list');
       addSystemMessage('This group has been disbanded');
     }
+  });
+
+  socket.on('group_join_denied', async ({ groupId }) => {
+    const normalizedGroupId = String(groupId || '');
+    if (!normalizedGroupId) return;
+    await loadGroups();
+    if (currentGroupId !== normalizedGroupId) return;
+    if (groups.some((group) => String(group.id) === normalizedGroupId)) return;
+    currentGroupId = null;
+    currentGroupData = null;
+    members = [];
+    $('chat-active').hidden = true;
+    $('chat-empty').hidden = false;
+    $('right-panel-content').hidden = true;
+    $('right-panel-empty').hidden = false;
+    renderMembersList();
+    renderWhisperPicker();
+    setMobileView('list');
   });
 
   socket.on('presence_update', ({ groupId, onlineUserIds }) => {

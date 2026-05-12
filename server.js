@@ -2895,10 +2895,14 @@ io.on('connection', (socket) => {
   // ── join_room ──────────────────────────────────────────────────────────────
   socket.on('join_room', (groupId) => {
     if (!groupId) return;
+    const normalizedGroupId = String(groupId);
 
-    const member = stmts.isMember.get(groupId, socket.userId);
+    const member = stmts.isMember.get(normalizedGroupId, String(socket.userId));
     if (!member) {
-      socket.emit('error', { message: 'Not a member of this group' });
+      socket.emit('group_join_denied', {
+        groupId: normalizedGroupId,
+        message: 'Not a member of this group',
+      });
       return;
     }
 
@@ -2912,20 +2916,20 @@ io.on('connection', (socket) => {
       }
     }
 
-    socket.join(groupId);
-    socket.currentRoom = groupId;
-    addPresence(groupId, socket.id);
+    socket.join(normalizedGroupId);
+    socket.currentRoom = normalizedGroupId;
+    addPresence(normalizedGroupId, socket.id);
 
     // Notify room of updated presence
-    const presenceSockets = getPresence(groupId);
+    const presenceSockets = getPresence(normalizedGroupId);
     const onlineUserIds = new Set();
     for (const sid of presenceSockets) {
       const s = io.sockets.sockets.get(sid);
       if (s) onlineUserIds.add(s.userId);
     }
-    io.to(groupId).emit('presence_update', { groupId, onlineUserIds: [...onlineUserIds] });
+    io.to(normalizedGroupId).emit('presence_update', { groupId: normalizedGroupId, onlineUserIds: [...onlineUserIds] });
 
-    console.log(`${socket.username} joined room ${groupId}`);
+    console.log(`${socket.username} joined room ${normalizedGroupId}`);
   });
 
   socket.on('attachment_upload_progress', ({ groupId, uploadId, type, filename, totalBytes, loadedBytes }) => {
