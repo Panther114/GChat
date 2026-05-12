@@ -7004,12 +7004,12 @@ function setupEventListeners() {
     if (e.target !== $('diagnostics-modal')) return;
     closeDiagnosticsModal();
   });
-  $('sidebar-mobile-user-list-btn').addEventListener('click', () => {
+  $('sidebar-mobile-user-list-btn').addEventListener('click', async () => {
     closeMobileActionMenu();
     $('user-management-error').textContent = '';
     setUserManagementLoading();
     $('user-management-modal').hidden = false;
-    void loadUserManagementSummary();
+    await loadUserManagementSummary();
   });
   $('sidebar-mobile-actions-btn').addEventListener('click', (event) => {
     event.stopPropagation();
