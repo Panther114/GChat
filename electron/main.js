@@ -63,28 +63,10 @@ let lastLoadError = null;
 
 // ── Resolve icon path ─────────────────────────────────────────────────────────
 function getIconPath() {
-  const windows = process.platform === 'win32';
-  const mac = process.platform === 'darwin';
-  const candidates = windows
-    ? [
-        path.join(__dirname, '..', 'build', 'icon.ico'),
-        path.join(process.resourcesPath, 'icon.ico'),
-        path.join(__dirname, '..', 'public', 'gchat_icon.png'),
-        path.join(process.resourcesPath, 'public', 'gchat_icon.png'),
-      ]
-    : mac
-      ? [
-          path.join(__dirname, '..', 'build', 'icon.icns'),
-          path.join(process.resourcesPath, 'icon.icns'),
-          path.join(__dirname, '..', 'public', 'gchat_icon.png'),
-          path.join(process.resourcesPath, 'public', 'gchat_icon.png'),
-        ]
-      : [
-          path.join(__dirname, '..', 'build', 'icons', '512x512.png'),
-          path.join(process.resourcesPath, 'build', 'icons', '512x512.png'),
-          path.join(__dirname, '..', 'public', 'gchat_icon.png'),
-          path.join(process.resourcesPath, 'public', 'gchat_icon.png'),
-        ];
+  const candidates = [
+    path.join(__dirname, '..', 'public', 'gchat_icon.png'),
+    path.join(process.resourcesPath, 'public', 'gchat_icon.png'),
+  ];
 
   for (const candidate of candidates) {
     if (!candidate) continue;

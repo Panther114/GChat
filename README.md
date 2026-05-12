@@ -447,7 +447,7 @@ Relevant Electron Builder behavior:
 │   ├── offline.html             # Desktop connection recovery page
 │   └── desktop.css              # Desktop setup/recovery styling
 ├── build/
-│   └── icon.ico                 # Windows desktop icon
+│   └── icon.ico                 # Generated desktop icon artifact
 └── public/
     ├── index.html               # Sign-in/sign-up page
     ├── chat.html                # Main chat UI
@@ -456,7 +456,6 @@ Relevant Electron Builder behavior:
     ├── service-worker.js        # Hosted PWA offline/update handling
     ├── style.css                # Web UI styling
     ├── gchat_icon.png           # App icon asset
-    ├── icons/                   # Android/iOS PWA icon set
     └── promo.html               # Static promotional page
 ```
 

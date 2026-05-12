@@ -2148,8 +2148,8 @@ function sendNativeNotification(unreadCount, groupId) {
     try {
       const n = new Notification(GENERIC_NOTIFICATION_TITLE, {
         body: getGenericUnreadNotificationBody(unreadCount),
-        icon: '/icons/icon-192-v124.png',
-        badge: '/icons/icon-192-v124.png',
+        icon: '/gchat_icon.png',
+        badge: '/gchat_icon.png',
         tag: PUSH_NOTIFICATION_TAG,
       });
       n.addEventListener('click', () => { window.focus(); });
