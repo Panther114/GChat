@@ -1586,8 +1586,14 @@ function getMessageTextLineHeight(textEl) {
 function updateCollapsibleMessageState(textEl) {
   if (!textEl || !textEl.isConnected) return;
   textEl.classList.remove('is-collapsed', 'is-collapsible');
+  textEl.style.removeProperty('--msg-collapsed-height');
+  textEl.style.removeProperty('--msg-expanded-height');
   const lineHeight = getMessageTextLineHeight(textEl);
-  const shouldCollapse = textEl.scrollHeight > (lineHeight * COLLAPSIBLE_MESSAGE_LINE_THRESHOLD) + 2;
+  const collapsedHeight = Math.ceil((lineHeight * COLLAPSIBLE_MESSAGE_LINE_THRESHOLD) + 2);
+  const expandedHeight = Math.ceil(textEl.scrollHeight);
+  textEl.style.setProperty('--msg-collapsed-height', `${collapsedHeight}px`);
+  textEl.style.setProperty('--msg-expanded-height', `${Math.max(expandedHeight, collapsedHeight)}px`);
+  const shouldCollapse = expandedHeight > collapsedHeight + 2;
   if (!shouldCollapse) {
     delete textEl.dataset.collapsed;
     return;
@@ -2552,7 +2558,7 @@ const WHISPER_COMMAND_TARGET_PATTERN = /(?:^|\s)\/w\s+([^\s]+)\s$/;
 const DESKTOP_POINTER_CENTER_OFFSET = 0.5;
 const DESKTOP_POINTER_SHIFT_MULTIPLIER = 10;
 const DESKTOP_POINTER_SHIFT_PRECISION = 100;
-const COLLAPSIBLE_MESSAGE_LINE_THRESHOLD = 5;
+const COLLAPSIBLE_MESSAGE_LINE_THRESHOLD = 1;
 let mobileViewState = 'list';
 let viewportHeightSyncFrame = 0;
 let viewportHeightSyncTimer = 0;
@@ -4614,7 +4620,7 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
   }
 
   // Message content
-  const textEl = document.createElement(isAiAssistant ? 'div' : 'span');
+  const textEl = document.createElement(msg.type === 'text' ? 'div' : 'span');
   textEl.className = 'msg-text';
   await renderMsgContent(msg, textEl, bubble, groupId);
 
