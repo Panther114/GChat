@@ -3004,7 +3004,8 @@ function maybeTokenizeSlashCommand(input) {
       return false;
     }
     setWhisperTokenFromMember(member, whisperMatch[1]);
-    input.value = input.value.slice(0, whisperMatch.index);
+    const commandStart = whisperMatch.index + (whisperMatch[0].startsWith(' ') ? 1 : 0);
+    input.value = input.value.slice(0, commandStart);
     input.selectionStart = input.selectionEnd = input.value.length;
     syncComposerTokens();
     updateWhisperBtn();
