@@ -33,6 +33,7 @@ const { autoUpdater } = require('electron-updater');
 
 const OFFICIAL_SERVER_URL = 'https://gchat.up.railway.app';
 const OFFICIAL_SERVER_ORIGIN = new URL(OFFICIAL_SERVER_URL).origin;
+const OFFICIAL_SERVER_HOST = new URL(OFFICIAL_SERVER_URL).hostname;
 const APP_USER_MODEL_ID = 'com.Gchat.app';
 const MIN_WINDOW_WIDTH = 880;
 const MIN_WINDOW_HEIGHT = 600;
@@ -441,7 +442,7 @@ ipcMain.handle('clear-cache-and-restart', async () => {
     try {
       const cookies = await sessionToClear.cookies.get({});
       await Promise.all(cookies.map((cookie) => {
-        const hostname = String(cookie.domain || new URL(OFFICIAL_SERVER_URL).hostname).replace(/^\./, '');
+        const hostname = String(cookie.domain || OFFICIAL_SERVER_HOST).replace(/^\./, '');
         const pathname = cookie.path && cookie.path.startsWith('/') ? cookie.path : '/';
         const protocol = cookie.secure ? 'https://' : 'http://';
         return sessionToClear.cookies.remove(`${protocol}${hostname}${pathname}`, cookie.name).catch(() => {});

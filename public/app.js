@@ -189,16 +189,26 @@ async function clearIndexedDbDatabases() {
 }
 
 async function clearBrowserCookies() {
+  const deleteCookieStoreEntry = async (cookie) => {
+    try {
+      await window.cookieStore.delete({
+        name: cookie.name,
+        domain: cookie.domain,
+        path: cookie.path,
+      });
+    } catch {
+      try {
+        await window.cookieStore.delete(cookie.name);
+      } catch {
+        // fall through to document.cookie cleanup
+      }
+    }
+  };
+
   if ('cookieStore' in window && typeof window.cookieStore.getAll === 'function') {
     try {
       const cookies = await window.cookieStore.getAll();
-      await Promise.all(cookies.map((cookie) => (
-        window.cookieStore.delete({
-          name: cookie.name,
-          domain: cookie.domain,
-          path: cookie.path,
-        }).catch(() => window.cookieStore.delete(cookie.name).catch(() => {}))
-      )));
+      await Promise.all(cookies.map((cookie) => deleteCookieStoreEntry(cookie)));
     } catch {
       // fall through to document.cookie cleanup
     }
