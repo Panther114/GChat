@@ -158,109 +158,6 @@ async function prepareWallpaperFile(file) {
   return file;
 }
 
-function bestEffortDeleteDatabase(name) {
-  if (!name || !('indexedDB' in window)) return Promise.resolve();
-  return new Promise((resolve) => {
-    try {
-      const req = indexedDB.deleteDatabase(name);
-      const done = () => resolve();
-      req.onsuccess = done;
-      req.onerror = done;
-      req.onblocked = done;
-    } catch {
-      resolve();
-    }
-  });
-}
-
-async function clearIndexedDbDatabases() {
-  if (!('indexedDB' in window) || typeof indexedDB.databases !== 'function') return;
-  try {
-    const databases = await indexedDB.databases();
-    await Promise.all(
-      databases
-        .map((db) => (db && typeof db.name === 'string' ? db.name : ''))
-        .filter(Boolean)
-        .map((name) => bestEffortDeleteDatabase(name))
-    );
-  } catch {
-    // best effort only
-  }
-}
-
-async function clearBrowserCookies() {
-  const deleteCookieStoreEntry = async (cookie) => {
-    try {
-      await window.cookieStore.delete({
-        name: cookie.name,
-        domain: cookie.domain,
-        path: cookie.path,
-      });
-    } catch {
-      try {
-        await window.cookieStore.delete(cookie.name);
-      } catch {
-        // fall through to document.cookie cleanup
-      }
-    }
-  };
-
-  if ('cookieStore' in window && typeof window.cookieStore.getAll === 'function') {
-    try {
-      const cookies = await window.cookieStore.getAll();
-      await Promise.all(cookies.map((cookie) => deleteCookieStoreEntry(cookie)));
-    } catch {
-      // fall through to document.cookie cleanup
-    }
-  }
-
-  const rawCookies = document.cookie ? document.cookie.split(';') : [];
-  if (!rawCookies.length) return;
-  const expiry = 'Thu, 01 Jan 1970 00:00:00 GMT';
-  const host = window.location.hostname;
-  const basePath = window.location.pathname
-    .split('/')
-    .filter(Boolean)
-    .reduce((paths, segment) => {
-      const previous = paths[paths.length - 1] || '';
-      paths.push(`${previous}/${segment}`);
-      return paths;
-    }, ['/']);
-  const paths = Array.from(new Set([...basePath, '/']));
-  const domains = Array.from(new Set(['', host, host ? `.${host}` : ''].filter(Boolean)));
-
-  rawCookies.forEach((cookieStr) => {
-    const name = cookieStr.split('=')[0]?.trim();
-    if (!name) return;
-    const permutations = [
-      '',
-      'SameSite=Lax',
-      window.location.protocol === 'https:' ? 'SameSite=None; Secure' : 'SameSite=Lax',
-    ];
-    paths.forEach((pathValue) => {
-      permutations.forEach((extra) => {
-        document.cookie = `${name}=; expires=${expiry}; path=${pathValue}; ${extra}`.trim();
-        domains.forEach((domain) => {
-          document.cookie = `${name}=; expires=${expiry}; path=${pathValue}; domain=${domain}; ${extra}`.trim();
-        });
-      });
-    });
-  });
-}
-
-async function clearServerSessionCookie() {
-  try {
-    await fetch('/api/auth/logout', {
-      method: 'POST',
-      headers: apiHeaders(),
-      credentials: 'same-origin',
-      keepalive: true,
-    });
-  } catch {
-    // best effort only
-  }
-}
-
 // ── CSRF ──────────────────────────────────────────────────────────────────────
 let csrfToken = null;
 let appVersionLabel = 'v—';
@@ -484,10 +381,6 @@ function migrateLegacyLocalSettings(userId = currentUser && currentUser.id) {
 }
 
 async function clearBrowserRuntimeCaches({ includeLocalData = false } = {}) {
-  if (includeLocalData) {
-    await clearServerSessionCookie();
-  }
-
   if ('caches' in window) {
     try {
       const keys = await caches.keys();
@@ -508,10 +401,10 @@ async function clearBrowserRuntimeCaches({ includeLocalData = false } = {}) {
 
   if (!includeLocalData) return;
 
-  await clearIndexedDbDatabases();
-  await clearBrowserCookies();
+  const preservedLocalEntries = capturePreservedLocalStorageEntries();
   try { sessionStorage.clear(); } catch { /* ignore */ }
   try { localStorage.clear(); } catch { /* ignore */ }
+  restorePreservedLocalStorageEntries(preservedLocalEntries);
   derivedKeyCache.clear();
   clearAllMessageVisibilityTimers();
   groupDataCache.clear();
@@ -6982,7 +6875,7 @@ function setupEventListeners() {
   $('clear-cache-btn').addEventListener('click', () => {
     showConfirm(
       'Clear Cache and Restart',
-      'This will clear cookies, offline caches, local storage, indexed data, and restart GChat. Continue?',
+      'This will clear local cache and restart GChat. Stored group keys will be kept. Continue?',
       async () => {
         await clearCacheAndRestartApp();
       }
