@@ -33,6 +33,7 @@ const { autoUpdater } = require('electron-updater');
 
 const OFFICIAL_SERVER_URL = 'https://gchat.up.railway.app';
 const OFFICIAL_SERVER_ORIGIN = new URL(OFFICIAL_SERVER_URL).origin;
+const OFFICIAL_SERVER_HOST = new URL(OFFICIAL_SERVER_URL).hostname;
 const APP_USER_MODEL_ID = 'com.Gchat.app';
 const MIN_WINDOW_WIDTH = 880;
 const MIN_WINDOW_HEIGHT = 600;
@@ -436,6 +437,28 @@ ipcMain.handle('clear-cache-and-restart', async () => {
   const sessionToClear = mainWindow?.webContents?.session;
   if (sessionToClear) {
     await sessionToClear.clearCache();
+    await sessionToClear.clearStorageData().catch(() => {});
+    await sessionToClear.clearAuthCache().catch(() => {});
+    try {
+      const activeSessionUrl = (() => {
+        try {
+          return new URL(mainWindow?.webContents?.getURL() || OFFICIAL_SERVER_URL);
+        } catch {
+          return new URL(OFFICIAL_SERVER_URL);
+        }
+      })();
+      const cookies = await sessionToClear.cookies.get({});
+      await Promise.all(cookies.map((cookie) => {
+        const hostname = String(cookie.domain || activeSessionUrl.hostname || OFFICIAL_SERVER_HOST).replace(/^\./, '');
+        if (!hostname) return Promise.resolve();
+        const pathname = cookie.path && cookie.path.startsWith('/') ? cookie.path : '/';
+        const currentProtocol = /^https?:$/.test(activeSessionUrl.protocol) ? `${activeSessionUrl.protocol}//` : '';
+        const protocol = currentProtocol || (cookie.secure ? 'https://' : 'http://');
+        return sessionToClear.cookies.remove(`${protocol}${hostname}${pathname}`, cookie.name).catch(() => {});
+      }));
+    } catch {
+      // best effort only
+    }
   }
   isQuitting = true;
   app.relaunch();

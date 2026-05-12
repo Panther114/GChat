@@ -1,0 +1,688 @@
+.ios-liquid {
+  --ios-liquid-blur: 22px;
+  --ios-liquid-saturation: 175%;
+  --ios-liquid-radius-sm: 18px;
+  --ios-liquid-radius-lg: 24px;
+  --ios-liquid-radius-xl: 30px;
+  --ios-liquid-radius-pill: 999px;
+  --ios-liquid-bg: linear-gradient(180deg, rgba(42, 47, 66, 0.68), rgba(12, 16, 30, 0.52));
+  --ios-liquid-bg-strong: linear-gradient(180deg, rgba(38, 43, 62, 0.84), rgba(12, 15, 28, 0.72));
+  --ios-liquid-bg-popover: linear-gradient(180deg, rgba(46, 51, 72, 0.84), rgba(13, 16, 29, 0.78));
+  --ios-liquid-border: rgba(255, 255, 255, 0.28);
+  --ios-liquid-border-soft: rgba(255, 255, 255, 0.14);
+  --ios-liquid-shadow: 0 18px 48px rgba(0, 0, 0, 0.30), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  --ios-liquid-shadow-soft: 0 10px 28px rgba(0, 0, 0, 0.20), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  --ios-liquid-shadow-panel: 0 28px 72px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  --ios-liquid-spring: cubic-bezier(.22, 1, .36, 1);
+  --ios-blue: #0a84ff;
+  --ios-blue-2: #2997ff;
+  --ios-red: #ff453a;
+  --ios-purple: #bf5af2;
+}
+
+.ios-liquid.ios-liquid-conservative {
+  --ios-liquid-blur: 16px;
+  --ios-liquid-saturation: 150%;
+}
+
+.ios-liquid .liquid-surface,
+.ios-liquid .liquid-pill,
+.ios-liquid .liquid-sheet,
+.ios-liquid .liquid-popover,
+.ios-liquid [data-liquid-surface] {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  background: var(--ios-liquid-bg);
+  border: 1px solid var(--ios-liquid-border);
+  border-radius: var(--ios-liquid-radius-xl);
+  box-shadow: var(--ios-liquid-shadow);
+  backdrop-filter: saturate(var(--ios-liquid-saturation)) blur(var(--ios-liquid-blur));
+  -webkit-backdrop-filter: saturate(var(--ios-liquid-saturation)) blur(var(--ios-liquid-blur));
+}
+
+.ios-liquid .liquid-pill,
+.ios-liquid [data-liquid-surface].liquid-pill {
+  border-radius: var(--ios-liquid-radius-pill);
+}
+
+.ios-liquid .liquid-sheet,
+.ios-liquid [data-liquid-surface].liquid-sheet {
+  background: var(--ios-liquid-bg-strong);
+  box-shadow: var(--ios-liquid-shadow-panel);
+}
+
+.ios-liquid .liquid-popover,
+.ios-liquid [data-liquid-surface].liquid-popover {
+  background: var(--ios-liquid-bg-popover);
+  box-shadow: 0 24px 56px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+
+.ios-liquid [data-liquid-surface]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.42), rgba(255, 255, 255, 0.08) 42%, transparent 65%),
+    radial-gradient(circle at 72% 0%, rgba(255, 255, 255, 0.20), transparent 36%);
+  opacity: 0.74;
+  mix-blend-mode: screen;
+}
+
+.ios-liquid [data-liquid-surface]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  border: 1px solid rgba(135, 193, 255, 0.10);
+  box-shadow: inset -1px 0 0 rgba(255, 94, 178, 0.08);
+  opacity: 0.72;
+}
+
+.ios-liquid [data-liquid-surface] > * {
+  position: relative;
+  z-index: 1;
+}
+
+.ios-liquid [data-liquid-pressable] {
+  transform: translate3d(calc(var(--liquid-base-x, 0px) + var(--liquid-x, 0px)), calc(var(--liquid-base-y, 0px) + var(--liquid-y, 0px)), 0) scale(var(--liquid-scale, 1));
+  transition:
+    transform 180ms var(--ios-liquid-spring),
+    box-shadow 180ms ease,
+    background 180ms ease,
+    border-color 180ms ease,
+    filter 180ms ease;
+  will-change: transform;
+}
+
+.ios-liquid [data-liquid-pressable]:active {
+  --liquid-scale: 0.965;
+}
+
+.ios-liquid [data-liquid-pressable]:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--ios-blue) 70%, white 30%);
+  outline-offset: 2px;
+}
+
+.no-svg-backdrop .ios-liquid [data-liquid-surface],
+.no-backdrop .ios-liquid [data-liquid-surface] {
+  background: rgba(18, 22, 36, 0.84);
+}
+
+body.chat-body.ios-liquid {
+  background:
+    radial-gradient(circle at top left, rgba(41, 151, 255, 0.16), transparent 30%),
+    radial-gradient(circle at top right, rgba(191, 90, 242, 0.14), transparent 26%),
+    radial-gradient(circle at bottom center, rgba(10, 132, 255, 0.10), transparent 28%),
+    var(--bg);
+}
+
+.ios-liquid .chat-panel {
+  margin: 16px 0;
+  border-radius: 34px;
+  background: transparent;
+  min-width: 0;
+}
+
+.ios-liquid .chat-panel::before,
+.ios-liquid .chat-panel::after {
+  border-radius: inherit;
+}
+
+.ios-liquid .sidebar {
+  margin: 16px 0 16px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 32px;
+  border-right: 1px solid rgba(255, 255, 255, 0.18);
+  background: linear-gradient(180deg, rgba(32, 38, 58, 0.78), rgba(11, 15, 28, 0.70));
+}
+
+.ios-liquid .sidebar-resizer {
+  width: 12px;
+  margin: 16px 10px 16px 6px;
+}
+
+.ios-liquid .sidebar-brand,
+.ios-liquid .sidebar-actions,
+.ios-liquid .sidebar-user {
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.ios-liquid .group-list {
+  padding: 10px 8px 12px;
+}
+
+.ios-liquid .group-item {
+  margin: 4px 8px;
+  border: 1px solid transparent;
+  border-left-width: 1px;
+  background: rgba(255, 255, 255, 0.035);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.ios-liquid .group-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.10);
+}
+
+.ios-liquid .group-item.active {
+  background: linear-gradient(135deg, rgba(10, 132, 255, 0.26), rgba(41, 151, 255, 0.12));
+  border-color: rgba(120, 190, 255, 0.42);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 10px 24px rgba(10, 132, 255, 0.14);
+}
+
+.ios-liquid .group-item-badge {
+  background: linear-gradient(180deg, #ff5a50, #ff453a);
+  box-shadow: 0 8px 18px rgba(255, 69, 58, 0.25);
+}
+
+.ios-liquid .btn-icon,
+.ios-liquid .btn-action,
+.ios-liquid .btn-action-sm,
+.ios-liquid .btn-primary,
+.ios-liquid .btn-secondary,
+.ios-liquid .btn-danger,
+.ios-liquid .btn-quick-action,
+.ios-liquid .grok-model-option,
+.ios-liquid .user-management-expand-btn,
+.ios-liquid .user-management-save-btn,
+.ios-liquid .user-management-delete-btn {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow: var(--ios-liquid-shadow-soft);
+}
+
+.ios-liquid .btn-icon:hover,
+.ios-liquid .btn-action:hover,
+.ios-liquid .btn-action-sm:hover,
+.ios-liquid .btn-primary:hover,
+.ios-liquid .btn-secondary:hover,
+.ios-liquid .btn-danger:hover,
+.ios-liquid .btn-quick-action:hover,
+.ios-liquid .grok-model-option:hover,
+.ios-liquid .user-management-expand-btn:hover,
+.ios-liquid .user-management-save-btn:hover,
+.ios-liquid .user-management-delete-btn:hover {
+  filter: brightness(1.08);
+  border-color: rgba(255, 255, 255, 0.24);
+}
+
+.ios-liquid .btn-send {
+  background: linear-gradient(180deg, var(--ios-blue-2), var(--ios-blue));
+  border: 1px solid rgba(167, 216, 255, 0.44);
+  box-shadow: 0 14px 28px rgba(10, 132, 255, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+
+.ios-liquid .btn-danger,
+.ios-liquid .user-management-delete-btn {
+  background: linear-gradient(180deg, rgba(255, 92, 105, 0.26), rgba(115, 20, 31, 0.26));
+  border-color: rgba(255, 122, 133, 0.32);
+}
+
+.ios-liquid .btn-primary {
+  background: linear-gradient(180deg, rgba(41, 151, 255, 0.28), rgba(10, 132, 255, 0.18));
+  border-color: rgba(120, 190, 255, 0.34);
+}
+
+.ios-liquid .btn-secondary {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.ios-liquid .right-panel {
+  margin: 16px 16px 16px 0;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 32px;
+  border-left: 1px solid rgba(255, 255, 255, 0.18);
+  background: linear-gradient(180deg, rgba(31, 36, 56, 0.80), rgba(11, 15, 28, 0.72));
+}
+
+.ios-liquid .right-panel-inner {
+  padding: 18px 16px 18px;
+}
+
+.ios-liquid .panel-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 22px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.ios-liquid .panel-section-label {
+  display: block;
+  color: rgba(255, 255, 255, 0.58);
+}
+
+.ios-liquid .right-panel-owner-actions,
+.ios-liquid .right-panel-common-actions {
+  border-top-color: rgba(255, 255, 255, 0.08);
+}
+
+.ios-liquid .chat-topbar {
+  margin: 16px 16px 10px;
+  padding:
+    calc(10px + var(--safe-area-top))
+    calc(14px + var(--safe-area-right))
+    10px
+    calc(14px + var(--safe-area-left));
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: var(--ios-liquid-radius-pill);
+  background: linear-gradient(180deg, rgba(34, 40, 60, 0.70), rgba(12, 16, 29, 0.54));
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  transition:
+    margin 220ms var(--ios-liquid-spring),
+    padding 220ms var(--ios-liquid-spring),
+    border-radius 220ms var(--ios-liquid-spring),
+    box-shadow 220ms ease,
+    transform 220ms var(--ios-liquid-spring);
+}
+
+.ios-liquid .chat-topbar.is-compact {
+  margin-top: 10px;
+  padding-top: calc(8px + var(--safe-area-top));
+  padding-bottom: 8px;
+  box-shadow: 0 12px 26px rgba(0, 0, 0, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
+
+.ios-liquid .chat-tag-filter-btn {
+  background: rgba(255, 255, 255, 0.10);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+
+.ios-liquid .chat-tag-filter-btn.active {
+  background: linear-gradient(180deg, rgba(10, 132, 255, 0.34), rgba(10, 132, 255, 0.18));
+  border-color: rgba(131, 197, 255, 0.34);
+}
+
+.ios-liquid .unread-jump-btn {
+  top: calc(var(--safe-area-top) + 84px);
+  color: #fff;
+  background: linear-gradient(180deg, rgba(255, 95, 87, 0.92), rgba(255, 69, 58, 0.88));
+  border: 1px solid rgba(255, 211, 208, 0.36);
+  box-shadow: 0 14px 28px rgba(255, 69, 58, 0.30), inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+
+.ios-liquid .messages-area {
+  padding: 2px 18px 12px;
+  background: transparent;
+  scroll-padding-top: 96px;
+  scroll-padding-bottom: 124px;
+}
+
+.ios-liquid .msg-bubble {
+  background: linear-gradient(180deg, rgba(252, 254, 255, 0.96), rgba(237, 244, 252, 0.92));
+  border-color: rgba(255, 255, 255, 0.66);
+  box-shadow: 0 12px 24px rgba(17, 24, 39, 0.10), inset 0 1px 0 rgba(255, 255, 255, 0.84);
+}
+
+.ios-liquid .msg-row.own .msg-bubble {
+  background: linear-gradient(180deg, #47b7ff 0%, #0a84ff 72%, #0077ed 100%);
+  color: #fff;
+  box-shadow: 0 16px 32px rgba(10, 132, 255, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.26);
+}
+
+.ios-liquid .msg-row.own .msg-meta,
+.ios-liquid .msg-row.own .msg-delivery,
+.ios-liquid .msg-row.own .msg-delivery-tick,
+.ios-liquid .msg-row.own .msg-edited-badge {
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.ios-liquid .msg-row.own .msg-delivery-tick.read {
+  color: rgba(219, 240, 255, 0.98);
+}
+
+.ios-liquid .msg-row.whisper .msg-bubble {
+  background: linear-gradient(180deg, rgba(251, 245, 255, 0.96), rgba(239, 231, 252, 0.92));
+}
+
+.ios-liquid .msg-date-divider,
+.ios-liquid .msg-system {
+  width: max-content;
+  max-width: calc(100% - 24px);
+  margin: 10px auto;
+  padding: 7px 12px;
+  border-radius: var(--ios-liquid-radius-pill);
+  background: rgba(18, 22, 36, 0.52);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  box-shadow: var(--ios-liquid-shadow-soft);
+  backdrop-filter: saturate(140%) blur(14px);
+  -webkit-backdrop-filter: saturate(140%) blur(14px);
+}
+
+.ios-liquid .typing-indicator {
+  padding: 0 24px 6px;
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.ios-liquid .reply-preview-bar {
+  margin: 0 16px 8px;
+  padding: 10px 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.18);
+  background: linear-gradient(180deg, rgba(82, 62, 138, 0.30), rgba(20, 22, 40, 0.48));
+}
+
+.ios-liquid .message-input-bar {
+  margin: 0 16px calc(16px + var(--safe-area-bottom));
+  padding: 10px 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 28px;
+  background: linear-gradient(180deg, rgba(35, 40, 60, 0.74), rgba(12, 16, 28, 0.62));
+  box-shadow: 0 20px 46px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  overflow: visible;
+  transition:
+    margin 220ms var(--ios-liquid-spring),
+    padding 220ms var(--ios-liquid-spring),
+    box-shadow 220ms ease,
+    transform 220ms var(--ios-liquid-spring);
+}
+
+.ios-liquid .message-input-bar.is-compact {
+  margin-bottom: calc(12px + var(--safe-area-bottom));
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.ios-liquid .message-composer-shell {
+  background: rgba(7, 10, 20, 0.34);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.ios-liquid .message-composer-shell::before,
+.ios-liquid .message-composer-shell::after {
+  opacity: 0.55;
+}
+
+.ios-liquid .message-composer-shell:focus-within {
+  border-color: rgba(130, 197, 255, 0.38);
+  box-shadow: 0 0 0 2px rgba(41, 151, 255, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+
+.ios-liquid .message-input-bar textarea {
+  font-size: max(16px, 1rem);
+}
+
+.ios-liquid .slash-command-menu,
+.ios-liquid .emoji-picker,
+.ios-liquid .whisper-picker,
+.ios-liquid .ctx-menu,
+.ios-liquid .mobile-sidebar-actions-menu,
+.ios-liquid .modal {
+  animation: liquid-popover-in 180ms var(--ios-liquid-spring);
+}
+
+.ios-liquid .slash-command-menu,
+.ios-liquid .emoji-picker,
+.ios-liquid .whisper-picker,
+.ios-liquid .ctx-menu,
+.ios-liquid .mobile-sidebar-actions-menu {
+  border-radius: 24px;
+}
+
+.ios-liquid .slash-command-menu,
+.ios-liquid .emoji-picker,
+.ios-liquid .whisper-picker {
+  border-color: rgba(255, 255, 255, 0.20);
+}
+
+.ios-liquid .slash-command-item:hover,
+.ios-liquid .whisper-picker-item:hover,
+.ios-liquid .ctx-item:hover,
+.ios-liquid .emoji-btn-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.ios-liquid .scroll-bottom-btn {
+  bottom: 138px;
+  right: 24px;
+  background: rgba(20, 25, 40, 0.68);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  box-shadow: 0 16px 30px rgba(0, 0, 0, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.16);
+}
+
+.ios-liquid .scroll-unread-badge {
+  background: linear-gradient(180deg, #ff5f57, #ff453a);
+}
+
+.ios-liquid .modal-overlay {
+  background: rgba(2, 4, 10, 0.54);
+  backdrop-filter: blur(10px) saturate(120%);
+  -webkit-backdrop-filter: blur(10px) saturate(120%);
+}
+
+.ios-liquid .modal {
+  border-color: rgba(255, 255, 255, 0.22);
+  background: linear-gradient(180deg, rgba(34, 39, 58, 0.80), rgba(10, 14, 28, 0.74));
+}
+
+.ios-liquid .ctx-menu {
+  border-color: rgba(255, 255, 255, 0.20);
+}
+
+.ios-liquid .search-bar input,
+.ios-liquid .right-panel-title-input,
+.ios-liquid .form-group input,
+.ios-liquid .form-group textarea,
+.ios-liquid .user-management-global-actions input,
+.ios-liquid .user-management-user-actions input,
+.ios-liquid #grok-prompt-input {
+  background: rgba(7, 10, 20, 0.36);
+  border-color: rgba(255, 255, 255, 0.14);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.ios-liquid .grok-model-toggle,
+.ios-liquid .search-bar,
+.ios-liquid .right-panel-code,
+.ios-liquid .profile-push-card,
+.ios-liquid .profile-ai-usage-card,
+.ios-liquid .user-management-global-card,
+.ios-liquid .user-management-user,
+.ios-liquid .diagnostics-item {
+  border-radius: 22px;
+}
+
+.ios-liquid .user-management-user,
+.ios-liquid .diagnostics-item {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+}
+
+.ios-liquid .grok-model-option.active {
+  background: linear-gradient(180deg, rgba(10, 132, 255, 0.34), rgba(10, 132, 255, 0.18));
+  border-color: rgba(120, 190, 255, 0.34);
+  color: #fff;
+}
+
+@keyframes liquid-popover-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (max-width: 768px) {
+  .ios-liquid .chat-panel {
+    margin: 0;
+    border-radius: 0;
+  }
+
+  .ios-liquid .sidebar,
+  .ios-liquid .chat-panel,
+  .ios-liquid .right-panel {
+    box-shadow: none;
+  }
+
+  .ios-liquid .sidebar {
+    top: max(8px, var(--safe-area-top));
+    right: 10px;
+    bottom: max(10px, var(--safe-area-bottom));
+    left: 10px;
+    width: auto;
+    min-width: 0;
+    height: auto;
+    transform: translateX(calc(-100% - 18px));
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 30px;
+    background: linear-gradient(180deg, rgba(18, 23, 36, 0.90), rgba(10, 13, 25, 0.82));
+  }
+
+  body.chat-body.mobile-layout.mobile-list-view.ios-liquid .sidebar {
+    transform: translateX(0);
+  }
+
+  .ios-liquid .sidebar-brand {
+    background: transparent;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+
+  .ios-liquid .group-list {
+    padding-top: 6px;
+    background: transparent;
+  }
+
+  .ios-liquid .group-item {
+    margin: 4px 10px;
+    border-radius: 20px;
+    border-bottom: none;
+    background: rgba(255, 255, 255, 0.05);
+  }
+
+  .ios-liquid .group-item.active {
+    background: linear-gradient(135deg, rgba(10, 132, 255, 0.28), rgba(10, 132, 255, 0.10));
+  }
+
+  .ios-liquid .mobile-sidebar-actions-menu {
+    top: calc(var(--safe-area-top) + 70px);
+    right: calc(14px + var(--safe-area-right));
+  }
+
+  .ios-liquid .chat-topbar {
+    margin: max(8px, var(--safe-area-top)) 10px 8px;
+    padding:
+      8px
+      calc(12px + var(--safe-area-right))
+      8px
+      calc(12px + var(--safe-area-left));
+    position: sticky;
+    top: max(8px, var(--safe-area-top));
+    z-index: 4;
+  }
+
+  .ios-liquid .messages-area {
+    padding: 2px 12px 8px;
+    scroll-padding-top: calc(var(--mobile-topbar-height) + var(--safe-area-top) + 24px);
+    scroll-padding-bottom: 150px;
+  }
+
+  .ios-liquid .reply-preview-bar {
+    margin: 0 10px 8px;
+  }
+
+  .ios-liquid .message-input-bar {
+    position: sticky;
+    bottom: 0;
+    margin: 0 10px calc(10px + var(--safe-area-bottom));
+    padding: 8px 10px;
+  }
+
+  .ios-liquid .message-input-tools {
+    gap: 3px;
+  }
+
+  .ios-liquid .scroll-bottom-btn {
+    right: 18px;
+    bottom: 130px;
+  }
+
+  .ios-liquid .right-panel {
+    top: auto;
+    right: 10px;
+    bottom: max(10px, var(--safe-area-bottom));
+    left: 10px;
+    width: auto;
+    min-width: 0;
+    height: min(78vh, 720px);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 28px 28px 18px 18px;
+    background: linear-gradient(180deg, rgba(23, 28, 44, 0.92), rgba(10, 14, 26, 0.88));
+    transform: translateY(calc(100% + 18px));
+  }
+
+  body.chat-body.mobile-layout.mobile-details-view.ios-liquid .right-panel {
+    transform: translateY(0);
+  }
+
+  .ios-liquid .right-panel-mobile-header {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: transparent;
+    border-bottom-color: rgba(255, 255, 255, 0.08);
+  }
+
+  .ios-liquid .right-panel-mobile-header::before {
+    content: "";
+    position: absolute;
+    top: 10px;
+    left: 50%;
+    width: 42px;
+    height: 5px;
+    border-radius: 999px;
+    transform: translateX(-50%);
+    background: rgba(255, 255, 255, 0.28);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  }
+
+  .ios-liquid .right-panel-inner,
+  .ios-liquid .right-panel-empty {
+    padding-bottom: calc(18px + var(--safe-area-bottom));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ios-liquid *,
+  .ios-liquid *::before,
+  .ios-liquid *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .ios-liquid [data-liquid-pressable] {
+    transform: none !important;
+  }
+}
+
+@media (prefers-contrast: more) {
+  .ios-liquid {
+    --ios-liquid-border: rgba(255, 255, 255, 0.48);
+    --ios-liquid-bg: linear-gradient(180deg, rgba(44, 49, 68, 0.88), rgba(16, 19, 32, 0.82));
+    --ios-liquid-bg-strong: linear-gradient(180deg, rgba(42, 47, 66, 0.94), rgba(16, 19, 32, 0.90));
+  }
+
+  .ios-liquid [data-liquid-surface]::before,
+  .ios-liquid [data-liquid-surface]::after {
+    opacity: 0.96;
+    mix-blend-mode: normal;
+  }
+
+  .ios-liquid .msg-bubble {
+    border-color: rgba(20, 24, 36, 0.20);
+  }
+}
