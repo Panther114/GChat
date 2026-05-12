@@ -1600,6 +1600,9 @@ function updateCollapsibleMessageState(textEl) {
     return;
   }
   textEl.classList.add('is-collapsible');
+  if (textEl.dataset.collapsed !== '0' && textEl.dataset.collapsed !== '1') {
+    textEl.dataset.collapsed = '1';
+  }
   if (textEl.dataset.collapsed === '1') textEl.classList.add('is-collapsed');
 }
 
