@@ -436,6 +436,19 @@ ipcMain.handle('clear-cache-and-restart', async () => {
   const sessionToClear = mainWindow?.webContents?.session;
   if (sessionToClear) {
     await sessionToClear.clearCache();
+    await sessionToClear.clearStorageData().catch(() => {});
+    await sessionToClear.clearAuthCache().catch(() => {});
+    try {
+      const cookies = await sessionToClear.cookies.get({});
+      await Promise.all(cookies.map((cookie) => {
+        const hostname = String(cookie.domain || new URL(OFFICIAL_SERVER_URL).hostname).replace(/^\./, '');
+        const pathname = cookie.path && cookie.path.startsWith('/') ? cookie.path : '/';
+        const protocol = cookie.secure ? 'https://' : 'http://';
+        return sessionToClear.cookies.remove(`${protocol}${hostname}${pathname}`, cookie.name).catch(() => {});
+      }));
+    } catch {
+      // best effort only
+    }
   }
   isQuitting = true;
   app.relaunch();
