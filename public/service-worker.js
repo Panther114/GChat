@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_CACHE = 'gchat-pwa-v6';
+const APP_CACHE = 'gchat-pwa-v5';
 const APP_SHELL_ASSETS = [
   '/',
   '/index.html',
@@ -9,11 +9,9 @@ const APP_SHELL_ASSETS = [
   '/manifest.json',
   '/pwa.js',
   '/style.css',
-  '/liquid-glass.css',
   '/theme-init.js',
   '/auth.js',
   '/app.js',
-  '/liquid-glass.js',
   '/socket.io/socket.io.js',
   '/gchat_icon.png',
   '/favicon.svg',
