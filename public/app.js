@@ -1592,13 +1592,13 @@ function updateCollapsibleMessageState(textEl) {
   const collapsedHeight = Math.ceil((lineHeight * COLLAPSIBLE_MESSAGE_LINE_THRESHOLD) + 2);
   const expandedHeight = Math.ceil(textEl.scrollHeight);
   textEl.style.setProperty('--msg-collapsed-height', `${collapsedHeight}px`);
-  textEl.style.setProperty('--msg-expanded-height', `${Math.max(expandedHeight, collapsedHeight)}px`);
   const shouldCollapse = expandedHeight > collapsedHeight + 2;
   if (!shouldCollapse) {
     delete textEl.dataset.collapsed;
     return;
   }
   textEl.classList.add('is-collapsible');
+  textEl.style.setProperty('--msg-expanded-height', `${expandedHeight}px`);
   if (textEl.dataset.collapsed === undefined) {
     textEl.dataset.collapsed = '1';
   }
@@ -4620,7 +4620,7 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
   }
 
   // Message content
-  const textEl = document.createElement(msg.type === 'text' ? 'div' : 'span');
+  const textEl = document.createElement(isAiAssistant ? 'div' : 'span');
   textEl.className = 'msg-text';
   await renderMsgContent(msg, textEl, bubble, groupId);
 

@@ -892,6 +892,7 @@ body.sidebar-resizing * {
 .msg-sender-name { font-size: 11px; font-weight: 700; color: var(--text-secondary); margin-bottom: 2px; margin-left: 4px; }
 
 .msg-bubble {
+  --collapse-indicator-text: '.....';
   --collapse-cover-bg: rgba(255,255,255,.96);
   background:
     linear-gradient(180deg, rgba(255,255,255,.24) 0%, rgba(255,255,255,.09) 100%),
@@ -984,7 +985,7 @@ body.sidebar-resizing * {
   padding-right: 52px;
 }
 .msg-text.is-collapsed::after {
-  content: '.....';
+  content: var(--collapse-indicator-text);
   position: absolute;
   right: 0;
   top: 0;
