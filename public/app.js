@@ -1589,10 +1589,10 @@ function updateCollapsibleMessageState(textEl) {
   textEl.style.removeProperty('--msg-collapsed-height');
   textEl.style.removeProperty('--msg-expanded-height');
   const lineHeight = getMessageTextLineHeight(textEl);
-  const collapsedHeight = Math.ceil((lineHeight * COLLAPSIBLE_MESSAGE_LINE_THRESHOLD) + 2);
+  const collapsedHeight = Math.ceil((lineHeight * COLLAPSIBLE_MESSAGE_LINE_THRESHOLD) + COLLAPSIBLE_MESSAGE_HEIGHT_TOLERANCE);
   const expandedHeight = Math.ceil(textEl.scrollHeight);
   textEl.style.setProperty('--msg-collapsed-height', `${collapsedHeight}px`);
-  const shouldCollapse = expandedHeight > collapsedHeight + 2;
+  const shouldCollapse = expandedHeight > collapsedHeight + COLLAPSIBLE_MESSAGE_HEIGHT_TOLERANCE;
   if (!shouldCollapse) {
     delete textEl.dataset.collapsed;
     return;
@@ -2558,6 +2558,7 @@ const WHISPER_COMMAND_TARGET_PATTERN = /(?:^|\s)\/w\s+([^\s]+)\s$/;
 const DESKTOP_POINTER_CENTER_OFFSET = 0.5;
 const DESKTOP_POINTER_SHIFT_MULTIPLIER = 10;
 const DESKTOP_POINTER_SHIFT_PRECISION = 100;
+const COLLAPSIBLE_MESSAGE_HEIGHT_TOLERANCE = 2;
 const COLLAPSIBLE_MESSAGE_LINE_THRESHOLD = 1;
 let mobileViewState = 'list';
 let viewportHeightSyncFrame = 0;
