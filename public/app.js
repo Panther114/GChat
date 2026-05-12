@@ -196,6 +196,8 @@ function clearGroupKey(groupId) {
   localStorage.removeItem('gk:' + groupId);
 }
 
+// Keep only long-lived user essentials across a local reset: group keys plus the
+// current/legacy wallpaper and other per-user local settings payloads.
 function shouldPreserveLocalStorageEntry(key) {
   return !!(
     key
@@ -229,6 +231,8 @@ function clearAccessibleCookies() {
   const hostname = window.location.hostname || '';
   const domainParts = hostname.split('.').filter(Boolean);
   const domains = [''];
+  // Also try parent domains so cookies set on `.example.com` are cleared from
+  // subdomains such as `app.example.com`.
   for (let i = 0; i < domainParts.length - 1; i += 1) {
     domains.push('.' + domainParts.slice(i).join('.'));
   }
@@ -276,7 +280,7 @@ async function clearIndexedDbDatabases() {
 }
 
 function getVisibleWhisperRecipientIds(msg) {
-  if (!msg || msg.type !== 'whisper') return null;
+  if (!msg || msg.type !== 'whisper') return [];
   if (!msg.whisperTo) return [];
   try {
     const parsed = JSON.parse(msg.whisperTo);
