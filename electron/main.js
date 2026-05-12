@@ -440,9 +440,17 @@ ipcMain.handle('clear-cache-and-restart', async () => {
     await sessionToClear.clearStorageData().catch(() => {});
     await sessionToClear.clearAuthCache().catch(() => {});
     try {
+      const activeSessionHost = (() => {
+        try {
+          return new URL(mainWindow?.webContents?.getURL() || OFFICIAL_SERVER_URL).hostname;
+        } catch {
+          return OFFICIAL_SERVER_HOST;
+        }
+      })();
       const cookies = await sessionToClear.cookies.get({});
       await Promise.all(cookies.map((cookie) => {
-        const hostname = String(cookie.domain || OFFICIAL_SERVER_HOST).replace(/^\./, '');
+        const hostname = String(cookie.domain || activeSessionHost || '').replace(/^\./, '');
+        if (!hostname) return Promise.resolve();
         const pathname = cookie.path && cookie.path.startsWith('/') ? cookie.path : '/';
         const protocol = cookie.secure ? 'https://' : 'http://';
         return sessionToClear.cookies.remove(`${protocol}${hostname}${pathname}`, cookie.name).catch(() => {});
