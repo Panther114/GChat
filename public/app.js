@@ -2360,12 +2360,22 @@ async function ensureGroupDataPreloaded(groupId) {
   const cache = ensureGroupCacheEntry(groupId);
 
   const preload = (async () => {
-    if (cache.messages && cache.members && cache.rowsDirty) {
-      await rebuildGroupMessageRows(groupId);
+    if (cache.messages && cache.members) {
+      if (cache.rowsDirty || !cache.messageRows) {
+        await rebuildGroupMessageRows(groupId);
+      }
+      return ensureGroupCacheEntry(groupId);
     }
-    const results = await Promise.allSettled([loadMessages(groupId), loadMembers(groupId)]);
+    const pending = [];
+    if (!cache.messages) pending.push(loadMessages(groupId));
+    if (!cache.members) pending.push(loadMembers(groupId));
+    const results = await Promise.allSettled(pending);
     for (const result of results) {
       if (result.status === 'rejected') console.error('Group preload failed:', groupId, result.reason);
+    }
+    const refreshed = ensureGroupCacheEntry(groupId);
+    if (refreshed.messages && refreshed.members && (refreshed.rowsDirty || !refreshed.messageRows)) {
+      await rebuildGroupMessageRows(groupId);
     }
     return ensureGroupCacheEntry(groupId);
   })();
@@ -3532,7 +3542,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   await loadPushStatus();
   await refreshAiUsageSummary();
-  await loadGroups();
+  const loadedWithBackendPreload = await loadGroups({ withBackendPreload: true });
+  if (!loadedWithBackendPreload) await loadGroups();
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.addEventListener('message', (event) => {
       if (event.data?.type !== 'push-unread-count') return;
@@ -3602,20 +3613,55 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 // ── Load groups ───────────────────────────────────────────────────────────────
-async function loadGroups() {
+async function loadGroups({ withBackendPreload = false } = {}) {
   try {
-    const res = await fetch('/api/groups/mine');
-    if (!res.ok) return;
+    const previousPreviewByGroupId = new Map(
+      groups.map((group) => [group.id, { text: group._lastPreviewText, time: group._lastPreviewTime }])
+    );
+    const endpoint = withBackendPreload ? '/api/groups/preload?limit=50' : '/api/groups/mine';
+    const res = await fetch(endpoint);
+    if (!res.ok) return false;
     groups = await res.json();
     unreadCounts = {};
     for (const group of groups) {
       unreadCounts[group.id] = Math.max(0, Number(group.unreadCount) || 0);
+      const previousPreview = previousPreviewByGroupId.get(group.id);
+      if (previousPreview) {
+        group._lastPreviewText = previousPreview.text;
+        group._lastPreviewTime = previousPreview.time;
+      }
+      if (group.preloaded && typeof group.preloaded === 'object') {
+        const cache = ensureGroupCacheEntry(group.id);
+        const preloadedMessages = Array.isArray(group.preloaded.messages)
+          ? group.preloaded.messages.filter((msg) => !isMessageHiddenForCurrentUser(msg))
+          : [];
+        cache.messages = preloadedMessages;
+        cache.members = Array.isArray(group.preloaded.members) ? group.preloaded.members : [];
+        cache.messageRows = null;
+        cache.oldestMessageId = preloadedMessages.length ? preloadedMessages[0].id : null;
+        cache.rowsDirty = true;
+        writeLocalGroupCache(group.id, cache);
+      }
+      if (!group._lastPreviewText) {
+        const cache = ensureGroupCacheEntry(group.id);
+        const cachedMessages = cache.messages || [];
+        const lastMessage = cachedMessages.length ? cachedMessages[cachedMessages.length - 1] : null;
+        if (lastMessage) {
+          group._lastPreviewText = truncate(getMessagePreviewFallbackText(lastMessage), 35);
+          group._lastPreviewTime = lastMessage.createdAt ? formatTime(lastMessage.createdAt) : '';
+        }
+      }
     }
     pushStatus.totalUnreadCount = getTotalUnreadCount();
     renderGroupList();
+    void refreshGroupPreviewsFromCache(groups.map((group) => group.id));
     syncUnreadIndicators();
     if (isMobileLayout() && !currentGroupId) setMobileView('list');
-  } catch(err) { console.error('loadGroups error:', err); }
+    return true;
+  } catch(err) {
+    console.error('loadGroups error:', err);
+    return false;
+  }
 }
 
 function renderGroupList() {
@@ -3783,14 +3829,21 @@ function updateGroupPreview(groupId, text, time) {
   }
 }
 
-async function getMessagePreviewText(msg, groupId = msg.groupId) {
+function getMessagePreviewFallbackText(msg) {
   if (!msg) return '';
   const aiMentionPrefix = msg.aiMention ? `${buildAiMentionLabel(msg.aiMeta)} ` : '';
   const prefix = getMessageHashtagPrefix(msg);
   const typeLabel = getMessageTypePreviewLabel(msg);
-  if (typeLabel) return aiMentionPrefix + prefix + typeLabel;
+  return typeLabel ? aiMentionPrefix + prefix + typeLabel : aiMentionPrefix + prefix + '[encrypted]';
+}
+
+async function getMessagePreviewText(msg, groupId = msg.groupId) {
+  if (!msg) return '';
+  const fallbackPreview = getMessagePreviewFallbackText(msg);
   const key = getGroupKey(groupId);
-  if (!key || msg.type !== 'text') return aiMentionPrefix + prefix + '[encrypted]';
+  if (!key || msg.type !== 'text') return fallbackPreview;
+  const aiMentionPrefix = msg.aiMention ? `${buildAiMentionLabel(msg.aiMeta)} ` : '';
+  const prefix = getMessageHashtagPrefix(msg);
   const plaintext = await decryptMessage(msg.encryptedContent, msg.iv, key, groupId);
   return aiMentionPrefix + prefix + (plaintext || '[encrypted]');
 }
@@ -3802,6 +3855,18 @@ async function updateGroupPreviewFromMessage(groupId, msg) {
   }
   const preview = await getMessagePreviewText(msg, groupId);
   updateGroupPreview(groupId, preview, msg.createdAt);
+}
+
+async function refreshGroupPreviewsFromCache(groupIds) {
+  const targetGroupIds = Array.isArray(groupIds) ? groupIds : groups.map((group) => group.id);
+  const tasks = [];
+  for (const groupId of targetGroupIds) {
+    const cache = ensureGroupCacheEntry(groupId);
+    const lastMessage = cache.messages && cache.messages.length ? cache.messages[cache.messages.length - 1] : null;
+    if (!lastMessage) continue;
+    tasks.push(updateGroupPreviewFromMessage(groupId, lastMessage));
+  }
+  if (tasks.length) await Promise.allSettled(tasks);
 }
 
 function applyCurrentUserReadState(msg) {

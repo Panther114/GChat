@@ -2183,6 +2183,46 @@ app.get('/api/groups/mine', (req, res) => {
   );
 });
 
+app.get('/api/groups/preload', (req, res) => {
+  const userId = req.session.userId;
+  const requestedLimit = Number(req.query.limit);
+  const safeLimit = Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : 50;
+  const limit = Math.min(Math.max(safeLimit, 1), 100);
+  markExpiredDisappearingMessagesHidden(userId);
+  const groups = stmts.getUserGroups.all(userId);
+  res.json(
+    groups.map((g) => {
+      const rows = stmts.getLastMessages
+        .all({ viewerId: userId, groupId: g.id, limit })
+        .reverse()
+        .map(formatMessage);
+      const members = stmts.getGroupMembers.all(g.id).map((u) => ({
+        id: u.id,
+        username: u.username,
+        iconColor: u.icon_color,
+        profilePicture: u.profile_picture || null,
+      }));
+      return {
+        id: g.id,
+        name: g.name,
+        code: g.code,
+        createdBy: g.created_by,
+        unreadCount: Math.max(0, Number(g.unread_count) || 0),
+        allowMemberClear: g.allow_member_clear || 0,
+        allowMemberClearTag: g.allow_member_clear_tag || 0,
+        allowMemberExport: g.allow_member_export || 0,
+        allowMemberKick: g.allow_member_kick || 0,
+        aiEnabled: g.ai_enabled || 0,
+        groupColor: g.group_color || null,
+        preloaded: {
+          messages: rows,
+          members,
+        },
+      };
+    })
+  );
+});
+
 // PATCH /api/groups/:groupId/name — rename group (all members)
 app.patch('/api/groups/:groupId/name', (req, res) => {
   const { groupId } = req.params;
