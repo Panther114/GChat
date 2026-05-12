@@ -2185,7 +2185,9 @@ app.get('/api/groups/mine', (req, res) => {
 
 app.get('/api/groups/preload', (req, res) => {
   const userId = req.session.userId;
-  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
+  const requestedLimit = Number(req.query.limit);
+  const safeLimit = Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : 50;
+  const limit = Math.min(Math.max(safeLimit, 1), 100);
   markExpiredDisappearingMessagesHidden(userId);
   const groups = stmts.getUserGroups.all(userId);
   res.json(

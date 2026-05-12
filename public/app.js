@@ -3647,11 +3647,7 @@ async function loadGroups({ withBackendPreload = false } = {}) {
         const cachedMessages = cache.messages || [];
         const lastMessage = cachedMessages.length ? cachedMessages[cachedMessages.length - 1] : null;
         if (lastMessage) {
-          const aiMentionPrefix = lastMessage.aiMention ? `${buildAiMentionLabel(lastMessage.aiMeta)} ` : '';
-          const prefix = getMessageHashtagPrefix(lastMessage);
-          const typeLabel = getMessageTypePreviewLabel(lastMessage);
-          const fallbackPreview = typeLabel ? aiMentionPrefix + prefix + typeLabel : aiMentionPrefix + prefix + '[encrypted]';
-          group._lastPreviewText = truncate(fallbackPreview, 35);
+          group._lastPreviewText = truncate(getMessagePreviewFallbackText(lastMessage), 35);
           group._lastPreviewTime = lastMessage.createdAt ? formatTime(lastMessage.createdAt) : '';
         }
       }
@@ -3833,14 +3829,21 @@ function updateGroupPreview(groupId, text, time) {
   }
 }
 
-async function getMessagePreviewText(msg, groupId = msg.groupId) {
+function getMessagePreviewFallbackText(msg) {
   if (!msg) return '';
   const aiMentionPrefix = msg.aiMention ? `${buildAiMentionLabel(msg.aiMeta)} ` : '';
   const prefix = getMessageHashtagPrefix(msg);
   const typeLabel = getMessageTypePreviewLabel(msg);
-  if (typeLabel) return aiMentionPrefix + prefix + typeLabel;
+  return typeLabel ? aiMentionPrefix + prefix + typeLabel : aiMentionPrefix + prefix + '[encrypted]';
+}
+
+async function getMessagePreviewText(msg, groupId = msg.groupId) {
+  if (!msg) return '';
+  const fallbackPreview = getMessagePreviewFallbackText(msg);
   const key = getGroupKey(groupId);
-  if (!key || msg.type !== 'text') return aiMentionPrefix + prefix + '[encrypted]';
+  if (!key || msg.type !== 'text') return fallbackPreview;
+  const aiMentionPrefix = msg.aiMention ? `${buildAiMentionLabel(msg.aiMeta)} ` : '';
+  const prefix = getMessageHashtagPrefix(msg);
   const plaintext = await decryptMessage(msg.encryptedContent, msg.iv, key, groupId);
   return aiMentionPrefix + prefix + (plaintext || '[encrypted]');
 }
@@ -3854,9 +3857,10 @@ async function updateGroupPreviewFromMessage(groupId, msg) {
   updateGroupPreview(groupId, preview, msg.createdAt);
 }
 
-async function refreshGroupPreviewsFromCache(groupIds = groups.map((group) => group.id)) {
+async function refreshGroupPreviewsFromCache(groupIds) {
+  const targetGroupIds = Array.isArray(groupIds) ? groupIds : groups.map((group) => group.id);
   const tasks = [];
-  for (const groupId of groupIds) {
+  for (const groupId of targetGroupIds) {
     const cache = ensureGroupCacheEntry(groupId);
     const lastMessage = cache.messages && cache.messages.length ? cache.messages[cache.messages.length - 1] : null;
     if (!lastMessage) continue;
