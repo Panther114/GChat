@@ -2,15 +2,13 @@
 
 @font-face {
   font-family: 'Botanical';
-  src:
-    url('botanical.otf') format('opentype'),
-    url('Botanical.otf') format('opentype');
+  src: url('Botanical.otf?v=20260512') format('opentype');
   font-display: swap;
 }
 
 @font-face {
   font-family: 'Roca Regular';
-  src: url('Roca-regular.ttf') format('truetype');
+  src: url('Roca-Regular.ttf?v=20260512') format('truetype');
   font-display: swap;
 }
 
