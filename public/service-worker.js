@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_CACHE = 'gchat-pwa-v5';
+const APP_CACHE = 'gchat-pwa-v6';
 const APP_SHELL_ASSETS = [
   '/',
   '/index.html',
@@ -15,9 +15,10 @@ const APP_SHELL_ASSETS = [
   '/socket.io/socket.io.js',
   '/gchat_icon.png',
   '/favicon.svg',
-  '/icons/icon-192.png',
-  '/icons/icon-512.png',
-  '/icons/icon-512-maskable.png',
+  '/icons/icon-192-v124.png',
+  '/icons/icon-512-v124.png',
+  '/icons/icon-512-maskable-v124.png',
+  '/apple-touch-icon-v124.png',
 ];
 
 function isCacheableResponse(response) {
@@ -113,7 +114,7 @@ async function handleAsset(request) {
     const cachedResponse = await cache.match(url.pathname);
     if (cachedResponse) return cachedResponse;
     if (request.destination === 'image') {
-      return (await cache.match('/icons/icon-192.png')) || Response.error();
+      return (await cache.match('/icons/icon-192-v124.png')) || Response.error();
     }
     return Response.error();
   }
@@ -141,8 +142,8 @@ self.addEventListener('push', (event) => {
   const totalUnreadCount = Math.max(0, Number(payload.totalUnreadCount) || 0);
   const notificationPromise = self.registration.showNotification(payload.title || 'GChat', {
     body: typeof payload.body === 'string' && payload.body ? payload.body : getGenericNotificationBody(totalUnreadCount),
-    icon: '/icons/icon-192.png',
-    badge: '/icons/icon-192.png',
+    icon: '/icons/icon-192-v124.png',
+    badge: '/icons/icon-192-v124.png',
     tag: payload.tag || 'gchat-unread',
     renotify: true,
     data: {

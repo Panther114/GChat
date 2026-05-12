@@ -1121,14 +1121,15 @@ const stmts = {
                WHERE mr2.message_id = m.id AND mr2.user_id = @viewerId
              ) AS has_read
      FROM messages m
-     LEFT JOIN users u ON m.sender_id = u.id
-     LEFT JOIN disappearing_message_states dms
-       ON dms.message_id = m.id AND dms.user_id = @viewerId
-    WHERE m.group_id = @groupId
-      AND (m.sender_id = @viewerId OR m.is_disappearing = 0 OR dms.hidden_at IS NULL)
-    ORDER BY m.created_at DESC, m.id DESC
-    LIMIT @limit
-  `),
+      LEFT JOIN users u ON m.sender_id = u.id
+      LEFT JOIN disappearing_message_states dms
+        ON dms.message_id = m.id AND dms.user_id = @viewerId
+     WHERE m.group_id = @groupId
+       AND (m.type != 'whisper' OR m.sender_id = @viewerId OR m.whisper_to LIKE '%"' || @viewerId || '"%')
+       AND (m.sender_id = @viewerId OR m.is_disappearing = 0 OR dms.hidden_at IS NULL)
+     ORDER BY m.created_at DESC, m.id DESC
+     LIMIT @limit
+   `),
   getMessagesBefore: db.prepare(`
     WITH ref AS (SELECT created_at, id FROM messages WHERE id = @beforeId)
       SELECT m.id, m.group_id, m.sender_id, u.username AS sender_name,
@@ -1152,10 +1153,11 @@ const stmts = {
      LEFT JOIN disappearing_message_states dms
        ON dms.message_id = m.id AND dms.user_id = @viewerId
     CROSS JOIN ref
-    WHERE m.group_id = @groupId
-      AND (m.sender_id = @viewerId OR m.is_disappearing = 0 OR dms.hidden_at IS NULL)
-      AND (
-      m.created_at < ref.created_at OR
+     WHERE m.group_id = @groupId
+       AND (m.type != 'whisper' OR m.sender_id = @viewerId OR m.whisper_to LIKE '%"' || @viewerId || '"%')
+       AND (m.sender_id = @viewerId OR m.is_disappearing = 0 OR dms.hidden_at IS NULL)
+       AND (
+       m.created_at < ref.created_at OR
       (m.created_at = ref.created_at AND m.id < ref.id)
     )
     ORDER BY m.created_at DESC, m.id DESC

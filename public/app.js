@@ -196,18 +196,107 @@ function clearGroupKey(groupId) {
   localStorage.removeItem('gk:' + groupId);
 }
 
+function shouldPreserveLocalStorageEntry(key) {
+  return !!(
+    key
+    && (
+      key.startsWith('gk:')
+      || key === ACTIVE_LOCAL_SETTINGS_KEY
+      || key === LEGACY_LOCAL_SETTINGS_KEY
+      || key.startsWith(LOCAL_SETTINGS_KEY_PREFIX)
+    )
+  );
+}
+
 function capturePreservedLocalStorageEntries() {
   const entries = [];
   try {
     for (let i = 0; i < localStorage.length; i += 1) {
       const key = localStorage.key(i);
-      if (!key || !key.startsWith('gk:')) continue;
+      if (!shouldPreserveLocalStorageEntry(key)) continue;
       entries.push([key, localStorage.getItem(key)]);
     }
   } catch {
     return [];
   }
   return entries;
+}
+
+function getPreservedCookieNames() {
+  return new Set(['connect.sid', '__Host-connect.sid', '__Secure-connect.sid']);
+}
+
+function clearAccessibleCookies() {
+  if (typeof document === 'undefined') return;
+  const preservedNames = getPreservedCookieNames();
+  const rawCookies = typeof document.cookie === 'string' ? document.cookie : '';
+  if (!rawCookies) return;
+  const hostname = window.location.hostname || '';
+  const domainParts = hostname.split('.').filter(Boolean);
+  const domains = [''];
+  for (let i = 0; i < domainParts.length - 1; i += 1) {
+    domains.push('.' + domainParts.slice(i).join('.'));
+  }
+  for (const cookie of rawCookies.split(';')) {
+    const [namePart] = cookie.split('=');
+    const cookieName = namePart ? namePart.trim() : '';
+    if (!cookieName || preservedNames.has(cookieName)) continue;
+    document.cookie = `${cookieName}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`;
+    for (const domain of domains) {
+      if (!domain) continue;
+      document.cookie = `${cookieName}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; domain=${domain}`;
+    }
+  }
+}
+
+async function clearIndexedDbDatabases() {
+  if (!('indexedDB' in window) || typeof indexedDB.deleteDatabase !== 'function') return;
+  if (typeof indexedDB.databases !== 'function') return;
+  try {
+    const databases = await indexedDB.databases();
+    await Promise.allSettled((databases || []).map((database) => new Promise((resolve) => {
+      const name = typeof database?.name === 'string' ? database.name : '';
+      if (!name) {
+        resolve();
+        return;
+      }
+      try {
+        const request = indexedDB.deleteDatabase(name);
+        request.onsuccess = () => resolve();
+        request.onerror = () => resolve();
+        request.onblocked = () => resolve();
+      } catch {
+        resolve();
+      }
+    })));
+  } catch {
+    // best effort only
+  }
+}
+
+function getVisibleWhisperRecipientIds(msg) {
+  if (!msg || msg.type !== 'whisper') return null;
+  if (!msg.whisperTo) return [];
+  try {
+    const parsed = JSON.parse(msg.whisperTo);
+    return Array.isArray(parsed) ? parsed.map((id) => String(id)) : [];
+  } catch {
+    return String(msg.whisperTo)
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean);
+  }
+}
+
+function canCurrentUserAccessMessage(msg, userId = currentUser?.id) {
+  if (!msg || !userId) return false;
+  if (msg.senderId === userId) return true;
+  if (msg.type !== 'whisper') return true;
+  return getVisibleWhisperRecipientIds(msg)?.includes(String(userId)) === true;
+}
+
+function filterMessagesVisibleToCurrentUser(messages = [], userId = currentUser?.id) {
+  return (messages || []).filter((msg) => canCurrentUserAccessMessage(msg, userId) && !isMessageHiddenForCurrentUser(msg));
 }
 
 function restorePreservedLocalStorageEntries(entries = []) {
@@ -402,6 +491,8 @@ async function clearBrowserRuntimeCaches({ includeLocalData = false } = {}) {
   if (!includeLocalData) return;
 
   const preservedLocalEntries = capturePreservedLocalStorageEntries();
+  await clearIndexedDbDatabases();
+  clearAccessibleCookies();
   try { sessionStorage.clear(); } catch { /* ignore */ }
   try { localStorage.clear(); } catch { /* ignore */ }
   restorePreservedLocalStorageEntries(preservedLocalEntries);
@@ -2002,8 +2093,8 @@ function sendNativeNotification(unreadCount, groupId) {
     try {
       const n = new Notification(GENERIC_NOTIFICATION_TITLE, {
         body: getGenericUnreadNotificationBody(unreadCount),
-        icon: '/icons/icon-192.png',
-        badge: '/icons/icon-192.png',
+        icon: '/icons/icon-192-v124.png',
+        badge: '/icons/icon-192-v124.png',
         tag: PUSH_NOTIFICATION_TAG,
       });
       n.addEventListener('click', () => { window.focus(); });
@@ -2196,7 +2287,7 @@ function renderCurrentUserAvatar(user = currentUser) {
 function ensureGroupCacheEntry(groupId) {
   if (!groupDataCache.has(groupId)) {
     const local = readLocalGroupCache(groupId);
-    const localMessages = (local?.messages || []).filter((msg) => !isMessageHiddenForCurrentUser(msg));
+    const localMessages = filterMessagesVisibleToCurrentUser(local?.messages || []);
     groupDataCache.set(groupId, {
       messages: localMessages.length ? localMessages : (local?.messages ? [] : null),
       messageRows: null,
@@ -3631,9 +3722,9 @@ async function loadGroups({ withBackendPreload = false } = {}) {
         group._lastPreviewTime = previousPreview.time;
       }
       if (group.preloaded && typeof group.preloaded === 'object') {
-        const cache = ensureGroupCacheEntry(group.id);
-        const preloadedMessages = Array.isArray(group.preloaded.messages)
-          ? group.preloaded.messages.filter((msg) => !isMessageHiddenForCurrentUser(msg))
+      const cache = ensureGroupCacheEntry(group.id);
+      const preloadedMessages = Array.isArray(group.preloaded.messages)
+          ? filterMessagesVisibleToCurrentUser(group.preloaded.messages)
           : [];
         cache.messages = preloadedMessages;
         cache.members = Array.isArray(group.preloaded.members) ? group.preloaded.members : [];
@@ -3908,7 +3999,7 @@ function updateUnreadBadge(groupId, count) {
 
 function updateGroupUnseenCount(groupId, messages = []) {
   const unseen = (messages || []).reduce((acc, msg) => {
-    if (!msg || msg.senderId === currentUser?.id) return acc;
+    if (!msg || !canCurrentUserAccessMessage(msg) || isMessageHiddenForCurrentUser(msg) || msg.senderId === currentUser?.id) return acc;
     return acc + (msg.hasRead === true ? 0 : 1);
   }, 0);
   unreadCounts[groupId] = unseen;
@@ -4035,7 +4126,7 @@ async function loadMessages(groupId, before) {
       return;
     }
     const rawMsgs = await res.json();
-    const msgs = rawMsgs.filter((msg) => !isMessageHiddenForCurrentUser(msg));
+    const msgs = filterMessagesVisibleToCurrentUser(rawMsgs);
     if (!before) {
       const cache = ensureGroupCacheEntry(groupId);
       cache.messages = msgs;
@@ -4180,14 +4271,7 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
   }
 
   // Whisper — hide if not recipient or sender
-  if (msg.type === 'whisper') {
-    let recipients = [];
-    if (msg.whisperTo) {
-      try { recipients = JSON.parse(msg.whisperTo); } catch { recipients = msg.whisperTo.split(','); }
-    }
-    const normalizedRecipients = recipients.map((id) => String(id));
-    if (!isOwn && !normalizedRecipients.includes(String(currentUser.id))) return null;
-  }
+  if (!canCurrentUserAccessMessage(msg, currentUser?.id)) return null;
   if (isMessageHiddenForCurrentUser(msg)) return null;
 
   const row = document.createElement('div');
@@ -6875,7 +6959,7 @@ function setupEventListeners() {
   $('clear-cache-btn').addEventListener('click', () => {
     showConfirm(
       'Clear Cache and Restart',
-      'This will clear local cache and restart GChat. Stored group keys will be kept. Continue?',
+      'This will reset local GChat data and restart the app. Your saved group keys, login session, and local user settings will be kept. Continue?',
       async () => {
         await clearCacheAndRestartApp();
       }
