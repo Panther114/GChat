@@ -2259,6 +2259,16 @@ let grokRequestHashtag = null;
 let aiUsageSummary = null;
 let userManagementSummary = null;
 let aiMessageRequestInFlight = false;
+let whisperPickerMode = null;
+let pendingWhisperCommandStart = null;
+let desktopPointerEffectFrame = 0;
+let desktopPointerEffectBound = false;
+const desktopPointerEffectState = {
+  pointerX: window.innerWidth / 2,
+  pointerY: window.innerHeight / 2,
+  shiftX: 0,
+  shiftY: 0,
+};
 const composerTokens = {
   whisper: null,
   hashtag: null,
@@ -2512,6 +2522,138 @@ function resolveSlashWhisperTarget(rawTarget) {
   return members.find((member) => normalizeCommandUsername(member.username) === normalizedTarget) || null;
 }
 
+function getUniqueWhisperRecipientIds(ids = []) {
+  const seen = new Set();
+  const result = [];
+  for (const id of ids) {
+    const key = String(id);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(id);
+  }
+  return result;
+}
+
+function getActiveWhisperRecipientIds() {
+  return getUniqueWhisperRecipientIds(
+    composerTokens.whisper
+      ? [...whisperRecipients, composerTokens.whisper.memberId]
+      : whisperRecipients
+  );
+}
+
+function getWhisperRecipientMembers(recipientIds = getActiveWhisperRecipientIds(), groupId = currentGroupId) {
+  return recipientIds
+    .map((id) => getMemberProfile(groupId, id))
+    .filter(Boolean);
+}
+
+function formatWhisperRecipientLabel(recipientIds = getActiveWhisperRecipientIds(), groupId = currentGroupId, { fallback = 'Whisper', prefix = 'Whisper → ' } = {}) {
+  const names = getWhisperRecipientMembers(recipientIds, groupId)
+    .map((member) => member.username)
+    .filter(Boolean);
+  if (!names.length) return fallback;
+  if (names.length <= 2) return `${prefix}${names.join(', ')}`;
+  return `${prefix}${names[0]}, ${names[1]} +${names.length - 2}`;
+}
+
+function formatWhisperMessageLabel(msg, groupId = currentGroupId) {
+  const names = getWhisperRecipientMembers(getVisibleWhisperRecipientIds(msg), groupId)
+    .map((member) => member.username)
+    .filter(Boolean);
+  if (!names.length) return 'Whisper';
+  if (names.length <= 3) return `Whisper to ${names.join(', ')}`;
+  return `Whisper to ${names[0]}, ${names[1]}, ${names[2]} +${names.length - 3}`;
+}
+
+function consumePendingWhisperCommand() {
+  const input = $('message-input');
+  if (!input || pendingWhisperCommandStart == null) return;
+  input.value = input.value.slice(0, pendingWhisperCommandStart);
+  input.selectionStart = input.selectionEnd = input.value.length;
+  pendingWhisperCommandStart = null;
+  autoResizeTextarea(input);
+}
+
+function showWhisperPicker(mode = 'button', commandStart = null) {
+  const picker = $('whisper-picker');
+  if (!picker) return;
+  whisperPickerMode = mode;
+  pendingWhisperCommandStart = Number.isInteger(commandStart) ? commandStart : null;
+  renderWhisperPicker();
+  picker.hidden = false;
+}
+
+function hideWhisperPicker() {
+  const picker = $('whisper-picker');
+  if (!picker) return;
+  picker.hidden = true;
+  whisperPickerMode = null;
+  pendingWhisperCommandStart = null;
+}
+
+function syncWhisperPickerStatus() {
+  const status = $('whisper-picker-status');
+  if (!status) return;
+  const count = getActiveWhisperRecipientIds().length;
+  if (!count) {
+    status.textContent = pendingWhisperCommandStart != null ? 'Select recipients' : 'No recipients selected';
+    return;
+  }
+  status.textContent = count === 1 ? '1 recipient selected' : `${count} recipients selected`;
+}
+
+function setDesktopEffectsEnabled(enabled) {
+  document.body.classList.toggle('electron-desktop-effects', !!enabled);
+  if (!enabled) {
+    document.body.style.setProperty('--desktop-panel-shift-x', '0px');
+    document.body.style.setProperty('--desktop-panel-shift-y', '0px');
+  }
+}
+
+function flushDesktopPointerEffect() {
+  desktopPointerEffectFrame = 0;
+  document.body.style.setProperty('--desktop-pointer-x', `${desktopPointerEffectState.pointerX}px`);
+  document.body.style.setProperty('--desktop-pointer-y', `${desktopPointerEffectState.pointerY}px`);
+  document.body.style.setProperty('--desktop-panel-shift-x', `${desktopPointerEffectState.shiftX}px`);
+  document.body.style.setProperty('--desktop-panel-shift-y', `${desktopPointerEffectState.shiftY}px`);
+}
+
+function scheduleDesktopPointerEffect() {
+  if (desktopPointerEffectFrame) return;
+  desktopPointerEffectFrame = requestAnimationFrame(flushDesktopPointerEffect);
+}
+
+function handleDesktopPointerMove(event) {
+  if (!document.body.classList.contains('electron-desktop-effects')) return;
+  const width = Math.max(window.innerWidth, 1);
+  const height = Math.max(window.innerHeight, 1);
+  const pointerX = Math.max(0, Math.min(width, event.clientX));
+  const pointerY = Math.max(0, Math.min(height, event.clientY));
+  desktopPointerEffectState.pointerX = pointerX;
+  desktopPointerEffectState.pointerY = pointerY;
+  desktopPointerEffectState.shiftX = Math.round((((pointerX / width) - 0.5) * 10) * 100) / 100;
+  desktopPointerEffectState.shiftY = Math.round((((pointerY / height) - 0.5) * 10) * 100) / 100;
+  scheduleDesktopPointerEffect();
+}
+
+function handleDesktopPointerLeave() {
+  desktopPointerEffectState.pointerX = window.innerWidth / 2;
+  desktopPointerEffectState.pointerY = window.innerHeight / 2;
+  desktopPointerEffectState.shiftX = 0;
+  desktopPointerEffectState.shiftY = 0;
+  scheduleDesktopPointerEffect();
+}
+
+function bindDesktopPointerEffects() {
+  if (desktopPointerEffectBound || !window.electronAPI) return;
+  window.addEventListener('mousemove', handleDesktopPointerMove, { passive: true });
+  document.addEventListener('mouseleave', handleDesktopPointerLeave, { passive: true });
+  window.addEventListener('blur', handleDesktopPointerLeave, { passive: true });
+  desktopPointerEffectBound = true;
+  handleDesktopPointerLeave();
+}
+
 function setComposerShellDisabled(disabled) {
   const shell = $('message-composer-shell');
   if (!shell) return;
@@ -2520,13 +2662,15 @@ function setComposerShellDisabled(disabled) {
 
 function setWhisperTokenFromMember(member, rawTarget = member && member.username) {
   if (!member) return false;
+  if (!whisperRecipients.some((id) => String(id) === String(member.id))) {
+    whisperRecipients.push(member.id);
+  }
   composerTokens.whisper = {
     memberId: member.id,
     username: member.username,
     raw: `/w ${rawTarget} `,
-    label: `Whisper → ${member.username}`,
   };
-  whisperRecipients = [member.id];
+  whisperRecipients = getUniqueWhisperRecipientIds(whisperRecipients);
   messageMode = 'whisper';
   return true;
 }
@@ -2602,10 +2746,11 @@ function syncComposerTokens() {
   if (!strip) return;
   strip.replaceChildren();
   const tokens = [];
-  if (composerTokens.whisper) {
+  const activeWhisperRecipientIds = getActiveWhisperRecipientIds();
+  if (messageMode === 'whisper' && activeWhisperRecipientIds.length) {
     const token = document.createElement('span');
     token.className = 'message-token message-token-whisper';
-    token.textContent = composerTokens.whisper.label;
+    token.textContent = formatWhisperRecipientLabel(activeWhisperRecipientIds);
     tokens.push(token);
   }
   if (composerTokens.hashtag) {
@@ -2630,7 +2775,7 @@ function updateSlashCommandMenu() {
   if (!menu || !input) return;
   const match = /^\/([^\s]*)$/.exec(input.value);
   const commandQuery = match ? match[1].toLowerCase() : null;
-  const shouldShow = !composerTokens.whisper
+  const shouldShow = !getActiveWhisperRecipientIds().length
     && !composerTokens.hashtag
     && !composerTokens.ai
     && commandQuery != null
@@ -2815,12 +2960,36 @@ function handleComposerBackspace(input) {
     autoResizeTextarea(input);
     return true;
   }
+  if (messageMode === 'whisper' && whisperRecipients.length) {
+    whisperRecipients = [];
+    messageMode = 'normal';
+    syncComposerTokens();
+    updateWhisperBtn();
+    updateSlashCommandMenu();
+    autoResizeTextarea(input);
+    return true;
+  }
   return false;
 }
 
 function maybeTokenizeSlashCommand(input) {
   if (!input) return false;
-  const whisperMatch = /^\/w\s+([^\s]+)\s$/.exec(input.value);
+  const pendingWhisperMatch = /(?:^|\s)(\/w\s)$/.exec(input.value);
+  if (pendingWhisperMatch) {
+    if (composerTokens.hashtag || composerTokens.ai) {
+      showToast(getWhisperCombinationError({
+        hasHashtag: !!composerTokens.hashtag,
+        hasAi: !!composerTokens.ai,
+      }), 'error');
+      return false;
+    }
+    showWhisperPicker('command', pendingWhisperMatch.index + pendingWhisperMatch[0].length - pendingWhisperMatch[1].length);
+    return false;
+  }
+  if (pendingWhisperCommandStart != null && whisperPickerMode === 'command') {
+    hideWhisperPicker();
+  }
+  const whisperMatch = /(?:^|\s)\/w\s+([^\s]+)\s$/.exec(input.value);
   if (whisperMatch) {
     if (composerTokens.hashtag || composerTokens.ai) {
       showToast(getWhisperCombinationError({
@@ -2835,9 +3004,11 @@ function maybeTokenizeSlashCommand(input) {
       return false;
     }
     setWhisperTokenFromMember(member, whisperMatch[1]);
-    input.value = '';
+    input.value = input.value.slice(0, whisperMatch.index);
+    input.selectionStart = input.selectionEnd = input.value.length;
     syncComposerTokens();
     updateWhisperBtn();
+    renderWhisperPicker();
     updateSlashCommandMenu();
     autoResizeTextarea(input);
     return true;
@@ -2906,9 +3077,7 @@ function parseAiCommand(body) {
 
 function parseComposerMessageInput(rawText) {
   let body = String(rawText || '').trim();
-  let whisperRecipientIds = composerTokens.whisper
-    ? [composerTokens.whisper.memberId]
-    : (messageMode === 'whisper' && whisperRecipients.length ? [...whisperRecipients] : []);
+  let whisperRecipientIds = getActiveWhisperRecipientIds();
   let hashtag = composerTokens.hashtag ? composerTokens.hashtag.topic : null;
   let isAiPrompt = !!composerTokens.ai;
   let isDisappearing = false;
@@ -3591,6 +3760,7 @@ function toggleRightPanel() {
 }
 
 function syncResponsiveUiState() {
+  setDesktopEffectsEnabled(!!window.electronAPI && !isMobileLayout());
   if (!isMobileLayout()) {
     document.body.classList.remove('mobile-layout', 'mobile-list-view', 'mobile-chat-view', 'mobile-details-view');
     $('sidebar')?.classList.remove('open');
@@ -3608,6 +3778,7 @@ function syncResponsiveUiState() {
 document.addEventListener('DOMContentLoaded', async () => {
   applyStaticIcons();
   bindViewportHeightTracking();
+  bindDesktopPointerEffects();
   desktopSidebarWidth = readDesktopSidebarWidth();
   desktopRightPanelExpanded = localStorage.getItem(DESKTOP_RIGHT_PANEL_STORAGE_KEY) !== '0';
   loadMergedLocalSettings();
@@ -4240,7 +4411,9 @@ function renderMembersList() {
 
 function renderWhisperPicker() {
   const list = $('whisper-picker-list');
+  if (!list) return;
   list.innerHTML = '';
+  syncWhisperPickerStatus();
   for (const m of members) {
     if (m.id === currentUser.id) continue;
     const item = document.createElement('div');
@@ -4249,14 +4422,33 @@ function renderWhisperPicker() {
     cb.type = 'checkbox';
     cb.id = 'wp-' + m.id;
     cb.value = m.id;
-    cb.checked = whisperRecipients.includes(m.id);
+    cb.checked = getActiveWhisperRecipientIds().some((id) => String(id) === String(m.id));
     cb.addEventListener('change', () => {
-      if (cb.checked) { if (!whisperRecipients.includes(m.id)) whisperRecipients.push(m.id); }
-      else whisperRecipients = whisperRecipients.filter(id => id !== m.id);
+      if (pendingWhisperCommandStart != null) consumePendingWhisperCommand();
+      if (cb.checked) {
+        setWhisperTokenFromMember(m);
+      } else {
+        whisperRecipients = whisperRecipients.filter((id) => String(id) !== String(m.id));
+        if (composerTokens.whisper && String(composerTokens.whisper.memberId) === String(m.id)) {
+          composerTokens.whisper = null;
+        }
+        if (!whisperRecipients.length && !composerTokens.whisper) messageMode = 'normal';
+      }
+      whisperRecipients = getUniqueWhisperRecipientIds(whisperRecipients);
+      syncComposerTokens();
+      syncWhisperPickerStatus();
+      updateWhisperBtn();
+      updateSlashCommandMenu();
     });
     const lbl = document.createElement('label');
     lbl.htmlFor = 'wp-' + m.id;
-    lbl.textContent = m.username;
+    const avatar = document.createElement('span');
+    avatar.className = 'whisper-picker-avatar';
+    renderAvatarElement(avatar, m);
+    const name = document.createElement('span');
+    name.className = 'whisper-picker-name';
+    name.textContent = m.username;
+    lbl.append(avatar, name);
     item.append(cb, lbl);
     list.appendChild(item);
   }
@@ -4332,7 +4524,7 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
   if (msg.type === 'whisper') {
     const wl = document.createElement('span');
     wl.className = 'whisper-label';
-    wl.textContent = 'Whisper' + (msg.whisperTo ? ' (private)' : '');
+    wl.textContent = formatWhisperMessageLabel(msg, groupId);
     prefixRow.appendChild(wl);
     hasPrefixContent = true;
   }
@@ -4599,6 +4791,7 @@ function resetComposerAfterSend() {
   composerTokens.whisper = null;
   whisperRecipients = [];
   messageMode = 'normal';
+  hideWhisperPicker();
   if (activeTagFilter) setHashtagToken(activeTagFilter, { linkedToFilter: true });
   syncComposerTokens();
   updateWhisperBtn();
@@ -6076,12 +6269,13 @@ function updateWhisperBtn() {
   if (whisperActive) {
     setElementIcon(btn, 'megaphone', { iconOnly: true });
     btn.classList.add('whisper-active');
-    $('whisper-picker').hidden = !!composerTokens.whisper;
+    if (!whisperRecipients.length && whisperPickerMode == null) $('whisper-picker').hidden = true;
   } else {
     setElementIcon(btn, 'message-square', { iconOnly: true });
     btn.classList.remove('whisper-active');
-    $('whisper-picker').hidden = true;
+    hideWhisperPicker();
   }
+  syncWhisperPickerStatus();
   if (keepBottomPinned) pinMessagesToBottom();
 }
 
@@ -7332,6 +7526,9 @@ function setupEventListeners() {
     if (!$('slash-command-menu').contains(e.target) && e.target !== $('message-input')) {
       $('slash-command-menu').hidden = true;
     }
+    if (!$('whisper-picker').contains(e.target) && e.target !== $('whisper-mode-btn') && e.target !== $('message-input')) {
+      hideWhisperPicker();
+    }
   });
 
   // Reply cancel
@@ -7359,6 +7556,8 @@ function setupEventListeners() {
       msgInput.value = item.dataset.command || '/';
       msgInput.focus();
       msgInput.selectionStart = msgInput.selectionEnd = msgInput.value.length;
+      maybeTokenizeSlashCommand(msgInput);
+      syncComposerTokens();
       updateSlashCommandMenu();
       autoResizeTextarea(msgInput);
     });
@@ -7448,6 +7647,8 @@ function setupEventListeners() {
       messageMode = messageMode === 'normal' ? 'whisper' : 'normal';
       if (messageMode !== 'whisper') whisperRecipients = [];
     }
+    if (messageMode === 'whisper') showWhisperPicker('button');
+    else hideWhisperPicker();
     updateWhisperBtn();
   });
 
