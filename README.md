@@ -4,7 +4,7 @@ Gchat is a client-side encrypted group chat application built with Node.js, Expr
 
 The hosted web app is the primary product. The desktop app is a native shell that loads the hosted Railway deployment.
 
-Current version: **v1.2.1**
+Current version: **v1.2.4**
 
 ---
 
@@ -87,6 +87,13 @@ Most product updates are delivered through the hosted web app. Native desktop up
 | Frontend | HTML, CSS, vanilla JavaScript |
 | Desktop | Electron, Electron Builder |
 | Hosting | Railway |
+
+---
+
+## Mobile install notes
+
+- **Android**: GChat installs as a hosted PWA from Chrome/Chromium using the browser's **Install app** / **Add to Home screen** flow. Android is browser-managed here, so icon refreshes, notification support, and background behavior depend on the installed browser/WebAPK refresh cycle instead of a separate native APK in this repository.
+- **iPhone / iPad**: GChat installs from Safari using **Share → Add to Home Screen**. iOS also requires the home-screen app to be launched from its icon before web push notifications can be enabled.
 
 ---
 
@@ -177,7 +184,7 @@ The main application pages are served from `public/`.
 
 ---
 
-## Ask AI (v1.2.1)
+## Ask AI (v1.2.4)
 
 - Typing `/ai ` in the chat composer or clicking **Ask AI** in the right panel opens the same modal before the AI-tagged prompt is sent into chat.
 - The modal defaults to:

@@ -1016,12 +1016,19 @@ const stmts = {
                ON mr.message_id = m.id AND mr.user_id = gm.user_id
              LEFT JOIN disappearing_message_states dms
                ON dms.message_id = m.id AND dms.user_id = gm.user_id
-             WHERE m.group_id = g.id
-               AND m.sender_id != gm.user_id
-               AND mr.message_id IS NULL
-               AND (m.type != 'whisper' OR m.whisper_to LIKE '%"' || gm.user_id || '"%')
-               AND (m.is_disappearing = 0 OR dms.hidden_at IS NULL)
-           ) AS unread_count
+              WHERE m.group_id = g.id
+                AND m.sender_id != gm.user_id
+                AND mr.message_id IS NULL
+                AND (
+                  m.type != 'whisper'
+                  OR EXISTS(
+                    SELECT 1
+                    FROM json_each(COALESCE(m.whisper_to, '[]')) AS whisper_recipient
+                    WHERE whisper_recipient.value = CAST(gm.user_id AS TEXT)
+                  )
+                )
+                AND (m.is_disappearing = 0 OR dms.hidden_at IS NULL)
+            ) AS unread_count
     FROM group_chats g
     JOIN group_members gm ON g.id = gm.group_id
     WHERE gm.user_id = ?
@@ -1077,7 +1084,14 @@ const stmts = {
     LEFT JOIN disappearing_message_states dms ON dms.message_id = m.id AND dms.user_id = gm.user_id
     WHERE m.sender_id != gm.user_id
       AND mr.message_id IS NULL
-      AND (m.type != 'whisper' OR m.whisper_to LIKE '%"' || gm.user_id || '"%')
+      AND (
+        m.type != 'whisper'
+        OR EXISTS(
+          SELECT 1
+          FROM json_each(COALESCE(m.whisper_to, '[]')) AS whisper_recipient
+          WHERE whisper_recipient.value = CAST(gm.user_id AS TEXT)
+        )
+      )
       AND (m.is_disappearing = 0 OR dms.hidden_at IS NULL)
   `),
   upsertPushSubscription: db.prepare(`
@@ -1121,14 +1135,23 @@ const stmts = {
                WHERE mr2.message_id = m.id AND mr2.user_id = @viewerId
              ) AS has_read
      FROM messages m
-     LEFT JOIN users u ON m.sender_id = u.id
-     LEFT JOIN disappearing_message_states dms
-       ON dms.message_id = m.id AND dms.user_id = @viewerId
-    WHERE m.group_id = @groupId
-      AND (m.sender_id = @viewerId OR m.is_disappearing = 0 OR dms.hidden_at IS NULL)
-    ORDER BY m.created_at DESC, m.id DESC
-    LIMIT @limit
-  `),
+      LEFT JOIN users u ON m.sender_id = u.id
+      LEFT JOIN disappearing_message_states dms
+        ON dms.message_id = m.id AND dms.user_id = @viewerId
+     WHERE m.group_id = @groupId
+       AND (
+         m.type != 'whisper'
+         OR m.sender_id = @viewerId
+         OR EXISTS(
+           SELECT 1
+           FROM json_each(COALESCE(m.whisper_to, '[]')) AS whisper_recipient
+           WHERE whisper_recipient.value = CAST(@viewerId AS TEXT)
+         )
+       )
+       AND (m.sender_id = @viewerId OR m.is_disappearing = 0 OR dms.hidden_at IS NULL)
+     ORDER BY m.created_at DESC, m.id DESC
+     LIMIT @limit
+   `),
   getMessagesBefore: db.prepare(`
     WITH ref AS (SELECT created_at, id FROM messages WHERE id = @beforeId)
       SELECT m.id, m.group_id, m.sender_id, u.username AS sender_name,
@@ -1152,10 +1175,19 @@ const stmts = {
      LEFT JOIN disappearing_message_states dms
        ON dms.message_id = m.id AND dms.user_id = @viewerId
     CROSS JOIN ref
-    WHERE m.group_id = @groupId
-      AND (m.sender_id = @viewerId OR m.is_disappearing = 0 OR dms.hidden_at IS NULL)
-      AND (
-      m.created_at < ref.created_at OR
+     WHERE m.group_id = @groupId
+       AND (
+         m.type != 'whisper'
+         OR m.sender_id = @viewerId
+         OR EXISTS(
+           SELECT 1
+           FROM json_each(COALESCE(m.whisper_to, '[]')) AS whisper_recipient
+           WHERE whisper_recipient.value = CAST(@viewerId AS TEXT)
+         )
+       )
+       AND (m.sender_id = @viewerId OR m.is_disappearing = 0 OR dms.hidden_at IS NULL)
+       AND (
+       m.created_at < ref.created_at OR
       (m.created_at = ref.created_at AND m.id < ref.id)
     )
     ORDER BY m.created_at DESC, m.id DESC

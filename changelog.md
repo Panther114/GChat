@@ -4,6 +4,15 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## v1.2.4
+
+- Forced the hosted PWA to use freshly versioned mobile icon assets so updated home-screen installs pick up the current branding on iOS and Android.
+- Expanded the in-app refresh/reset flow so it clears local site data more completely while preserving saved group keys, local user settings, and the active login session.
+- Fixed unread-count desyncs by filtering whispers consistently for the current user in both backend message queries and client-side unread calculations.
+- Bumped the app version to **1.2.4** and documented the Android/iOS install behavior for the hosted mobile app.
+
+---
+
 ## v1.1.4
 
 - Added a manual `Search the web` toggle to the Ask AI modal for both DeepSeek V4 Flash and Grok 4.3 in both Fast and Context mode.
