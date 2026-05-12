@@ -880,7 +880,10 @@ body.sidebar-resizing * {
 .msg-sender-name { font-size: 11px; font-weight: 700; color: var(--text-secondary); margin-bottom: 2px; margin-left: 4px; }
 
 .msg-bubble {
-  background: var(--bubble-other);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.18) 0%, rgba(255,255,255,.07) 100%),
+    linear-gradient(135deg, rgba(255,255,255,.08) 0%, rgba(255,255,255,0) 55%),
+    var(--bubble-other);
   border: 1px solid var(--bubble-other-border);
   border-radius: 16px 16px 16px 6px;
   padding: 6px 10px;
@@ -891,13 +894,37 @@ body.sidebar-resizing * {
   word-break: break-word;
   position: relative;
   cursor: pointer;
-  transition: filter .15s;
+  overflow: hidden;
+  backdrop-filter: saturate(160%) blur(14px);
+  -webkit-backdrop-filter: saturate(160%) blur(14px);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.2),
+    inset 0 -1px 0 rgba(255,255,255,.03),
+    0 10px 24px rgba(7, 10, 18, .12);
+  transition: filter .15s, box-shadow .18s ease;
 }
 .msg-bubble:hover { filter: brightness(1.08); }
+.msg-bubble::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at top left, rgba(255,255,255,.18) 0%, rgba(255,255,255,0) 52%),
+    linear-gradient(180deg, rgba(255,255,255,.08) 0%, rgba(255,255,255,0) 45%);
+  opacity: .9;
+}
 .msg-row.own .msg-bubble {
-  background: var(--bubble-own);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.16) 0%, rgba(255,255,255,.05) 100%),
+    linear-gradient(135deg, rgba(255,255,255,.1) 0%, rgba(255,255,255,0) 55%),
+    var(--bubble-own);
   border: none;
   border-radius: 16px 16px 6px 16px;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.18),
+    inset 0 -1px 0 rgba(255,255,255,.04),
+    0 10px 24px rgba(33, 21, 82, .18);
 }
 
 .msg-date-divider {
@@ -923,6 +950,27 @@ body.sidebar-resizing * {
   border: 1px solid var(--disappearing-border);
 }
 .whisper-label { font-size: 10px; color: #a78bfa; font-style: italic; display: inline-block; }
+.msg-text.is-collapsible {
+  cursor: pointer;
+}
+.msg-text.is-collapsed {
+  display: block;
+  position: relative;
+  max-height: calc(1.4em + 2px);
+  overflow: hidden;
+  padding-right: 34px;
+}
+.msg-text.is-collapsed::after {
+  content: '.....';
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  padding-left: 8px;
+  background: linear-gradient(90deg, rgba(17,17,40,0) 0%, rgba(17,17,40,.96) 44%);
+}
+.msg-row.own .msg-text.is-collapsed::after {
+  background: linear-gradient(90deg, rgba(17,17,40,0) 0%, rgba(108,99,255,.96) 44%);
+}
 .disappearing-label {
   display: inline-flex;
   align-items: center;

@@ -1578,6 +1578,39 @@ function renderMarkdown(target, text) {
   if (!target.childNodes.length) renderPlainText(target, text);
 }
 
+function getMessageTextLineHeight(textEl) {
+  const lineHeight = parseFloat(window.getComputedStyle(textEl).lineHeight);
+  return Number.isFinite(lineHeight) && lineHeight > 0 ? lineHeight : 18;
+}
+
+function updateCollapsibleMessageState(textEl) {
+  if (!textEl || !textEl.isConnected) return;
+  textEl.classList.remove('is-collapsed', 'is-collapsible');
+  const lineHeight = getMessageTextLineHeight(textEl);
+  const shouldCollapse = textEl.scrollHeight > (lineHeight * COLLAPSIBLE_MESSAGE_LINE_THRESHOLD) + 2;
+  if (!shouldCollapse) {
+    delete textEl.dataset.collapsed;
+    return;
+  }
+  textEl.classList.add('is-collapsible');
+  if (textEl.dataset.collapsed === '1') textEl.classList.add('is-collapsed');
+}
+
+function scheduleCollapsibleMessageState(textEl) {
+  if (!textEl) return;
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => updateCollapsibleMessageState(textEl));
+  });
+}
+
+function toggleCollapsedMessage(textEl) {
+  if (!textEl || !textEl.classList.contains('is-collapsible')) return false;
+  const shouldCollapse = textEl.dataset.collapsed !== '1';
+  textEl.dataset.collapsed = shouldCollapse ? '1' : '0';
+  textEl.classList.toggle('is-collapsed', shouldCollapse);
+  return true;
+}
+
 function emitSocketWithAck(event, payload, timeoutMs = 12000) {
   return new Promise((resolve, reject) => {
     if (!socket) {
@@ -2516,6 +2549,7 @@ const WHISPER_COMMAND_TARGET_PATTERN = /(?:^|\s)\/w\s+([^\s]+)\s$/;
 const DESKTOP_POINTER_CENTER_OFFSET = 0.5;
 const DESKTOP_POINTER_SHIFT_MULTIPLIER = 10;
 const DESKTOP_POINTER_SHIFT_PRECISION = 100;
+const COLLAPSIBLE_MESSAGE_LINE_THRESHOLD = 5;
 let mobileViewState = 'list';
 let viewportHeightSyncFrame = 0;
 let viewportHeightSyncTimer = 0;
@@ -4643,6 +4677,11 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
     longPressTimer = setTimeout(() => showContextMenu(null, msg, textEl.textContent), 600);
   });
   bubble.addEventListener('touchend', () => clearTimeout(longPressTimer));
+  bubble.addEventListener('click', (event) => {
+    if (msg.type !== 'text') return;
+    if (event.target.closest('a, button, .msg-reply-box, .msg-file-btn, img')) return;
+    toggleCollapsedMessage(textEl);
+  });
 
   if (isOwn) {
     row.append(content);
@@ -4650,6 +4689,7 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
     row.append(av, content);
   }
 
+  scheduleCollapsibleMessageState(textEl);
   scheduleDisappearingTimerForMessage(msg);
 
   return row;
@@ -5946,6 +5986,7 @@ function initSocket() {
         } else {
           textEl.textContent = MSG_NO_KEY;
         }
+        scheduleCollapsibleMessageState(textEl);
 
         // Add or update the "(edited)" badge in the meta line
         const metaEl = bubble.querySelector('.msg-meta');
@@ -6384,6 +6425,7 @@ function searchMessages(term) {
     const markdownSource = textEl.dataset.markdownSource;
     if (markdownSource != null) renderMarkdown(textEl, markdownSource);
     else renderPlainText(textEl, textEl.textContent);
+    scheduleCollapsibleMessageState(textEl);
     if (!term) { row.style.display = ''; return; }
     const text = textEl.textContent;
     if (text.toLowerCase().includes(term.toLowerCase())) {
