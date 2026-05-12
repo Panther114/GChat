@@ -222,13 +222,8 @@ function capturePreservedLocalStorageEntries() {
   return entries;
 }
 
-function getPreservedCookieNames() {
-  return new Set(['connect.sid', '__Host-connect.sid', '__Secure-connect.sid']);
-}
-
 function clearAccessibleCookies() {
   if (typeof document === 'undefined') return;
-  const preservedNames = getPreservedCookieNames();
   const rawCookies = typeof document.cookie === 'string' ? document.cookie : '';
   if (!rawCookies) return;
   const hostname = window.location.hostname || '';
@@ -240,7 +235,7 @@ function clearAccessibleCookies() {
   for (const cookie of rawCookies.split(';')) {
     const [namePart] = cookie.split('=');
     const cookieName = namePart ? namePart.trim() : '';
-    if (!cookieName || preservedNames.has(cookieName)) continue;
+    if (!cookieName || PRESERVED_COOKIE_NAMES.has(cookieName)) continue;
     document.cookie = `${cookieName}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`;
     for (const domain of domains) {
       if (!domain) continue;
@@ -249,26 +244,32 @@ function clearAccessibleCookies() {
   }
 }
 
+function deleteIndexedDbDatabase(name) {
+  return new Promise((resolve) => {
+    if (!name) {
+      resolve();
+      return;
+    }
+    try {
+      const request = indexedDB.deleteDatabase(name);
+      request.onsuccess = () => resolve();
+      request.onerror = () => resolve();
+      request.onblocked = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+
 async function clearIndexedDbDatabases() {
   if (!('indexedDB' in window) || typeof indexedDB.deleteDatabase !== 'function') return;
   if (typeof indexedDB.databases !== 'function') return;
   try {
     const databases = await indexedDB.databases();
-    await Promise.allSettled((databases || []).map((database) => new Promise((resolve) => {
+    await Promise.allSettled((databases || []).map((database) => {
       const name = typeof database?.name === 'string' ? database.name : '';
-      if (!name) {
-        resolve();
-        return;
-      }
-      try {
-        const request = indexedDB.deleteDatabase(name);
-        request.onsuccess = () => resolve();
-        request.onerror = () => resolve();
-        request.onblocked = () => resolve();
-      } catch {
-        resolve();
-      }
-    })));
+      return deleteIndexedDbDatabase(name);
+    }));
   } catch {
     // best effort only
   }
@@ -398,6 +399,7 @@ const GENERIC_NOTIFICATION_TITLE = 'GChat';
 const GENERIC_NOTIFICATION_FALLBACK_BODY = 'You have unread messages in GChat.';
 const PUSH_NOTIFICATION_TAG = 'gchat-unread';
 const APP_BADGE_UNSUPPORTED = Symbol('app-badge-unsupported');
+const PRESERVED_COOKIE_NAMES = new Set(['connect.sid', '__Host-connect.sid', '__Secure-connect.sid']);
 
 function readLocalGroupCache(groupId) {
   try {
