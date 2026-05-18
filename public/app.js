@@ -1620,6 +1620,18 @@ function toggleCollapsedMessage(textEl) {
   return true;
 }
 
+function isInteractiveMessageClickTarget(target) {
+  return !!(target && target.closest('a, button, .msg-reply-box, .msg-file-btn, img, input, textarea, select, label'));
+}
+
+function shouldToggleCollapsedMessage(event, textEl) {
+  if (!textEl || !textEl.classList.contains('is-collapsible')) return false;
+  const target = event?.target instanceof Element ? event.target : null;
+  if (!target || !textEl.contains(target) || isInteractiveMessageClickTarget(target)) return false;
+  const selection = window.getSelection?.();
+  return !selection || !String(selection).trim();
+}
+
 function emitSocketWithAck(event, payload, timeoutMs = 12000) {
   return new Promise((resolve, reject) => {
     if (!socket) {
@@ -4640,16 +4652,14 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
     editedBadge.textContent = ' (edited)';
     meta.appendChild(editedBadge);
   }
-  if (isOwn || isAiAssistant) {
-    const del = document.createElement('span');
-    del.className = 'msg-delivery';
-    del.id = 'del-' + msg.id;
-    const { total, read } = normalizeDeliveryCounts(resolveDeliveryRecipientCount(msg, groupId), msg.readCount);
-    del.dataset.totalRecipients = String(total);
-    del.dataset.readCount = String(read);
-    renderDeliveryTicks(del, total, read);
-    meta.appendChild(del);
-  }
+  const del = document.createElement('span');
+  del.className = 'msg-delivery';
+  del.id = 'del-' + msg.id;
+  const { total, read } = normalizeDeliveryCounts(resolveDeliveryRecipientCount(msg, groupId), msg.readCount);
+  del.dataset.totalRecipients = String(total);
+  del.dataset.readCount = String(read);
+  renderDeliveryTicks(del, total, read);
+  meta.appendChild(del);
 
   const inlineChipsForRow = isAiAssistant ? [] : inlinePrefixChips;
   if (isAiAssistant && inlinePrefixChips.length) {
@@ -4694,7 +4704,7 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
   bubble.addEventListener('touchend', () => clearTimeout(longPressTimer));
   bubble.addEventListener('click', (event) => {
     if (msg.type !== 'text') return;
-    if (event.target.closest('a, button, .msg-reply-box, .msg-file-btn, img')) return;
+    if (!shouldToggleCollapsedMessage(event, textEl)) return;
     toggleCollapsedMessage(textEl);
   });
 
@@ -6909,6 +6919,14 @@ async function submitGrokPrompt() {
   }
 }
 
+async function openUserManagementModal() {
+  closeMobileActionMenu();
+  $('user-management-error').textContent = '';
+  setUserManagementLoading();
+  $('user-management-modal').hidden = false;
+  await loadUserManagementSummary();
+}
+
 // ── Event listeners ───────────────────────────────────────────────────────────
 function setupEventListeners() {
   // Logout
@@ -7034,12 +7052,12 @@ function setupEventListeners() {
     if (e.target !== $('diagnostics-modal')) return;
     closeDiagnosticsModal();
   });
+  $('sidebar-user-list-btn').addEventListener('click', async (e) => {
+    e.stopPropagation();
+    await openUserManagementModal();
+  });
   $('sidebar-mobile-user-list-btn').addEventListener('click', async () => {
-    closeMobileActionMenu();
-    $('user-management-error').textContent = '';
-    setUserManagementLoading();
-    $('user-management-modal').hidden = false;
-    await loadUserManagementSummary();
+    await openUserManagementModal();
   });
   $('sidebar-mobile-actions-btn').addEventListener('click', (event) => {
     event.stopPropagation();
