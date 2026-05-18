@@ -395,7 +395,18 @@ const localDayFormatter = new Intl.DateTimeFormat(undefined, {
 });
 const DESKTOP_SIDEBAR_WIDTH_STORAGE_KEY = 'gchat:desktop-sidebar-width';
 const DESKTOP_RIGHT_PANEL_STORAGE_KEY = 'gchat:desktop-right-panel-expanded';
-const INTERACTIVE_MESSAGE_CLICK_SELECTOR = 'a, button, .msg-reply-box, .msg-file-btn, img, input, textarea, select, label';
+const INTERACTIVE_MESSAGE_CLICK_SELECTORS = [
+  'a',
+  'button',
+  '.msg-reply-box',
+  '.msg-file-btn',
+  'img',
+  'input',
+  'textarea',
+  'select',
+  'label',
+];
+const INTERACTIVE_MESSAGE_CLICK_SELECTOR = INTERACTIVE_MESSAGE_CLICK_SELECTORS.join(', ');
 const DESKTOP_DEFAULT_SIDEBAR_WIDTH = 260;
 // Keeps the desktop minimum near 60% of the old 220px floor while still fitting the icon and refresh control.
 const DESKTOP_MIN_SIDEBAR_WIDTH = 132;
@@ -1622,7 +1633,7 @@ function toggleCollapsedMessage(textEl) {
 }
 
 function isInteractiveMessageClickTarget(target) {
-  return !!(target && target.closest(INTERACTIVE_MESSAGE_CLICK_SELECTOR));
+  return Boolean(target && target.closest(INTERACTIVE_MESSAGE_CLICK_SELECTOR));
 }
 
 function shouldToggleCollapsedMessage(event, textEl) {
