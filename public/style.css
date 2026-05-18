@@ -641,6 +641,7 @@ body.sidebar-resizing * {
 }
 
 .sidebar-username { flex: 1; font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sidebar-user-list-btn,
 .wallpaper-btn { flex-shrink: 0; }
 
 .ui-icon {
@@ -2744,6 +2745,9 @@ body.chat-body.mobile-layout .sidebar-overlay {
   }
   .sidebar-mobile-user-list-btn {
     margin-left: auto;
+  }
+  .sidebar-user-list-btn {
+    display: none;
   }
   .mobile-sidebar-actions-menu {
     display: flex;

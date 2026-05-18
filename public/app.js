@@ -369,7 +369,7 @@ const AI_MODE_LABELS = {
   fast: 'Fast',
   thinking: 'Context',
 };
-const DEFAULT_AI_MODE = 'thinking';
+const DEFAULT_AI_MODE = 'fast';
 const AI_TONE_LABELS = {
   casual: 'Casual',
   professional: 'Professional',
@@ -395,6 +395,18 @@ const localDayFormatter = new Intl.DateTimeFormat(undefined, {
 });
 const DESKTOP_SIDEBAR_WIDTH_STORAGE_KEY = 'gchat:desktop-sidebar-width';
 const DESKTOP_RIGHT_PANEL_STORAGE_KEY = 'gchat:desktop-right-panel-expanded';
+const INTERACTIVE_MESSAGE_CLICK_SELECTORS = [
+  'a',
+  'button',
+  '.msg-reply-box',
+  '.msg-file-btn',
+  'img',
+  'input',
+  'textarea',
+  'select',
+  'label',
+];
+const INTERACTIVE_MESSAGE_CLICK_SELECTOR = INTERACTIVE_MESSAGE_CLICK_SELECTORS.join(', ');
 const DESKTOP_DEFAULT_SIDEBAR_WIDTH = 260;
 // Keeps the desktop minimum near 60% of the old 220px floor while still fitting the icon and refresh control.
 const DESKTOP_MIN_SIDEBAR_WIDTH = 132;
@@ -1620,6 +1632,20 @@ function toggleCollapsedMessage(textEl) {
   return true;
 }
 
+function isInteractiveMessageClickTarget(target) {
+  return Boolean(target && target.closest(INTERACTIVE_MESSAGE_CLICK_SELECTOR));
+}
+
+function shouldToggleCollapsedMessage(event, textEl) {
+  if (!textEl || !textEl.classList.contains('is-collapsible')) return false;
+  if (!(event instanceof MouseEvent) || event.button !== 0 || event.detail < 1) return false;
+  if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return false;
+  const target = event?.target instanceof Element ? event.target : null;
+  if (!target || !textEl.contains(target) || isInteractiveMessageClickTarget(target)) return false;
+  const selection = window.getSelection?.();
+  return !selection || !String(selection).trim();
+}
+
 function emitSocketWithAck(event, payload, timeoutMs = 12000) {
   return new Promise((resolve, reject) => {
     if (!socket) {
@@ -1991,10 +2017,13 @@ function completeViewportTrackingForRow(row) {
     socket.emit('mark_message_read', { groupId: rowGroupId, messageId });
   }
 
-  if (row.dataset.disappearing === '1' && row.dataset.senderId !== String(currentUser?.id) && row.dataset.disappearingHidden !== '1') {
-    row.dataset.disappearingHidden = '1';
-    void hideDisappearingMessageLocally(messageId, rowGroupId, { notifyServer: true });
-    return;
+  if (
+    row.dataset.disappearing === '1'
+    && row.dataset.senderId !== String(currentUser?.id)
+    && row.dataset.disappearingHidden !== '1'
+    && row.dataset.disappearingStarted !== '1'
+  ) {
+    requestDisappearingTimerStart(messageId, rowGroupId);
   }
 
   if (row.dataset.hasRead === '1') {
@@ -4640,16 +4669,14 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
     editedBadge.textContent = ' (edited)';
     meta.appendChild(editedBadge);
   }
-  if (isOwn || isAiAssistant) {
-    const del = document.createElement('span');
-    del.className = 'msg-delivery';
-    del.id = 'del-' + msg.id;
-    const { total, read } = normalizeDeliveryCounts(resolveDeliveryRecipientCount(msg, groupId), msg.readCount);
-    del.dataset.totalRecipients = String(total);
-    del.dataset.readCount = String(read);
-    renderDeliveryTicks(del, total, read);
-    meta.appendChild(del);
-  }
+  const deliveryEl = document.createElement('span');
+  deliveryEl.className = 'msg-delivery';
+  deliveryEl.id = 'del-' + msg.id;
+  const { total, read } = normalizeDeliveryCounts(resolveDeliveryRecipientCount(msg, groupId), msg.readCount);
+  deliveryEl.dataset.totalRecipients = String(total);
+  deliveryEl.dataset.readCount = String(read);
+  renderDeliveryTicks(deliveryEl, total, read);
+  meta.appendChild(deliveryEl);
 
   const inlineChipsForRow = isAiAssistant ? [] : inlinePrefixChips;
   if (isAiAssistant && inlinePrefixChips.length) {
@@ -4694,7 +4721,7 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
   bubble.addEventListener('touchend', () => clearTimeout(longPressTimer));
   bubble.addEventListener('click', (event) => {
     if (msg.type !== 'text') return;
-    if (event.target.closest('a, button, .msg-reply-box, .msg-file-btn, img')) return;
+    if (!shouldToggleCollapsedMessage(event, textEl)) return;
     toggleCollapsedMessage(textEl);
   });
 
@@ -6511,7 +6538,7 @@ function resetGrokModalState() {
   grokRequestHashtag = null;
   $('grok-prompt-input').value = '';
   $('grok-model-input').value = DEFAULT_AI_MODEL;
-  $('grok-mode-input').value = '1';
+  $('grok-mode-input').value = DEFAULT_AI_MODE === 'fast' ? '0' : '1';
   $('grok-tone-input').value = '0';
   $('grok-web-search-toggle').checked = false;
   $('grok-error').textContent = '';
@@ -6909,6 +6936,14 @@ async function submitGrokPrompt() {
   }
 }
 
+async function openUserManagementModal() {
+  closeMobileActionMenu();
+  $('user-management-error').textContent = '';
+  setUserManagementLoading();
+  $('user-management-modal').hidden = false;
+  await loadUserManagementSummary();
+}
+
 // ── Event listeners ───────────────────────────────────────────────────────────
 function setupEventListeners() {
   // Logout
@@ -7034,12 +7069,12 @@ function setupEventListeners() {
     if (e.target !== $('diagnostics-modal')) return;
     closeDiagnosticsModal();
   });
+  $('sidebar-user-list-btn').addEventListener('click', async (e) => {
+    e.stopPropagation();
+    await openUserManagementModal();
+  });
   $('sidebar-mobile-user-list-btn').addEventListener('click', async () => {
-    closeMobileActionMenu();
-    $('user-management-error').textContent = '';
-    setUserManagementLoading();
-    $('user-management-modal').hidden = false;
-    await loadUserManagementSummary();
+    await openUserManagementModal();
   });
   $('sidebar-mobile-actions-btn').addEventListener('click', (event) => {
     event.stopPropagation();
