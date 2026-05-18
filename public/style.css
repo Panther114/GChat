@@ -480,6 +480,9 @@ body.sidebar-resizing * {
 .mobile-sidebar-actions-menu {
   display: none;
 }
+#user-management-btn {
+  display: none;
+}
 .sidebar-mobile-actions-btn.active {
   background: rgba(108,99,255,.18);
   color: #f5f7ff;
@@ -893,8 +896,6 @@ body.sidebar-resizing * {
 .msg-sender-name { font-size: 11px; font-weight: 700; color: var(--text-secondary); margin-bottom: 2px; margin-left: 4px; }
 
 .msg-bubble {
-  --collapse-indicator-text: '.....';
-  --collapse-cover-bg: rgba(255,255,255,.96);
   background:
     linear-gradient(180deg, rgba(255,255,255,.24) 0%, rgba(255,255,255,.09) 100%),
     linear-gradient(135deg, rgba(255,255,255,.14) 0%, rgba(255,255,255,0) 55%),
@@ -930,7 +931,6 @@ body.sidebar-resizing * {
   opacity: .9;
 }
 .msg-row.own .msg-bubble {
-  --collapse-cover-bg: rgba(218,233,255,.98);
   background:
     linear-gradient(180deg, rgba(255,255,255,.2) 0%, rgba(255,255,255,.07) 100%),
     linear-gradient(135deg, rgba(255,255,255,.14) 0%, rgba(255,255,255,0) 55%),
@@ -953,7 +953,6 @@ body.sidebar-resizing * {
 
 /* Whisper */
 .msg-row.whisper .msg-bubble {
-  --collapse-cover-bg: rgba(246,239,255,.98);
   background:
     linear-gradient(180deg, rgba(255,255,255,.16) 0%, rgba(255,255,255,.06) 100%),
     linear-gradient(135deg, rgba(255,255,255,.1) 0%, rgba(255,255,255,0) 55%),
@@ -974,33 +973,6 @@ body.sidebar-resizing * {
   min-width: 0;
 }
 .whisper-label { font-size: 10px; color: #a78bfa; font-style: italic; display: inline-block; }
-.msg-text.is-collapsible {
-  position: relative;
-  cursor: pointer;
-  overflow: hidden;
-  max-height: var(--msg-expanded-height);
-  transition: max-height .22s ease, padding-right .22s ease;
-}
-.msg-text.is-collapsed {
-  max-height: var(--msg-collapsed-height);
-  padding-right: 52px;
-}
-.msg-text.is-collapsed::after {
-  content: var(--collapse-indicator-text);
-  position: absolute;
-  right: 0;
-  top: 0;
-  bottom: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  min-width: 52px;
-  padding-left: 12px;
-  color: var(--red);
-  font-weight: 700;
-  letter-spacing: .08em;
-  background: var(--collapse-cover-bg);
-}
 .disappearing-label {
   display: inline-flex;
   align-items: center;
@@ -2540,6 +2512,9 @@ body.sidebar-compact .sidebar-user {
 }
 
 @media (min-width: 769px) {
+  #user-management-btn {
+    display: flex;
+  }
   .sidebar-actions {
     flex-direction: row;
     align-items: stretch;

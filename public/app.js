@@ -395,18 +395,6 @@ const localDayFormatter = new Intl.DateTimeFormat(undefined, {
 });
 const DESKTOP_SIDEBAR_WIDTH_STORAGE_KEY = 'gchat:desktop-sidebar-width';
 const DESKTOP_RIGHT_PANEL_STORAGE_KEY = 'gchat:desktop-right-panel-expanded';
-const INTERACTIVE_MESSAGE_CLICK_SELECTORS = [
-  'a',
-  'button',
-  '.msg-reply-box',
-  '.msg-file-btn',
-  'img',
-  'input',
-  'textarea',
-  'select',
-  'label',
-];
-const INTERACTIVE_MESSAGE_CLICK_SELECTOR = INTERACTIVE_MESSAGE_CLICK_SELECTORS.join(', ');
 const DESKTOP_DEFAULT_SIDEBAR_WIDTH = 260;
 // Keeps the desktop minimum near 60% of the old 220px floor while still fitting the icon and refresh control.
 const DESKTOP_MIN_SIDEBAR_WIDTH = 132;
@@ -1590,62 +1578,6 @@ function renderMarkdown(target, text) {
   if (!target.childNodes.length) renderPlainText(target, text);
 }
 
-function getMessageTextLineHeight(textEl) {
-  const lineHeight = parseFloat(window.getComputedStyle(textEl).lineHeight);
-  return Number.isFinite(lineHeight) && lineHeight > 0 ? lineHeight : 18;
-}
-
-function updateCollapsibleMessageState(textEl) {
-  if (!textEl || !textEl.isConnected) return;
-  textEl.classList.remove('is-collapsed', 'is-collapsible');
-  textEl.style.removeProperty('--msg-collapsed-height');
-  textEl.style.removeProperty('--msg-expanded-height');
-  const lineHeight = getMessageTextLineHeight(textEl);
-  const collapsedHeight = Math.ceil((lineHeight * COLLAPSIBLE_MESSAGE_LINE_THRESHOLD) + COLLAPSIBLE_MESSAGE_HEIGHT_TOLERANCE);
-  const expandedHeight = Math.ceil(textEl.scrollHeight);
-  textEl.style.setProperty('--msg-collapsed-height', `${collapsedHeight}px`);
-  const shouldCollapse = expandedHeight > collapsedHeight + COLLAPSIBLE_MESSAGE_HEIGHT_TOLERANCE;
-  if (!shouldCollapse) {
-    delete textEl.dataset.collapsed;
-    return;
-  }
-  textEl.classList.add('is-collapsible');
-  textEl.style.setProperty('--msg-expanded-height', `${expandedHeight}px`);
-  if (textEl.dataset.collapsed === undefined) {
-    textEl.dataset.collapsed = '1';
-  }
-  if (textEl.dataset.collapsed === '1') textEl.classList.add('is-collapsed');
-}
-
-function scheduleCollapsibleMessageState(textEl) {
-  if (!textEl) return;
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => updateCollapsibleMessageState(textEl));
-  });
-}
-
-function toggleCollapsedMessage(textEl) {
-  if (!textEl || !textEl.classList.contains('is-collapsible')) return false;
-  const shouldCollapse = textEl.dataset.collapsed !== '1';
-  textEl.dataset.collapsed = shouldCollapse ? '1' : '0';
-  textEl.classList.toggle('is-collapsed', shouldCollapse);
-  return true;
-}
-
-function isInteractiveMessageClickTarget(target) {
-  return Boolean(target && target.closest(INTERACTIVE_MESSAGE_CLICK_SELECTOR));
-}
-
-function shouldToggleCollapsedMessage(event, textEl) {
-  if (!textEl || !textEl.classList.contains('is-collapsible')) return false;
-  if (!(event instanceof MouseEvent) || event.button !== 0 || event.detail < 1) return false;
-  if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return false;
-  const target = event?.target instanceof Element ? event.target : null;
-  if (!target || !textEl.contains(target) || isInteractiveMessageClickTarget(target)) return false;
-  const selection = window.getSelection?.();
-  return !selection || !String(selection).trim();
-}
-
 function emitSocketWithAck(event, payload, timeoutMs = 12000) {
   return new Promise((resolve, reject) => {
     if (!socket) {
@@ -2589,8 +2521,6 @@ const WHISPER_COMMAND_TARGET_PATTERN = /(?:^|\s)\/w\s+([^\s]+)\s$/;
 const DESKTOP_POINTER_CENTER_OFFSET = 0.5;
 const DESKTOP_POINTER_SHIFT_MULTIPLIER = 10;
 const DESKTOP_POINTER_SHIFT_PRECISION = 100;
-const COLLAPSIBLE_MESSAGE_HEIGHT_TOLERANCE = 2;
-const COLLAPSIBLE_MESSAGE_LINE_THRESHOLD = 1;
 let mobileViewState = 'list';
 let viewportHeightSyncFrame = 0;
 let viewportHeightSyncTimer = 0;
@@ -4719,11 +4649,6 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
     longPressTimer = setTimeout(() => showContextMenu(null, msg, textEl.textContent), 600);
   });
   bubble.addEventListener('touchend', () => clearTimeout(longPressTimer));
-  bubble.addEventListener('click', (event) => {
-    if (msg.type !== 'text') return;
-    if (!shouldToggleCollapsedMessage(event, textEl)) return;
-    toggleCollapsedMessage(textEl);
-  });
 
   if (isOwn) {
     row.append(content);
@@ -4731,7 +4656,6 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
     row.append(av, content);
   }
 
-  scheduleCollapsibleMessageState(textEl);
   scheduleDisappearingTimerForMessage(msg);
 
   return row;
@@ -6028,8 +5952,6 @@ function initSocket() {
         } else {
           textEl.textContent = MSG_NO_KEY;
         }
-        scheduleCollapsibleMessageState(textEl);
-
         // Add or update the "(edited)" badge in the meta line
         const metaEl = bubble.querySelector('.msg-meta');
         if (metaEl && !metaEl.querySelector('.msg-edited-badge')) {
@@ -6485,7 +6407,6 @@ function searchMessages(term) {
     const markdownSource = textEl.dataset.markdownSource;
     if (markdownSource != null) renderMarkdown(textEl, markdownSource);
     else renderPlainText(textEl, textEl.textContent);
-    scheduleCollapsibleMessageState(textEl);
     if (!term) { row.style.display = ''; return; }
     const text = textEl.textContent;
     if (text.toLowerCase().includes(term.toLowerCase())) {
@@ -7068,6 +6989,10 @@ function setupEventListeners() {
   $('diagnostics-modal').addEventListener('click', (e) => {
     if (e.target !== $('diagnostics-modal')) return;
     closeDiagnosticsModal();
+  });
+  $('user-management-btn').addEventListener('click', async (e) => {
+    e.stopPropagation();
+    await openUserManagementModal();
   });
   $('sidebar-user-list-btn').addEventListener('click', async (e) => {
     e.stopPropagation();
