@@ -395,6 +395,7 @@ const localDayFormatter = new Intl.DateTimeFormat(undefined, {
 });
 const DESKTOP_SIDEBAR_WIDTH_STORAGE_KEY = 'gchat:desktop-sidebar-width';
 const DESKTOP_RIGHT_PANEL_STORAGE_KEY = 'gchat:desktop-right-panel-expanded';
+const INTERACTIVE_MESSAGE_CLICK_SELECTOR = 'a, button, .msg-reply-box, .msg-file-btn, img, input, textarea, select, label';
 const DESKTOP_DEFAULT_SIDEBAR_WIDTH = 260;
 // Keeps the desktop minimum near 60% of the old 220px floor while still fitting the icon and refresh control.
 const DESKTOP_MIN_SIDEBAR_WIDTH = 132;
@@ -1621,7 +1622,7 @@ function toggleCollapsedMessage(textEl) {
 }
 
 function isInteractiveMessageClickTarget(target) {
-  return !!(target && target.closest('a, button, .msg-reply-box, .msg-file-btn, img, input, textarea, select, label'));
+  return !!(target && target.closest(INTERACTIVE_MESSAGE_CLICK_SELECTOR));
 }
 
 function shouldToggleCollapsedMessage(event, textEl) {
@@ -4652,14 +4653,14 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
     editedBadge.textContent = ' (edited)';
     meta.appendChild(editedBadge);
   }
-  const del = document.createElement('span');
-  del.className = 'msg-delivery';
-  del.id = 'del-' + msg.id;
+  const deliveryEl = document.createElement('span');
+  deliveryEl.className = 'msg-delivery';
+  deliveryEl.id = 'del-' + msg.id;
   const { total, read } = normalizeDeliveryCounts(resolveDeliveryRecipientCount(msg, groupId), msg.readCount);
-  del.dataset.totalRecipients = String(total);
-  del.dataset.readCount = String(read);
-  renderDeliveryTicks(del, total, read);
-  meta.appendChild(del);
+  deliveryEl.dataset.totalRecipients = String(total);
+  deliveryEl.dataset.readCount = String(read);
+  renderDeliveryTicks(deliveryEl, total, read);
+  meta.appendChild(deliveryEl);
 
   const inlineChipsForRow = isAiAssistant ? [] : inlinePrefixChips;
   if (isAiAssistant && inlinePrefixChips.length) {
