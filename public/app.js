@@ -369,7 +369,7 @@ const AI_MODE_LABELS = {
   fast: 'Fast',
   thinking: 'Context',
 };
-const DEFAULT_AI_MODE = 'thinking';
+const DEFAULT_AI_MODE = 'fast';
 const AI_TONE_LABELS = {
   casual: 'Casual',
   professional: 'Professional',
@@ -771,7 +771,7 @@ function getAiModeLabel(mode) {
 function getAiModeTag(mode) {
   const normalizedMode = String(mode || '').trim().toLowerCase();
   if (normalizedMode === 'thinking' || normalizedMode === 'context') return 'context';
-  return normalizedMode === 'fast' ? 'fast' : 'context';
+  return normalizedMode === 'fast' ? 'fast' : DEFAULT_AI_MODE;
 }
 
 function getAiToneLabel(tone) {
@@ -1638,6 +1638,8 @@ function isInteractiveMessageClickTarget(target) {
 
 function shouldToggleCollapsedMessage(event, textEl) {
   if (!textEl || !textEl.classList.contains('is-collapsible')) return false;
+  if (!(event instanceof MouseEvent) || event.button !== 0 || event.detail === 0) return false;
+  if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return false;
   const target = event?.target instanceof Element ? event.target : null;
   if (!target || !textEl.contains(target) || isInteractiveMessageClickTarget(target)) return false;
   const selection = window.getSelection?.();
@@ -2015,10 +2017,13 @@ function completeViewportTrackingForRow(row) {
     socket.emit('mark_message_read', { groupId: rowGroupId, messageId });
   }
 
-  if (row.dataset.disappearing === '1' && row.dataset.senderId !== String(currentUser?.id) && row.dataset.disappearingHidden !== '1') {
-    row.dataset.disappearingHidden = '1';
-    void hideDisappearingMessageLocally(messageId, rowGroupId, { notifyServer: true });
-    return;
+  if (
+    row.dataset.disappearing === '1'
+    && row.dataset.senderId !== String(currentUser?.id)
+    && row.dataset.disappearingHidden !== '1'
+    && row.dataset.disappearingStarted !== '1'
+  ) {
+    requestDisappearingTimerStart(messageId, rowGroupId);
   }
 
   if (row.dataset.hasRead === '1') {
@@ -6533,7 +6538,7 @@ function resetGrokModalState() {
   grokRequestHashtag = null;
   $('grok-prompt-input').value = '';
   $('grok-model-input').value = DEFAULT_AI_MODEL;
-  $('grok-mode-input').value = '1';
+  $('grok-mode-input').value = DEFAULT_AI_MODE === 'fast' ? '0' : '1';
   $('grok-tone-input').value = '0';
   $('grok-web-search-toggle').checked = false;
   $('grok-error').textContent = '';
