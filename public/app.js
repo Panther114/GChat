@@ -771,7 +771,7 @@ function getAiModeLabel(mode) {
 function getAiModeTag(mode) {
   const normalizedMode = String(mode || '').trim().toLowerCase();
   if (normalizedMode === 'thinking' || normalizedMode === 'context') return 'context';
-  return normalizedMode === 'fast' ? 'fast' : DEFAULT_AI_MODE;
+  return normalizedMode === 'fast' ? 'fast' : 'context';
 }
 
 function getAiToneLabel(tone) {
