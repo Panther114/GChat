@@ -1638,7 +1638,7 @@ function isInteractiveMessageClickTarget(target) {
 
 function shouldToggleCollapsedMessage(event, textEl) {
   if (!textEl || !textEl.classList.contains('is-collapsible')) return false;
-  if (!(event instanceof MouseEvent) || event.button !== 0 || event.detail === 0) return false;
+  if (!(event instanceof MouseEvent) || event.button !== 0 || event.detail < 1) return false;
   if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return false;
   const target = event?.target instanceof Element ? event.target : null;
   if (!target || !textEl.contains(target) || isInteractiveMessageClickTarget(target)) return false;
