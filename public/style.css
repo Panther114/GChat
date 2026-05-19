@@ -2017,7 +2017,8 @@ body.sidebar-resizing * {
 .profile-push-actions .btn-sm {
   min-height: 40px;
 }
-.profile-diagnostics-btn {
+.profile-diagnostics-btn,
+.profile-user-list-btn {
   width: 100%;
   display: flex;
   align-items: center;
