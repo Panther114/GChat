@@ -480,9 +480,6 @@ body.sidebar-resizing * {
 .mobile-sidebar-actions-menu {
   display: none;
 }
-#user-management-btn {
-  display: none;
-}
 .sidebar-mobile-actions-btn.active {
   background: rgba(108,99,255,.18);
   color: #f5f7ff;
@@ -2512,9 +2509,6 @@ body.sidebar-compact .sidebar-user {
 }
 
 @media (min-width: 769px) {
-  #user-management-btn {
-    display: flex;
-  }
   .sidebar-actions {
     flex-direction: row;
     align-items: stretch;

@@ -6990,10 +6990,6 @@ function setupEventListeners() {
     if (e.target !== $('diagnostics-modal')) return;
     closeDiagnosticsModal();
   });
-  $('user-management-btn').addEventListener('click', async (e) => {
-    e.stopPropagation();
-    await openUserManagementModal();
-  });
   $('sidebar-user-list-btn').addEventListener('click', async (e) => {
     e.stopPropagation();
     await openUserManagementModal();
