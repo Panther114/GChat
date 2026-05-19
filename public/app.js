@@ -7041,6 +7041,7 @@ function setupEventListeners() {
   $('sidebar-user-btn').addEventListener('click', openProfileModal);
   $('profile-close-btn').addEventListener('click', () => $('profile-modal').hidden = true);
   $('profile-diagnostics-btn').addEventListener('click', openDiagnosticsModal);
+  $('profile-user-list-btn').addEventListener('click', () => { void openUserManagementModal(); });
   $('enable-push-btn').addEventListener('click', () => { void enablePushNotifications(); });
   $('disable-push-btn').addEventListener('click', () => { void disablePushNotifications(); });
 
