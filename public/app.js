@@ -4,7 +4,9 @@
 
 // Cache derived keys to avoid running 100 000 PBKDF2 iterations for every
 // individual message encrypt/decrypt operation (#21).
+// Cap size to prevent unbounded memory growth in long-lived tabs.
 const derivedKeyCache = new Map(); // `${passphrase}\x00${groupId}` -> CryptoKey
+const DERIVED_KEY_CACHE_MAX = 64;
 
 async function deriveKey(passphrase, groupId) {
   const cacheKey = passphrase + '\x00' + groupId;
@@ -20,6 +22,11 @@ async function deriveKey(passphrase, groupId) {
     false,
     ['encrypt', 'decrypt']
   );
+  // Evict oldest entry when cache is full (simple FIFO eviction)
+  if (derivedKeyCache.size >= DERIVED_KEY_CACHE_MAX) {
+    const firstKey = derivedKeyCache.keys().next().value;
+    derivedKeyCache.delete(firstKey);
+  }
   derivedKeyCache.set(cacheKey, key);
   return key;
 }
@@ -6401,18 +6408,31 @@ function highlightText(el, term) {
 function searchMessages(term) {
   const rows = messagesArea().querySelectorAll('.msg-row');
   let count = 0;
+  const normalizedTerm = term ? term.toLowerCase() : '';
   rows.forEach(row => {
     const textEl = row.querySelector('.msg-text');
-    if (!textEl) return;
-    const markdownSource = textEl.dataset.markdownSource;
-    if (markdownSource != null) renderMarkdown(textEl, markdownSource);
-    else renderPlainText(textEl, textEl.textContent);
-    if (!term) { row.style.display = ''; return; }
+    if (!textEl) { row.style.display = ''; return; }
+    if (!normalizedTerm) {
+      // When clearing search, just show all rows without expensive re-rendering.
+      // Only re-render if a highlight was previously applied.
+      if (row.dataset.searchHighlighted) {
+        delete row.dataset.searchHighlighted;
+        const markdownSource = textEl.dataset.markdownSource;
+        if (markdownSource != null) renderMarkdown(textEl, markdownSource);
+        else renderPlainText(textEl, textEl.textContent);
+      }
+      row.style.display = '';
+      return;
+    }
     const text = textEl.textContent;
-    if (text.toLowerCase().includes(term.toLowerCase())) {
+    if (text.toLowerCase().includes(normalizedTerm)) {
       count++;
       row.style.display = '';
+      const markdownSource = textEl.dataset.markdownSource;
+      if (markdownSource != null) renderMarkdown(textEl, markdownSource);
+      else renderPlainText(textEl, textEl.textContent);
       highlightText(textEl, term);
+      row.dataset.searchHighlighted = '1';
     } else {
       row.style.display = 'none';
     }
@@ -7698,20 +7718,26 @@ function setupEventListeners() {
   // Scroll to bottom button
   $('scroll-bottom-btn').addEventListener('click', () => scrollToBottom());
 
-  // Scroll listener for pagination + scroll-to-bottom visibility
+  // Scroll listener for pagination + scroll-to-bottom visibility (throttled via rAF)
+  let scrollRafPending = false;
   messagesArea().addEventListener('scroll', () => {
-    const area = messagesArea();
-    const isAtBottom = area.scrollHeight - area.scrollTop - area.clientHeight < 150;
-    $('scroll-bottom-btn').hidden = isAtBottom;
-    if (isAtBottom) {
-      scrollUnreadCount = 0;
-      $('scroll-unread-badge').hidden = true;
-    }
-    // Infinite scroll up
-    if (area.scrollTop <= SCROLL_LOAD_THRESHOLD && !loadingOlder && oldestMessageId) {
-      loadOlderMessages();
-    }
-  });
+    if (scrollRafPending) return;
+    scrollRafPending = true;
+    requestAnimationFrame(() => {
+      scrollRafPending = false;
+      const area = messagesArea();
+      const isAtBottom = area.scrollHeight - area.scrollTop - area.clientHeight < 150;
+      $('scroll-bottom-btn').hidden = isAtBottom;
+      if (isAtBottom) {
+        scrollUnreadCount = 0;
+        $('scroll-unread-badge').hidden = true;
+      }
+      // Infinite scroll up
+      if (area.scrollTop <= SCROLL_LOAD_THRESHOLD && !loadingOlder && oldestMessageId) {
+        loadOlderMessages();
+      }
+    });
+  }, { passive: true });
 
   $('sidebar-resizer').addEventListener('mousedown', startSidebarResize);
 
@@ -7728,9 +7754,17 @@ function setupEventListeners() {
   $('right-panel-close').addEventListener('click', closeRightPanel);
   $('sidebar-overlay').addEventListener('click', closeMobilePanels);
 
-  // Search
-  $('search-input').addEventListener('input', (e) => searchMessages(e.target.value));
+  // Search (debounced to avoid expensive DOM re-renders on every keystroke)
+  let searchDebounceTimer = 0;
+  $('search-input').addEventListener('input', (e) => {
+    if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+    searchDebounceTimer = setTimeout(() => {
+      searchDebounceTimer = 0;
+      searchMessages(e.target.value);
+    }, 180);
+  });
   $('clear-search-btn').addEventListener('click', () => {
+    if (searchDebounceTimer) { clearTimeout(searchDebounceTimer); searchDebounceTimer = 0; }
     $('search-input').value = '';
     searchMessages('');
   });
@@ -7793,11 +7827,11 @@ async function loadOlderMessages() {
       area.appendChild(fragment);
     }
 
-    allMessages = [...msgs, ...allMessages];
+    allMessages.unshift(...msgs);
     oldestMessageId = rawMsgs[0].id;
     const cache = ensureGroupCacheEntry(currentGroupId);
     cache.messages = allMessages;
-    cache.messageRows = [...rows, ...(cache.messageRows || [])];
+    cache.messageRows = rows.concat(cache.messageRows || []);
     cache.oldestMessageId = oldestMessageId;
     cache.rowsDirty = false;
     writeLocalGroupCache(currentGroupId, cache);
