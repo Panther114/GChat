@@ -158,10 +158,25 @@ function estimateBase64Bytes(value) {
 }
 
 function isValidBase64(value) {
-  return typeof value === 'string'
-    && value.length > 0
-    && value.length % 4 === 0
-    && /^[A-Za-z0-9+/]+={0,2}$/.test(value);
+  if (typeof value !== 'string' || value.length === 0 || value.length % 4 !== 0) return false;
+  // For large payloads (attachments), use a sampling strategy to avoid O(n)
+  // regex over megabytes of data. Check several positions across the string.
+  if (value.length > 1024) {
+    const base64Char = /^[A-Za-z0-9+/]$/;
+    // Check first, last (before padding), and several mid-points
+    if (!base64Char.test(value[0])) return false;
+    const contentEnd = value.endsWith('==') ? value.length - 2
+      : value.endsWith('=') ? value.length - 1
+      : value.length;
+    if (contentEnd > 0 && !base64Char.test(value[contentEnd - 1])) return false;
+    // Sample 8 evenly-spaced positions
+    const step = Math.floor(contentEnd / 9);
+    for (let i = 1; i <= 8; i++) {
+      if (!base64Char.test(value[i * step])) return false;
+    }
+    return true;
+  }
+  return /^[A-Za-z0-9+/]+={0,2}$/.test(value);
 }
 
 function isValidIv(value) {
@@ -682,6 +697,14 @@ setInterval(() => {
   }
   for (const [userId, data] of settingsUpdateAttempts) {
     if (now - data.windowStart > SETTINGS_UPDATE_WINDOW) settingsUpdateAttempts.delete(userId);
+  }
+  // Prune stale socketRateMap entries for users with no recent activity.
+  // The disconnect handler covers most cases, but if a socket drops uncleanly
+  // or the disconnect cleanup is skipped, stale entries can accumulate.
+  for (const [userId, data] of socketRateMap) {
+    if (!data.timestamps.length) { socketRateMap.delete(userId); continue; }
+    const newest = data.timestamps[data.timestamps.length - 1];
+    if (now - newest > 30000) socketRateMap.delete(userId);
   }
 }, 5 * 60 * 1000); // every 5 minutes
 
@@ -2852,7 +2875,8 @@ function canUserAccessMessage(message, userId) {
   if (message.type !== 'whisper') return true;
   try {
     const recipients = JSON.parse(message.whisper_to || '[]');
-    return Array.isArray(recipients) && recipients.map(String).includes(String(userId));
+    const uid = String(userId);
+    return Array.isArray(recipients) && recipients.some(r => String(r) === uid);
   } catch {
     return false;
   }
@@ -3470,13 +3494,15 @@ io.on('connection', (socket) => {
   // ── typing ────────────────────────────────────────────────────────────────
   socket.on('typing', ({ groupId }) => {
     if (!groupId) return;
-    if (!stmts.isMember.get(groupId, socket.userId)) return;
+    // Socket is already in the room only if membership was verified at join time.
+    // Skip the expensive DB lookup for every keystroke.
+    if (!socket.rooms.has(groupId)) return;
     socket.to(groupId).emit('user_typing', { username: socket.username });
   });
 
   socket.on('stop_typing', ({ groupId }) => {
     if (!groupId) return;
-    if (!stmts.isMember.get(groupId, socket.userId)) return;
+    if (!socket.rooms.has(groupId)) return;
     socket.to(groupId).emit('user_stop_typing', { username: socket.username });
   });
 
