@@ -159,14 +159,22 @@ function estimateBase64Bytes(value) {
 
 function isValidBase64(value) {
   if (typeof value !== 'string' || value.length === 0 || value.length % 4 !== 0) return false;
-  // For large payloads (attachments), skip the expensive full-string regex scan.
-  // Length and mod-4 checks above, combined with the base64 decode at usage sites,
-  // are sufficient to reject garbage. Only run the regex on small values (e.g. IVs).
+  // For large payloads (attachments), use a sampling strategy to avoid O(n)
+  // regex over megabytes of data. Check several positions across the string.
   if (value.length > 1024) {
-    const tail = value.slice(-2);
-    if (tail === '==') return /^[A-Za-z0-9+/]/.test(value[0]);
-    if (tail[1] === '=') return /^[A-Za-z0-9+/]/.test(value[0]);
-    return /^[A-Za-z0-9+/]/.test(value[0]) && /[A-Za-z0-9+/]$/.test(value);
+    const base64Char = /^[A-Za-z0-9+/]$/;
+    // Check first, last (before padding), and several mid-points
+    if (!base64Char.test(value[0])) return false;
+    const contentEnd = value.endsWith('==') ? value.length - 2
+      : value.endsWith('=') ? value.length - 1
+      : value.length;
+    if (contentEnd > 0 && !base64Char.test(value[contentEnd - 1])) return false;
+    // Sample 8 evenly-spaced positions
+    const step = Math.floor(contentEnd / 9);
+    for (let i = 1; i <= 8; i++) {
+      if (!base64Char.test(value[i * step])) return false;
+    }
+    return true;
   }
   return /^[A-Za-z0-9+/]+={0,2}$/.test(value);
 }

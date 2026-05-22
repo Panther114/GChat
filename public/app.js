@@ -7757,10 +7757,11 @@ function setupEventListeners() {
   // Search (debounced to avoid expensive DOM re-renders on every keystroke)
   let searchDebounceTimer = 0;
   $('search-input').addEventListener('input', (e) => {
+    const value = e.target.value;
     if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
     searchDebounceTimer = setTimeout(() => {
       searchDebounceTimer = 0;
-      searchMessages(e.target.value);
+      searchMessages(value);
     }, 180);
   });
   $('clear-search-btn').addEventListener('click', () => {
@@ -7827,7 +7828,7 @@ async function loadOlderMessages() {
       area.appendChild(fragment);
     }
 
-    allMessages.unshift(...msgs);
+    allMessages = msgs.concat(allMessages);
     oldestMessageId = rawMsgs[0].id;
     const cache = ensureGroupCacheEntry(currentGroupId);
     cache.messages = allMessages;
