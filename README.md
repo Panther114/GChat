@@ -130,7 +130,8 @@ Important limitations:
 | `PORT` | No | Server port. Railway provides this automatically. |
 | `DB_PATH` | Recommended | SQLite database path. Use `/data/Gchat.db` with a Railway volume for persistence. |
 | `ADMIN_SECRET` | Optional | Enables the admin users endpoint when set. |
-| `OPENROUTER_API_KEY` | Optional | Enables the server-side Ask AI integration for Grok 4.3 and DeepSeek V4 Flash. Keep this only in server/runtime environment variables such as Railway service variables. |
+| `OPENROUTER_API_KEY` | Optional | Enables the server-side Ask AI integration for DeepSeek V4 Flash. Keep this only in server/runtime environment variables such as Railway service variables. |
+| `GETGOAPI_API_KEY` | Optional | Enables the server-side Ask AI integration for Grok 4.1 Fast through GetGoAPI. Keep this only in server/runtime environment variables such as Railway service variables. |
 | `VAPID_PUBLIC_KEY` | Optional | Public VAPID key used by the hosted PWA to subscribe to Web Push notifications. |
 | `VAPID_PRIVATE_KEY` | Optional | Private VAPID key used only on the server to send Web Push notifications. Never expose this to clients. |
 | `VAPID_SUBJECT` | Optional | VAPID contact subject such as `mailto:admin@example.com` or an HTTPS URL. |
@@ -193,7 +194,7 @@ The main application pages are served from `public/`.
   - Tone: `Casual`
 - Model options:
   - `DeepSeek V4 Flash` → `deepseek/deepseek-v4-flash`
-  - `Grok 4.3` → `x-ai/grok-4.3`
+  - `Grok 4.1 Fast` → `grok-4-1-fast-non-reasoning`
 - Mode behavior:
   - `Fast` normally sends only the user prompt plus the selected system prompt.
   - `Context` can include eligible decrypted chat context, while still respecting `/ai` vs `/# tag /ai` scoping rules.
@@ -203,8 +204,8 @@ The main application pages are served from `public/`.
   - `Playful`
 - `Search the web` is a manual toggle and defaults to OFF.
 - When `Search the web` is ON, web search can be used in both `Fast` and `Context` mode.
-- Web search works for both `DeepSeek V4 Flash` and `Grok 4.3` through the existing server-side OpenRouter integration.
-- Web search may increase OpenRouter cost.
+- Web search works for `DeepSeek V4 Flash` through the server-side OpenRouter integration.
+- `Grok 4.1 Fast` is routed through GetGoAPI.
 - Submitted Ask AI prompts are tagged in chat with model/mode/tone labels such as `@deepseek-context-casual`, and the AI reply is posted when the background request completes.
 - AI replies show the selected model, mode, tone, token count, and estimated RMB cost in the response metadata line.
 
@@ -221,6 +222,7 @@ The main application pages are served from `public/`.
 SESSION_SECRET=<long random secret>
 DB_PATH=/data/Gchat.db
 OPENROUTER_API_KEY=<openrouter api key>
+GETGOAPI_API_KEY=<getgoapi api key>
 ```
 
 5. Deploy.
@@ -469,7 +471,7 @@ Relevant Electron Builder behavior:
 - SQLite database files should not be committed.
 - The server stores encrypted message payloads, not plaintext message content.
 - Group keys are client-managed and cannot be recovered by the server.
-- The browser never calls OpenRouter directly; Ask AI requests are proxied through `server.js` with `OPENROUTER_API_KEY` kept server-side.
+- The browser never calls AI providers directly; Ask AI requests are proxied through `server.js` with `OPENROUTER_API_KEY` and `GETGOAPI_API_KEY` kept server-side.
 - Large file handling should be reviewed carefully before public-scale deployment.
 
 ---
@@ -481,7 +483,8 @@ Before using Gchat with real users:
 - Set `SESSION_SECRET`.
 - Mount a Railway volume.
 - Set `DB_PATH=/data/Gchat.db`.
-- Set `OPENROUTER_API_KEY` if Ask AI should be available.
+- Set `OPENROUTER_API_KEY` for DeepSeek Ask AI access.
+- Set `GETGOAPI_API_KEY` for Grok Ask AI access.
 - Confirm login, group creation, message sending, and file upload behavior.
 - Test the desktop installer on a clean Windows machine.
 - Verify notification behavior in Windows settings.

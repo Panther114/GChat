@@ -40,28 +40,27 @@ const MIN_DISAPPEARING_DURATION_MS = 6000;
 const MAX_DISAPPEARING_DURATION_MS = 45000;
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 const OPENROUTER_CHAT_COMPLETIONS_URL = `${OPENROUTER_BASE_URL}/chat/completions`;
-const GETGOAPI_BASE_URL = 'https://api.getgoapi.com/v1';
-const GETGOAPI_CHAT_COMPLETIONS_URL = `${GETGOAPI_BASE_URL}/chat/completions`;
-// Models that route to GetGoAPI instead of OpenRouter
-const GETGOAPI_MODELS = new Set(['grok-4.1-fast-non-reasoning']);
+const GETGOAPI_BASE_URL = 'https://api.getgoapi.com';
+const GETGOAPI_CHAT_COMPLETIONS_URL = `${GETGOAPI_BASE_URL}/v1/chat/completions`;
+const GETGOAPI_MODELS = new Set(['grok-4-1-fast-non-reasoning']);
 const AI_MODEL_OPTIONS = {
-  'grok-4.1-fast-non-reasoning': {
-    label: 'Grok 4.1 Fast',
-    inputCostPerMillion: 0.2,
-    outputCostPerMillion: 0.5,
-    creditMultiplier: 2,
-  },
   'deepseek/deepseek-v4-flash': {
     label: 'DeepSeek V4 Flash',
     inputCostPerMillion: 0.069,
     outputCostPerMillion: 0.281,
     creditMultiplier: 1,
   },
+  'grok-4-1-fast-non-reasoning': {
+    label: 'Grok 4.1 Fast',
+    inputCostPerMillion: 0.2,
+    outputCostPerMillion: 0.5,
+    creditMultiplier: 2,
+  },
 };
 const DEFAULT_AI_MODEL = 'deepseek/deepseek-v4-flash';
 const AI_MODEL_PROFILE_PICTURES = {
   'deepseek/deepseek-v4-flash': '/deepseek.webp',
-  'grok-4.1-fast-non-reasoning': '/grok.webp',
+  'grok-4-1-fast-non-reasoning': '/grok.webp',
 };
 const AI_MODE_OPTIONS = new Set(['fast', 'thinking']);
 const DEFAULT_AI_MODE = 'thinking';
@@ -601,11 +600,13 @@ function getAiApiConfig(model) {
     return {
       url: GETGOAPI_CHAT_COMPLETIONS_URL,
       apiKey: process.env.GETGOAPI_API_KEY || '',
+      provider: 'getgoapi',
     };
   }
   return {
     url: OPENROUTER_CHAT_COMPLETIONS_URL,
     apiKey: process.env.OPENROUTER_API_KEY || '',
+    provider: 'openrouter',
   };
 }
 
@@ -2767,8 +2768,12 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiConfig.apiKey}`,
-        'X-Title': 'GChat',
-        ...(origin ? { 'HTTP-Referer': origin } : {}),
+        ...(apiConfig.provider === 'getgoapi'
+          ? { 'x-api-key': apiConfig.apiKey }
+          : {
+              'X-Title': 'GChat',
+              ...(origin ? { 'HTTP-Referer': origin } : {}),
+            }),
       },
       body: JSON.stringify({
         model: selectedModel,
@@ -2778,6 +2783,7 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
         presence_penalty: OPENROUTER_PRESENCE_PENALTY,
         max_tokens: OPENROUTER_MAX_TOKENS,
         messages,
+        ...(apiConfig.provider === 'getgoapi' ? { stream: false } : {}),
       }),
       signal: controller.signal,
     });
