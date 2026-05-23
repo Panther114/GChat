@@ -40,10 +40,10 @@ const MIN_DISAPPEARING_DURATION_MS = 6000;
 const MAX_DISAPPEARING_DURATION_MS = 45000;
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 const OPENROUTER_CHAT_COMPLETIONS_URL = `${OPENROUTER_BASE_URL}/chat/completions`;
-const TOKENMIX_BASE_URL = 'https://api.tokenmix.ai/v1';
-const TOKENMIX_CHAT_COMPLETIONS_URL = `${TOKENMIX_BASE_URL}/chat/completions`;
-// Models that route to TokenMix instead of OpenRouter
-const TOKENMIX_MODELS = new Set(['grok-4.1-fast-non-reasoning']);
+const GETGOAPI_BASE_URL = 'https://api.getgoapi.com/v1';
+const GETGOAPI_CHAT_COMPLETIONS_URL = `${GETGOAPI_BASE_URL}/chat/completions`;
+// Models that route to GetGoAPI instead of OpenRouter
+const GETGOAPI_MODELS = new Set(['grok-4.1-fast-non-reasoning']);
 const AI_MODEL_OPTIONS = {
   'grok-4.1-fast-non-reasoning': {
     label: 'Grok 4.1 Fast',
@@ -597,10 +597,10 @@ function getOpenRouterResponseModel(payload, fallbackModel = DEFAULT_AI_MODEL) {
 }
 
 function getAiApiConfig(model) {
-  if (TOKENMIX_MODELS.has(model)) {
+  if (GETGOAPI_MODELS.has(model)) {
     return {
-      url: TOKENMIX_CHAT_COMPLETIONS_URL,
-      apiKey: process.env.TOKENMIX_API_KEY || '',
+      url: GETGOAPI_CHAT_COMPLETIONS_URL,
+      apiKey: process.env.GETGOAPI_API_KEY || '',
     };
   }
   return {
