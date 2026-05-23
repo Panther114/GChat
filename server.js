@@ -491,8 +491,8 @@ function extractOpenRouterText(content) {
     .trim();
 }
 
-function getOpenRouterErrorMessage(payload) {
-  const fallback = 'OpenRouter request failed';
+function getOpenRouterErrorMessage(payload, fallbackLabel = 'OpenRouter') {
+  const fallback = `${fallbackLabel} request failed`;
   if (!payload || typeof payload !== 'object') return fallback;
   const nested = payload.error && typeof payload.error === 'object'
     ? sanitizeAiText(payload.error.message, 240)
@@ -607,6 +607,10 @@ function getAiApiConfig(model) {
     url: OPENROUTER_CHAT_COMPLETIONS_URL,
     apiKey: process.env.OPENROUTER_API_KEY || '',
   };
+}
+
+function getAiProviderLabel(model) {
+  return GETGOAPI_MODELS.has(model) ? 'GetGoAPI' : 'OpenRouter';
 }
 
 function buildAiSystemPrompt(tone = DEFAULT_AI_TONE) {
@@ -2700,6 +2704,7 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
   const userId = req.session.userId;
   const selectedModel = normalizeAiModel(req.body.model);
   const apiConfig = getAiApiConfig(selectedModel);
+  const providerLabel = getAiProviderLabel(selectedModel);
   if (!apiConfig.apiKey) {
     return res.status(503).json({ error: 'AI assistant is not configured on this server' });
   }
@@ -2779,9 +2784,10 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
     const payload = await upstream.json().catch(() => ({}));
     const debug = extractOpenRouterDebugMeta(upstream, payload);
     if (!upstream.ok) {
-      const errorMessage = getOpenRouterErrorMessage(payload);
+      const errorMessage = getOpenRouterErrorMessage(payload, providerLabel);
       console.warn('AI upstream error:', {
         ...debug,
+        providerLabel,
         errorMessage,
       });
       const status = upstream.status === 429 ? 429 : 502;
@@ -2848,8 +2854,9 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
       name: err?.name || 'Error',
       message: sanitizeAiText(err?.message, 240) || 'Unknown error',
       code: sanitizeAiText(err?.code, 64),
+      providerLabel,
     });
-    res.status(502).json({ error: 'Failed to contact OpenRouter' });
+    res.status(502).json({ error: `Failed to contact ${providerLabel}` });
   } finally {
     clearTimeout(timeout);
   }
