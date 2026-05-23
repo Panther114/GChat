@@ -353,11 +353,11 @@ const AI_ASSISTANT_COLOR = '#8d7bff';
 const AI_ASSISTANT_PROFILE_PICTURE = '/grok.webp';
 const AI_MODEL_PROFILE_PICTURES = {
   'deepseek/deepseek-v4-flash': '/deepseek.webp',
-  'x-ai/grok-4.3': '/grok.webp',
+  'grok-4-1-fast-non-reasoning': '/grok.webp',
 };
 const AI_MODEL_TAGS = {
   'deepseek/deepseek-v4-flash': 'deepseek',
-  'x-ai/grok-4.3': 'grok',
+  'grok-4-1-fast-non-reasoning': 'grok',
 };
 const APP_OWNER_USERNAME = 'Furina';
 const AI_RESET_TIME_LABEL = '4:00 AM Shanghai time';
@@ -369,9 +369,9 @@ const MIN_CURRENCY_DISPLAY_THRESHOLD = 0.01;
 const SMALL_CURRENCY_PRECISION = 4;
 const AI_MODEL_OPTIONS = {
   'deepseek/deepseek-v4-flash': 'DeepSeek V4 Flash',
-  'x-ai/grok-4.3': 'Grok 4.3',
+  'grok-4-1-fast-non-reasoning': 'Grok 4.1 Fast',
 };
-const DEFAULT_AI_MODEL = 'x-ai/grok-4.3';
+const DEFAULT_AI_MODEL = 'grok-4-1-fast-non-reasoning';
 const AI_MODE_LABELS = {
   fast: 'Context-less',
   thinking: 'Context',
