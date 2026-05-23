@@ -323,7 +323,6 @@
             </div>
           </div>
           <button class="btn-secondary btn-sm profile-diagnostics-btn" id="profile-diagnostics-btn" type="button" data-icon="activity">Connection diagnostics</button>
-          <button class="btn-secondary btn-sm profile-user-list-btn" id="profile-user-list-btn" type="button" data-icon="users">User list</button>
         </section>
         <section class="profile-section">
           <div class="profile-section-title">AI usage</div>
@@ -475,39 +474,29 @@
         <div class="grok-group-name" id="grok-group-name">—</div>
       </div>
       <div class="form-group">
-        <label>Model</label>
-        <input type="hidden" id="grok-model-input" value="deepseek/deepseek-v4-flash" />
-        <div class="grok-model-toggle" role="group" aria-label="AI model">
-          <button type="button" class="grok-model-option" data-model="x-ai/grok-4.3">Grok 4.3</button>
-          <button type="button" class="grok-model-option active" data-model="deepseek/deepseek-v4-flash">DeepSeek V4 Flash</button>
-        </div>
+      <label>Model</label>
+      <input type="hidden" id="grok-model-input" value="grok-4.1-fast-non-reasoning" />
+      <div class="grok-model-toggle" role="group" aria-label="AI model">
+        <button type="button" class="grok-model-option active" data-model="grok-4.1-fast-non-reasoning">Grok 4.1 Fast</button>
+        <button type="button" class="grok-model-option" data-model="deepseek/deepseek-v4-flash">DeepSeek V4 Flash</button>
+      </div>
       </div>
       <div class="form-group">
-        <label for="grok-mode-input">Mode</label>
-        <div class="grok-slider-labels">
-          <span class="grok-slider-label" id="grok-mode-fast-label">Fast</span>
-          <span class="grok-slider-label" id="grok-mode-thinking-label">Context</span>
-        </div>
-        <input type="range" id="grok-mode-input" min="0" max="1" step="1" value="0" aria-label="AI mode" />
+      <label for="grok-mode-input">Mode</label>
+      <div class="grok-slider-labels">
+        <span class="grok-slider-label" id="grok-mode-fast-label">Context-less</span>
+        <span class="grok-slider-label" id="grok-mode-thinking-label">Context</span>
+      </div>
+      <input type="range" id="grok-mode-input" min="0" max="1" step="1" value="0" aria-label="AI mode" />
       </div>
       <div class="form-group">
-        <label for="grok-tone-input">Tone</label>
-        <div class="grok-slider-labels grok-slider-labels-tone">
-          <span class="grok-slider-label" id="grok-tone-casual-label">Casual</span>
-          <span class="grok-slider-label" id="grok-tone-professional-label">Professional</span>
-          <span class="grok-slider-label" id="grok-tone-playful-label">Playful</span>
-        </div>
-        <input type="range" id="grok-tone-input" min="0" max="2" step="1" value="0" aria-label="AI tone" />
+      <label>Tone</label>
+      <input type="hidden" id="grok-tone-input" value="casual" />
+      <div id="grok-tone-toggle" class="grok-model-toggle" role="group" aria-label="AI tone">
+        <button type="button" class="grok-model-option grok-tone-option active" data-tone="casual" aria-pressed="true">Casual</button>
+        <button type="button" class="grok-model-option grok-tone-option" data-tone="professional" aria-pressed="false">Professional</button>
+        <button type="button" class="grok-model-option grok-tone-option" data-tone="playful" aria-pressed="false">Playful</button>
       </div>
-      <div class="form-group">
-        <label class="toggle-label toggle-switch-row grok-toggle-row" for="grok-web-search-toggle">
-          <span class="grok-toggle-copy">
-            <span class="grok-toggle-title">Search the web</span>
-            <span class="grok-toggle-help">Uses OpenRouter web search when the prompt needs current public information. May increase cost.</span>
-          </span>
-          <input type="checkbox" id="grok-web-search-toggle" />
-          <span class="toggle-switch-ui" aria-hidden="true"></span>
-        </label>
       </div>
       <div class="form-group">
         <label for="grok-prompt-input">Prompt</label>

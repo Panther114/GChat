@@ -353,11 +353,11 @@ const AI_ASSISTANT_COLOR = '#8d7bff';
 const AI_ASSISTANT_PROFILE_PICTURE = '/grok.webp';
 const AI_MODEL_PROFILE_PICTURES = {
   'deepseek/deepseek-v4-flash': '/deepseek.webp',
-  'x-ai/grok-4.3': '/grok.webp',
+  'grok-4.1-fast-non-reasoning': '/grok.webp',
 };
 const AI_MODEL_TAGS = {
   'deepseek/deepseek-v4-flash': 'deepseek',
-  'x-ai/grok-4.3': 'grok',
+  'grok-4.1-fast-non-reasoning': 'grok',
 };
 const APP_OWNER_USERNAME = 'Furina';
 const AI_RESET_TIME_LABEL = '4:00 AM Shanghai time';
@@ -369,15 +369,15 @@ const MIN_CURRENCY_DISPLAY_THRESHOLD = 0.01;
 const SMALL_CURRENCY_PRECISION = 4;
 const AI_MODEL_OPTIONS = {
   'deepseek/deepseek-v4-flash': 'DeepSeek V4 Flash',
-  'x-ai/grok-4.3': 'Grok 4.3',
+  'grok-4.1-fast-non-reasoning': 'Grok 4.1 Fast',
 };
-const DEFAULT_AI_MODEL = 'deepseek/deepseek-v4-flash';
+const DEFAULT_AI_MODEL = 'grok-4.1-fast-non-reasoning';
 const AI_MODE_LABELS = {
-  fast: 'Fast',
+  fast: 'Context-less',
   thinking: 'Context',
 };
 const DEFAULT_AI_MODE = 'fast';
-const AI_TONE_LABELS = {
+let AI_TONE_LABELS = {
   casual: 'Casual',
   professional: 'Professional',
   playful: 'Playful',
@@ -1561,10 +1561,12 @@ function renderMarkdown(target, text) {
       continue;
     }
 
-    const numberedMatch = /^\d+\.\s+(.*)$/.exec(trimmed);
+    const numberedMatch = /^(\d+)\.\s+(.*)$/.exec(trimmed);
     if (numberedMatch) {
       flushParagraph();
+      const startNum = parseInt(numberedMatch[1], 10) || 1;
       const list = document.createElement('ol');
+      if (startNum !== 1) list.setAttribute('start', String(startNum));
       while (i < lines.length) {
         const itemMatch = /^\d+\.\s+(.*)$/.exec(lines[i].trim());
         if (!itemMatch) break;
@@ -3837,6 +3839,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   await loadPushStatus();
   await refreshAiUsageSummary();
+  void loadAndRenderAiTones();
   const loadedWithBackendPreload = await loadGroups({ withBackendPreload: true });
   if (!loadedWithBackendPreload) await loadGroups();
   if ('serviceWorker' in navigator) {
@@ -6301,7 +6304,7 @@ function setupKeyboardShortcuts() {
 function autoResizeTextarea(el) {
   const keepBottomPinned = isMessagesPinnedToBottom();
   el.style.height = 'auto';
-  const maxH = 5 * 20 + 18; // ~5 lines
+  const maxH = Math.floor(window.innerHeight * 0.4);
   el.style.height = Math.min(el.scrollHeight, maxH) + 'px';
   if (keepBottomPinned) pinMessagesToBottom();
 }
@@ -6471,6 +6474,50 @@ async function exportChat() {
   URL.revokeObjectURL(url);
 }
 
+async function loadAndRenderAiTones() {
+  try {
+    const res = await fetch('/api/ai/tones');
+    if (!res.ok) return;
+    const data = await res.json().catch(() => ({}));
+    if (!data.tones || typeof data.tones !== 'object') return;
+    const tones = data.tones;
+    const keys = Object.keys(tones);
+    if (!keys.length) return;
+    // Update AI_TONE_LABELS with fetched data
+    for (const key of keys) {
+      if (tones[key] && typeof tones[key].label === 'string') {
+        AI_TONE_LABELS[key] = tones[key].label;
+      }
+    }
+    // Remove old keys no longer in server tones
+    for (const key of Object.keys(AI_TONE_LABELS)) {
+      if (!tones[key]) delete AI_TONE_LABELS[key];
+    }
+    // Render tone buttons into the container
+    const container = $('grok-tone-toggle');
+    if (!container) return;
+    container.replaceChildren();
+    for (const key of keys) {
+      const label = (tones[key] && tones[key].label) || (key.charAt(0).toUpperCase() + key.slice(1));
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'grok-model-option grok-tone-option';
+      btn.dataset.tone = key;
+      btn.setAttribute('aria-pressed', 'false');
+      btn.textContent = label;
+      btn.addEventListener('click', () => {
+        $('grok-tone-input').value = key;
+        syncAiModalSelectionUi();
+        updateAskAiSubmitButton();
+      });
+      container.appendChild(btn);
+    }
+    syncAiModalSelectionUi();
+  } catch {
+    // best effort — default tone buttons remain if fetch fails
+  }
+}
+
 function resetGrokModalState() {
   grokResponseDraft = '';
   grokResponseModel = '';
@@ -6480,8 +6527,7 @@ function resetGrokModalState() {
   $('grok-prompt-input').value = '';
   $('grok-model-input').value = DEFAULT_AI_MODEL;
   $('grok-mode-input').value = DEFAULT_AI_MODE === 'fast' ? '0' : '1';
-  $('grok-tone-input').value = '0';
-  $('grok-web-search-toggle').checked = false;
+  $('grok-tone-input').value = DEFAULT_AI_TONE;
   $('grok-error').textContent = '';
   $('grok-status').textContent = '';
   $('grok-status').hidden = true;
@@ -6510,14 +6556,8 @@ function getSelectedAiMode() {
 }
 
 function getSelectedAiTone() {
-  const value = String($('grok-tone-input').value);
-  if (value === '1') return 'professional';
-  if (value === '2') return 'playful';
-  return 'casual';
-}
-
-function getSelectedAiWebSearchEnabled() {
-  return !!$('grok-web-search-toggle').checked;
+  const value = String($('grok-tone-input').value || DEFAULT_AI_TONE).trim().toLowerCase();
+  return AI_TONE_LABELS[value] ? value : DEFAULT_AI_TONE;
 }
 
 function syncAiModalSelectionUi() {
@@ -6533,9 +6573,11 @@ function syncAiModalSelectionUi() {
   $('grok-mode-thinking-label').classList.toggle('active', selectedMode === 'thinking');
 
   const selectedTone = getSelectedAiTone();
-  $('grok-tone-casual-label').classList.toggle('active', selectedTone === 'casual');
-  $('grok-tone-professional-label').classList.toggle('active', selectedTone === 'professional');
-  $('grok-tone-playful-label').classList.toggle('active', selectedTone === 'playful');
+  document.querySelectorAll('.grok-tone-option').forEach((button) => {
+    const isActive = button.dataset.tone === selectedTone;
+    button.classList.toggle('active', isActive);
+    button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+  });
 }
 
 function updateAskAiSubmitButton() {
@@ -6688,7 +6730,6 @@ async function requestAiResponse(groupId, options = {}) {
   const mode = options.mode || DEFAULT_AI_MODE;
   const model = options.model || DEFAULT_AI_MODEL;
   const tone = options.tone || DEFAULT_AI_TONE;
-  const webSearchEnabled = !!options.webSearchEnabled;
   const contextMessages = mode === 'thinking'
     ? await buildGrokContextMessages(groupId, {
       sourceMessages: options.sourceMessages,
@@ -6714,7 +6755,6 @@ async function requestAiResponse(groupId, options = {}) {
       model,
       mode,
       tone,
-      webSearchEnabled,
     }),
   });
   const data = await res.json().catch(() => ({}));
@@ -6735,7 +6775,6 @@ async function sendAiReplyInBackground(request) {
       model: request.model,
       mode: request.mode,
       tone: request.tone,
-      webSearchEnabled: request.webSearchEnabled,
       tagFilter: request.tagFilter,
       sourceMessages: request.sourceMessages,
       skipBusyUi: true,
@@ -6786,7 +6825,6 @@ async function submitGrokPrompt() {
   const model = getSelectedAiModel();
   const mode = getSelectedAiMode();
   const tone = getSelectedAiTone();
-  const webSearchEnabled = getSelectedAiWebSearchEnabled();
   const tagFilter = grokRequestHashtag || null;
   grokResponseDraft = '';
   grokResponseModel = '';
@@ -6822,15 +6860,16 @@ async function submitGrokPrompt() {
       isDisappearing: false,
       disappearingDurationMs: 0,
       aiMention: true,
-      aiMeta: { model, mode, tone, webSearchEnabled },
+      aiMeta: { model, mode, tone, webSearchEnabled: false },
     });
 
     resetComposerAfterSend();
-    setGrokBusy(false);
-    closeGrokModal();
-    showToast('AI request sent', 'success');
 
     if (requestSource === 'chat') {
+      // Chat mode: close modal immediately, fire-and-forget background request
+      setGrokBusy(false);
+      closeGrokModal();
+      showToast('AI request sent', 'success');
       void sendAiReplyInBackground({
         groupId,
         groupName,
@@ -6838,7 +6877,6 @@ async function submitGrokPrompt() {
         model,
         mode,
         tone,
-        webSearchEnabled,
         tagFilter,
         sourceMessages: sourceMessagesSnapshot,
         replyToData,
@@ -6847,15 +6885,19 @@ async function submitGrokPrompt() {
       return;
     }
 
+    // Panel mode: keep modal open and await AI response
+    const modelLabel = getAiModelLabel(model);
+    const modeLabel = getAiModeLabel(mode);
+    setGrokBusy(true, `Asking ${modelLabel} in ${modeLabel} mode…`);
     const result = await requestAiResponse(groupId, {
       groupName,
       prompt,
       model,
       mode,
       tone,
-      webSearchEnabled,
       tagFilter,
       sourceMessages: sourceMessagesSnapshot,
+      skipBusyUi: true,
     });
     if (!result.answer) throw new Error('AI returned an empty response');
     if (result.aiUsage) setAiUsageSummary(result.aiUsage);
@@ -7061,7 +7103,6 @@ function setupEventListeners() {
   $('sidebar-user-btn').addEventListener('click', openProfileModal);
   $('profile-close-btn').addEventListener('click', () => $('profile-modal').hidden = true);
   $('profile-diagnostics-btn').addEventListener('click', openDiagnosticsModal);
-  $('profile-user-list-btn').addEventListener('click', () => { void openUserManagementModal(); });
   $('enable-push-btn').addEventListener('click', () => { void enablePushNotifications(); });
   $('disable-push-btn').addEventListener('click', () => { void disablePushNotifications(); });
 
