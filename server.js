@@ -2780,7 +2780,9 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
         temperature: OPENROUTER_TEMPERATURE,
         top_p: OPENROUTER_TOP_P,
         frequency_penalty: OPENROUTER_FREQUENCY_PENALTY,
-        presence_penalty: OPENROUTER_PRESENCE_PENALTY,
+        ...(apiConfig.provider === 'getgoapi'
+          ? {}
+          : { presence_penalty: OPENROUTER_PRESENCE_PENALTY }),
         max_tokens: OPENROUTER_MAX_TOKENS,
         messages,
         ...(apiConfig.provider === 'getgoapi' ? { stream: false } : {}),
