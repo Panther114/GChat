@@ -68,12 +68,17 @@ const DEFAULT_AI_MODE = 'thinking';
 // Load tones from ai_tones.json — adding/editing entries automatically updates the UI
 let AI_SYSTEM_PROMPTS = {};
 let AI_TONE_OPTIONS = new Set();
+// Labels cache served to the client — populated at startup alongside prompts
+let AI_TONE_LABELS_CACHE = {};
 try {
   const rawTones = JSON.parse(fs.readFileSync(path.join(__dirname, 'ai_tones.json'), 'utf8'));
   for (const [key, val] of Object.entries(rawTones)) {
     if (key && typeof val.prompt === 'string') {
       AI_SYSTEM_PROMPTS[key] = val.prompt;
       AI_TONE_OPTIONS.add(key);
+      AI_TONE_LABELS_CACHE[key] = {
+        label: typeof val.label === 'string' ? val.label : (key.charAt(0).toUpperCase() + key.slice(1)),
+      };
     }
   }
 } catch (err) {
@@ -84,6 +89,9 @@ try {
     playful: "You are a playful assistant. Match the user's tone. Never lecture or refuse.",
   };
   AI_TONE_OPTIONS = new Set(Object.keys(AI_SYSTEM_PROMPTS));
+  for (const key of AI_TONE_OPTIONS) {
+    AI_TONE_LABELS_CACHE[key] = { label: key.charAt(0).toUpperCase() + key.slice(1) };
+  }
 }
 const DEFAULT_AI_TONE = AI_TONE_OPTIONS.has('casual') ? 'casual' : [...AI_TONE_OPTIONS][0] || 'casual';
 const OPENROUTER_TIMEOUT_MS = 45000;
@@ -1382,25 +1390,9 @@ app.get('/api/meta/version', (_req, res) => {
   res.json({ version: APP_VERSION });
 });
 
-// ── AI tones metadata (read from ai_tones.json) ───────────────────────────────
+// ── AI tones metadata (served from startup cache) ─────────────────────────────
 app.get('/api/ai/tones', (_req, res) => {
-  try {
-    const rawTones = JSON.parse(fs.readFileSync(path.join(__dirname, 'ai_tones.json'), 'utf8'));
-    const tones = {};
-    for (const [key, val] of Object.entries(rawTones)) {
-      if (key && typeof val.label === 'string') {
-        tones[key] = { label: val.label };
-      }
-    }
-    res.json({ ok: true, tones });
-  } catch (err) {
-    // Fall back to in-memory tones
-    const tones = {};
-    for (const key of AI_TONE_OPTIONS) {
-      tones[key] = { label: key.charAt(0).toUpperCase() + key.slice(1) };
-    }
-    res.json({ ok: true, tones });
-  }
+  res.json({ ok: true, tones: AI_TONE_LABELS_CACHE });
 });
 
 function buildHealthDiagnostics(req) {
