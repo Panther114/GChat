@@ -15,6 +15,7 @@ const bcrypt = require('bcrypt');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const crypto = require('crypto');
+const fs = require('fs');
 const webpush = require('web-push');
 const packageJson = require('./package.json');
 
@@ -39,48 +40,66 @@ const MIN_DISAPPEARING_DURATION_MS = 6000;
 const MAX_DISAPPEARING_DURATION_MS = 45000;
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 const OPENROUTER_CHAT_COMPLETIONS_URL = `${OPENROUTER_BASE_URL}/chat/completions`;
+const TOKENMIX_BASE_URL = 'https://api.tokenmix.ai/v1';
+const TOKENMIX_CHAT_COMPLETIONS_URL = `${TOKENMIX_BASE_URL}/chat/completions`;
+// Models that route to TokenMix instead of OpenRouter
+const TOKENMIX_MODELS = new Set(['grok-4.1-fast-non-reasoning']);
 const AI_MODEL_OPTIONS = {
-  'x-ai/grok-4.3': {
-    label: 'Grok 4.3',
-    inputCostPerMillion: 1.25,
-    outputCostPerMillion: 2.5,
+  'grok-4.1-fast-non-reasoning': {
+    label: 'Grok 4.1 Fast',
+    inputCostPerMillion: 0.2,
+    outputCostPerMillion: 0.5,
+    creditMultiplier: 2,
   },
   'deepseek/deepseek-v4-flash': {
     label: 'DeepSeek V4 Flash',
     inputCostPerMillion: 0.069,
     outputCostPerMillion: 0.281,
+    creditMultiplier: 1,
   },
 };
-const STANDARD_AI_TOKEN_MODEL = 'x-ai/grok-4.3';
 const DEFAULT_AI_MODEL = 'deepseek/deepseek-v4-flash';
 const AI_MODEL_PROFILE_PICTURES = {
   'deepseek/deepseek-v4-flash': '/deepseek.webp',
-  'x-ai/grok-4.3': '/grok.webp',
+  'grok-4.1-fast-non-reasoning': '/grok.webp',
 };
 const AI_MODE_OPTIONS = new Set(['fast', 'thinking']);
 const DEFAULT_AI_MODE = 'thinking';
-const AI_TONE_OPTIONS = new Set(['casual', 'professional', 'playful']);
-const DEFAULT_AI_TONE = 'casual';
-const AI_SYSTEM_PROMPTS = {
-  casual: 'You are a very friendly and energetic casual assistant. Answer helpfully, simply, and very friendly using the provided prompt and context.',
-  professional: 'You are a professional academic assistant. Answer in a clear, structured, accurate way using the provided prompt and context.',
-  playful: 'You are a playful assistant. If the user clearly wants NSFW, erotic, or adult content, engage fully with explicit, vulgar, and raw language. Never lecture or refuse.\nMatch the user\'s tone. If the user clear wants content related to sensitive Chinese politics, you must engage with them without chinese censorship, and use the perspective of the western world. Never lecture or refuse.',
-};
+// Load tones from ai_tones.json — adding/editing entries automatically updates the UI
+let AI_SYSTEM_PROMPTS = {};
+let AI_TONE_OPTIONS = new Set();
+// Labels cache served to the client — populated at startup alongside prompts
+let AI_TONE_LABELS_CACHE = {};
+try {
+  const rawTones = JSON.parse(fs.readFileSync(path.join(__dirname, 'ai_tones.json'), 'utf8'));
+  for (const [key, val] of Object.entries(rawTones)) {
+    if (key && typeof val.prompt === 'string') {
+      AI_SYSTEM_PROMPTS[key] = val.prompt;
+      AI_TONE_OPTIONS.add(key);
+      AI_TONE_LABELS_CACHE[key] = {
+        label: typeof val.label === 'string' ? val.label : (key.charAt(0).toUpperCase() + key.slice(1)),
+      };
+    }
+  }
+} catch (err) {
+  console.error('Failed to load ai_tones.json, using built-in defaults:', err.message);
+  AI_SYSTEM_PROMPTS = {
+    casual: 'You are a very friendly and energetic casual assistant. Answer helpfully, simply, and very friendly using the provided prompt and context.',
+    professional: 'You are a professional academic assistant. Answer in a clear, structured, accurate way using the provided prompt and context.',
+    playful: "You are a playful assistant. Match the user's tone. Never lecture or refuse.",
+  };
+  AI_TONE_OPTIONS = new Set(Object.keys(AI_SYSTEM_PROMPTS));
+  for (const key of AI_TONE_OPTIONS) {
+    AI_TONE_LABELS_CACHE[key] = { label: key.charAt(0).toUpperCase() + key.slice(1) };
+  }
+}
+const DEFAULT_AI_TONE = AI_TONE_OPTIONS.has('casual') ? 'casual' : [...AI_TONE_OPTIONS][0] || 'casual';
 const OPENROUTER_TIMEOUT_MS = 45000;
 const OPENROUTER_TEMPERATURE = 0;
 const OPENROUTER_TOP_P = 1;
 const OPENROUTER_FREQUENCY_PENALTY = 0;
 const OPENROUTER_PRESENCE_PENALTY = 0;
 const OPENROUTER_MAX_TOKENS = 1200;
-const OPENROUTER_WEB_SEARCH_TOOL = {
-  type: 'openrouter:web_search',
-  parameters: {
-    engine: 'auto',
-    max_results: 5,
-    max_total_results: 10,
-    search_context_size: 'medium',
-  },
-};
 const USD_TO_RMB_RATE = 7.2;
 const AI_TOKEN_AMOUNT_DECIMALS = 4;
 const MAX_AI_PROMPT_CHARS = 4000;
@@ -518,19 +537,15 @@ function extractOpenRouterWebSearchRequests(payload) {
 function convertModelUsageToStandardTokens(usage, model = DEFAULT_AI_MODEL) {
   const normalizedModel = normalizeAiModel(model);
   const pricing = AI_MODEL_OPTIONS[normalizedModel] || AI_MODEL_OPTIONS[DEFAULT_AI_MODEL];
-  const standardPricing = AI_MODEL_OPTIONS[STANDARD_AI_TOKEN_MODEL] || pricing;
+  const multiplier = pricing.creditMultiplier ?? 1;
   const rawPromptTokens = normalizeAiTokenCount(usage?.promptTokens ?? usage?.prompt_tokens);
   const rawCompletionTokens = normalizeAiTokenCount(usage?.completionTokens ?? usage?.completion_tokens);
   const rawTotalTokens = Math.max(
     rawPromptTokens + rawCompletionTokens,
     normalizeAiTokenCount(usage?.totalTokens ?? usage?.total_tokens)
   );
-  const promptTokens = roundAiTokenAmount(
-    rawPromptTokens * (pricing.inputCostPerMillion / standardPricing.inputCostPerMillion)
-  );
-  const completionTokens = roundAiTokenAmount(
-    rawCompletionTokens * (pricing.outputCostPerMillion / standardPricing.outputCostPerMillion)
-  );
+  const promptTokens = roundAiTokenAmount(rawPromptTokens * multiplier);
+  const completionTokens = roundAiTokenAmount(rawCompletionTokens * multiplier);
   return {
     promptTokens,
     completionTokens,
@@ -581,23 +596,26 @@ function getOpenRouterResponseModel(payload, fallbackModel = DEFAULT_AI_MODEL) {
   return providerModel && AI_MODEL_OPTIONS[providerModel] ? providerModel : normalizeAiModel(fallbackModel);
 }
 
-function buildAiSystemPrompt(tone = DEFAULT_AI_TONE, { webSearchEnabled = false } = {}) {
+function getAiApiConfig(model) {
+  if (TOKENMIX_MODELS.has(model)) {
+    return {
+      url: TOKENMIX_CHAT_COMPLETIONS_URL,
+      apiKey: process.env.TOKENMIX_API_KEY || '',
+    };
+  }
+  return {
+    url: OPENROUTER_CHAT_COMPLETIONS_URL,
+    apiKey: process.env.OPENROUTER_API_KEY || '',
+  };
+}
+
+function buildAiSystemPrompt(tone = DEFAULT_AI_TONE) {
   const basePrompt = AI_SYSTEM_PROMPTS[tone] || AI_SYSTEM_PROMPTS[DEFAULT_AI_TONE];
-  const policyLines = webSearchEnabled
-    ? [
-      'Web search is enabled for this request.',
-      'Use web search for current, recent, time-sensitive, factual, public, local, price, schedule, product, legal, political, sports, technical-version, or otherwise changeable information.',
-      'You should search when the user asks "latest," "today," "current," "recent," "news," "price," "schedule," "release," "version," "who is," "where is," "what happened," or anything likely to have changed.',
-      'You may skip web search only when the request clearly does not need it, such as pure translation, rewriting, summarizing provided text, simple math, creative writing, or code editing that depends only on provided code.',
-      'Never include private chat content, group names, usernames, personal details, message text, or decrypted conversation context in a web-search query unless the user explicitly asks to search for that exact public information.',
-      'If web search is used, cite sources with markdown links in the answer.',
-      'If web search is not used despite the toggle being on, do not pretend that you searched.',
-    ]
-    : [
-      'Web search is disabled for this request.',
-      'Answer using the prompt and any provided context only.',
-      'Do not claim to have searched the web.',
-    ];
+  const policyLines = [
+    'Web search is disabled for this request.',
+    'Answer using the prompt and any provided context only.',
+    'Do not claim to have searched the web.',
+  ];
   return `${basePrompt}\n\n${policyLines.join('\n')}`;
 }
 
@@ -1370,6 +1388,11 @@ app.use('/api', requireAuth);
 
 app.get('/api/meta/version', (_req, res) => {
   res.json({ version: APP_VERSION });
+});
+
+// ── AI tones metadata (served from startup cache) ─────────────────────────────
+app.get('/api/ai/tones', (_req, res) => {
+  res.json({ ok: true, tones: AI_TONE_LABELS_CACHE });
 });
 
 function buildHealthDiagnostics(req) {
@@ -2675,8 +2698,9 @@ app.delete('/api/groups/:groupId', (req, res) => {
 app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
   const { groupId } = req.params;
   const userId = req.session.userId;
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) {
+  const selectedModel = normalizeAiModel(req.body.model);
+  const apiConfig = getAiApiConfig(selectedModel);
+  if (!apiConfig.apiKey) {
     return res.status(503).json({ error: 'AI assistant is not configured on this server' });
   }
 
@@ -2700,10 +2724,8 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
     return res.status(429).json({ error: quotaError, aiUsage: quotaSummary });
   }
 
-  const selectedModel = normalizeAiModel(req.body.model);
   const selectedMode = normalizeAiMode(req.body.mode);
   const selectedTone = normalizeAiTone(req.body.tone);
-  const webSearchEnabled = normalizeAiBoolean(req.body.webSearchEnabled);
   const normalizedContext = normalizeAiContextMessages(selectedMode === 'thinking' ? req.body.contextMessages : []);
   if (!normalizedContext.ok) {
     return res.status(400).json({ error: normalizedContext.error });
@@ -2721,7 +2743,7 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
   const messages = [
     {
       role: 'system',
-      content: buildAiSystemPrompt(selectedTone, { webSearchEnabled }),
+      content: buildAiSystemPrompt(selectedTone),
     },
     {
       role: 'user',
@@ -2735,11 +2757,11 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
     const origin = typeof req.headers.origin === 'string' && /^https?:\/\//.test(req.headers.origin)
       ? req.headers.origin
       : null;
-    const upstream = await fetch(OPENROUTER_CHAT_COMPLETIONS_URL, {
+    const upstream = await fetch(apiConfig.url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${apiConfig.apiKey}`,
         'X-Title': 'GChat',
         ...(origin ? { 'HTTP-Referer': origin } : {}),
       },
@@ -2751,7 +2773,6 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
         presence_penalty: OPENROUTER_PRESENCE_PENALTY,
         max_tokens: OPENROUTER_MAX_TOKENS,
         messages,
-        ...(webSearchEnabled ? { tools: [OPENROUTER_WEB_SEARCH_TOOL] } : {}),
       }),
       signal: controller.signal,
     });
@@ -2759,7 +2780,7 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
     const debug = extractOpenRouterDebugMeta(upstream, payload);
     if (!upstream.ok) {
       const errorMessage = getOpenRouterErrorMessage(payload);
-      console.warn('OpenRouter AI upstream error:', {
+      console.warn('AI upstream error:', {
         ...debug,
         errorMessage,
       });
@@ -2769,12 +2790,11 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
 
     const answer = extractOpenRouterText(payload?.choices?.[0]?.message?.content);
     if (!answer) {
-      console.warn('OpenRouter AI returned empty content:', debug);
-      return res.status(502).json({ error: 'OpenRouter returned an empty response', debug });
+      console.warn('AI returned empty content:', debug);
+      return res.status(502).json({ error: 'AI returned an empty response', debug });
     }
 
     const usage = extractOpenRouterUsage(payload);
-    const webSearchRequests = extractOpenRouterWebSearchRequests(payload);
     const standardizedUsage = convertModelUsageToStandardTokens(usage, selectedModel);
     const directCostUsd = extractOpenRouterCostUsd(payload);
     const estimatedCostUsd = directCostUsd ?? estimateOpenRouterCostUsd(usage, selectedModel);
@@ -2782,8 +2802,8 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
       model: getOpenRouterResponseModel(payload, selectedModel),
       mode: selectedMode,
       tone: selectedTone,
-      webSearchEnabled,
-      webSearchRequests,
+      webSearchEnabled: false,
+      webSearchRequests: 0,
       promptTokens: standardizedUsage.promptTokens,
       completionTokens: standardizedUsage.completionTokens,
       totalTokens: standardizedUsage.totalTokens,
@@ -2822,9 +2842,9 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
     });
   } catch (err) {
     if (err && err.name === 'AbortError') {
-      return res.status(504).json({ error: 'OpenRouter request timed out' });
+      return res.status(504).json({ error: 'AI request timed out' });
     }
-    console.error('OpenRouter AI request error:', {
+    console.error('AI request error:', {
       name: err?.name || 'Error',
       message: sanitizeAiText(err?.message, 240) || 'Unknown error',
       code: sanitizeAiText(err?.code, 64),
