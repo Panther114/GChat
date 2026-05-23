@@ -3045,7 +3045,7 @@ body.chat-body.mobile-layout .sidebar-overlay {
   }
   .message-input-bar textarea {
     min-height: 24px;
-    max-height: min(26dvh, 144px);
+    max-height: 40dvh;
     line-height: 1.45;
   }
   .messages-area {
