@@ -40,28 +40,24 @@ const MIN_DISAPPEARING_DURATION_MS = 6000;
 const MAX_DISAPPEARING_DURATION_MS = 45000;
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 const OPENROUTER_CHAT_COMPLETIONS_URL = `${OPENROUTER_BASE_URL}/chat/completions`;
-const GETGOAPI_BASE_URL = 'https://api.getgoapi.com/v1';
-const GETGOAPI_CHAT_COMPLETIONS_URL = `${GETGOAPI_BASE_URL}/chat/completions`;
-// Models that route to GetGoAPI instead of OpenRouter
-const GETGOAPI_MODELS = new Set(['grok-4.1-fast-non-reasoning']);
 const AI_MODEL_OPTIONS = {
-  'grok-4.1-fast-non-reasoning': {
-    label: 'Grok 4.1 Fast',
-    inputCostPerMillion: 0.2,
-    outputCostPerMillion: 0.5,
-    creditMultiplier: 2,
-  },
   'deepseek/deepseek-v4-flash': {
     label: 'DeepSeek V4 Flash',
     inputCostPerMillion: 0.069,
     outputCostPerMillion: 0.281,
     creditMultiplier: 1,
   },
+  'x-ai/grok-4.3': {
+    label: 'Grok 4.3',
+    inputCostPerMillion: 1.25,
+    outputCostPerMillion: 2.5,
+    creditMultiplier: 1,
+  },
 };
 const DEFAULT_AI_MODEL = 'deepseek/deepseek-v4-flash';
 const AI_MODEL_PROFILE_PICTURES = {
   'deepseek/deepseek-v4-flash': '/deepseek.webp',
-  'grok-4.1-fast-non-reasoning': '/grok.webp',
+  'x-ai/grok-4.3': '/grok.webp',
 };
 const AI_MODE_OPTIONS = new Set(['fast', 'thinking']);
 const DEFAULT_AI_MODE = 'thinking';
@@ -597,12 +593,6 @@ function getOpenRouterResponseModel(payload, fallbackModel = DEFAULT_AI_MODEL) {
 }
 
 function getAiApiConfig(model) {
-  if (GETGOAPI_MODELS.has(model)) {
-    return {
-      url: GETGOAPI_CHAT_COMPLETIONS_URL,
-      apiKey: process.env.GETGOAPI_API_KEY || '',
-    };
-  }
   return {
     url: OPENROUTER_CHAT_COMPLETIONS_URL,
     apiKey: process.env.OPENROUTER_API_KEY || '',
@@ -610,7 +600,7 @@ function getAiApiConfig(model) {
 }
 
 function getAiProviderLabel(model) {
-  return GETGOAPI_MODELS.has(model) ? 'GetGoAPI' : 'OpenRouter';
+  return 'OpenRouter';
 }
 
 function buildAiSystemPrompt(tone = DEFAULT_AI_TONE) {
