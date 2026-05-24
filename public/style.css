@@ -475,7 +475,6 @@ body.sidebar-resizing * {
 }
 .brand-cache-btn:hover { color: var(--text-primary); }
 .brand-version { margin-left: 8px; font-size: 11px; color: var(--text-secondary); opacity: .9; }
-.sidebar-mobile-user-list-btn,
 .sidebar-mobile-actions-btn,
 .mobile-sidebar-actions-menu {
   display: none;
@@ -2091,7 +2090,7 @@ body.sidebar-resizing * {
 #wallpaper-modal .modal { max-width: 440px; }
 .grok-modal { max-width: 640px; }
 #profile-modal .modal-page {
-  max-width: min(70vw, 1100px);
+  max-width: min(42vw, 660px);
   max-height: min(78vh, 820px);
 }
 .grok-group-name {
@@ -2703,7 +2702,6 @@ body.chat-body.mobile-layout .sidebar-overlay {
   .brand-cache-btn {
     display: none;
   }
-  .sidebar-mobile-user-list-btn,
   .sidebar-mobile-actions-btn {
     display: inline-flex;
     width: 36px;
@@ -2713,7 +2711,7 @@ body.chat-body.mobile-layout .sidebar-overlay {
     border: 1px solid rgba(255,255,255,.06);
     color: var(--text-primary);
   }
-  .sidebar-mobile-user-list-btn {
+  .sidebar-mobile-actions-btn {
     margin-left: auto;
   }
   .sidebar-user-list-btn {

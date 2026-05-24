@@ -614,6 +614,21 @@ function getAiProviderLabel(model) {
   return GETGOAPI_MODELS.has(model) ? 'GetGoAPI' : 'OpenRouter';
 }
 
+function buildAiRequestBody(model, provider, messages) {
+  const requestBody = {
+    model,
+    temperature: OPENROUTER_TEMPERATURE,
+    max_tokens: OPENROUTER_MAX_TOKENS,
+    messages,
+  };
+  if (provider !== 'getgoapi') {
+    requestBody.top_p = OPENROUTER_TOP_P;
+    requestBody.frequency_penalty = OPENROUTER_FREQUENCY_PENALTY;
+    requestBody.presence_penalty = OPENROUTER_PRESENCE_PENALTY;
+  }
+  return requestBody;
+}
+
 function buildAiSystemPrompt(tone = DEFAULT_AI_TONE) {
   const basePrompt = AI_SYSTEM_PROMPTS[tone] || AI_SYSTEM_PROMPTS[DEFAULT_AI_TONE];
   const policyLines = [
@@ -2775,18 +2790,7 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
               ...(origin ? { 'HTTP-Referer': origin } : {}),
             }),
       },
-      body: JSON.stringify({
-        model: selectedModel,
-        temperature: OPENROUTER_TEMPERATURE,
-        top_p: OPENROUTER_TOP_P,
-        frequency_penalty: OPENROUTER_FREQUENCY_PENALTY,
-        ...(apiConfig.provider === 'getgoapi'
-          ? {}
-          : { presence_penalty: OPENROUTER_PRESENCE_PENALTY }),
-        max_tokens: OPENROUTER_MAX_TOKENS,
-        messages,
-        ...(apiConfig.provider === 'getgoapi' ? { stream: false } : {}),
-      }),
+      body: JSON.stringify(buildAiRequestBody(selectedModel, apiConfig.provider, messages)),
       signal: controller.signal,
     });
     const payload = await upstream.json().catch(() => ({}));
