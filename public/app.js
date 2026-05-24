@@ -7062,9 +7062,6 @@ function setupEventListeners() {
     e.stopPropagation();
     await openUserManagementModal();
   });
-  $('sidebar-mobile-user-list-btn').addEventListener('click', async () => {
-    await openUserManagementModal();
-  });
   $('sidebar-mobile-actions-btn').addEventListener('click', (event) => {
     event.stopPropagation();
     toggleMobileActionMenu();
@@ -7076,6 +7073,10 @@ function setupEventListeners() {
   $('mobile-join-group-btn').addEventListener('click', () => {
     closeMobileActionMenu();
     $('join-group-btn').click();
+  });
+  $('mobile-user-list-btn').addEventListener('click', async () => {
+    closeMobileActionMenu();
+    await openUserManagementModal();
   });
   $('mobile-diagnostics-btn').addEventListener('click', () => {
     closeMobileActionMenu();
