@@ -2024,13 +2024,15 @@ app.post('/api/auth/logout', (req, res) => {
 
 // POST /api/auth/add-email — existing users (pending session) add their email
 app.post('/api/auth/add-email', async (req, res) => {
-  const userId = req.session.pendingUserId;
-  if (!userId || !req.session.pendingEmailVerification) {
-    return res.status(401).json({ error: 'Not authenticated' });
-  }
   const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
   if (isEmailVerifySendBlocked(clientIp)) {
     return res.status(429).json({ error: 'Too many requests. Please wait before requesting a new code.' });
+  }
+  recordEmailVerifySend(clientIp);
+
+  const userId = req.session.pendingUserId;
+  if (!userId || !req.session.pendingEmailVerification) {
+    return res.status(401).json({ error: 'Not authenticated' });
   }
 
   const user = stmts.findUserById.get(userId);
@@ -2056,7 +2058,6 @@ app.post('/api/auth/add-email', async (req, res) => {
 
   try {
     stmts.setUserEmail.run({ userId, email, code, expiresAt });
-    recordEmailVerifySend(clientIp);
     await sendVerificationEmail(email, code);
     res.json({ ok: true, message: 'Verification code sent' });
   } catch (err) {
@@ -2067,13 +2068,15 @@ app.post('/api/auth/add-email', async (req, res) => {
 
 // POST /api/auth/send-verification-email — resend verification code
 app.post('/api/auth/send-verification-email', async (req, res) => {
-  const userId = req.session.pendingUserId;
-  if (!userId || !req.session.pendingEmailVerification) {
-    return res.status(401).json({ error: 'Not authenticated' });
-  }
   const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
   if (isEmailVerifySendBlocked(clientIp)) {
     return res.status(429).json({ error: 'Too many requests. Please wait before requesting a new code.' });
+  }
+  recordEmailVerifySend(clientIp);
+
+  const userId = req.session.pendingUserId;
+  if (!userId || !req.session.pendingEmailVerification) {
+    return res.status(401).json({ error: 'Not authenticated' });
   }
 
   const user = stmts.findUserById.get(userId);
@@ -2090,7 +2093,6 @@ app.post('/api/auth/send-verification-email', async (req, res) => {
 
   try {
     stmts.setUserEmail.run({ userId, email: user.email, code, expiresAt });
-    recordEmailVerifySend(clientIp);
     await sendVerificationEmail(user.email, code);
     res.json({ ok: true, message: 'Verification code sent' });
   } catch (err) {
