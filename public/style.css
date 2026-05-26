@@ -335,6 +335,16 @@ body.auth-body::after {
 
 .form-error { color: var(--red); font-size: 12px; min-height: 18px; }
 
+.auth-verify-info {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  padding: 10px 14px;
+  background: rgba(108,99,255,.08);
+  border: 1px solid rgba(108,99,255,.2);
+  border-radius: 8px;
+}
+
 .btn-primary {
   background: var(--accent);
   color: #fff;

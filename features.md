@@ -3,7 +3,11 @@
 This document tracks all implemented features in the Gchat application. All features listed below are currently implemented and working.
 
 ## Authentication & User Management
-- [x] User registration with username and password
+- [x] User registration with username, email, and password
+- [x] Email verification required before accessing GChat (6-digit code sent to email)
+- [x] Existing users without an email are prompted to add and verify their email on next login
+- [x] Email addresses cannot be changed after verification
+- [x] After email is verified, normal login/logout works with username and password only
 - [x] User login with bcrypt password hashing (cost factor 12)
 - [x] Session management with express-session and SQLite store
 - [x] User profile customization (username, icon color, and profile picture)
@@ -89,6 +93,8 @@ This document tracks all implemented features in the Gchat application. All feat
 - [x] CSRF token validation for state-changing operations
 - [x] Session authentication for Socket.IO connections
 - [x] Brute-force login protection (10 failed attempts per IP per 15 minutes)
+- [x] Email verification send rate limiting (3 sends per minute per IP)
+- [x] Email verification code attempt limiting (5 wrong attempts before requiring a new code)
 - [x] Timing-safe comparison for ADMIN_SECRET bearer token
 - [x] Profile picture MIME type allowlist (JPEG, PNG, GIF, WebP only — SVG rejected)
 - [x] Whisper recipient membership validation (recipients must be group members)
