@@ -144,7 +144,7 @@ Important limitations:
 | `SMTP_FROM` | Optional | Sender address shown in verification emails. Defaults to `SMTP_USER`. |
 | `SMTP_SECURE` | Optional | Set to `true` to use TLS on port 465. Default is STARTTLS (port 587). |
 
-\* If `SMTP_HOST`, `SMTP_USER`, and `SMTP_PASS` are all unset, email is not sent and verification codes are printed to the server console (development only). **Configure SMTP for any production deployment.**
+\* If `SMTP_HOST`, `SMTP_USER`, and `SMTP_PASS` are all unset, email is not sent and verification codes are printed to the server console in development only. Production deployments will reject verification requests until SMTP is configured. **Configure SMTP for any production deployment.**
 
 ---
 
