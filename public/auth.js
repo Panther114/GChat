@@ -47,10 +47,10 @@ window.addEventListener('storage', (event) => {
 });
 
 // ── Panel management ─────────────────────────────────────────────────────
-const PANELS = ['signin-form', 'signup-form', 'add-email-form', 'verify-email-form'];
+const PANELS = ['signin-form', 'signup-form', 'verify-email-form'];
 
 function showPanel(panelId) {
-  const isVerifyPanel = panelId === 'verify-email-form' || panelId === 'add-email-form';
+  const isVerifyPanel = panelId === 'verify-email-form';
   const tabsEl = document.getElementById('auth-tabs');
   if (tabsEl) tabsEl.style.display = isVerifyPanel ? 'none' : '';
 
@@ -65,16 +65,39 @@ function showPanel(panelId) {
   });
 }
 
+// ── Verification panel step management ──────────────────────────────────
+let verifyPanelEmail = '';
+
+function showVerifyStep1() {
+  const s1 = document.getElementById('verify-step1');
+  const s2 = document.getElementById('verify-step2');
+  if (s1) s1.style.display = '';
+  if (s2) s2.style.display = 'none';
+}
+
+function showVerifyStep2(email) {
+  if (email != null) verifyPanelEmail = email;
+  const s1 = document.getElementById('verify-step1');
+  const s2 = document.getElementById('verify-step2');
+  if (s1) s1.style.display = 'none';
+  if (s2) s2.style.display = '';
+  const infoEl = document.getElementById('verify-email-info');
+  if (infoEl && verifyPanelEmail) {
+    infoEl.textContent = `A 6-digit verification code has been sent to ${verifyPanelEmail}. Enter it below.`;
+  }
+}
+
 async function redirectIfAuthenticated() {
   try {
     const res = await fetch('/api/auth/me', { cache: 'no-store' });
     if (res.ok) {
       const data = await res.json();
       if (data.needsEmailVerification) {
+        showPanel('verify-email-form');
         if (data.needsEmailEntry) {
-          showPanel('add-email-form');
+          showVerifyStep1();
         } else {
-          showPanel('verify-email-form');
+          showVerifyStep2(data.email || '');
         }
         return;
       }
@@ -134,10 +157,11 @@ document.getElementById('signin-form').addEventListener('submit', async (e) => {
       errorEl.textContent = data.error || 'Sign in failed';
     } else if (data.needsEmailVerification) {
       persistUserWallpaperSettings(data);
+      showPanel('verify-email-form');
       if (data.needsEmailEntry) {
-        showPanel('add-email-form');
+        showVerifyStep1();
       } else {
-        showPanel('verify-email-form');
+        showVerifyStep2(data.email || '');
       }
     } else {
       persistUserWallpaperSettings(data);
@@ -183,10 +207,9 @@ document.getElementById('signup-form').addEventListener('submit', async (e) => {
       errorEl.textContent = data.error || 'Registration failed';
     } else {
       persistUserWallpaperSettings(data);
-      // After registration, always need email verification
-      const infoEl = document.getElementById('verify-email-info');
-      if (infoEl) infoEl.textContent = `A 6-digit verification code has been sent to ${email}. Enter it below.`;
+      // After registration, always need email verification (code was sent to the signup email)
       showPanel('verify-email-form');
+      showVerifyStep2(email);
     }
   } catch {
     errorEl.textContent = 'Network error. Please try again.';
@@ -196,16 +219,15 @@ document.getElementById('signup-form').addEventListener('submit', async (e) => {
   }
 });
 
-// ── Add Email (existing users without email) ──────────────────────────────
-document.getElementById('add-email-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const btn = document.getElementById('add-email-btn');
-  const errorEl = document.getElementById('add-email-error');
+// ── Send Code (step 1 of unified verify panel: users without email) ──────
+document.getElementById('send-code-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('send-code-btn');
+  const errorEl = document.getElementById('verify-step1-error');
   errorEl.textContent = '';
   btn.disabled = true;
   btn.textContent = 'Sending code…';
 
-  const email = document.getElementById('add-email-input').value.trim();
+  const email = document.getElementById('verify-email-input').value.trim();
 
   try {
     const res = await fetch('/api/auth/add-email', {
@@ -217,9 +239,7 @@ document.getElementById('add-email-form').addEventListener('submit', async (e) =
     if (!res.ok) {
       errorEl.textContent = data.error || 'Failed to send code';
     } else {
-      const infoEl = document.getElementById('verify-email-info');
-      if (infoEl) infoEl.textContent = `A 6-digit verification code has been sent to ${email}. Enter it below.`;
-      showPanel('verify-email-form');
+      showVerifyStep2(email);
     }
   } catch {
     errorEl.textContent = 'Network error. Please try again.';
