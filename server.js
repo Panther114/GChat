@@ -137,14 +137,20 @@ const SMTP_USER = typeof process.env.SMTP_USER === 'string' ? process.env.SMTP_U
 const SMTP_PASS = typeof process.env.SMTP_PASS === 'string' ? process.env.SMTP_PASS : '';
 const SMTP_FROM = typeof process.env.SMTP_FROM === 'string' ? process.env.SMTP_FROM.trim() : (SMTP_USER || 'noreply@gchat.app');
 const SMTP_SECURE = process.env.SMTP_SECURE === 'true' || SMTP_PORT === 465;
+const RESEND_API_KEY = typeof process.env.RESEND_API_KEY === 'string' ? process.env.RESEND_API_KEY.trim() : '';
+const RESEND_FROM = typeof process.env.RESEND_FROM === 'string' ? process.env.RESEND_FROM.trim() : (SMTP_FROM || 'noreply@gchat.app');
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
-function isEmailConfigured() {
+function isSmtpConfigured() {
   return !!(SMTP_HOST && SMTP_USER && SMTP_PASS);
 }
 
+function isEmailConfigured() {
+  return isSmtpConfigured() || !!RESEND_API_KEY;
+}
+
 let emailTransporter = null;
-if (isEmailConfigured()) {
+if (isSmtpConfigured()) {
   try {
     emailTransporter = nodemailer.createTransport({
       host: SMTP_HOST,
@@ -155,11 +161,12 @@ if (isEmailConfigured()) {
   } catch (err) {
     console.error('Failed to initialize email transporter:', err);
   }
-} else {
+}
+if (!isEmailConfigured()) {
   if (IS_PRODUCTION) {
-    console.error('Email (SMTP) not configured. Verification emails will fail until SMTP_HOST, SMTP_USER, and SMTP_PASS are set.');
+    console.error('Email not configured. Verification emails will fail until SMTP_HOST/SMTP_USER/SMTP_PASS or RESEND_API_KEY are set.');
   } else {
-    console.warn('Email (SMTP) not configured. Verification codes will be printed to console. Set SMTP_HOST, SMTP_USER, SMTP_PASS to enable real email delivery.');
+    console.warn('Email not configured. Verification codes will be printed to console. Set SMTP_HOST/SMTP_USER/SMTP_PASS or RESEND_API_KEY to enable real email delivery.');
   }
 }
 
@@ -182,6 +189,19 @@ async function sendVerificationEmail(toEmail, code) {
 </div>`;
   if (emailTransporter) {
     await emailTransporter.sendMail({ from: SMTP_FROM, to: toEmail, subject, text, html });
+  } else if (RESEND_API_KEY) {
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + RESEND_API_KEY,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ from: RESEND_FROM, to: [toEmail], subject, text, html }),
+    });
+    if (!response.ok) {
+      const errData = await response.json().catch(() => ({}));
+      throw new Error(`Resend API error (${response.status}): ${errData.message || 'unknown error'}`);
+    }
   } else if (IS_PRODUCTION) {
     throw new SmtpNotConfiguredError();
   } else {
@@ -2045,6 +2065,19 @@ app.post('/api/auth/login', async (req, res) => {
       req.session.pendingUserId = user.id;
       req.session.pendingEmailVerification = true;
       req.session.pendingRememberMe = rememberMe === true;
+
+      // Auto-send a verification code if the user already has an email on file
+      if (user.email) {
+        const code = String(Math.floor(100000 + Math.random() * 900000));
+        const expiresAt = new Date(Date.now() + EMAIL_VERIFICATION_EXPIRY_MS).toISOString();
+        try {
+          stmts.setUserEmail.run({ userId: user.id, email: user.email, code, expiresAt });
+          await sendVerificationEmail(user.email, code);
+        } catch (err) {
+          console.error('Failed to auto-send verification email on login:', err);
+        }
+      }
+
       req.session.save(() => {
         const formatted = formatUser(user);
         res.json({
