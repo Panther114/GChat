@@ -117,24 +117,19 @@
 
     <!-- Email Verification Panel (unified: email entry + code verification) -->
     <div id="verify-email-form" class="auth-form" role="form">
-      <!-- Step 1: Email entry (shown when user has no email on file) -->
-      <div id="verify-step1">
-        <p class="auth-verify-info">Enter your email address to receive a verification code. Your username and chat history are preserved.</p>
-        <div class="form-group">
-          <label for="verify-email-input">Email Address</label>
-          <input
-            type="email"
-            id="verify-email-input"
-            placeholder="Enter your email address"
-            autocomplete="email"
-          />
-        </div>
-        <p class="form-error" id="verify-step1-error"></p>
-        <button type="button" class="btn-primary" id="send-code-btn">Send Verification Code</button>
+      <p class="auth-verify-info" id="verify-email-info">Enter your email address and verify it with a 6-digit code.</p>
+      <div class="form-group">
+        <label for="verify-email-input">Email Address</label>
+        <input
+          type="email"
+          id="verify-email-input"
+          placeholder="Enter your email address"
+          autocomplete="email"
+        />
       </div>
-      <!-- Step 2: Code entry (shown after code is sent) -->
-      <div id="verify-step2" style="display:none">
-        <p class="auth-verify-info" id="verify-email-info">A 6-digit verification code has been sent to your email. Enter it below.</p>
+      <button type="button" class="btn-primary" id="send-code-btn">Send Verification Code</button>
+      <p class="form-error" id="verify-step1-error"></p>
+      <div id="verify-code-section" style="display:none">
         <div class="form-group">
           <label for="verify-code-input">Verification Code</label>
           <input

@@ -157,6 +157,9 @@ if (isSmtpConfigured()) {
       port: SMTP_PORT,
       secure: SMTP_SECURE,
       auth: { user: SMTP_USER, pass: SMTP_PASS },
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+      socketTimeout: 15000,
     });
   } catch (err) {
     console.error('Failed to initialize email transporter:', err);
@@ -2074,12 +2077,25 @@ app.post('/api/auth/login', async (req, res) => {
       if (user.email) {
         const code = generateVerificationCode();
         const expiresAt = new Date(Date.now() + EMAIL_VERIFICATION_EXPIRY_MS).toISOString();
+        let emailSendFailed = false;
         try {
           stmts.setUserEmail.run({ userId: user.id, email: user.email, code, expiresAt });
           await sendVerificationEmail(user.email, code);
         } catch (err) {
           console.error('Failed to auto-send verification email on login:', err);
+          emailSendFailed = true;
         }
+
+        req.session.save(() => {
+          const formatted = formatUser(user);
+          res.json({
+            ...formatted,
+            needsEmailVerification: true,
+            needsEmailEntry: false,
+            emailSendFailed,
+          });
+        });
+        return;
       }
 
       req.session.save(() => {
@@ -2130,9 +2146,6 @@ app.post('/api/auth/add-email', async (req, res) => {
   if (user.email_verified) {
     return res.status(400).json({ error: 'Email already verified' });
   }
-  if (user.email) {
-    return res.status(400).json({ error: 'Email already added. Use send-verification-email to resend the code.' });
-  }
 
   const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
   if (!email || email.length > EMAIL_MAX_LENGTH || !EMAIL_REGEX.test(email)) {
@@ -2152,7 +2165,12 @@ app.post('/api/auth/add-email', async (req, res) => {
     res.json({ ok: true, message: 'Verification code sent' });
   } catch (err) {
     console.error('Add email error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    const smtpErr = err instanceof SmtpNotConfiguredError;
+    res.status(smtpErr ? 503 : 500).json({
+      error: smtpErr
+        ? 'Email service is not configured on this server.'
+        : 'Failed to send verification email. Please try again later.',
+    });
   }
 });
 
@@ -2187,7 +2205,12 @@ app.post('/api/auth/send-verification-email', async (req, res) => {
     res.json({ ok: true, message: 'Verification code sent' });
   } catch (err) {
     console.error('Send verification email error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    const smtpErr = err instanceof SmtpNotConfiguredError;
+    res.status(smtpErr ? 503 : 500).json({
+      error: smtpErr
+        ? 'Email service is not configured on this server.'
+        : 'Failed to send verification email. Please try again later.',
+    });
   }
 });
 

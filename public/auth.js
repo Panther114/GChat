@@ -68,22 +68,30 @@ function showPanel(panelId) {
 // ── Verification panel step management ──────────────────────────────────
 let verifyPanelEmail = '';
 
+function showCodeSection(visible) {
+  const section = document.getElementById('verify-code-section');
+  if (section) section.style.display = visible ? '' : 'none';
+}
+
 function showVerifyStep1() {
-  const s1 = document.getElementById('verify-step1');
-  const s2 = document.getElementById('verify-step2');
-  if (s1) s1.style.display = '';
-  if (s2) s2.style.display = 'none';
+  // Show email input editable, hide code section
+  const emailInput = document.getElementById('verify-email-input');
+  if (emailInput) emailInput.disabled = false;
+  showCodeSection(false);
+  const infoEl = document.getElementById('verify-email-info');
+  if (infoEl) infoEl.textContent = 'Enter your email address and verify it with a 6-digit code.';
 }
 
 function showVerifyStep2(email) {
-  if (email != null) verifyPanelEmail = email;
-  const s1 = document.getElementById('verify-step1');
-  const s2 = document.getElementById('verify-step2');
-  if (s1) s1.style.display = 'none';
-  if (s2) s2.style.display = '';
+  if (email != null) {
+    verifyPanelEmail = email;
+    const emailInput = document.getElementById('verify-email-input');
+    if (emailInput) emailInput.value = email;
+  }
+  showCodeSection(true);
   const infoEl = document.getElementById('verify-email-info');
   if (infoEl && verifyPanelEmail) {
-    infoEl.textContent = `A 6-digit verification code has been sent to ${verifyPanelEmail}. Enter it below.`;
+    infoEl.textContent = `A 6-digit verification code has been sent to ${verifyPanelEmail}. Enter it below. You can change your email and resend.`;
   }
 }
 
@@ -162,6 +170,10 @@ document.getElementById('signin-form').addEventListener('submit', async (e) => {
         showVerifyStep1();
       } else {
         showVerifyStep2(data.email || '');
+        if (data.emailSendFailed) {
+          const errorEl = document.getElementById('verify-step1-error');
+          if (errorEl) errorEl.textContent = 'Failed to send verification code. Click "Send Verification Code" to retry.';
+        }
       }
     } else {
       persistUserWallpaperSettings(data);
@@ -219,7 +231,7 @@ document.getElementById('signup-form').addEventListener('submit', async (e) => {
   }
 });
 
-// ── Send Code (step 1 of unified verify panel: users without email) ──────
+// ── Send Code (unified: sends/resends code to the email in the input) ──────
 document.getElementById('send-code-btn').addEventListener('click', async () => {
   const btn = document.getElementById('send-code-btn');
   const errorEl = document.getElementById('verify-step1-error');
@@ -240,6 +252,7 @@ document.getElementById('send-code-btn').addEventListener('click', async () => {
       errorEl.textContent = data.error || 'Failed to send code';
     } else {
       showVerifyStep2(email);
+      errorEl.textContent = '';
     }
   } catch {
     errorEl.textContent = 'Network error. Please try again.';
@@ -288,16 +301,20 @@ document.getElementById('resend-code-btn').addEventListener('click', async () =>
   btn.disabled = true;
   btn.textContent = 'Sending…';
 
+  const email = document.getElementById('verify-email-input').value.trim();
+
   try {
-    const res = await fetch('/api/auth/send-verification-email', {
+    // Use add-email which allows setting or changing email before verification
+    const res = await fetch('/api/auth/add-email', {
       method: 'POST',
       headers: authHeaders(),
-      body: JSON.stringify({}),
+      body: JSON.stringify({ email }),
     });
     const data = await res.json();
     if (!res.ok) {
       errorEl.textContent = data.error || 'Failed to resend code';
     } else {
+      verifyPanelEmail = email;
       errorEl.style.color = 'var(--accent2)';
       errorEl.textContent = 'Code resent. Check your email.';
       setTimeout(() => {
