@@ -17,7 +17,7 @@ const path = require('path');
 const crypto = require('crypto');
 const fs = require('fs');
 const webpush = require('web-push');
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
 const packageJson = require('./package.json');
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -131,53 +131,34 @@ const EMAIL_VERIFICATION_RESEND_WINDOW = 60 * 1000; // 1 per minute per IP
 const EMAIL_VERIFICATION_MAX_ATTEMPTS = 5; // max wrong code attempts per code
 const EMAIL_MAX_LENGTH = 254;
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
-const SMTP_HOST = typeof process.env.SMTP_HOST === 'string' ? process.env.SMTP_HOST.trim() : '';
-const SMTP_PORT = Number(process.env.SMTP_PORT) || 587;
-const SMTP_USER = typeof process.env.SMTP_USER === 'string' ? process.env.SMTP_USER.trim() : '';
-const SMTP_PASS = typeof process.env.SMTP_PASS === 'string' ? process.env.SMTP_PASS : '';
-const SMTP_FROM = typeof process.env.SMTP_FROM === 'string' ? process.env.SMTP_FROM.trim() : (SMTP_USER || 'noreply@gchat.app');
-const SMTP_SECURE = process.env.SMTP_SECURE === 'true' || SMTP_PORT === 465;
 const RESEND_API_KEY = typeof process.env.RESEND_API_KEY === 'string' ? process.env.RESEND_API_KEY.trim() : '';
-const RESEND_FROM = typeof process.env.RESEND_FROM === 'string' ? process.env.RESEND_FROM.trim() : 'noreply@gchat.app';
+const SMTP_FROM = typeof process.env.SMTP_FROM === 'string' ? process.env.SMTP_FROM.trim() : 'noreply@gchat.app';
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
-function isSmtpConfigured() {
-  return !!(SMTP_HOST && SMTP_USER && SMTP_PASS);
-}
-
 function isEmailConfigured() {
-  return isSmtpConfigured() || !!RESEND_API_KEY;
+  return !!RESEND_API_KEY;
 }
 
-let emailTransporter = null;
-if (isSmtpConfigured()) {
+// Initialise the Resend client once at startup so we can log its readiness.
+let resendClient = null;
+if (RESEND_API_KEY) {
   try {
-    emailTransporter = nodemailer.createTransport({
-      host: SMTP_HOST,
-      port: SMTP_PORT,
-      secure: SMTP_SECURE,
-      auth: { user: SMTP_USER, pass: SMTP_PASS },
-      connectionTimeout: 10000,
-      greetingTimeout: 10000,
-      socketTimeout: 15000,
-    });
+    resendClient = new Resend(RESEND_API_KEY);
+    console.log('[EMAIL] Resend client initialised. Sender address:', SMTP_FROM);
   } catch (err) {
-    console.error('Failed to initialize email transporter:', err);
+    console.error('[EMAIL] Failed to initialise Resend client:', err.message);
   }
-}
-if (!isEmailConfigured()) {
-  if (IS_PRODUCTION) {
-    console.error('Email not configured. Verification emails will fail until SMTP_HOST/SMTP_USER/SMTP_PASS or RESEND_API_KEY are set.');
-  } else {
-    console.warn('Email not configured. Verification codes will be printed to console. Set SMTP_HOST/SMTP_USER/SMTP_PASS or RESEND_API_KEY to enable real email delivery.');
-  }
+} else if (IS_PRODUCTION) {
+  console.error('[EMAIL] RESEND_API_KEY is not set. Verification emails will fail until it is configured.');
+} else {
+  console.warn('[EMAIL] RESEND_API_KEY is not set. Verification codes will be printed to the console in development mode.');
 }
 
-class SmtpNotConfiguredError extends Error {
+class EmailNotConfiguredError extends Error {
   constructor() {
-    super('SMTP is not configured on this server');
-    this.name = 'SmtpNotConfiguredError';
-    this.code = 'SMTP_NOT_CONFIGURED';
+    super('Email delivery is not configured on this server');
+    this.name = 'EmailNotConfiguredError';
+    this.code = 'EMAIL_NOT_CONFIGURED';
   }
 }
 
@@ -190,23 +171,26 @@ async function sendVerificationEmail(toEmail, code) {
 <div style="font-size:32px;font-weight:bold;letter-spacing:8px;padding:16px;background:#f0f0f8;border-radius:8px;text-align:center;">${code}</div>
 <p style="color:#666;margin-top:16px;font-size:13px;">This code expires in 10 minutes. Do not share it with anyone.</p>
 </div>`;
-  if (emailTransporter) {
-    await emailTransporter.sendMail({ from: SMTP_FROM, to: toEmail, subject, text, html });
-  } else if (RESEND_API_KEY) {
-    const response = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        'Authorization': 'Bearer ' + RESEND_API_KEY,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ from: RESEND_FROM, to: [toEmail], subject, text, html }),
+
+  if (resendClient) {
+    console.log(`[EMAIL] Sending verification email via Resend API → to: ${toEmail}, subject: "${subject}"`);
+    const t0 = Date.now();
+    const { data, error } = await resendClient.emails.send({
+      from: SMTP_FROM,
+      to: [toEmail],
+      subject,
+      text,
+      html,
     });
-    if (!response.ok) {
-      const errData = await response.json().catch(() => ({}));
-      throw new Error(`Resend API error (${response.status}): ${errData.message || 'unknown error'}`);
+    const elapsed = Date.now() - t0;
+    if (error) {
+      console.error(`[EMAIL] Resend API error after ${elapsed}ms → name: ${error.name}, message: ${error.message}`);
+      throw new Error(`Resend API error: ${error.message}`);
     }
+    console.log(`[EMAIL] Verification email sent successfully in ${elapsed}ms → messageId: ${data?.id}, to: ${toEmail}`);
   } else if (IS_PRODUCTION) {
-    throw new SmtpNotConfiguredError();
+    console.error(`[EMAIL] Cannot send verification email to ${toEmail} — RESEND_API_KEY is not configured.`);
+    throw new EmailNotConfiguredError();
   } else {
     // Development fallback: print to console
     console.log(`[EMAIL VERIFICATION] To: ${toEmail} | Code: ${code}`);
@@ -2019,12 +2003,12 @@ app.post('/api/auth/register', async (req, res) => {
         if (!rollbackFailedRegistration(id)) {
           console.error('Registration rollback could not be completed after email delivery failure.');
         }
-        const missingSmtp = err instanceof SmtpNotConfiguredError;
+        const missingEmail = err instanceof EmailNotConfiguredError;
         return req.session.destroy(() => {
           if (!res.headersSent) {
-            res.status(missingSmtp ? 503 : 500).json({
-              error: missingSmtp
-                ? 'SMTP is not configured on this server. Set SMTP_HOST, SMTP_USER, and SMTP_PASS before sending verification emails.'
+            res.status(missingEmail ? 503 : 500).json({
+              error: missingEmail
+                ? 'Email delivery is not configured on this server. Set RESEND_API_KEY before sending verification emails.'
                 : 'Verification email could not be sent. Please try again later.',
             });
           }
@@ -2165,10 +2149,10 @@ app.post('/api/auth/add-email', async (req, res) => {
     res.json({ ok: true, message: 'Verification code sent' });
   } catch (err) {
     console.error('Add email error:', err);
-    const smtpErr = err instanceof SmtpNotConfiguredError;
-    res.status(smtpErr ? 503 : 500).json({
-      error: smtpErr
-        ? 'Email service is not configured on this server.'
+    const emailErr = err instanceof EmailNotConfiguredError;
+    res.status(emailErr ? 503 : 500).json({
+      error: emailErr
+        ? 'Email delivery is not configured on this server.'
         : 'Failed to send verification email. Please try again later.',
     });
   }
@@ -2205,10 +2189,10 @@ app.post('/api/auth/send-verification-email', async (req, res) => {
     res.json({ ok: true, message: 'Verification code sent' });
   } catch (err) {
     console.error('Send verification email error:', err);
-    const smtpErr = err instanceof SmtpNotConfiguredError;
-    res.status(smtpErr ? 503 : 500).json({
-      error: smtpErr
-        ? 'Email service is not configured on this server.'
+    const emailErr = err instanceof EmailNotConfiguredError;
+    res.status(emailErr ? 503 : 500).json({
+      error: emailErr
+        ? 'Email delivery is not configured on this server.'
         : 'Failed to send verification email. Please try again later.',
     });
   }
