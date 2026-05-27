@@ -137,6 +137,7 @@ const SMTP_USER = typeof process.env.SMTP_USER === 'string' ? process.env.SMTP_U
 const SMTP_PASS = typeof process.env.SMTP_PASS === 'string' ? process.env.SMTP_PASS : '';
 const SMTP_FROM = typeof process.env.SMTP_FROM === 'string' ? process.env.SMTP_FROM.trim() : (SMTP_USER || 'noreply@gchat.app');
 const SMTP_SECURE = process.env.SMTP_SECURE === 'true' || SMTP_PORT === 465;
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
 function isEmailConfigured() {
   return !!(SMTP_HOST && SMTP_USER && SMTP_PASS);
@@ -155,7 +156,19 @@ if (isEmailConfigured()) {
     console.error('Failed to initialize email transporter:', err);
   }
 } else {
-  console.warn('Email (SMTP) not configured. Verification codes will be printed to console. Set SMTP_HOST, SMTP_USER, SMTP_PASS to enable real email delivery.');
+  if (IS_PRODUCTION) {
+    console.error('Email (SMTP) not configured. Verification emails will fail until SMTP_HOST, SMTP_USER, and SMTP_PASS are set.');
+  } else {
+    console.warn('Email (SMTP) not configured. Verification codes will be printed to console. Set SMTP_HOST, SMTP_USER, SMTP_PASS to enable real email delivery.');
+  }
+}
+
+class SmtpNotConfiguredError extends Error {
+  constructor() {
+    super('SMTP is not configured on this server');
+    this.name = 'SmtpNotConfiguredError';
+    this.code = 'SMTP_NOT_CONFIGURED';
+  }
 }
 
 async function sendVerificationEmail(toEmail, code) {
@@ -169,9 +182,21 @@ async function sendVerificationEmail(toEmail, code) {
 </div>`;
   if (emailTransporter) {
     await emailTransporter.sendMail({ from: SMTP_FROM, to: toEmail, subject, text, html });
+  } else if (IS_PRODUCTION) {
+    throw new SmtpNotConfiguredError();
   } else {
     // Development fallback: print to console
     console.log(`[EMAIL VERIFICATION] To: ${toEmail} | Code: ${code}`);
+  }
+}
+
+function rollbackFailedRegistration(userId) {
+  try {
+    stmts.deleteUser.run(userId);
+    return true;
+  } catch (err) {
+    console.error('Failed to roll back registration after email delivery error:', err);
+    return false;
   }
 }
 
@@ -1942,14 +1967,42 @@ app.post('/api/auth/register', async (req, res) => {
     // Set a pending session — full access is blocked until email is verified
     req.session.pendingUserId = id;
     req.session.pendingEmailVerification = true;
-    req.session.save(async () => {
+    req.session.save(async (saveErr) => {
+      if (saveErr) {
+        console.error('Failed to save pending registration session:', saveErr);
+        rollbackFailedRegistration(id);
+        return req.session.destroy(() => {
+          res.status(500).json({ error: 'Internal server error' });
+        });
+      }
       try {
         await sendVerificationEmail(email, code);
+        const user = stmts.findUserById.get(id);
+        if (!user) {
+          console.error('Registered user record could not be retrieved after registration.');
+          return req.session.destroy(() => {
+            if (!res.headersSent) {
+              res.status(500).json({ error: 'Internal server error' });
+            }
+          });
+        }
+        return res.status(201).json({ ...formatUser(user), needsEmailVerification: true });
       } catch (err) {
         console.error('Failed to send verification email:', err);
+        if (!rollbackFailedRegistration(id)) {
+          console.error('Registration rollback could not be completed after email delivery failure.');
+        }
+        const missingSmtp = err instanceof SmtpNotConfiguredError;
+        return req.session.destroy(() => {
+          if (!res.headersSent) {
+            res.status(missingSmtp ? 503 : 500).json({
+              error: missingSmtp
+                ? 'SMTP is not configured on this server. Set SMTP_HOST, SMTP_USER, and SMTP_PASS before sending verification emails.'
+                : 'Verification email could not be sent. Please try again later.',
+            });
+          }
+        });
       }
-      const user = stmts.findUserById.get(id);
-      res.status(201).json({ ...formatUser(user), needsEmailVerification: true });
     });
   } catch (err) {
     console.error('Register error:', err);
