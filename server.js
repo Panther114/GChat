@@ -137,7 +137,7 @@ const SMTP_USER = typeof process.env.SMTP_USER === 'string' ? process.env.SMTP_U
 const SMTP_PASS = typeof process.env.SMTP_PASS === 'string' ? process.env.SMTP_PASS : '';
 const SMTP_FROM = typeof process.env.SMTP_FROM === 'string' ? process.env.SMTP_FROM.trim() : (SMTP_USER || 'noreply@gchat.app');
 const SMTP_SECURE = process.env.SMTP_SECURE === 'true' || SMTP_PORT === 465;
-const IS_PRODUCTION = process.env.NODE_ENV === 'production' || process.env.RAILWAY_ENVIRONMENT != null;
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
 function isEmailConfigured() {
   return !!(SMTP_HOST && SMTP_USER && SMTP_PASS);
@@ -163,6 +163,14 @@ if (isEmailConfigured()) {
   }
 }
 
+class SmtpNotConfiguredError extends Error {
+  constructor() {
+    super('SMTP is not configured on this server');
+    this.name = 'SmtpNotConfiguredError';
+    this.code = 'SMTP_NOT_CONFIGURED';
+  }
+}
+
 async function sendVerificationEmail(toEmail, code) {
   const subject = 'Your GChat Verification Code';
   const text = `Your GChat email verification code is: ${code}\n\nThis code expires in 10 minutes. Do not share it with anyone.`;
@@ -175,7 +183,7 @@ async function sendVerificationEmail(toEmail, code) {
   if (emailTransporter) {
     await emailTransporter.sendMail({ from: SMTP_FROM, to: toEmail, subject, text, html });
   } else if (IS_PRODUCTION) {
-    throw new Error('SMTP is not configured on this server');
+    throw new SmtpNotConfiguredError();
   } else {
     // Development fallback: print to console
     console.log(`[EMAIL VERIFICATION] To: ${toEmail} | Code: ${code}`);
@@ -185,8 +193,10 @@ async function sendVerificationEmail(toEmail, code) {
 function rollbackFailedRegistration(userId) {
   try {
     stmts.deleteUser.run(userId);
+    return true;
   } catch (err) {
     console.error('Failed to roll back registration after email delivery error:', err);
+    return false;
   }
 }
 
@@ -1968,13 +1978,28 @@ app.post('/api/auth/register', async (req, res) => {
       try {
         await sendVerificationEmail(email, code);
         const user = stmts.findUserById.get(id);
+        if (!user) {
+          console.error('Registered user record could not be retrieved after registration.');
+          return req.session.destroy(() => {
+            if (!res.headersSent) {
+              res.status(500).json({ error: 'Internal server error' });
+            }
+          });
+        }
         return res.status(201).json({ ...formatUser(user), needsEmailVerification: true });
       } catch (err) {
         console.error('Failed to send verification email:', err);
-        rollbackFailedRegistration(id);
+        if (!rollbackFailedRegistration(id)) {
+          console.error('Registration rollback could not be completed after email delivery failure.');
+        }
+        const missingSmtp = err instanceof SmtpNotConfiguredError;
         return req.session.destroy(() => {
           if (!res.headersSent) {
-            res.status(503).json({ error: 'Verification email could not be sent. Please try again later.' });
+            res.status(missingSmtp ? 503 : 500).json({
+              error: missingSmtp
+                ? 'SMTP is not configured on this server. Set SMTP_HOST, SMTP_USER, and SMTP_PASS before sending verification emails.'
+                : 'Verification email could not be sent. Please try again later.',
+            });
           }
         });
       }
