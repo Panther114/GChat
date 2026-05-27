@@ -76,7 +76,7 @@ function showVerifyStep1() {
 }
 
 function showVerifyStep2(email) {
-  verifyPanelEmail = email || verifyPanelEmail;
+  if (email != null) verifyPanelEmail = email;
   const s1 = document.getElementById('verify-step1');
   const s2 = document.getElementById('verify-step2');
   if (s1) s1.style.display = 'none';

@@ -138,7 +138,7 @@ const SMTP_PASS = typeof process.env.SMTP_PASS === 'string' ? process.env.SMTP_P
 const SMTP_FROM = typeof process.env.SMTP_FROM === 'string' ? process.env.SMTP_FROM.trim() : (SMTP_USER || 'noreply@gchat.app');
 const SMTP_SECURE = process.env.SMTP_SECURE === 'true' || SMTP_PORT === 465;
 const RESEND_API_KEY = typeof process.env.RESEND_API_KEY === 'string' ? process.env.RESEND_API_KEY.trim() : '';
-const RESEND_FROM = typeof process.env.RESEND_FROM === 'string' ? process.env.RESEND_FROM.trim() : (SMTP_FROM || 'noreply@gchat.app');
+const RESEND_FROM = typeof process.env.RESEND_FROM === 'string' ? process.env.RESEND_FROM.trim() : 'noreply@gchat.app';
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
 function isSmtpConfigured() {
@@ -208,6 +208,10 @@ async function sendVerificationEmail(toEmail, code) {
     // Development fallback: print to console
     console.log(`[EMAIL VERIFICATION] To: ${toEmail} | Code: ${code}`);
   }
+}
+
+function generateVerificationCode() {
+  return String(Math.floor(100000 + Math.random() * 900000));
 }
 
 function rollbackFailedRegistration(userId) {
@@ -1975,7 +1979,7 @@ app.post('/api/auth/register', async (req, res) => {
     const passwordHash = await bcrypt.hash(password, 12);
     const id = uuidv4();
     const color = iconColor || '#4A90D9';
-    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const code = generateVerificationCode();
     const expiresAt = new Date(Date.now() + EMAIL_VERIFICATION_EXPIRY_MS).toISOString();
 
     stmts.insertUser.run(id, username, passwordHash, color);
@@ -2068,7 +2072,7 @@ app.post('/api/auth/login', async (req, res) => {
 
       // Auto-send a verification code if the user already has an email on file
       if (user.email) {
-        const code = String(Math.floor(100000 + Math.random() * 900000));
+        const code = generateVerificationCode();
         const expiresAt = new Date(Date.now() + EMAIL_VERIFICATION_EXPIRY_MS).toISOString();
         try {
           stmts.setUserEmail.run({ userId: user.id, email: user.email, code, expiresAt });
@@ -2139,7 +2143,7 @@ app.post('/api/auth/add-email', async (req, res) => {
     return res.status(409).json({ error: 'Email address already in use' });
   }
 
-  const code = String(Math.floor(100000 + Math.random() * 900000));
+  const code = generateVerificationCode();
   const expiresAt = new Date(Date.now() + EMAIL_VERIFICATION_EXPIRY_MS).toISOString();
 
   try {
@@ -2174,7 +2178,7 @@ app.post('/api/auth/send-verification-email', async (req, res) => {
     return res.status(400).json({ error: 'No email address on file. Please add your email first.' });
   }
 
-  const code = String(Math.floor(100000 + Math.random() * 900000));
+  const code = generateVerificationCode();
   const expiresAt = new Date(Date.now() + EMAIL_VERIFICATION_EXPIRY_MS).toISOString();
 
   try {
