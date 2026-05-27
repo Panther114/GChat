@@ -46,10 +46,38 @@ window.addEventListener('storage', (event) => {
   applyAuthWallpaperFromStorage();
 });
 
+// ── Panel management ─────────────────────────────────────────────────────
+const PANELS = ['signin-form', 'signup-form', 'add-email-form', 'verify-email-form'];
+
+function showPanel(panelId) {
+  const isVerifyPanel = panelId === 'verify-email-form' || panelId === 'add-email-form';
+  const tabsEl = document.getElementById('auth-tabs');
+  if (tabsEl) tabsEl.style.display = isVerifyPanel ? 'none' : '';
+
+  PANELS.forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (id === panelId) {
+      el.classList.add('active');
+    } else {
+      el.classList.remove('active');
+    }
+  });
+}
+
 async function redirectIfAuthenticated() {
   try {
     const res = await fetch('/api/auth/me', { cache: 'no-store' });
     if (res.ok) {
+      const data = await res.json();
+      if (data.needsEmailVerification) {
+        if (data.needsEmailEntry) {
+          showPanel('add-email-form');
+        } else {
+          showPanel('verify-email-form');
+        }
+        return;
+      }
       window.location.replace('chat.html');
     }
   } catch {
@@ -69,9 +97,8 @@ document.querySelectorAll('.auth-tab').forEach((tab) => {
   tab.addEventListener('click', () => {
     const target = tab.dataset.tab;
     document.querySelectorAll('.auth-tab').forEach((t) => t.classList.remove('active'));
-    document.querySelectorAll('.auth-form').forEach((f) => f.classList.remove('active'));
     tab.classList.add('active');
-    document.getElementById(`${target}-form`).classList.add('active');
+    showPanel(`${target}-form`);
   });
 });
 
@@ -105,6 +132,13 @@ document.getElementById('signin-form').addEventListener('submit', async (e) => {
     const data = await res.json();
     if (!res.ok) {
       errorEl.textContent = data.error || 'Sign in failed';
+    } else if (data.needsEmailVerification) {
+      persistUserWallpaperSettings(data);
+      if (data.needsEmailEntry) {
+        showPanel('add-email-form');
+      } else {
+        showPanel('verify-email-form');
+      }
     } else {
       persistUserWallpaperSettings(data);
       window.location.href = 'chat.html';
@@ -125,6 +159,7 @@ document.getElementById('signup-form').addEventListener('submit', async (e) => {
   errorEl.textContent = '';
 
   const username = document.getElementById('signup-username').value.trim();
+  const email = document.getElementById('signup-email').value.trim();
   const password = document.getElementById('signup-password').value;
   const confirm = document.getElementById('signup-confirm').value;
   const iconColor = document.getElementById('signup-color').value;
@@ -141,11 +176,78 @@ document.getElementById('signup-form').addEventListener('submit', async (e) => {
     const res = await fetch('/api/auth/register', {
       method: 'POST',
       headers: authHeaders(),
-      body: JSON.stringify({ username, password, iconColor }),
+      body: JSON.stringify({ username, email, password, iconColor }),
     });
     const data = await res.json();
     if (!res.ok) {
       errorEl.textContent = data.error || 'Registration failed';
+    } else {
+      persistUserWallpaperSettings(data);
+      // After registration, always need email verification
+      const infoEl = document.getElementById('verify-email-info');
+      if (infoEl) infoEl.textContent = `A 6-digit verification code has been sent to ${email}. Enter it below.`;
+      showPanel('verify-email-form');
+    }
+  } catch {
+    errorEl.textContent = 'Network error. Please try again.';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Create Account';
+  }
+});
+
+// ── Add Email (existing users without email) ──────────────────────────────
+document.getElementById('add-email-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById('add-email-btn');
+  const errorEl = document.getElementById('add-email-error');
+  errorEl.textContent = '';
+  btn.disabled = true;
+  btn.textContent = 'Sending code…';
+
+  const email = document.getElementById('add-email-input').value.trim();
+
+  try {
+    const res = await fetch('/api/auth/add-email', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ email }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      errorEl.textContent = data.error || 'Failed to send code';
+    } else {
+      const infoEl = document.getElementById('verify-email-info');
+      if (infoEl) infoEl.textContent = `A 6-digit verification code has been sent to ${email}. Enter it below.`;
+      showPanel('verify-email-form');
+    }
+  } catch {
+    errorEl.textContent = 'Network error. Please try again.';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Send Verification Code';
+  }
+});
+
+// ── Email Verification ────────────────────────────────────────────────────
+document.getElementById('verify-email-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('verify-email-btn');
+  const errorEl = document.getElementById('verify-email-error');
+  errorEl.textContent = '';
+  btn.disabled = true;
+  btn.textContent = 'Verifying…';
+
+  const code = document.getElementById('verify-code-input').value.trim();
+
+  try {
+    const res = await fetch('/api/auth/verify-email', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ code }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      errorEl.textContent = data.error || 'Verification failed';
     } else {
       persistUserWallpaperSettings(data);
       window.location.href = 'chat.html';
@@ -154,6 +256,39 @@ document.getElementById('signup-form').addEventListener('submit', async (e) => {
     errorEl.textContent = 'Network error. Please try again.';
   } finally {
     btn.disabled = false;
-    btn.textContent = 'Create Account';
+    btn.textContent = 'Verify Email';
+  }
+});
+
+// ── Resend code ───────────────────────────────────────────────────────────
+document.getElementById('resend-code-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('resend-code-btn');
+  const errorEl = document.getElementById('verify-email-error');
+  errorEl.textContent = '';
+  btn.disabled = true;
+  btn.textContent = 'Sending…';
+
+  try {
+    const res = await fetch('/api/auth/send-verification-email', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({}),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      errorEl.textContent = data.error || 'Failed to resend code';
+    } else {
+      errorEl.style.color = 'var(--accent2)';
+      errorEl.textContent = 'Code resent. Check your email.';
+      setTimeout(() => {
+        errorEl.textContent = '';
+        errorEl.style.color = '';
+      }, 4000);
+    }
+  } catch {
+    errorEl.textContent = 'Network error. Please try again.';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Resend Code';
   }
 });

@@ -26,8 +26,8 @@
       <p class="auth-subtitle">Encrypted Group Messaging</p>
     </div>
 
-    <!-- Tabs -->
-    <div class="auth-tabs">
+    <!-- Tabs (hidden when email verification panels are shown) -->
+    <div class="auth-tabs" id="auth-tabs">
       <button class="auth-tab active" data-tab="signin">Sign In</button>
       <button class="auth-tab" data-tab="signup">Sign Up</button>
     </div>
@@ -75,6 +75,16 @@
         />
       </div>
       <div class="form-group">
+        <label for="signup-email">Email</label>
+        <input
+          type="email"
+          id="signup-email"
+          placeholder="Enter your email address"
+          autocomplete="email"
+          required
+        />
+      </div>
+      <div class="form-group">
         <label for="signup-password">Password</label>
         <input
           type="password"
@@ -104,6 +114,44 @@
       <p class="form-error" id="signup-error"></p>
       <button type="submit" class="btn-primary" id="signup-btn">Create Account</button>
     </form>
+
+    <!-- Add Email Panel (existing users without an email) -->
+    <form id="add-email-form" class="auth-form" novalidate>
+      <p class="auth-verify-info">Your account needs an email address for verification. Your username and chat history are preserved.</p>
+      <div class="form-group">
+        <label for="add-email-input">Email Address</label>
+        <input
+          type="email"
+          id="add-email-input"
+          placeholder="Enter your email address"
+          autocomplete="email"
+          required
+        />
+      </div>
+      <p class="form-error" id="add-email-error"></p>
+      <button type="submit" class="btn-primary" id="add-email-btn">Send Verification Code</button>
+    </form>
+
+    <!-- Email Verification Panel -->
+    <div id="verify-email-form" class="auth-form" role="form">
+      <p class="auth-verify-info" id="verify-email-info">A 6-digit verification code has been sent to your email. Enter it below.</p>
+      <div class="form-group">
+        <label for="verify-code-input">Verification Code</label>
+        <input
+          type="text"
+          id="verify-code-input"
+          placeholder="Enter 6-digit code"
+          autocomplete="one-time-code"
+          maxlength="6"
+          inputmode="numeric"
+          pattern="\d{6}"
+          required
+        />
+      </div>
+      <p class="form-error" id="verify-email-error"></p>
+      <button type="button" class="btn-primary" id="verify-email-btn">Verify Email</button>
+      <button type="button" class="btn-secondary" id="resend-code-btn" style="margin-top:8px;">Resend Code</button>
+    </div>
   </div>
 
   <script src="/pwa.js?v=20260512-v124"></script>

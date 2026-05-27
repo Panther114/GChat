@@ -17,6 +17,7 @@ const path = require('path');
 const crypto = require('crypto');
 const fs = require('fs');
 const webpush = require('web-push');
+const nodemailer = require('nodemailer');
 const packageJson = require('./package.json');
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -121,6 +122,57 @@ const AI_RESET_TIME_LABEL = '4:00 AM Shanghai time';
 const USER_AI_DAILY_TOKEN_LIMIT_MIGRATION_DEFAULT = 20000;
 if (USER_AI_DAILY_TOKEN_LIMIT_MIGRATION_DEFAULT !== DEFAULT_USER_DAILY_AI_TOKEN_LIMIT) {
   throw new Error('User AI daily token migration default must match the runtime default');
+}
+
+// ── Email verification constants ──────────────────────────────────────────────
+const EMAIL_VERIFICATION_CODE_LENGTH = 6;
+const EMAIL_VERIFICATION_EXPIRY_MS = 10 * 60 * 1000; // 10 minutes
+const EMAIL_VERIFICATION_RESEND_WINDOW = 60 * 1000; // 1 per minute per IP
+const EMAIL_VERIFICATION_MAX_ATTEMPTS = 5; // max wrong code attempts per code
+const EMAIL_MAX_LENGTH = 254;
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+const SMTP_HOST = typeof process.env.SMTP_HOST === 'string' ? process.env.SMTP_HOST.trim() : '';
+const SMTP_PORT = Number(process.env.SMTP_PORT) || 587;
+const SMTP_USER = typeof process.env.SMTP_USER === 'string' ? process.env.SMTP_USER.trim() : '';
+const SMTP_PASS = typeof process.env.SMTP_PASS === 'string' ? process.env.SMTP_PASS : '';
+const SMTP_FROM = typeof process.env.SMTP_FROM === 'string' ? process.env.SMTP_FROM.trim() : (SMTP_USER || 'noreply@gchat.app');
+const SMTP_SECURE = process.env.SMTP_SECURE === 'true' || SMTP_PORT === 465;
+
+function isEmailConfigured() {
+  return !!(SMTP_HOST && SMTP_USER && SMTP_PASS);
+}
+
+let emailTransporter = null;
+if (isEmailConfigured()) {
+  try {
+    emailTransporter = nodemailer.createTransport({
+      host: SMTP_HOST,
+      port: SMTP_PORT,
+      secure: SMTP_SECURE,
+      auth: { user: SMTP_USER, pass: SMTP_PASS },
+    });
+  } catch (err) {
+    console.error('Failed to initialize email transporter:', err);
+  }
+} else {
+  console.warn('Email (SMTP) not configured. Verification codes will be printed to console. Set SMTP_HOST, SMTP_USER, SMTP_PASS to enable real email delivery.');
+}
+
+async function sendVerificationEmail(toEmail, code) {
+  const subject = 'Your GChat Verification Code';
+  const text = `Your GChat email verification code is: ${code}\n\nThis code expires in 10 minutes. Do not share it with anyone.`;
+  const html = `<div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:24px;">
+<h2 style="color:#6c63ff;">GChat Email Verification</h2>
+<p>Your verification code is:</p>
+<div style="font-size:32px;font-weight:bold;letter-spacing:8px;padding:16px;background:#f0f0f8;border-radius:8px;text-align:center;">${code}</div>
+<p style="color:#666;margin-top:16px;font-size:13px;">This code expires in 10 minutes. Do not share it with anyone.</p>
+</div>`;
+  if (emailTransporter) {
+    await emailTransporter.sendMail({ from: SMTP_FROM, to: toEmail, subject, text, html });
+  } else {
+    // Development fallback: print to console
+    console.log(`[EMAIL VERIFICATION] To: ${toEmail} | Code: ${code}`);
+  }
 }
 
 function isPushConfigured() {
@@ -723,6 +775,7 @@ const REMEMBER_ME_MAX_AGE = 30 * 24 * 60 * 60 * 1000;
 const loginAttempts = new Map(); // ip -> { count, windowStart }
 const registerAttempts = new Map(); // ip -> { count, windowStart }
 const settingsUpdateAttempts = new Map(); // userId -> { count, windowStart }
+const emailVerifySendAttempts = new Map(); // ip -> { count, windowStart }
 
 // Periodically prune stale entries so the map doesn't grow unboundedly.
 setInterval(() => {
@@ -735,6 +788,9 @@ setInterval(() => {
   }
   for (const [userId, data] of settingsUpdateAttempts) {
     if (now - data.windowStart > SETTINGS_UPDATE_WINDOW) settingsUpdateAttempts.delete(userId);
+  }
+  for (const [ip, data] of emailVerifySendAttempts) {
+    if (now - data.windowStart > EMAIL_VERIFICATION_RESEND_WINDOW) emailVerifySendAttempts.delete(ip);
   }
   // Prune stale socketRateMap entries for users with no recent activity.
   // The disconnect handler covers most cases, but if a socket drops uncleanly
@@ -791,6 +847,26 @@ function isRegisterBlocked(ip) {
 
 function clearRegisterAttempts(ip) {
   registerAttempts.delete(ip);
+}
+
+// ── Email verification rate limiting ─────────────────────────────────────────
+
+function recordEmailVerifySend(ip) {
+  const now = Date.now();
+  const data = emailVerifySendAttempts.get(ip);
+  if (!data || now - data.windowStart > EMAIL_VERIFICATION_RESEND_WINDOW) {
+    emailVerifySendAttempts.set(ip, { count: 1, windowStart: now });
+    return;
+  }
+  data.count++;
+}
+
+function isEmailVerifySendBlocked(ip) {
+  const now = Date.now();
+  const data = emailVerifySendAttempts.get(ip);
+  if (!data) return false;
+  if (now - data.windowStart > EMAIL_VERIFICATION_RESEND_WINDOW) { emailVerifySendAttempts.delete(ip); return false; }
+  return data.count >= 3; // max 3 sends per minute per IP
 }
 
 function recordSettingsUpdate(userId) {
@@ -986,6 +1062,13 @@ const migrations = [
   "CREATE INDEX IF NOT EXISTS idx_push_subscriptions_updated_at ON push_subscriptions (updated_at)",
   // Composite index to support efficient pagination ORDER BY (created_at DESC, id DESC)
   "CREATE INDEX IF NOT EXISTS idx_messages_group_pagination ON messages (group_id, created_at DESC, id DESC)",
+  // Email verification columns
+  "ALTER TABLE users ADD COLUMN email TEXT",
+  "ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE users ADD COLUMN email_verification_code TEXT",
+  "ALTER TABLE users ADD COLUMN email_verification_expires_at TEXT",
+  "ALTER TABLE users ADD COLUMN email_verification_attempts INTEGER NOT NULL DEFAULT 0",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users (email) WHERE email IS NOT NULL",
 ];
 for (const sql of migrations) {
   try { db.exec(sql); } catch { /* column/table already exists */ }
@@ -1038,6 +1121,27 @@ const stmts = {
     WHERE id = @userId
   `),
   updateUserSettings: db.prepare('UPDATE users SET client_settings = ? WHERE id = ?'),
+  findUserByEmail: db.prepare('SELECT * FROM users WHERE email = ?'),
+  setUserEmail: db.prepare(`
+    UPDATE users
+    SET email = @email,
+        email_verified = 0,
+        email_verification_code = @code,
+        email_verification_expires_at = @expiresAt,
+        email_verification_attempts = 0
+    WHERE id = @userId
+  `),
+  markEmailVerified: db.prepare(`
+    UPDATE users
+    SET email_verified = 1,
+        email_verification_code = NULL,
+        email_verification_expires_at = NULL,
+        email_verification_attempts = 0
+    WHERE id = ?
+  `),
+  incrementVerificationAttempts: db.prepare(`
+    UPDATE users SET email_verification_attempts = email_verification_attempts + 1 WHERE id = ?
+  `),
   deleteUser: db.prepare('DELETE FROM users WHERE id = ?'),
   deleteUserMemberships: db.prepare('DELETE FROM group_members WHERE user_id = ?'),
   deleteUserMessageReads: db.prepare('DELETE FROM message_reads WHERE user_id = ?'),
@@ -1363,6 +1467,9 @@ const CSRF_EXEMPT = [
   '/auth/register', // No session before first request; protected by sameSite:lax
   '/auth/login',    // No session before first request; protected by sameSite:lax
   '/auth/me',       // GET only
+  '/auth/send-verification-email', // pending session only; no full auth yet
+  '/auth/verify-email',            // pending session only; no full auth yet
+  '/auth/add-email',               // pending session only; no full auth yet
 ];
 
 function csrfProtect(req, res, next) {
@@ -1394,12 +1501,19 @@ const UNPROTECTED = [
   '/auth/csrf',
   '/health',
   '/meta/version',
+  '/auth/send-verification-email',
+  '/auth/verify-email',
+  '/auth/add-email',
 ];
 
 function requireAuth(req, res, next) {
   if (UNPROTECTED.includes(req.path)) return next();
   if (!req.session.userId) {
     return res.status(401).json({ error: 'Not authenticated' });
+  }
+  // Block users who have a session but email is not yet verified
+  if (req.session.pendingEmailVerification) {
+    return res.status(403).json({ error: 'Email verification required', needsEmailVerification: true });
   }
   next();
 }
@@ -1463,6 +1577,8 @@ function formatUser(user) {
     iconColor: user.icon_color,
     profilePicture: user.profile_picture || null,
     clientSettings: normalizeClientSettings(clientSettings),
+    emailVerified: !!user.email_verified,
+    hasEmail: !!(user.email),
   };
 }
 
@@ -1695,6 +1811,19 @@ app.get('/api/auth/csrf', (req, res) => {
 });
 
 app.get('/api/auth/me', (req, res) => {
+  // Handle pending email verification sessions
+  if (req.session.pendingEmailVerification && req.session.pendingUserId) {
+    const user = stmts.findUserById.get(req.session.pendingUserId);
+    if (!user) {
+      req.session.destroy(() => {});
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+    return res.json({
+      ...formatUser(user),
+      needsEmailVerification: true,
+      needsEmailEntry: !user.email,
+    });
+  }
   if (!req.session.userId) {
     return res.status(401).json({ error: 'Not authenticated' });
   }
@@ -1759,6 +1888,7 @@ app.patch('/api/auth/settings', (req, res) => {
 app.post('/api/auth/register', async (req, res) => {
   const username = typeof req.body.username === 'string' ? req.body.username.trim() : '';
   const password = typeof req.body.password === 'string' ? req.body.password : '';
+  const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
   const iconColor = (req.body.iconColor == null || req.body.iconColor === '')
     ? '#4A90D9'
     : normalizeHexColor(req.body.iconColor);
@@ -1776,6 +1906,12 @@ app.post('/api/auth/register', async (req, res) => {
   if (!iconColor) {
     return res.status(400).json({ error: 'Invalid icon color format' });
   }
+  if (!email) {
+    return res.status(400).json({ error: 'Email address is required' });
+  }
+  if (email.length > EMAIL_MAX_LENGTH || !EMAIL_REGEX.test(email)) {
+    return res.status(400).json({ error: 'Invalid email address' });
+  }
   if (isRegisterBlocked(clientIp)) {
     return res.status(429).json({ error: 'Too many registration attempts. Please try again later.' });
   }
@@ -1785,19 +1921,35 @@ app.post('/api/auth/register', async (req, res) => {
   if (existing) {
     return res.status(409).json({ error: 'Username already taken' });
   }
+  const existingEmail = stmts.findUserByEmail.get(email);
+  if (existingEmail) {
+    return res.status(409).json({ error: 'Email address already in use' });
+  }
 
   try {
     const passwordHash = await bcrypt.hash(password, 12);
     const id = uuidv4();
     const color = iconColor || '#4A90D9';
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const expiresAt = new Date(Date.now() + EMAIL_VERIFICATION_EXPIRY_MS).toISOString();
 
     stmts.insertUser.run(id, username, passwordHash, color);
+    stmts.setUserEmail.run({ userId: id, email, code, expiresAt });
 
     clearRegisterAttempts(clientIp);
-    req.session.userId = id;
-    req.session.save(() => {
+    recordEmailVerifySend(clientIp);
+
+    // Set a pending session — full access is blocked until email is verified
+    req.session.pendingUserId = id;
+    req.session.pendingEmailVerification = true;
+    req.session.save(async () => {
+      try {
+        await sendVerificationEmail(email, code);
+      } catch (err) {
+        console.error('Failed to send verification email:', err);
+      }
       const user = stmts.findUserById.get(id);
-      res.status(201).json(formatUser(user));
+      res.status(201).json({ ...formatUser(user), needsEmailVerification: true });
     });
   } catch (err) {
     console.error('Register error:', err);
@@ -1834,6 +1986,23 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     clearLoginAttempts(clientIp);
+
+    // If the user has no email or email is not verified, require verification
+    if (!user.email || !user.email_verified) {
+      req.session.pendingUserId = user.id;
+      req.session.pendingEmailVerification = true;
+      req.session.pendingRememberMe = rememberMe === true;
+      req.session.save(() => {
+        const formatted = formatUser(user);
+        res.json({
+          ...formatted,
+          needsEmailVerification: true,
+          needsEmailEntry: !user.email,
+        });
+      });
+      return;
+    }
+
     req.session.userId = user.id;
     setSessionPersistence(req, rememberMe === true);
     req.session.save(() => {
@@ -1848,6 +2017,151 @@ app.post('/api/auth/login', async (req, res) => {
 app.post('/api/auth/logout', (req, res) => {
   req.session.destroy(() => {
     res.json({ ok: true });
+  });
+});
+
+// ── Email verification endpoints ──────────────────────────────────────────────
+
+// POST /api/auth/add-email — existing users (pending session) add their email
+app.post('/api/auth/add-email', async (req, res) => {
+  const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
+  if (isEmailVerifySendBlocked(clientIp)) {
+    return res.status(429).json({ error: 'Too many requests. Please wait before requesting a new code.' });
+  }
+  recordEmailVerifySend(clientIp);
+
+  const userId = req.session.pendingUserId;
+  if (!userId || !req.session.pendingEmailVerification) {
+    return res.status(401).json({ error: 'Not authenticated' });
+  }
+
+  const user = stmts.findUserById.get(userId);
+  if (!user) return res.status(401).json({ error: 'Not authenticated' });
+  if (user.email_verified) {
+    return res.status(400).json({ error: 'Email already verified' });
+  }
+  if (user.email) {
+    return res.status(400).json({ error: 'Email already added. Use send-verification-email to resend the code.' });
+  }
+
+  const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+  if (!email || email.length > EMAIL_MAX_LENGTH || !EMAIL_REGEX.test(email)) {
+    return res.status(400).json({ error: 'Invalid email address' });
+  }
+  const existingEmail = stmts.findUserByEmail.get(email);
+  if (existingEmail && existingEmail.id !== userId) {
+    return res.status(409).json({ error: 'Email address already in use' });
+  }
+
+  const code = String(Math.floor(100000 + Math.random() * 900000));
+  const expiresAt = new Date(Date.now() + EMAIL_VERIFICATION_EXPIRY_MS).toISOString();
+
+  try {
+    stmts.setUserEmail.run({ userId, email, code, expiresAt });
+    await sendVerificationEmail(email, code);
+    res.json({ ok: true, message: 'Verification code sent' });
+  } catch (err) {
+    console.error('Add email error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/auth/send-verification-email — resend verification code
+app.post('/api/auth/send-verification-email', async (req, res) => {
+  const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
+  if (isEmailVerifySendBlocked(clientIp)) {
+    return res.status(429).json({ error: 'Too many requests. Please wait before requesting a new code.' });
+  }
+  recordEmailVerifySend(clientIp);
+
+  const userId = req.session.pendingUserId;
+  if (!userId || !req.session.pendingEmailVerification) {
+    return res.status(401).json({ error: 'Not authenticated' });
+  }
+
+  const user = stmts.findUserById.get(userId);
+  if (!user) return res.status(401).json({ error: 'Not authenticated' });
+  if (user.email_verified) {
+    return res.status(400).json({ error: 'Email already verified' });
+  }
+  if (!user.email) {
+    return res.status(400).json({ error: 'No email address on file. Please add your email first.' });
+  }
+
+  const code = String(Math.floor(100000 + Math.random() * 900000));
+  const expiresAt = new Date(Date.now() + EMAIL_VERIFICATION_EXPIRY_MS).toISOString();
+
+  try {
+    stmts.setUserEmail.run({ userId, email: user.email, code, expiresAt });
+    await sendVerificationEmail(user.email, code);
+    res.json({ ok: true, message: 'Verification code sent' });
+  } catch (err) {
+    console.error('Send verification email error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/auth/verify-email — verify the 6-digit code
+app.post('/api/auth/verify-email', (req, res) => {
+  const userId = req.session.pendingUserId;
+  if (!userId || !req.session.pendingEmailVerification) {
+    return res.status(401).json({ error: 'Not authenticated' });
+  }
+
+  const code = typeof req.body.code === 'string' ? req.body.code.trim() : '';
+  if (!/^\d{6}$/.test(code)) {
+    return res.status(400).json({ error: 'Verification code must be 6 digits' });
+  }
+
+  const user = stmts.findUserById.get(userId);
+  if (!user) return res.status(401).json({ error: 'Not authenticated' });
+  if (user.email_verified) {
+    // Already verified — promote session if not already done
+    req.session.userId = userId;
+    req.session.pendingUserId = undefined;
+    req.session.pendingEmailVerification = undefined;
+    const rememberMe = req.session.pendingRememberMe;
+    req.session.pendingRememberMe = undefined;
+    setSessionPersistence(req, !!rememberMe);
+    return req.session.save(() => res.json(formatUser(user)));
+  }
+  if (!user.email_verification_code || !user.email_verification_expires_at) {
+    return res.status(400).json({ error: 'No verification code found. Please request a new one.' });
+  }
+  if (new Date(user.email_verification_expires_at) < new Date()) {
+    return res.status(400).json({ error: 'Verification code has expired. Please request a new one.' });
+  }
+  if (user.email_verification_attempts >= EMAIL_VERIFICATION_MAX_ATTEMPTS) {
+    return res.status(429).json({ error: 'Too many incorrect attempts. Please request a new code.' });
+  }
+
+  // Timing-safe comparison
+  const storedCode = user.email_verification_code;
+  const inputBuf = Buffer.alloc(6);
+  const storedBuf = Buffer.alloc(6);
+  inputBuf.write(code);
+  storedBuf.write(storedCode);
+  const match = crypto.timingSafeEqual(inputBuf, storedBuf);
+
+  if (!match) {
+    stmts.incrementVerificationAttempts.run(userId);
+    const attemptsLeft = EMAIL_VERIFICATION_MAX_ATTEMPTS - (user.email_verification_attempts + 1);
+    return res.status(400).json({
+      error: `Incorrect code. ${attemptsLeft > 0 ? `${attemptsLeft} attempt${attemptsLeft === 1 ? '' : 's'} remaining.` : 'Please request a new code.'}`,
+    });
+  }
+
+  stmts.markEmailVerified.run(userId);
+  // Promote pending session to a full session
+  req.session.userId = userId;
+  req.session.pendingUserId = undefined;
+  req.session.pendingEmailVerification = undefined;
+  const rememberMe = req.session.pendingRememberMe;
+  req.session.pendingRememberMe = undefined;
+  setSessionPersistence(req, !!rememberMe);
+  req.session.save(() => {
+    const updated = stmts.findUserById.get(userId);
+    res.json(formatUser(updated));
   });
 });
 
