@@ -304,7 +304,7 @@ document.getElementById('resend-code-btn').addEventListener('click', async () =>
   const email = document.getElementById('verify-email-input').value.trim();
 
   try {
-    // Use add-email which allows changing email; falls back to resend if same email
+    // Use add-email which allows setting or changing email before verification
     const res = await fetch('/api/auth/add-email', {
       method: 'POST',
       headers: authHeaders(),

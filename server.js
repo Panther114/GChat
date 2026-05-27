@@ -160,7 +160,6 @@ if (isSmtpConfigured()) {
       connectionTimeout: 10000,
       greetingTimeout: 10000,
       socketTimeout: 15000,
-      tls: { rejectUnauthorized: SMTP_PORT !== 25 },
     });
   } catch (err) {
     console.error('Failed to initialize email transporter:', err);
@@ -2170,7 +2169,7 @@ app.post('/api/auth/add-email', async (req, res) => {
     res.status(smtpErr ? 503 : 500).json({
       error: smtpErr
         ? 'Email service is not configured on this server.'
-        : `Failed to send verification email: ${err.message || 'Please try again later.'}`,
+        : 'Failed to send verification email. Please try again later.',
     });
   }
 });
@@ -2210,7 +2209,7 @@ app.post('/api/auth/send-verification-email', async (req, res) => {
     res.status(smtpErr ? 503 : 500).json({
       error: smtpErr
         ? 'Email service is not configured on this server.'
-        : `Failed to send verification email: ${err.message || 'Please try again later.'}`,
+        : 'Failed to send verification email. Please try again later.',
     });
   }
 });
