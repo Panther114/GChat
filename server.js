@@ -17,7 +17,7 @@ const path = require('path');
 const crypto = require('crypto');
 const fs = require('fs');
 const webpush = require('web-push');
-const { Resend } = require('resend');
+
 const packageJson = require('./package.json');
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -125,33 +125,27 @@ if (USER_AI_DAILY_TOKEN_LIMIT_MIGRATION_DEFAULT !== DEFAULT_USER_DAILY_AI_TOKEN_
 }
 
 // ── Email verification constants ──────────────────────────────────────────────
-const EMAIL_VERIFICATION_CODE_LENGTH = 6;
-const EMAIL_VERIFICATION_EXPIRY_MS = 10 * 60 * 1000; // 10 minutes
 const EMAIL_VERIFICATION_RESEND_WINDOW = 60 * 1000; // 1 per minute per IP
-const EMAIL_VERIFICATION_MAX_ATTEMPTS = 5; // max wrong code attempts per code
 const EMAIL_MAX_LENGTH = 254;
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
-const RESEND_API_KEY = typeof process.env.RESEND_API_KEY === 'string' ? process.env.RESEND_API_KEY.trim() : '';
-const SMTP_FROM = typeof process.env.SMTP_FROM === 'string' ? process.env.SMTP_FROM.trim() : 'noreply@gchat.app';
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
+// ── Logto Cloud — email verification provider ─────────────────────────────────
+// Requires a Machine-to-Machine (M2M) application created in your Logto tenant.
+const LOGTO_ENDPOINT = typeof process.env.LOGTO_ENDPOINT === 'string' ? process.env.LOGTO_ENDPOINT.trim().replace(/\/$/, '') : '';
+const LOGTO_M2M_APP_ID = typeof process.env.LOGTO_M2M_APP_ID === 'string' ? process.env.LOGTO_M2M_APP_ID.trim() : '';
+const LOGTO_M2M_APP_SECRET = typeof process.env.LOGTO_M2M_APP_SECRET === 'string' ? process.env.LOGTO_M2M_APP_SECRET.trim() : '';
+
 function isEmailConfigured() {
-  return !!RESEND_API_KEY;
+  return !!(LOGTO_ENDPOINT && LOGTO_M2M_APP_ID && LOGTO_M2M_APP_SECRET);
 }
 
-// Initialise the Resend client once at startup so we can log its readiness.
-let resendClient = null;
-if (RESEND_API_KEY) {
-  try {
-    resendClient = new Resend(RESEND_API_KEY);
-    console.log('[EMAIL] Resend client initialised. Sender address:', SMTP_FROM);
-  } catch (err) {
-    console.error('[EMAIL] Failed to initialise Resend client:', err.message);
-  }
+if (isEmailConfigured()) {
+  console.log('[EMAIL] Logto Cloud email provider configured. Endpoint:', LOGTO_ENDPOINT);
 } else if (IS_PRODUCTION) {
-  console.error('[EMAIL] RESEND_API_KEY is not set. Verification emails will fail until it is configured.');
+  console.error('[EMAIL] Logto Cloud credentials are not set. Set LOGTO_ENDPOINT, LOGTO_M2M_APP_ID, and LOGTO_M2M_APP_SECRET.');
 } else {
-  console.warn('[EMAIL] RESEND_API_KEY is not set. Verification codes will be printed to the console in development mode.');
+  console.warn('[EMAIL] Logto Cloud credentials are not set. Verification emails will not be sent in development mode.');
 }
 
 class EmailNotConfiguredError extends Error {
@@ -162,43 +156,91 @@ class EmailNotConfiguredError extends Error {
   }
 }
 
-async function sendVerificationEmail(toEmail, code) {
-  const subject = 'Your GChat Verification Code';
-  const text = `Your GChat email verification code is: ${code}\n\nThis code expires in 10 minutes. Do not share it with anyone.`;
-  const html = `<div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:24px;">
-<h2 style="color:#6c63ff;">GChat Email Verification</h2>
-<p>Your verification code is:</p>
-<div style="font-size:32px;font-weight:bold;letter-spacing:8px;padding:16px;background:#f0f0f8;border-radius:8px;text-align:center;">${code}</div>
-<p style="color:#666;margin-top:16px;font-size:13px;">This code expires in 10 minutes. Do not share it with anyone.</p>
-</div>`;
+// Cache the M2M access token so we don't fetch a new one on every request.
+let logtoTokenCache = null; // { token: string, expiresAt: number }
 
-  if (resendClient) {
-    console.log(`[EMAIL] Sending verification email via Resend API → to: ${toEmail}, subject: "${subject}"`);
-    const t0 = Date.now();
-    const { data, error } = await resendClient.emails.send({
-      from: SMTP_FROM,
-      to: [toEmail],
-      subject,
-      text,
-      html,
-    });
-    const elapsed = Date.now() - t0;
-    if (error) {
-      console.error(`[EMAIL] Resend API error after ${elapsed}ms → name: ${error.name}, message: ${error.message}`);
-      throw new Error(`Resend API error: ${error.message}`);
-    }
-    console.log(`[EMAIL] Verification email sent successfully in ${elapsed}ms → messageId: ${data?.id}, to: ${toEmail}`);
-  } else if (IS_PRODUCTION) {
-    console.error(`[EMAIL] Cannot send verification email to ${toEmail} — RESEND_API_KEY is not configured.`);
-    throw new EmailNotConfiguredError();
-  } else {
-    // Development fallback: print to console
-    console.log(`[EMAIL VERIFICATION] To: ${toEmail} | Code: ${code}`);
+async function getLogtoAccessToken() {
+  if (logtoTokenCache && Date.now() < logtoTokenCache.expiresAt - 30 * 1000) {
+    return logtoTokenCache.token;
   }
+  const res = await fetch(`${LOGTO_ENDPOINT}/oidc/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'client_credentials',
+      client_id: LOGTO_M2M_APP_ID,
+      client_secret: LOGTO_M2M_APP_SECRET,
+      resource: `${LOGTO_ENDPOINT}/api`,
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Logto token request failed (HTTP ${res.status}): ${body}`);
+  }
+  const data = await res.json();
+  logtoTokenCache = {
+    token: data.access_token,
+    expiresAt: Date.now() + (data.expires_in ?? 3600) * 1000,
+  };
+  return logtoTokenCache.token;
 }
 
-function generateVerificationCode() {
-  return String(Math.floor(100000 + Math.random() * 900000));
+// Ask Logto to generate and deliver a verification code to toEmail.
+async function sendVerificationEmail(toEmail) {
+  if (!isEmailConfigured()) {
+    if (IS_PRODUCTION) {
+      throw new EmailNotConfiguredError();
+    } else {
+      console.warn(`[EMAIL DEV] Logto not configured — skipping verification email to ${toEmail}`);
+      return;
+    }
+  }
+  const token = await getLogtoAccessToken();
+  const t0 = Date.now();
+  console.log(`[EMAIL] Sending verification code via Logto → to: ${toEmail}`);
+  const res = await fetch(`${LOGTO_ENDPOINT}/api/verification-codes`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`,
+    },
+    body: JSON.stringify({ email: toEmail }),
+  });
+  const elapsed = Date.now() - t0;
+  if (!res.ok) {
+    let errDetail = `HTTP ${res.status}`;
+    try {
+      const body = await res.json();
+      errDetail = body.message || body.error || errDetail;
+      if (body.code) errDetail = `${body.code}: ${errDetail}`;
+    } catch { /* ignore JSON parse errors */ }
+    console.error(`[EMAIL] Logto send error after ${elapsed}ms → ${errDetail}`);
+    throw new Error(`Logto verification-code send failed: ${errDetail}`);
+  }
+  console.log(`[EMAIL] Verification code sent via Logto in ${elapsed}ms → to: ${toEmail}`);
+}
+
+// Ask Logto to validate the code the user submitted.
+// Returns { success: true } on 204, or { success: false, message, status } otherwise.
+async function verifyEmailCode(toEmail, code) {
+  const token = await getLogtoAccessToken();
+  const res = await fetch(`${LOGTO_ENDPOINT}/api/verification-codes/verify`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`,
+    },
+    body: JSON.stringify({ email: toEmail, verificationCode: code }),
+  });
+  if (res.status === 204) return { success: true };
+  let message = `Verification failed (HTTP ${res.status})`;
+  try {
+    const body = await res.json();
+    const detail = body.message || body.error || '';
+    const errorCode = body.code ? `[${body.code}] ` : '';
+    if (detail) message = `${errorCode}${detail}`;
+  } catch { /* ignore */ }
+  return { success: false, message, status: res.status };
 }
 
 function rollbackFailedRegistration(userId) {
@@ -828,6 +870,9 @@ setInterval(() => {
   for (const [ip, data] of emailVerifySendAttempts) {
     if (now - data.windowStart > EMAIL_VERIFICATION_RESEND_WINDOW) emailVerifySendAttempts.delete(ip);
   }
+  for (const [ip, data] of emailVerifyAttempts) {
+    if (now - data.windowStart > EMAIL_VERIFY_ATTEMPT_WINDOW) emailVerifyAttempts.delete(ip);
+  }
   // Prune stale socketRateMap entries for users with no recent activity.
   // The disconnect handler covers most cases, but if a socket drops uncleanly
   // or the disconnect cleanup is skipped, stale entries can accumulate.
@@ -886,6 +931,31 @@ function clearRegisterAttempts(ip) {
 }
 
 // ── Email verification rate limiting ─────────────────────────────────────────
+const EMAIL_VERIFY_ATTEMPT_WINDOW = 15 * 60 * 1000; // 15 minutes
+const EMAIL_VERIFY_MAX_ATTEMPTS_PER_IP = 10; // max code-check attempts per IP per 15 min
+const emailVerifyAttempts = new Map(); // ip -> { count, windowStart }
+
+function recordEmailVerifyAttempt(ip) {
+  const now = Date.now();
+  const data = emailVerifyAttempts.get(ip);
+  if (!data || now - data.windowStart > EMAIL_VERIFY_ATTEMPT_WINDOW) {
+    emailVerifyAttempts.set(ip, { count: 1, windowStart: now });
+    return;
+  }
+  data.count++;
+}
+
+function isEmailVerifyBlocked(ip) {
+  const now = Date.now();
+  const data = emailVerifyAttempts.get(ip);
+  if (!data) return false;
+  if (now - data.windowStart > EMAIL_VERIFY_ATTEMPT_WINDOW) { emailVerifyAttempts.delete(ip); return false; }
+  return data.count >= EMAIL_VERIFY_MAX_ATTEMPTS_PER_IP;
+}
+
+function clearEmailVerifyAttempts(ip) {
+  emailVerifyAttempts.delete(ip);
+}
 
 function recordEmailVerifySend(ip) {
   const now = Date.now();
@@ -1162,8 +1232,8 @@ const stmts = {
     UPDATE users
     SET email = @email,
         email_verified = 0,
-        email_verification_code = @code,
-        email_verification_expires_at = @expiresAt,
+        email_verification_code = NULL,
+        email_verification_expires_at = NULL,
         email_verification_attempts = 0
     WHERE id = @userId
   `),
@@ -1174,9 +1244,6 @@ const stmts = {
         email_verification_expires_at = NULL,
         email_verification_attempts = 0
     WHERE id = ?
-  `),
-  incrementVerificationAttempts: db.prepare(`
-    UPDATE users SET email_verification_attempts = email_verification_attempts + 1 WHERE id = ?
   `),
   deleteUser: db.prepare('DELETE FROM users WHERE id = ?'),
   deleteUserMemberships: db.prepare('DELETE FROM group_members WHERE user_id = ?'),
@@ -1966,11 +2033,9 @@ app.post('/api/auth/register', async (req, res) => {
     const passwordHash = await bcrypt.hash(password, 12);
     const id = uuidv4();
     const color = iconColor || '#4A90D9';
-    const code = generateVerificationCode();
-    const expiresAt = new Date(Date.now() + EMAIL_VERIFICATION_EXPIRY_MS).toISOString();
 
     stmts.insertUser.run(id, username, passwordHash, color);
-    stmts.setUserEmail.run({ userId: id, email, code, expiresAt });
+    stmts.setUserEmail.run({ userId: id, email });
 
     clearRegisterAttempts(clientIp);
     recordEmailVerifySend(clientIp);
@@ -1987,7 +2052,7 @@ app.post('/api/auth/register', async (req, res) => {
         });
       }
       try {
-        await sendVerificationEmail(email, code);
+        await sendVerificationEmail(email);
         const user = stmts.findUserById.get(id);
         if (!user) {
           console.error('Registered user record could not be retrieved after registration.');
@@ -2008,8 +2073,8 @@ app.post('/api/auth/register', async (req, res) => {
           if (!res.headersSent) {
             res.status(missingEmail ? 503 : 500).json({
               error: missingEmail
-                ? 'Email delivery is not configured on this server. Set RESEND_API_KEY before sending verification emails.'
-                : 'Verification email could not be sent. Please try again later.',
+                ? 'Email delivery is not configured on this server. Set LOGTO_ENDPOINT, LOGTO_M2M_APP_ID, and LOGTO_M2M_APP_SECRET.'
+                : `Verification email could not be sent: ${err.message}`,
             });
           }
         });
@@ -2059,15 +2124,15 @@ app.post('/api/auth/login', async (req, res) => {
 
       // Auto-send a verification code if the user already has an email on file
       if (user.email) {
-        const code = generateVerificationCode();
-        const expiresAt = new Date(Date.now() + EMAIL_VERIFICATION_EXPIRY_MS).toISOString();
         let emailSendFailed = false;
+        let emailSendError = '';
         try {
-          stmts.setUserEmail.run({ userId: user.id, email: user.email, code, expiresAt });
-          await sendVerificationEmail(user.email, code);
+          stmts.setUserEmail.run({ userId: user.id, email: user.email });
+          await sendVerificationEmail(user.email);
         } catch (err) {
           console.error('Failed to auto-send verification email on login:', err);
           emailSendFailed = true;
+          emailSendError = err.message || 'Unknown error';
         }
 
         req.session.save(() => {
@@ -2077,6 +2142,7 @@ app.post('/api/auth/login', async (req, res) => {
             needsEmailVerification: true,
             needsEmailEntry: false,
             emailSendFailed,
+            ...(emailSendFailed && emailSendError ? { emailSendError } : {}),
           });
         });
         return;
@@ -2140,20 +2206,17 @@ app.post('/api/auth/add-email', async (req, res) => {
     return res.status(409).json({ error: 'Email address already in use' });
   }
 
-  const code = generateVerificationCode();
-  const expiresAt = new Date(Date.now() + EMAIL_VERIFICATION_EXPIRY_MS).toISOString();
-
   try {
-    stmts.setUserEmail.run({ userId, email, code, expiresAt });
-    await sendVerificationEmail(email, code);
+    stmts.setUserEmail.run({ userId, email });
+    await sendVerificationEmail(email);
     res.json({ ok: true, message: 'Verification code sent' });
   } catch (err) {
     console.error('Add email error:', err);
     const emailErr = err instanceof EmailNotConfiguredError;
     res.status(emailErr ? 503 : 500).json({
       error: emailErr
-        ? 'Email delivery is not configured on this server.'
-        : 'Failed to send verification email. Please try again later.',
+        ? 'Email delivery is not configured on this server. Set LOGTO_ENDPOINT, LOGTO_M2M_APP_ID, and LOGTO_M2M_APP_SECRET.'
+        : `Failed to send verification email: ${err.message}`,
     });
   }
 });
@@ -2180,26 +2243,28 @@ app.post('/api/auth/send-verification-email', async (req, res) => {
     return res.status(400).json({ error: 'No email address on file. Please add your email first.' });
   }
 
-  const code = generateVerificationCode();
-  const expiresAt = new Date(Date.now() + EMAIL_VERIFICATION_EXPIRY_MS).toISOString();
-
   try {
-    stmts.setUserEmail.run({ userId, email: user.email, code, expiresAt });
-    await sendVerificationEmail(user.email, code);
+    stmts.setUserEmail.run({ userId, email: user.email });
+    await sendVerificationEmail(user.email);
     res.json({ ok: true, message: 'Verification code sent' });
   } catch (err) {
     console.error('Send verification email error:', err);
     const emailErr = err instanceof EmailNotConfiguredError;
     res.status(emailErr ? 503 : 500).json({
       error: emailErr
-        ? 'Email delivery is not configured on this server.'
-        : 'Failed to send verification email. Please try again later.',
+        ? 'Email delivery is not configured on this server. Set LOGTO_ENDPOINT, LOGTO_M2M_APP_ID, and LOGTO_M2M_APP_SECRET.'
+        : `Failed to send verification email: ${err.message}`,
     });
   }
 });
 
 // POST /api/auth/verify-email — verify the 6-digit code
-app.post('/api/auth/verify-email', (req, res) => {
+app.post('/api/auth/verify-email', async (req, res) => {
+  const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
+  if (isEmailVerifyBlocked(clientIp)) {
+    return res.status(429).json({ error: 'Too many verification attempts from this IP. Please wait before trying again.' });
+  }
+
   const userId = req.session.pendingUserId;
   if (!userId || !req.session.pendingEmailVerification) {
     return res.status(401).json({ error: 'Not authenticated' });
@@ -2222,32 +2287,27 @@ app.post('/api/auth/verify-email', (req, res) => {
     setSessionPersistence(req, !!rememberMe);
     return req.session.save(() => res.json(formatUser(user)));
   }
-  if (!user.email_verification_code || !user.email_verification_expires_at) {
-    return res.status(400).json({ error: 'No verification code found. Please request a new one.' });
-  }
-  if (new Date(user.email_verification_expires_at) < new Date()) {
-    return res.status(400).json({ error: 'Verification code has expired. Please request a new one.' });
-  }
-  if (user.email_verification_attempts >= EMAIL_VERIFICATION_MAX_ATTEMPTS) {
-    return res.status(429).json({ error: 'Too many incorrect attempts. Please request a new code.' });
+  if (!user.email) {
+    return res.status(400).json({ error: 'No email address on file. Please add your email first.' });
   }
 
-  // Timing-safe comparison
-  const storedCode = user.email_verification_code;
-  const inputBuf = Buffer.alloc(6);
-  const storedBuf = Buffer.alloc(6);
-  inputBuf.write(code);
-  storedBuf.write(storedCode);
-  const match = crypto.timingSafeEqual(inputBuf, storedBuf);
-
-  if (!match) {
-    stmts.incrementVerificationAttempts.run(userId);
-    const attemptsLeft = EMAIL_VERIFICATION_MAX_ATTEMPTS - (user.email_verification_attempts + 1);
-    return res.status(400).json({
-      error: `Incorrect code. ${attemptsLeft > 0 ? `${attemptsLeft} attempt${attemptsLeft === 1 ? '' : 's'} remaining.` : 'Please request a new code.'}`,
+  try {
+    recordEmailVerifyAttempt(clientIp);
+    const result = await verifyEmailCode(user.email, code);
+    if (!result.success) {
+      const httpStatus = result.status === 429 ? 429 : 400;
+      return res.status(httpStatus).json({
+        error: result.message || 'Incorrect verification code. Please try again or request a new code.',
+      });
+    }
+  } catch (err) {
+    console.error('Logto verification error:', err);
+    return res.status(503).json({
+      error: `Verification service error: ${err.message}. Please try again later.`,
     });
   }
 
+  clearEmailVerifyAttempts(clientIp);
   stmts.markEmailVerified.run(userId);
   // Promote pending session to a full session
   req.session.userId = userId;
