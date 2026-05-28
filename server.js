@@ -124,135 +124,6 @@ if (USER_AI_DAILY_TOKEN_LIMIT_MIGRATION_DEFAULT !== DEFAULT_USER_DAILY_AI_TOKEN_
   throw new Error('User AI daily token migration default must match the runtime default');
 }
 
-// ── Email verification constants ──────────────────────────────────────────────
-const EMAIL_VERIFICATION_RESEND_WINDOW = 60 * 1000; // 1 per minute per IP
-const EMAIL_MAX_LENGTH = 254;
-const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
-const IS_PRODUCTION = process.env.NODE_ENV === 'production';
-
-// ── Logto Cloud — email verification provider ─────────────────────────────────
-// Requires a Machine-to-Machine (M2M) application created in your Logto tenant.
-const LOGTO_ENDPOINT = typeof process.env.LOGTO_ENDPOINT === 'string' ? process.env.LOGTO_ENDPOINT.trim().replace(/\/$/, '') : '';
-const LOGTO_M2M_APP_ID = typeof process.env.LOGTO_M2M_APP_ID === 'string' ? process.env.LOGTO_M2M_APP_ID.trim() : '';
-const LOGTO_M2M_APP_SECRET = typeof process.env.LOGTO_M2M_APP_SECRET === 'string' ? process.env.LOGTO_M2M_APP_SECRET.trim() : '';
-
-function isEmailConfigured() {
-  return !!(LOGTO_ENDPOINT && LOGTO_M2M_APP_ID && LOGTO_M2M_APP_SECRET);
-}
-
-if (isEmailConfigured()) {
-  console.log('[EMAIL] Logto Cloud email provider configured. Endpoint:', LOGTO_ENDPOINT);
-} else if (IS_PRODUCTION) {
-  console.error('[EMAIL] Logto Cloud credentials are not set. Set LOGTO_ENDPOINT, LOGTO_M2M_APP_ID, and LOGTO_M2M_APP_SECRET.');
-} else {
-  console.warn('[EMAIL] Logto Cloud credentials are not set. Verification emails will not be sent in development mode.');
-}
-
-class EmailNotConfiguredError extends Error {
-  constructor() {
-    super('Email delivery is not configured on this server');
-    this.name = 'EmailNotConfiguredError';
-    this.code = 'EMAIL_NOT_CONFIGURED';
-  }
-}
-
-// Cache the M2M access token so we don't fetch a new one on every request.
-let logtoTokenCache = null; // { token: string, expiresAt: number }
-
-async function getLogtoAccessToken() {
-  if (logtoTokenCache && Date.now() < logtoTokenCache.expiresAt - 30 * 1000) {
-    return logtoTokenCache.token;
-  }
-  const res = await fetch(`${LOGTO_ENDPOINT}/oidc/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'client_credentials',
-      client_id: LOGTO_M2M_APP_ID,
-      client_secret: LOGTO_M2M_APP_SECRET,
-      resource: `${LOGTO_ENDPOINT}/api`,
-    }),
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Logto token request failed (HTTP ${res.status}): ${body}`);
-  }
-  const data = await res.json();
-  logtoTokenCache = {
-    token: data.access_token,
-    expiresAt: Date.now() + (data.expires_in ?? 3600) * 1000,
-  };
-  return logtoTokenCache.token;
-}
-
-// Ask Logto to generate and deliver a verification code to toEmail.
-async function sendVerificationEmail(toEmail) {
-  if (!isEmailConfigured()) {
-    if (IS_PRODUCTION) {
-      throw new EmailNotConfiguredError();
-    } else {
-      console.warn(`[EMAIL DEV] Logto not configured — skipping verification email to ${toEmail}`);
-      return;
-    }
-  }
-  const token = await getLogtoAccessToken();
-  const t0 = Date.now();
-  console.log(`[EMAIL] Sending verification code via Logto → to: ${toEmail}`);
-  const res = await fetch(`${LOGTO_ENDPOINT}/api/verification-codes`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${token}`,
-    },
-    body: JSON.stringify({ email: toEmail }),
-  });
-  const elapsed = Date.now() - t0;
-  if (!res.ok) {
-    let errDetail = `HTTP ${res.status}`;
-    try {
-      const body = await res.json();
-      errDetail = body.message || body.error || errDetail;
-      if (body.code) errDetail = `${body.code}: ${errDetail}`;
-    } catch { /* ignore JSON parse errors */ }
-    console.error(`[EMAIL] Logto send error after ${elapsed}ms → ${errDetail}`);
-    throw new Error(`Logto verification-code send failed: ${errDetail}`);
-  }
-  console.log(`[EMAIL] Verification code sent via Logto in ${elapsed}ms → to: ${toEmail}`);
-}
-
-// Ask Logto to validate the code the user submitted.
-// Returns { success: true } on 204, or { success: false, message, status } otherwise.
-async function verifyEmailCode(toEmail, code) {
-  const token = await getLogtoAccessToken();
-  const res = await fetch(`${LOGTO_ENDPOINT}/api/verification-codes/verify`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${token}`,
-    },
-    body: JSON.stringify({ email: toEmail, verificationCode: code }),
-  });
-  if (res.status === 204) return { success: true };
-  let message = `Verification failed (HTTP ${res.status})`;
-  try {
-    const body = await res.json();
-    const detail = body.message || body.error || '';
-    const errorCode = body.code ? `[${body.code}] ` : '';
-    if (detail) message = `${errorCode}${detail}`;
-  } catch { /* ignore */ }
-  return { success: false, message, status: res.status };
-}
-
-function rollbackFailedRegistration(userId) {
-  try {
-    stmts.deleteUser.run(userId);
-    return true;
-  } catch (err) {
-    console.error('Failed to roll back registration after email delivery error:', err);
-    return false;
-  }
-}
-
 function isPushConfigured() {
   return !!(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY && VAPID_SUBJECT);
 }
@@ -853,7 +724,6 @@ const REMEMBER_ME_MAX_AGE = 30 * 24 * 60 * 60 * 1000;
 const loginAttempts = new Map(); // ip -> { count, windowStart }
 const registerAttempts = new Map(); // ip -> { count, windowStart }
 const settingsUpdateAttempts = new Map(); // userId -> { count, windowStart }
-const emailVerifySendAttempts = new Map(); // ip -> { count, windowStart }
 
 // Periodically prune stale entries so the map doesn't grow unboundedly.
 setInterval(() => {
@@ -866,12 +736,6 @@ setInterval(() => {
   }
   for (const [userId, data] of settingsUpdateAttempts) {
     if (now - data.windowStart > SETTINGS_UPDATE_WINDOW) settingsUpdateAttempts.delete(userId);
-  }
-  for (const [ip, data] of emailVerifySendAttempts) {
-    if (now - data.windowStart > EMAIL_VERIFICATION_RESEND_WINDOW) emailVerifySendAttempts.delete(ip);
-  }
-  for (const [ip, data] of emailVerifyAttempts) {
-    if (now - data.windowStart > EMAIL_VERIFY_ATTEMPT_WINDOW) emailVerifyAttempts.delete(ip);
   }
   // Prune stale socketRateMap entries for users with no recent activity.
   // The disconnect handler covers most cases, but if a socket drops uncleanly
@@ -928,51 +792,6 @@ function isRegisterBlocked(ip) {
 
 function clearRegisterAttempts(ip) {
   registerAttempts.delete(ip);
-}
-
-// ── Email verification rate limiting ─────────────────────────────────────────
-const EMAIL_VERIFY_ATTEMPT_WINDOW = 15 * 60 * 1000; // 15 minutes
-const EMAIL_VERIFY_MAX_ATTEMPTS_PER_IP = 10; // max code-check attempts per IP per 15 min
-const emailVerifyAttempts = new Map(); // ip -> { count, windowStart }
-
-function recordEmailVerifyAttempt(ip) {
-  const now = Date.now();
-  const data = emailVerifyAttempts.get(ip);
-  if (!data || now - data.windowStart > EMAIL_VERIFY_ATTEMPT_WINDOW) {
-    emailVerifyAttempts.set(ip, { count: 1, windowStart: now });
-    return;
-  }
-  data.count++;
-}
-
-function isEmailVerifyBlocked(ip) {
-  const now = Date.now();
-  const data = emailVerifyAttempts.get(ip);
-  if (!data) return false;
-  if (now - data.windowStart > EMAIL_VERIFY_ATTEMPT_WINDOW) { emailVerifyAttempts.delete(ip); return false; }
-  return data.count >= EMAIL_VERIFY_MAX_ATTEMPTS_PER_IP;
-}
-
-function clearEmailVerifyAttempts(ip) {
-  emailVerifyAttempts.delete(ip);
-}
-
-function recordEmailVerifySend(ip) {
-  const now = Date.now();
-  const data = emailVerifySendAttempts.get(ip);
-  if (!data || now - data.windowStart > EMAIL_VERIFICATION_RESEND_WINDOW) {
-    emailVerifySendAttempts.set(ip, { count: 1, windowStart: now });
-    return;
-  }
-  data.count++;
-}
-
-function isEmailVerifySendBlocked(ip) {
-  const now = Date.now();
-  const data = emailVerifySendAttempts.get(ip);
-  if (!data) return false;
-  if (now - data.windowStart > EMAIL_VERIFICATION_RESEND_WINDOW) { emailVerifySendAttempts.delete(ip); return false; }
-  return data.count >= 3; // max 3 sends per minute per IP
 }
 
 function recordSettingsUpdate(userId) {
@@ -1168,13 +987,6 @@ const migrations = [
   "CREATE INDEX IF NOT EXISTS idx_push_subscriptions_updated_at ON push_subscriptions (updated_at)",
   // Composite index to support efficient pagination ORDER BY (created_at DESC, id DESC)
   "CREATE INDEX IF NOT EXISTS idx_messages_group_pagination ON messages (group_id, created_at DESC, id DESC)",
-  // Email verification columns
-  "ALTER TABLE users ADD COLUMN email TEXT",
-  "ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0",
-  "ALTER TABLE users ADD COLUMN email_verification_code TEXT",
-  "ALTER TABLE users ADD COLUMN email_verification_expires_at TEXT",
-  "ALTER TABLE users ADD COLUMN email_verification_attempts INTEGER NOT NULL DEFAULT 0",
-  "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users (email) WHERE email IS NOT NULL",
 ];
 for (const sql of migrations) {
   try { db.exec(sql); } catch { /* column/table already exists */ }
@@ -1227,24 +1039,6 @@ const stmts = {
     WHERE id = @userId
   `),
   updateUserSettings: db.prepare('UPDATE users SET client_settings = ? WHERE id = ?'),
-  findUserByEmail: db.prepare('SELECT * FROM users WHERE email = ?'),
-  setUserEmail: db.prepare(`
-    UPDATE users
-    SET email = @email,
-        email_verified = 0,
-        email_verification_code = NULL,
-        email_verification_expires_at = NULL,
-        email_verification_attempts = 0
-    WHERE id = @userId
-  `),
-  markEmailVerified: db.prepare(`
-    UPDATE users
-    SET email_verified = 1,
-        email_verification_code = NULL,
-        email_verification_expires_at = NULL,
-        email_verification_attempts = 0
-    WHERE id = ?
-  `),
   deleteUser: db.prepare('DELETE FROM users WHERE id = ?'),
   deleteUserMemberships: db.prepare('DELETE FROM group_members WHERE user_id = ?'),
   deleteUserMessageReads: db.prepare('DELETE FROM message_reads WHERE user_id = ?'),
@@ -1570,9 +1364,6 @@ const CSRF_EXEMPT = [
   '/auth/register', // No session before first request; protected by sameSite:lax
   '/auth/login',    // No session before first request; protected by sameSite:lax
   '/auth/me',       // GET only
-  '/auth/send-verification-email', // pending session only; no full auth yet
-  '/auth/verify-email',            // pending session only; no full auth yet
-  '/auth/add-email',               // pending session only; no full auth yet
 ];
 
 function csrfProtect(req, res, next) {
@@ -1604,19 +1395,12 @@ const UNPROTECTED = [
   '/auth/csrf',
   '/health',
   '/meta/version',
-  '/auth/send-verification-email',
-  '/auth/verify-email',
-  '/auth/add-email',
 ];
 
 function requireAuth(req, res, next) {
   if (UNPROTECTED.includes(req.path)) return next();
   if (!req.session.userId) {
     return res.status(401).json({ error: 'Not authenticated' });
-  }
-  // Block users who have a session but email is not yet verified
-  if (req.session.pendingEmailVerification) {
-    return res.status(403).json({ error: 'Email verification required', needsEmailVerification: true });
   }
   next();
 }
@@ -1680,8 +1464,6 @@ function formatUser(user) {
     iconColor: user.icon_color,
     profilePicture: user.profile_picture || null,
     clientSettings: normalizeClientSettings(clientSettings),
-    emailVerified: !!user.email_verified,
-    hasEmail: !!(user.email),
   };
 }
 
@@ -1914,19 +1696,6 @@ app.get('/api/auth/csrf', (req, res) => {
 });
 
 app.get('/api/auth/me', (req, res) => {
-  // Handle pending email verification sessions
-  if (req.session.pendingEmailVerification && req.session.pendingUserId) {
-    const user = stmts.findUserById.get(req.session.pendingUserId);
-    if (!user) {
-      req.session.destroy(() => {});
-      return res.status(401).json({ error: 'Not authenticated' });
-    }
-    return res.json({
-      ...formatUser(user),
-      needsEmailVerification: true,
-      needsEmailEntry: !user.email,
-    });
-  }
   if (!req.session.userId) {
     return res.status(401).json({ error: 'Not authenticated' });
   }
@@ -1991,7 +1760,6 @@ app.patch('/api/auth/settings', (req, res) => {
 app.post('/api/auth/register', async (req, res) => {
   const username = typeof req.body.username === 'string' ? req.body.username.trim() : '';
   const password = typeof req.body.password === 'string' ? req.body.password : '';
-  const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
   const iconColor = (req.body.iconColor == null || req.body.iconColor === '')
     ? '#4A90D9'
     : normalizeHexColor(req.body.iconColor);
@@ -2009,12 +1777,6 @@ app.post('/api/auth/register', async (req, res) => {
   if (!iconColor) {
     return res.status(400).json({ error: 'Invalid icon color format' });
   }
-  if (!email) {
-    return res.status(400).json({ error: 'Email address is required' });
-  }
-  if (email.length > EMAIL_MAX_LENGTH || !EMAIL_REGEX.test(email)) {
-    return res.status(400).json({ error: 'Invalid email address' });
-  }
   if (isRegisterBlocked(clientIp)) {
     return res.status(429).json({ error: 'Too many registration attempts. Please try again later.' });
   }
@@ -2024,10 +1786,6 @@ app.post('/api/auth/register', async (req, res) => {
   if (existing) {
     return res.status(409).json({ error: 'Username already taken' });
   }
-  const existingEmail = stmts.findUserByEmail.get(email);
-  if (existingEmail) {
-    return res.status(409).json({ error: 'Email address already in use' });
-  }
 
   try {
     const passwordHash = await bcrypt.hash(password, 12);
@@ -2035,50 +1793,17 @@ app.post('/api/auth/register', async (req, res) => {
     const color = iconColor || '#4A90D9';
 
     stmts.insertUser.run(id, username, passwordHash, color);
-    stmts.setUserEmail.run({ userId: id, email });
-
     clearRegisterAttempts(clientIp);
-    recordEmailVerifySend(clientIp);
 
-    // Set a pending session — full access is blocked until email is verified
-    req.session.pendingUserId = id;
-    req.session.pendingEmailVerification = true;
-    req.session.save(async (saveErr) => {
-      if (saveErr) {
-        console.error('Failed to save pending registration session:', saveErr);
-        rollbackFailedRegistration(id);
-        return req.session.destroy(() => {
-          res.status(500).json({ error: 'Internal server error' });
-        });
-      }
-      try {
-        await sendVerificationEmail(email);
-        const user = stmts.findUserById.get(id);
-        if (!user) {
-          console.error('Registered user record could not be retrieved after registration.');
-          return req.session.destroy(() => {
-            if (!res.headersSent) {
-              res.status(500).json({ error: 'Internal server error' });
-            }
-          });
-        }
-        return res.status(201).json({ ...formatUser(user), needsEmailVerification: true });
-      } catch (err) {
-        console.error('Failed to send verification email:', err);
-        if (!rollbackFailedRegistration(id)) {
-          console.error('Registration rollback could not be completed after email delivery failure.');
-        }
-        const missingEmail = err instanceof EmailNotConfiguredError;
-        return req.session.destroy(() => {
-          if (!res.headersSent) {
-            res.status(missingEmail ? 503 : 500).json({
-              error: missingEmail
-                ? 'Email delivery is not configured on this server. Set LOGTO_ENDPOINT, LOGTO_M2M_APP_ID, and LOGTO_M2M_APP_SECRET.'
-                : `Verification email could not be sent: ${err.message}`,
-            });
-          }
-        });
-      }
+    const user = stmts.findUserById.get(id);
+    if (!user) {
+      console.error('Registered user record could not be retrieved after registration.');
+      return res.status(500).json({ error: 'Internal server error' });
+    }
+
+    req.session.userId = id;
+    req.session.save(() => {
+      res.status(201).json(formatUser(user));
     });
   } catch (err) {
     console.error('Register error:', err);
@@ -2116,49 +1841,6 @@ app.post('/api/auth/login', async (req, res) => {
 
     clearLoginAttempts(clientIp);
 
-    // If the user has no email or email is not verified, require verification
-    if (!user.email || !user.email_verified) {
-      req.session.pendingUserId = user.id;
-      req.session.pendingEmailVerification = true;
-      req.session.pendingRememberMe = rememberMe === true;
-
-      // Auto-send a verification code if the user already has an email on file
-      if (user.email) {
-        let emailSendFailed = false;
-        let emailSendError = '';
-        try {
-          stmts.setUserEmail.run({ userId: user.id, email: user.email });
-          await sendVerificationEmail(user.email);
-        } catch (err) {
-          console.error('Failed to auto-send verification email on login:', err);
-          emailSendFailed = true;
-          emailSendError = err.message || 'Unknown error';
-        }
-
-        req.session.save(() => {
-          const formatted = formatUser(user);
-          res.json({
-            ...formatted,
-            needsEmailVerification: true,
-            needsEmailEntry: false,
-            emailSendFailed,
-            ...(emailSendFailed && emailSendError ? { emailSendError } : {}),
-          });
-        });
-        return;
-      }
-
-      req.session.save(() => {
-        const formatted = formatUser(user);
-        res.json({
-          ...formatted,
-          needsEmailVerification: true,
-          needsEmailEntry: !user.email,
-        });
-      });
-      return;
-    }
-
     req.session.userId = user.id;
     setSessionPersistence(req, rememberMe === true);
     req.session.save(() => {
@@ -2173,152 +1855,6 @@ app.post('/api/auth/login', async (req, res) => {
 app.post('/api/auth/logout', (req, res) => {
   req.session.destroy(() => {
     res.json({ ok: true });
-  });
-});
-
-// ── Email verification endpoints ──────────────────────────────────────────────
-
-// POST /api/auth/add-email — existing users (pending session) add their email
-app.post('/api/auth/add-email', async (req, res) => {
-  const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
-  if (isEmailVerifySendBlocked(clientIp)) {
-    return res.status(429).json({ error: 'Too many requests. Please wait before requesting a new code.' });
-  }
-  recordEmailVerifySend(clientIp);
-
-  const userId = req.session.pendingUserId;
-  if (!userId || !req.session.pendingEmailVerification) {
-    return res.status(401).json({ error: 'Not authenticated' });
-  }
-
-  const user = stmts.findUserById.get(userId);
-  if (!user) return res.status(401).json({ error: 'Not authenticated' });
-  if (user.email_verified) {
-    return res.status(400).json({ error: 'Email already verified' });
-  }
-
-  const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
-  if (!email || email.length > EMAIL_MAX_LENGTH || !EMAIL_REGEX.test(email)) {
-    return res.status(400).json({ error: 'Invalid email address' });
-  }
-  const existingEmail = stmts.findUserByEmail.get(email);
-  if (existingEmail && existingEmail.id !== userId) {
-    return res.status(409).json({ error: 'Email address already in use' });
-  }
-
-  try {
-    stmts.setUserEmail.run({ userId, email });
-    await sendVerificationEmail(email);
-    res.json({ ok: true, message: 'Verification code sent' });
-  } catch (err) {
-    console.error('Add email error:', err);
-    const emailErr = err instanceof EmailNotConfiguredError;
-    res.status(emailErr ? 503 : 500).json({
-      error: emailErr
-        ? 'Email delivery is not configured on this server. Set LOGTO_ENDPOINT, LOGTO_M2M_APP_ID, and LOGTO_M2M_APP_SECRET.'
-        : `Failed to send verification email: ${err.message}`,
-    });
-  }
-});
-
-// POST /api/auth/send-verification-email — resend verification code
-app.post('/api/auth/send-verification-email', async (req, res) => {
-  const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
-  if (isEmailVerifySendBlocked(clientIp)) {
-    return res.status(429).json({ error: 'Too many requests. Please wait before requesting a new code.' });
-  }
-  recordEmailVerifySend(clientIp);
-
-  const userId = req.session.pendingUserId;
-  if (!userId || !req.session.pendingEmailVerification) {
-    return res.status(401).json({ error: 'Not authenticated' });
-  }
-
-  const user = stmts.findUserById.get(userId);
-  if (!user) return res.status(401).json({ error: 'Not authenticated' });
-  if (user.email_verified) {
-    return res.status(400).json({ error: 'Email already verified' });
-  }
-  if (!user.email) {
-    return res.status(400).json({ error: 'No email address on file. Please add your email first.' });
-  }
-
-  try {
-    stmts.setUserEmail.run({ userId, email: user.email });
-    await sendVerificationEmail(user.email);
-    res.json({ ok: true, message: 'Verification code sent' });
-  } catch (err) {
-    console.error('Send verification email error:', err);
-    const emailErr = err instanceof EmailNotConfiguredError;
-    res.status(emailErr ? 503 : 500).json({
-      error: emailErr
-        ? 'Email delivery is not configured on this server. Set LOGTO_ENDPOINT, LOGTO_M2M_APP_ID, and LOGTO_M2M_APP_SECRET.'
-        : `Failed to send verification email: ${err.message}`,
-    });
-  }
-});
-
-// POST /api/auth/verify-email — verify the 6-digit code
-app.post('/api/auth/verify-email', async (req, res) => {
-  const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
-  if (isEmailVerifyBlocked(clientIp)) {
-    return res.status(429).json({ error: 'Too many verification attempts from this IP. Please wait before trying again.' });
-  }
-
-  const userId = req.session.pendingUserId;
-  if (!userId || !req.session.pendingEmailVerification) {
-    return res.status(401).json({ error: 'Not authenticated' });
-  }
-
-  const code = typeof req.body.code === 'string' ? req.body.code.trim() : '';
-  if (!/^\d{6}$/.test(code)) {
-    return res.status(400).json({ error: 'Verification code must be 6 digits' });
-  }
-
-  const user = stmts.findUserById.get(userId);
-  if (!user) return res.status(401).json({ error: 'Not authenticated' });
-  if (user.email_verified) {
-    // Already verified — promote session if not already done
-    req.session.userId = userId;
-    req.session.pendingUserId = undefined;
-    req.session.pendingEmailVerification = undefined;
-    const rememberMe = req.session.pendingRememberMe;
-    req.session.pendingRememberMe = undefined;
-    setSessionPersistence(req, !!rememberMe);
-    return req.session.save(() => res.json(formatUser(user)));
-  }
-  if (!user.email) {
-    return res.status(400).json({ error: 'No email address on file. Please add your email first.' });
-  }
-
-  try {
-    recordEmailVerifyAttempt(clientIp);
-    const result = await verifyEmailCode(user.email, code);
-    if (!result.success) {
-      const httpStatus = result.status === 429 ? 429 : 400;
-      return res.status(httpStatus).json({
-        error: result.message || 'Incorrect verification code. Please try again or request a new code.',
-      });
-    }
-  } catch (err) {
-    console.error('Logto verification error:', err);
-    return res.status(503).json({
-      error: `Verification service error: ${err.message}. Please try again later.`,
-    });
-  }
-
-  clearEmailVerifyAttempts(clientIp);
-  stmts.markEmailVerified.run(userId);
-  // Promote pending session to a full session
-  req.session.userId = userId;
-  req.session.pendingUserId = undefined;
-  req.session.pendingEmailVerification = undefined;
-  const rememberMe = req.session.pendingRememberMe;
-  req.session.pendingRememberMe = undefined;
-  setSessionPersistence(req, !!rememberMe);
-  req.session.save(() => {
-    const updated = stmts.findUserById.get(userId);
-    res.json(formatUser(updated));
   });
 });
 
