@@ -84,7 +84,7 @@ Most product updates are delivered through the hosted web app. Native desktop up
 | Database | SQLite via `better-sqlite3` |
 | Sessions | `express-session` + `connect-sqlite3` |
 | Password hashing | bcrypt |
-| Email delivery | nodemailer (SMTP) |
+| Email delivery | Logto Cloud M2M API |
 | Encryption | Web Crypto API, AES-GCM, PBKDF2 |
 | Frontend | HTML, CSS, vanilla JavaScript |
 | Desktop | Electron, Electron Builder |
@@ -137,14 +137,11 @@ Important limitations:
 | `VAPID_PUBLIC_KEY` | Optional | Public VAPID key used by the hosted PWA to subscribe to Web Push notifications. |
 | `VAPID_PRIVATE_KEY` | Optional | Private VAPID key used only on the server to send Web Push notifications. Never expose this to clients. |
 | `VAPID_SUBJECT` | Optional | VAPID contact subject such as `mailto:admin@example.com` or an HTTPS URL. |
-| `SMTP_HOST` | Optional* | SMTP server hostname for email verification (e.g. `smtp.gmail.com`). |
-| `SMTP_PORT` | Optional | SMTP port (default `587`; use `465` for SMTP_SECURE). |
-| `SMTP_USER` | Optional* | SMTP authentication username (usually the sender email address). |
-| `SMTP_PASS` | Optional* | SMTP authentication password or app password. |
-| `SMTP_FROM` | Optional | Sender address shown in verification emails. Defaults to `SMTP_USER`. |
-| `SMTP_SECURE` | Optional | Set to `true` to use TLS on port 465. Default is STARTTLS (port 587). |
+| `LOGTO_ENDPOINT` | Optional* | Logto tenant URL for email verification (e.g. `https://your-tenant.logto.app`). |
+| `LOGTO_M2M_APP_ID` | Optional* | App ID of a Logto M2M application with Management API `all` role. |
+| `LOGTO_M2M_APP_SECRET` | Optional* | App Secret of the same Logto M2M application. |
 
-\* If `SMTP_HOST`, `SMTP_USER`, and `SMTP_PASS` are all unset, email is not sent and verification codes are printed to the server console in development only. Production deployments will reject verification requests until SMTP is configured. **Configure SMTP for any production deployment.**
+\* If `LOGTO_ENDPOINT`, `LOGTO_M2M_APP_ID`, and `LOGTO_M2M_APP_SECRET` are all unset, verification emails will not be sent. In development mode a warning is logged; production deployments will reject verification requests. **Configure Logto for any production deployment.**
 
 ---
 
