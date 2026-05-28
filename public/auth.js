@@ -171,8 +171,12 @@ document.getElementById('signin-form').addEventListener('submit', async (e) => {
       } else {
         showVerifyStep2(data.email || '');
         if (data.emailSendFailed) {
-          const errorEl = document.getElementById('verify-step1-error');
-          if (errorEl) errorEl.textContent = 'Failed to send verification code. Click "Send Verification Code" to retry.';
+          const step1ErrorEl = document.getElementById('verify-step1-error');
+          if (step1ErrorEl) {
+            step1ErrorEl.textContent = data.emailSendError
+              ? `Failed to send verification code: ${data.emailSendError}. Click "Send Verification Code" to retry.`
+              : 'Failed to send verification code. Click "Send Verification Code" to retry.';
+          }
         }
       }
     } else {
@@ -236,6 +240,7 @@ document.getElementById('send-code-btn').addEventListener('click', async () => {
   const btn = document.getElementById('send-code-btn');
   const errorEl = document.getElementById('verify-step1-error');
   errorEl.textContent = '';
+  errorEl.removeAttribute('data-status');
   btn.disabled = true;
   btn.textContent = 'Sending code…';
 
@@ -249,13 +254,22 @@ document.getElementById('send-code-btn').addEventListener('click', async () => {
     });
     const data = await res.json();
     if (!res.ok) {
-      errorEl.textContent = data.error || 'Failed to send code';
+      errorEl.setAttribute('data-status', String(res.status));
+      let msg = data.error || 'Failed to send code.';
+      if (res.status === 429) {
+        msg = msg + ' Please wait a minute before retrying.';
+      } else if (res.status === 503) {
+        msg = 'Email service unavailable: ' + msg;
+      } else if (res.status >= 500) {
+        msg = `Server error (${res.status}): ` + msg;
+      }
+      errorEl.textContent = msg;
     } else {
       showVerifyStep2(email);
       errorEl.textContent = '';
     }
   } catch {
-    errorEl.textContent = 'Network error. Please try again.';
+    errorEl.textContent = 'Network error. Please check your connection and try again.';
   } finally {
     btn.disabled = false;
     btn.textContent = 'Send Verification Code';
@@ -267,6 +281,7 @@ document.getElementById('verify-email-btn').addEventListener('click', async () =
   const btn = document.getElementById('verify-email-btn');
   const errorEl = document.getElementById('verify-email-error');
   errorEl.textContent = '';
+  errorEl.removeAttribute('data-status');
   btn.disabled = true;
   btn.textContent = 'Verifying…';
 
@@ -280,13 +295,20 @@ document.getElementById('verify-email-btn').addEventListener('click', async () =
     });
     const data = await res.json();
     if (!res.ok) {
-      errorEl.textContent = data.error || 'Verification failed';
+      errorEl.setAttribute('data-status', String(res.status));
+      let msg = data.error || 'Verification failed.';
+      if (res.status === 429) {
+        msg = msg + ' Please request a new code.';
+      } else if (res.status >= 500) {
+        msg = `Server error (${res.status}): ` + msg;
+      }
+      errorEl.textContent = msg;
     } else {
       persistUserWallpaperSettings(data);
       window.location.href = 'chat.html';
     }
   } catch {
-    errorEl.textContent = 'Network error. Please try again.';
+    errorEl.textContent = 'Network error. Please check your connection and try again.';
   } finally {
     btn.disabled = false;
     btn.textContent = 'Verify Email';
@@ -298,6 +320,7 @@ document.getElementById('resend-code-btn').addEventListener('click', async () =>
   const btn = document.getElementById('resend-code-btn');
   const errorEl = document.getElementById('verify-email-error');
   errorEl.textContent = '';
+  errorEl.removeAttribute('data-status');
   btn.disabled = true;
   btn.textContent = 'Sending…';
 
@@ -312,7 +335,16 @@ document.getElementById('resend-code-btn').addEventListener('click', async () =>
     });
     const data = await res.json();
     if (!res.ok) {
-      errorEl.textContent = data.error || 'Failed to resend code';
+      errorEl.setAttribute('data-status', String(res.status));
+      let msg = data.error || 'Failed to resend code.';
+      if (res.status === 429) {
+        msg = msg + ' Please wait a minute before retrying.';
+      } else if (res.status === 503) {
+        msg = 'Email service unavailable: ' + msg;
+      } else if (res.status >= 500) {
+        msg = `Server error (${res.status}): ` + msg;
+      }
+      errorEl.textContent = msg;
     } else {
       verifyPanelEmail = email;
       errorEl.style.color = 'var(--accent2)';
@@ -323,7 +355,7 @@ document.getElementById('resend-code-btn').addEventListener('click', async () =>
       }, 4000);
     }
   } catch {
-    errorEl.textContent = 'Network error. Please try again.';
+    errorEl.textContent = 'Network error. Please check your connection and try again.';
   } finally {
     btn.disabled = false;
     btn.textContent = 'Resend Code';
