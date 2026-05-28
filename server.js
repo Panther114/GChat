@@ -160,7 +160,7 @@ class EmailNotConfiguredError extends Error {
 let logtoTokenCache = null; // { token: string, expiresAt: number }
 
 async function getLogtoAccessToken() {
-  if (logtoTokenCache && Date.now() < logtoTokenCache.expiresAt - 30_000) {
+  if (logtoTokenCache && Date.now() < logtoTokenCache.expiresAt - 30 * 1000) {
     return logtoTokenCache.token;
   }
   const res = await fetch(`${LOGTO_ENDPOINT}/oidc/token`, {
@@ -237,8 +237,8 @@ async function verifyEmailCode(toEmail, code) {
   try {
     const body = await res.json();
     const detail = body.message || body.error || '';
-    const code_ = body.code ? `[${body.code}] ` : '';
-    if (detail) message = `${code_}${detail}`;
+    const errorCode = body.code ? `[${body.code}] ` : '';
+    if (detail) message = `${errorCode}${detail}`;
   } catch { /* ignore */ }
   return { success: false, message, status: res.status };
 }
@@ -870,6 +870,9 @@ setInterval(() => {
   for (const [ip, data] of emailVerifySendAttempts) {
     if (now - data.windowStart > EMAIL_VERIFICATION_RESEND_WINDOW) emailVerifySendAttempts.delete(ip);
   }
+  for (const [ip, data] of emailVerifyAttempts) {
+    if (now - data.windowStart > EMAIL_VERIFY_ATTEMPT_WINDOW) emailVerifyAttempts.delete(ip);
+  }
   // Prune stale socketRateMap entries for users with no recent activity.
   // The disconnect handler covers most cases, but if a socket drops uncleanly
   // or the disconnect cleanup is skipped, stale entries can accumulate.
@@ -928,6 +931,31 @@ function clearRegisterAttempts(ip) {
 }
 
 // ── Email verification rate limiting ─────────────────────────────────────────
+const EMAIL_VERIFY_ATTEMPT_WINDOW = 15 * 60 * 1000; // 15 minutes
+const EMAIL_VERIFY_MAX_ATTEMPTS_PER_IP = 10; // max code-check attempts per IP per 15 min
+const emailVerifyAttempts = new Map(); // ip -> { count, windowStart }
+
+function recordEmailVerifyAttempt(ip) {
+  const now = Date.now();
+  const data = emailVerifyAttempts.get(ip);
+  if (!data || now - data.windowStart > EMAIL_VERIFY_ATTEMPT_WINDOW) {
+    emailVerifyAttempts.set(ip, { count: 1, windowStart: now });
+    return;
+  }
+  data.count++;
+}
+
+function isEmailVerifyBlocked(ip) {
+  const now = Date.now();
+  const data = emailVerifyAttempts.get(ip);
+  if (!data) return false;
+  if (now - data.windowStart > EMAIL_VERIFY_ATTEMPT_WINDOW) { emailVerifyAttempts.delete(ip); return false; }
+  return data.count >= EMAIL_VERIFY_MAX_ATTEMPTS_PER_IP;
+}
+
+function clearEmailVerifyAttempts(ip) {
+  emailVerifyAttempts.delete(ip);
+}
 
 function recordEmailVerifySend(ip) {
   const now = Date.now();
@@ -2232,6 +2260,11 @@ app.post('/api/auth/send-verification-email', async (req, res) => {
 
 // POST /api/auth/verify-email — verify the 6-digit code
 app.post('/api/auth/verify-email', async (req, res) => {
+  const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
+  if (isEmailVerifyBlocked(clientIp)) {
+    return res.status(429).json({ error: 'Too many verification attempts from this IP. Please wait before trying again.' });
+  }
+
   const userId = req.session.pendingUserId;
   if (!userId || !req.session.pendingEmailVerification) {
     return res.status(401).json({ error: 'Not authenticated' });
@@ -2259,6 +2292,7 @@ app.post('/api/auth/verify-email', async (req, res) => {
   }
 
   try {
+    recordEmailVerifyAttempt(clientIp);
     const result = await verifyEmailCode(user.email, code);
     if (!result.success) {
       const httpStatus = result.status === 429 ? 429 : 400;
@@ -2273,6 +2307,7 @@ app.post('/api/auth/verify-email', async (req, res) => {
     });
   }
 
+  clearEmailVerifyAttempts(clientIp);
   stmts.markEmailVerified.run(userId);
   // Promote pending session to a full session
   req.session.userId = userId;
