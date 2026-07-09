@@ -910,7 +910,7 @@ body.sidebar-resizing * {
   border-radius: 16px 16px 16px 6px;
   padding: 6px 10px;
   color: var(--bubble-text);
-  font-size: 13px;
+  font-size: 15px;
   line-height: 1.4;
   white-space: pre-wrap;
   word-break: break-word;
@@ -3107,7 +3107,7 @@ body.chat-body.mobile-layout .sidebar-overlay {
       rgba(18, 24, 36, .58);
     border: 1px solid rgba(255,255,255,.14);
     color: #f5f8ff;
-    font-size: 14px;
+    font-size: 16px;
     line-height: 1.45;
     backdrop-filter: saturate(180%) blur(20px);
     -webkit-backdrop-filter: saturate(180%) blur(20px);
@@ -3560,7 +3560,7 @@ body.electron-desktop-effects .right-panel {
 
   /* Smaller bubbles on very small screens */
   .msg-content { max-width: 85%; }
-  .msg-bubble { font-size: 14px; padding: 8px 10px; }
+  .msg-bubble { font-size: 16px; padding: 8px 10px; }
 
   /* Compact chat topbar */
   .chat-topbar {
