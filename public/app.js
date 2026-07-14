@@ -193,18 +193,20 @@ function apiHeaders(options = {}) {
   return h;
 }
 
-// ── Per-group key storage ────────────────────────────────────────────────────
-function getGroupKey(groupId) { return localStorage.getItem('gk:' + groupId) || null; }
-function setGroupKey(groupId, key) { localStorage.setItem('gk:' + groupId, key); }
-function clearGroupKey(groupId) {
-  // Evict the cached CryptoKey so re-entry uses a fresh derivation
-  const old = localStorage.getItem('gk:' + groupId);
-  if (old) derivedKeyCache.delete(old + '\x00' + groupId);
-  localStorage.removeItem('gk:' + groupId);
+// ── Per-group encryption secret resolution ───────────────────────────────────
+function getGroupKey(groupId) {
+  const normalizedGroupId = String(groupId || '');
+  if (!normalizedGroupId) return null;
+  const storedKey = localStorage.getItem('gk:' + normalizedGroupId);
+  if (storedKey) return storedKey;
+  const group = groups.find((entry) => String(entry.id) === normalizedGroupId)
+    || (currentGroupData && String(currentGroupData.id) === normalizedGroupId ? currentGroupData : null);
+  const fallbackKey = group && typeof group.code === 'string' ? group.code.trim() : '';
+  return fallbackKey || null;
 }
 
-// Keep only long-lived user essentials across a local reset: group keys plus the
-// current/legacy wallpaper and other per-user local settings payloads.
+// Keep only long-lived user essentials across a local reset: legacy group keys
+// plus the current/legacy wallpaper and other per-user local settings payloads.
 function shouldPreserveLocalStorageEntry(key) {
   return !!(
     key
@@ -2225,7 +2227,6 @@ let currentGroupData = null;
 let groups = [];
 let members = [];
 let socket = null;
-let encryptionVisible = true;
 let messageMode = 'normal'; // 'normal' | 'whisper'
 let whisperRecipients = [];
 let replyingTo = null;
@@ -2515,7 +2516,7 @@ async function ensureGroupDataPreloaded(groupId) {
 }
 
 // Decryption failure text constants (must match renderMsgContent output)
-const MSG_NO_KEY = '[No key — set group key to decrypt]';
+const MSG_NO_KEY = '[Encryption unavailable]';
 const MSG_DECRYPT_FAIL = '[Unable to decrypt]';
 const GROUP_PREVIEW_EMPTY_TEXT = 'No messages yet';
 
@@ -2845,13 +2846,6 @@ function updateAiControls() {
   const quotaMessage = getAiQuotaBlockedMessage();
   const enabled = !!currentGroupId && isAiModeEnabled() && !quotaMessage;
   const disabledReason = !isAiModeEnabled() ? getAiDisabledMessage() : quotaMessage;
-  const askBtn = $('ask-grok-btn');
-  if (askBtn) {
-    askBtn.disabled = !enabled;
-    askBtn.classList.toggle('is-disabled', !enabled);
-    askBtn.title = enabled ? 'Ask AI' : (disabledReason || 'Ask AI');
-    askBtn.setAttribute('aria-label', enabled ? 'Ask AI' : (disabledReason || 'Ask AI'));
-  }
   const slashAiBtn = $('slash-command-ai-item');
   if (slashAiBtn) {
     slashAiBtn.disabled = !enabled;
@@ -3864,7 +3858,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupEmojiPicker();
   setupKeyboardShortcuts();
   updateWhisperBtn();
-  toggleEncryptionButton();
   syncResponsiveUiState();
   startHostedAppUpdatePolling();
 
@@ -4308,21 +4301,16 @@ async function selectGroup(groupId) {
 }
 
 function updateKeyState() {
-  const key = currentGroupId ? getGroupKey(currentGroupId) : null;
-  const hasKey = !!key;
   const modalBlockingInput = !$('grok-modal').hidden;
   const input = $('message-input');
   const sendBtn = $('send-btn');
   const blockedStatus = $('composer-blocked-status');
-  setElementIcon($('set-key-btn'), 'key-round', { iconOnly: true, label: hasKey ? 'Change Key' : 'Set Key' });
-  input.disabled = !hasKey || modalBlockingInput;
-  input.placeholder = !hasKey
-    ? 'Enter group key to continue'
-    : (modalBlockingInput ? 'Complete Ask AI first…' : 'Type a message…');
+  input.disabled = modalBlockingInput;
+  input.placeholder = modalBlockingInput ? 'Complete Ask AI first…' : 'Type a message…';
   if (modalBlockingInput) input.setAttribute('aria-describedby', 'composer-blocked-status');
   else input.removeAttribute('aria-describedby');
-  sendBtn.disabled = !hasKey || modalBlockingInput;
-  setComposerShellDisabled(!hasKey || modalBlockingInput);
+  sendBtn.disabled = modalBlockingInput;
+  setComposerShellDisabled(modalBlockingInput);
   if (blockedStatus) {
     blockedStatus.textContent = modalBlockingInput ? 'Chat input is temporarily disabled while the Ask AI modal is open.' : '';
   }
@@ -4680,13 +4668,6 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
 async function renderMsgContent(msg, textEl, bubble, groupId = currentGroupId) {
   const key = groupId ? getGroupKey(groupId) : null;
 
-  if (!encryptionVisible) {
-    if (msg.type === 'image') renderPlainText(textEl, '[encrypted image]');
-    else if (msg.type === 'file') renderPlainText(textEl, '[encrypted file: ' + (msg.filename || '') + ']');
-    else renderPlainText(textEl, msg.encryptedContent || '[no content]');
-    return;
-  }
-
   if (msg.type === 'image') {
     if (!key) {
       const locked = document.createElement('div');
@@ -4906,7 +4887,7 @@ async function getAttachmentData(msg) {
   if (!msg || (msg.type !== 'image' && msg.type !== 'file')) return null;
   const key = currentGroupId ? getGroupKey(currentGroupId) : null;
   if (!key) {
-    showToast('Set group key first', 'error');
+    showToast('Encryption is unavailable for this group', 'error');
     return null;
   }
   const bytes = await decryptBytes(msg.encryptedContent, msg.iv, key, currentGroupId);
@@ -5145,7 +5126,7 @@ async function startEditMessage(msg, currentPlaintext) {
     const newText = editInput.value.trim();
     if (!newText || newText === currentPlaintext) { cancelEdit(); return; }
     const key = getGroupKey(currentGroupId);
-    if (!key) { showToast('Set group key first', 'error'); cancelEdit(); return; }
+    if (!key) { showToast('Encryption is unavailable for this group', 'error'); cancelEdit(); return; }
     editSave.disabled = true;
     try {
       const { encryptedContent, iv } = await encryptMessage(newText, key, currentGroupId);
@@ -5174,7 +5155,10 @@ async function startEditMessage(msg, currentPlaintext) {
 async function doSend(text) {
   if (!currentGroupId || !socket) return;
   const key = getGroupKey(currentGroupId);
-  if (!key) return;
+  if (!key) {
+    showToast('Encryption is unavailable for this group', 'error');
+    return;
+  }
   const parsedMessage = parseComposerMessageInput(text);
   if (!parsedMessage.ok) {
     showToast(parsedMessage.error, 'error');
@@ -5434,7 +5418,7 @@ async function handleFileUpload(file) {
   if (!currentGroupId || !socket) return;
   const key = getGroupKey(currentGroupId);
   if (!key) {
-    showToast('Set group key first', 'error');
+    showToast('Encryption is unavailable for this group', 'error');
     return;
   }
   if (composerTokens.hashtag && (composerTokens.whisper || (messageMode === 'whisper' && whisperRecipients.length > 0))) {
@@ -6333,41 +6317,6 @@ function updateWhisperBtn() {
   if (keepBottomPinned) pinMessagesToBottom();
 }
 
-// ── Toggle encryption display ─────────────────────────────────────────────────
-function toggleEncryptionButton() {
-  setElementIcon(
-    $('enc-toggle-btn'),
-    encryptionVisible ? 'lock' : 'unlock',
-    { iconOnly: true, label: encryptionVisible ? 'Hide Encryption' : 'Show Encrypted' }
-  );
-}
-
-async function toggleEncryption() {
-  encryptionVisible = !encryptionVisible;
-  toggleEncryptionButton();
-  // Re-render all messages
-  if (!currentGroupId) return;
-  await loadMessages(currentGroupId);
-  renderGroupFromCache(currentGroupId);
-  observeCurrentGroupRowsForRead();
-}
-
-// ── Forget key ────────────────────────────────────────────────────────────────
-function forgetKey() {
-  showConfirm(
-    'Forget Encryption Key',
-    'This will remove your encryption key for this group. You won\'t be able to read or send messages until you re-enter it. Continue?',
-    async () => {
-      clearGroupKey(currentGroupId);
-      updateKeyState();
-      await loadMessages(currentGroupId);
-      renderGroupFromCache(currentGroupId);
-      observeCurrentGroupRowsForRead();
-      showToast('Key forgotten — messages are now locked', 'info');
-    }
-  );
-}
-
 // ── Kick member ───────────────────────────────────────────────────────────────
 async function kickMember(userId, username) {
   showConfirm('Kick Member', 'Remove ' + username + ' from this group?', async () => {
@@ -6649,10 +6598,6 @@ function openGrokModal(options = {}) {
     return;
   }
   if (!canUseAiInCurrentGroup({ showError: true })) return;
-  if (!getGroupKey(currentGroupId)) {
-    showToast('Set group key first', 'error');
-    return;
-  }
   resetGrokModalState();
   grokRequestSource = options.source === 'chat' ? 'chat' : 'panel';
   grokRequestHashtag = normalizeHashtagTopic(options.hashtag || null);
@@ -6687,7 +6632,7 @@ function openProfileModal() {
 
 async function buildGrokContextMessages(groupId, options = {}) {
   const key = getGroupKey(groupId);
-  if (!key) throw new Error('Set group key first');
+  if (!key) throw new Error('Encryption is unavailable for this group');
 
   const normalizedTag = normalizeHashtagTopic(options.tagFilter || null);
   const snapshot = Array.isArray(options.sourceMessages) ? options.sourceMessages : allMessages;
@@ -6841,7 +6786,7 @@ async function submitGrokPrompt() {
 
   try {
     const key = getGroupKey(groupId);
-    if (!key) throw new Error('Set group key first');
+    if (!key) throw new Error('Encryption is unavailable for this group');
 
     let replyToData = null;
     if (replyingTo) {
@@ -7271,7 +7216,7 @@ function setupEventListeners() {
   $('clear-cache-btn').addEventListener('click', () => {
     showConfirm(
       'Clear Cache and Restart',
-      'This will reset local GChat data and restart the app. Your saved group keys, login session, and local user settings will be kept. Continue?',
+      'This will reset local GChat data and restart the app. Your login session and local user settings will be kept. Continue?',
       async () => {
         await clearCacheAndRestartApp();
       }
@@ -7298,13 +7243,6 @@ function setupEventListeners() {
     addSystemMessage('You joined "' + d.name + '".');
   });
 
-  // Set group key
-  $('set-key-btn').addEventListener('click', () => {
-    $('group-key-input').value = currentGroupId ? (getGroupKey(currentGroupId) || '') : '';
-    $('group-key-error').textContent = '';
-    $('group-key-modal').hidden = false;
-  });
-  $('ask-grok-btn').addEventListener('click', () => openGrokModal({ source: 'chat' }));
   $('grok-close-btn').addEventListener('click', closeGrokModal);
   $('grok-cancel-btn').addEventListener('click', closeGrokModal);
   $('grok-modal').addEventListener('click', (e) => {
@@ -7346,8 +7284,7 @@ function setupEventListeners() {
   $('grok-insert-btn').addEventListener('click', () => {
     if (!grokResponseDraft) return;
     const input = $('message-input');
-    if (!input || !getGroupKey(currentGroupId)) {
-      showToast('Set group key first', 'error');
+    if (!input) {
       return;
     }
     input.value = input.value
@@ -7357,24 +7294,6 @@ function setupEventListeners() {
     closeGrokModal();
     if (!input.disabled) input.focus();
   });
-  $('group-key-cancel-btn').addEventListener('click', () => $('group-key-modal').hidden = true);
-  $('group-key-save-btn').addEventListener('click', async () => {
-    const key = $('group-key-input').value;
-    if (!key) { $('group-key-error').textContent = 'Key cannot be empty'; return; }
-    setGroupKey(currentGroupId, key);
-    $('group-key-modal').hidden = true;
-    updateKeyState();
-    await loadMessages(currentGroupId);
-    renderGroupFromCache(currentGroupId);
-    observeCurrentGroupRowsForRead();
-  });
-
-  // Encryption toggle
-  $('enc-toggle-btn').addEventListener('click', toggleEncryption);
-
-  // Forget key
-  $('forget-key-btn').addEventListener('click', forgetKey);
-
   // Copy code
   $('copy-code-btn').addEventListener('click', () => {
     if (!currentGroupData) return;
