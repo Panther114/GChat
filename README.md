@@ -1,6 +1,6 @@
 # Gchat
 
-Gchat is a client-side encrypted group chat application built with Node.js, Express, Socket.IO, SQLite, and vanilla web technologies. It supports real-time group messaging, per-group encryption keys, media/file messages, profile customization, group administration, and an optional Electron desktop wrapper.
+Gchat is a client-side encrypted group chat application built with Node.js, Express, Socket.IO, SQLite, and vanilla web technologies. It supports real-time group messaging, automatic per-group encryption, media/file messages, profile customization, group administration, and an optional Electron desktop wrapper.
 
 The hosted web app is the primary product. The desktop app is a native shell that loads the hosted Railway deployment.
 
@@ -103,19 +103,16 @@ Most product updates are delivered through the hosted web app. Native desktop up
 
 Gchat encrypts message content in the client before it is sent to the server.
 
-1. A user sets a per-group passphrase.
+1. The client resolves a per-group passphrase automatically from group membership data.
 2. The client derives a symmetric key using PBKDF2 with SHA-256.
 3. Message content is encrypted with AES-GCM.
 4. The server stores only encrypted content and IV values.
-5. Users with the same group key can decrypt messages locally.
-6. Users without the key see undecryptable placeholder text.
+5. Group members can decrypt messages locally without manual key entry.
 
-The server does not receive plaintext message content or group keys.
+The server does not receive plaintext message content.
 
 Important limitations:
 
-- Group keys are user-managed.
-- Lost group keys cannot be recovered by the server.
 - Metadata such as usernames, group membership, timestamps, and message ownership is still visible to the server.
 - Disappearing-message metadata, timers, and per-user hidden-state records are also visible to the server so the app can keep access state consistent across reloads.
 - Short repeated-message spam detection hashes normalized short messages server-side, which can reveal when two short messages are identical even though the server still does not receive plaintext.
