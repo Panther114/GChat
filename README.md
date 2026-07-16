@@ -126,7 +126,7 @@ Important limitations:
 |---|---:|---|
 | `SESSION_SECRET` | Yes | Secret used to sign session cookies. Use a long random value in production. |
 | `PORT` | No | Server port. Railway provides this automatically. |
-| `DB_PATH` | Recommended | SQLite database path. Use `/data/Gchat.db` with a Railway volume for persistence. |
+| `DB_PATH` | Recommended | SQLite database path. Use `/data/gaychat.db` with a Railway volume for persistence. |
 | `GROUP_CODE_PEPPER` | Recommended | At least 32 characters; used to HMAC normalized join codes. Falls back to the stable `SESSION_SECRET` during the v1.3.0 cutover. |
 | `AI_ENABLED` | No | Reserved for a later release. v1.3.0 keeps AI disabled in code even if this variable is set. |
 | `GCHAT_LOCAL_DEBUG` | No | Set to `1` only for the local `root/root` fixtures. |
@@ -142,10 +142,10 @@ Production load is bounded to 100 groups per user, 250 members per group, 100 me
 
 ### Increment A production cutover
 
-Before deploying v1.3.0, mount the persistent Railway volume at `/data`, set `DB_PATH=/data/Gchat.db`, set a stable 32+ character `GROUP_CODE_PEPPER`, and leave `AI_ENABLED` unset or `0`. Back up the database, then run the explicit chat-only reset once:
+Before deploying v1.3.0, mount the persistent Railway volume at `/data`, set `DB_PATH=/data/gaychat.db`, set a stable 32+ character `GROUP_CODE_PEPPER`, and leave `AI_ENABLED` unset or `0`. Back up the database, then run the explicit chat-only reset once:
 
 ```bash
-CONFIRM_RESET=RESET_ALL_GCHAT_CHATS_FOR_INCREMENT_A DB_PATH=/data/Gchat.db npm run migrate:increment-a
+CONFIRM_RESET=RESET_ALL_GCHAT_CHATS_FOR_INCREMENT_A DB_PATH=/data/gaychat.db npm run migrate:increment-a
 ```
 
 The reset is transactional, creates a timestamped backup, deletes groups, memberships, messages, read/disappearing state, and AI usage events, and preserves `users`, settings, sessions, and push subscriptions.
@@ -173,7 +173,7 @@ Recommended Railway setup:
 3. Set:
 
 ```txt
-DB_PATH=/data/Gchat.db
+DB_PATH=/data/gaychat.db
 ```
 
 This stores the SQLite database on persistent storage.
@@ -252,7 +252,7 @@ Client controls are hidden, `/api/ai/*` returns 404, socket AI sends are rejecte
 
 ```txt
 SESSION_SECRET=<long random secret>
-DB_PATH=/data/Gchat.db
+DB_PATH=/data/gaychat.db
 GROUP_CODE_PEPPER=<stable random secret of at least 32 characters>
 AI_ENABLED=0
 ```
@@ -514,10 +514,10 @@ Before using Gchat with real users:
 
 - Set `SESSION_SECRET`.
 - Mount a Railway volume.
-- Set `DB_PATH=/data/Gchat.db`.
-- Set `OPENROUTER_API_KEY` for DeepSeek Ask AI access.
-- Set `GETGOAPI_API_KEY` for Grok Ask AI access.
-- Confirm login, group creation, message sending, and file upload behavior.
+- Set `DB_PATH=/data/gaychat.db`.
+- Set a stable `GROUP_CODE_PEPPER`, or verify the `SESSION_SECRET` fallback before issuing invitation links.
+- Keep AI disabled; v1.3.0 does not require provider API keys.
+- Confirm login, invitation-link joining, message sending, and file upload behavior.
 - Test the desktop installer on a clean Windows machine.
 - Verify notification behavior in Windows settings.
 - Keep database backups if the app is used seriously.
