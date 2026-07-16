@@ -1,6 +1,6 @@
 {
   "name": "Gchat",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "End-to-end encrypted group chat app",
   "author": "Gchat",
   "main": "server.js",
@@ -49,7 +49,7 @@
   "build": {
     "appId": "com.Gchat.app",
     "productName": "Gchat",
-    "copyright": "Copyright © 2024 Gchat",
+    "copyright": "Copyright © 2024-2026 Gchat",
     "asar": true,
     "compression": "maximum",
     "extraMetadata": {
@@ -70,7 +70,7 @@
       "!**/node_modules/**/*"
     ],
     "win": {
-      "icon": "public/gchat_icon.png",
+      "icon": "build/icon.ico",
       "artifactName": "Gchat-Setup-${version}.${ext}",
       "target": [
         {
@@ -80,15 +80,20 @@
           ]
         }
       ],
-      "signAndEditExecutable": false
+      "signAndEditExecutable": true
     },
     "nsis": {
-      "oneClick": true,
+      "oneClick": false,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Gchat",
+      "uninstallDisplayName": "Gchat ${version}",
       "runAfterFinish": true,
       "deleteAppDataOnUninstall": false
     },

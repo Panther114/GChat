@@ -4,9 +4,9 @@ Gchat Desktop is a lightweight Electron shell for the hosted Gchat application. 
 
 ## Install
 
-1. Download `Gchat-Setup-<version>.exe` from the repository's `release/` folder or the GitHub release assets.
-2. Run it once. The per-user NSIS installer has no setup wizard or directory picker.
-3. Gchat opens automatically after installation.
+1. Download `Gchat-Setup-<version>.exe` from the latest GitHub Release.
+2. Follow the setup wizard. It installs for the current user by default and lets you choose the destination folder and shortcuts.
+3. Gchat opens automatically when setup finishes unless you clear that option.
 
 The desktop window opens the hosted sign-in page immediately. Electron stores the authenticated web session and client-side encrypted group keys in its persistent `persist:gchat` profile, so a returning user is taken straight back to the hosted app without repeating desktop setup.
 
@@ -23,7 +23,7 @@ The installer is written to `release/`:
 
 | File | Description |
 |---|---|
-| `Gchat-Setup-<version>.exe` | One-click, per-user Windows installer that opens Gchat when finished. |
+| `Gchat-Setup-<version>.exe` | Assisted, per-user Windows installer with destination and shortcut choices. |
 | `latest.yml` and `.blockmap` | Update metadata for `electron-updater`; keep these alongside the installer in GitHub Releases. |
 
 ## Desktop behavior
@@ -31,7 +31,7 @@ The installer is written to `release/`:
 - Uses the production hosted service only; no local chat server is packaged.
 - Persists the Chromium session, web cache, IndexedDB keys, and login cookies in the Electron profile.
 - Provides native notifications, unread badge, system tray controls, single-instance behavior, and optional launch at Windows sign-in.
-- Downloads GitHub Release updates in the background and asks only when the running app is ready to restart.
+- Downloads versioned GitHub Release updates in the background and installs them after the app exits.
 - Opens external links in the default browser.
 - Retains Electron security boundaries: `contextIsolation`, sandboxing, and no Node integration in the hosted renderer.
 

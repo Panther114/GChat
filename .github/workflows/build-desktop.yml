@@ -5,6 +5,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
   pull_request:
 
 jobs:
@@ -21,7 +23,16 @@ jobs:
           node-version: 20
 
       - name: Install dependencies
-        run: npm install --include=dev
+        run: npm ci --include=dev
+
+      - name: Verify release tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Tag $env:GITHUB_REF_NAME does not match package version v$version"
+          }
 
       - name: Build Windows desktop packages
         run: npm run build:win -- --publish never
@@ -31,5 +42,35 @@ jobs:
         with:
           name: gchat-windows-desktop
           path: |
-            dist/*.exe
-            dist/*.yml
+            release/*.exe
+            release/*.blockmap
+            release/latest.yml
+          if-no-files-found: error
+
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build-windows-desktop
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Windows desktop artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: gchat-windows-desktop
+          path: release
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          "release/Gchat-Setup-${GITHUB_REF_NAME#v}.exe"
+          "release/Gchat-Setup-${GITHUB_REF_NAME#v}.exe.blockmap"
+          "release/latest.yml"
+          --repo "$GITHUB_REPOSITORY"
+          --verify-tag
+          --generate-notes
+          --title "Gchat ${GITHUB_REF_NAME#v}"
+          --latest

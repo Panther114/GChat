@@ -21,6 +21,8 @@ const APP_USER_MODEL_ID = 'com.Gchat.app';
 const ERR_ABORTED = -3;
 const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 
+if (process.platform === 'win32') app.setAppUserModelId(APP_USER_MODEL_ID);
+
 let mainWindow = null;
 let tray = null;
 let isQuitting = false;
@@ -72,7 +74,6 @@ async function loadHostedApp() {
 }
 
 async function createWindow() {
-  app.setAppUserModelId(APP_USER_MODEL_ID);
   const icon = nativeImage.createFromPath(getIconPath());
   if (process.platform === 'darwin' && app.dock && !icon.isEmpty()) app.dock.setIcon(icon);
 
@@ -210,7 +211,7 @@ function setupAutoUpdater() {
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
   autoUpdater.on('update-downloaded', () => {
-    // The installer is intentionally non-interactive. Restart once the verified update is ready.
+    // Restart once the verified assisted installer update is ready.
     isQuitting = true;
     autoUpdater.quitAndInstall(true, true);
   });
