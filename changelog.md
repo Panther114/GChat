@@ -6,6 +6,10 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ## v1.3.0
 
+- Reworked Gchat Desktop into a direct, persistent Electron wrapper for the hosted production web app: no first-run wizard, shared hosted feature set, and fast return to the saved authenticated session.
+- Replaced the interactive installer/portable pair with a lightweight one-click per-user NSIS installer that launches Gchat when installation completes.
+- Reduced desktop package surface by removing the onboarding UI and `electron-store`; production installers now build into the tracked `release/` folder with maximum compression and updater metadata.
+
 - Added an isolated web-debug environment on port `4400` with a `root/root` local account and encrypted offline chat fixtures.
 - Started the `Increment-A` web-optimization cycle and bumped the application version to **1.3.0**.
 - Added server-blind encryption v2 with IndexedDB key storage, HKDF-separated keys, authenticated metadata, secure invite fragments, HMAC join codes, and blind indexes.
