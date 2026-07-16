@@ -62,11 +62,21 @@ function showPanel(panelId) {
 }
 
 
+const SECURE_INVITE_SESSION_KEY = 'gchat:pending-secure-invite';
+if (/^#invite=/.test(window.location.hash)) {
+  sessionStorage.setItem(SECURE_INVITE_SESSION_KEY, window.location.hash);
+}
+
+function chatRedirectUrl() {
+  const inviteFragment = sessionStorage.getItem(SECURE_INVITE_SESSION_KEY) || window.location.hash;
+  return `chat.html${inviteFragment}`;
+}
+
 async function redirectIfAuthenticated() {
   try {
     const res = await fetch('/api/auth/me', { cache: 'no-store' });
     if (res.ok) {
-      window.location.replace('chat.html');
+      window.location.replace(chatRedirectUrl());
     }
   } catch {
     // Stay on the login page when the session check fails.
@@ -122,7 +132,7 @@ document.getElementById('signin-form').addEventListener('submit', async (e) => {
       errorEl.textContent = data.error || 'Sign in failed';
     } else {
       persistUserWallpaperSettings(data);
-      window.location.href = 'chat.html';
+      window.location.href = chatRedirectUrl();
     }
   } catch {
     errorEl.textContent = 'Network error. Please try again.';
@@ -163,7 +173,7 @@ document.getElementById('signup-form').addEventListener('submit', async (e) => {
       errorEl.textContent = data.error || 'Registration failed';
     } else {
       persistUserWallpaperSettings(data);
-      window.location.href = 'chat.html';
+      window.location.href = chatRedirectUrl();
     }
   } catch {
     errorEl.textContent = 'Network error. Please try again.';

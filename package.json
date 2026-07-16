@@ -1,10 +1,19 @@
 {
   "name": "Gchat",
-  "version": "1.2.5",
+  "version": "1.3.0",
   "description": "End-to-end encrypted group chat app",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "dev:web": "cross-env NODE_ENV=development GCHAT_LOCAL_DEBUG=1 PORT=4400 DB_PATH=.gchat-local/Gchat.db node scripts/dev-web.js",
+    "build:web": "node scripts/build-web.js",
+    "lint": "eslint server.js src/server scripts test",
+    "test": "node --test test/security.test.js test/web-crypto.test.js test/integration.test.js",
+    "test:unit": "node --test test/security.test.js test/web-crypto.test.js",
+    "test:integration": "node --test test/integration.test.js",
+    "test:e2e": "playwright test",
+    "verify": "npm run lint && npm run build:web && npm test",
+    "migrate:increment-a": "node scripts/migrate-increment-a.js",
     "electron": "electron electron/main.js",
     "electron:dev": "cross-env NODE_ENV=development electron electron/main.js",
     "prebuild:win": "node scripts/ensure-electron-builder.js",
@@ -18,21 +27,24 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "bcrypt": "^5.1.1",
-    "better-sqlite3": "^12.8.0",
-    "connect-sqlite3": "^0.9.13",
+    "bcrypt": "^6.0.0",
+    "better-sqlite3": "12.8.0",
     "electron-store": "^10.0.0",
     "electron-updater": "^6.3.0",
-    "express": "^4.18.2",
+    "express": "^4.22.2",
     "express-session": "^1.17.3",
-    "socket.io": "^4.7.2",
-    "uuid": "^9.0.0",
+    "socket.io": "^4.8.3",
     "web-push": "^3.6.7"
   },
   "devDependencies": {
+    "@playwright/test": "^1.55.0",
     "cross-env": "^7.0.3",
+    "esbuild": "^0.25.0",
+    "eslint": "^9.0.0",
     "electron": "^41.0.0",
-    "electron-builder": "^25.0.0"
+    "electron-builder": "^25.0.0",
+    "socket.io-client": "^4.8.3",
+    "supertest": "^7.1.4"
   },
   "build": {
     "appId": "com.Gchat.app",

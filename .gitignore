@@ -3,6 +3,14 @@ node_modules/
 *.db-shm
 *.db-wal
 .env
+.gchat-local/
+public/*.map
+test-results/
+playwright-report/
+output/
+AGENTS.md
+quickrun.bat
+scripts/ui-screenshot.js
 
 # Electron build output
 dist/

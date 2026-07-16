@@ -1,0 +1,222 @@
+/* GChat — SpaceX-inspired monochrome product tokens
+   Black / white, high contrast, dense chat UI.
+   Brand display: Botanical. Product UI: Roca Regular. */
+
+:root {
+  /* Type */
+  --font-brand: 'Botanical', 'Roca Regular', system-ui, sans-serif;
+  --font-ui: 'Roca Regular', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  --type-xs: 11px;
+  --type-sm: 12px;
+  --type-md: 13px;
+  --type-base: 13px;
+  --type-lg: 14px;
+  --type-xl: 16px;
+  --type-msg: 13px;
+  --type-msg-lh: 1.375;
+  --type-label: 11px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-pill: 999px;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-tech: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-fast: 140ms;
+  --dur-med: 220ms;
+  --dur-theme: 320ms;
+  --motion-all: background-color var(--dur-med) var(--ease-tech),
+    color var(--dur-med) var(--ease-tech),
+    border-color var(--dur-med) var(--ease-tech),
+    box-shadow var(--dur-med) var(--ease-tech),
+    opacity var(--dur-fast) var(--ease-tech),
+    transform var(--dur-fast) var(--ease-tech),
+    filter var(--dur-fast) var(--ease-tech);
+
+  --z-base: 1;
+  --z-sticky: 20;
+  --z-dropdown: 40;
+  --z-modal: 100;
+  --z-toast: 200;
+}
+
+/* ── Dark (default): SpaceX night ─────────────────────────────────── */
+:root,
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --sx-void: #000000;
+  --sx-ink: #0a0a0a;
+  --sx-panel: #111111;
+  --sx-elevated: #161616;
+  --sx-hover: rgba(255, 255, 255, 0.06);
+  --sx-active: rgba(255, 255, 255, 0.1);
+  --sx-selected: rgba(255, 255, 255, 0.12);
+  --sx-input: #1a1a1a;
+  --sx-border: rgba(255, 255, 255, 0.16);
+  --sx-border-strong: rgba(255, 255, 255, 0.28);
+  --sx-text: #f5f5f5;
+  --sx-text-secondary: #a3a3a3;
+  --sx-text-muted: #737373;
+  --sx-text-faint: #525252;
+  --sx-inverse: #000000;
+  --sx-on-inverse: #ffffff;
+  --sx-accent: #ffffff;
+  --sx-accent-hover: #e5e5e5;
+  --sx-danger: #ef4444;
+  --sx-success: #22c55e;
+  --sx-warning: #f59e0b;
+  --sx-link: #93c5fd;
+  --sx-whisper: #a78bfa;
+  --sx-focus: rgba(255, 255, 255, 0.55);
+  --sx-scrim: rgba(0, 0, 0, 0.72);
+
+  --chat-canvas: var(--sx-ink);
+  --chat-surface: var(--sx-panel);
+  --chat-surface-deep: var(--sx-void);
+  --chat-elevated: var(--sx-elevated);
+  --chat-hover: var(--sx-hover);
+  --chat-active: var(--sx-active);
+  --chat-selected: var(--sx-selected);
+  --chat-input: var(--sx-input);
+  --chat-floating: var(--sx-elevated);
+  --chat-text: var(--sx-text);
+  --chat-text-strong: #ffffff;
+  --chat-muted: var(--sx-text-secondary);
+  --chat-faint: var(--sx-text-muted);
+  --chat-header: #ffffff;
+  --chat-header-secondary: var(--sx-text-secondary);
+  --chat-border: var(--sx-border);
+  --chat-border-strong: var(--sx-border-strong);
+  --chat-accent: var(--sx-accent);
+  --chat-accent-hover: var(--sx-accent-hover);
+  --chat-on-accent: var(--sx-inverse);
+  --chat-link: var(--sx-link);
+  --chat-danger: var(--sx-danger);
+  --chat-success: var(--sx-success);
+  --chat-warning: var(--sx-warning);
+  --chat-focus: var(--sx-focus);
+  --chat-scrim: var(--sx-scrim);
+
+  /* Bridge legacy vars */
+  --bg: var(--chat-surface-deep);
+  --sidebar-bg: var(--chat-surface);
+  --chat-bg: var(--chat-canvas);
+  --panel-bg: var(--chat-surface);
+  --text-primary: var(--chat-text-strong);
+  --text-secondary: var(--chat-muted);
+  --text-muted: var(--chat-faint);
+  --accent: var(--chat-accent);
+  --accent1: var(--chat-accent);
+  --accent2: var(--chat-success);
+  --red: var(--chat-danger);
+  --orange: var(--chat-warning);
+  --system-color: var(--chat-muted);
+  --bubble-text: var(--chat-text);
+  --bubble-meta: var(--chat-muted);
+  --bubble-own: transparent;
+  --bubble-other: transparent;
+  --bubble-other-border: transparent;
+  --whisper-bg: rgba(167, 139, 250, 0.1);
+  --whisper-bg-light: rgba(167, 139, 250, 0.1);
+  --whisper-border: var(--sx-whisper);
+  --disappearing-border: var(--chat-danger);
+  --disappearing-glow: rgba(239, 68, 68, 0.2);
+  --glass-panel: var(--chat-canvas);
+  --glass-panel-strong: var(--chat-surface);
+  --glass-border: var(--chat-border);
+  --glass-shadow: none;
+  --brand-gradient-start: #ffffff;
+  --brand-gradient-end: #a3a3a3;
+  --input-radius: var(--radius-md);
+  --radius: var(--radius-md);
+  --font-system: var(--font-ui);
+
+  --chat-wallpaper: none;
+  --auth-wallpaper: none;
+  --wallpaper-blur: 0px;
+  --wallpaper-overlay-opacity: 0;
+
+  --discord-scrollbar-thumb: #2a2a2a;
+}
+
+/* ── Light: SpaceX day ────────────────────────────────────────────── */
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --sx-void: #f0f0f0;
+  --sx-ink: #ffffff;
+  --sx-panel: #f5f5f5;
+  --sx-elevated: #ffffff;
+  --sx-hover: rgba(0, 0, 0, 0.04);
+  --sx-active: rgba(0, 0, 0, 0.07);
+  --sx-selected: rgba(0, 0, 0, 0.09);
+  --sx-input: #ebebeb;
+  --sx-border: rgba(0, 0, 0, 0.16);
+  --sx-border-strong: rgba(0, 0, 0, 0.28);
+  --sx-text: #171717;
+  --sx-text-secondary: #525252;
+  --sx-text-muted: #737373;
+  --sx-text-faint: #a3a3a3;
+  --sx-inverse: #ffffff;
+  --sx-on-inverse: #000000;
+  --sx-accent: #0a0a0a;
+  --sx-accent-hover: #262626;
+  --sx-danger: #dc2626;
+  --sx-success: #16a34a;
+  --sx-warning: #d97706;
+  --sx-link: #1d4ed8;
+  --sx-whisper: #7c3aed;
+  --sx-focus: rgba(0, 0, 0, 0.45);
+  --sx-scrim: rgba(0, 0, 0, 0.45);
+
+  --chat-canvas: var(--sx-ink);
+  --chat-surface: var(--sx-panel);
+  --chat-surface-deep: var(--sx-void);
+  --chat-elevated: var(--sx-elevated);
+  --chat-hover: var(--sx-hover);
+  --chat-active: var(--sx-active);
+  --chat-selected: var(--sx-selected);
+  --chat-input: var(--sx-input);
+  --chat-floating: var(--sx-elevated);
+  --chat-text: var(--sx-text);
+  --chat-text-strong: #0a0a0a;
+  --chat-muted: var(--sx-text-secondary);
+  --chat-faint: var(--sx-text-muted);
+  --chat-header: #0a0a0a;
+  --chat-header-secondary: var(--sx-text-secondary);
+  --chat-border: var(--sx-border);
+  --chat-border-strong: var(--sx-border-strong);
+  --chat-accent: var(--sx-accent);
+  --chat-accent-hover: var(--sx-accent-hover);
+  --chat-on-accent: var(--sx-inverse);
+  --chat-link: var(--sx-link);
+  --chat-danger: var(--sx-danger);
+  --chat-success: var(--sx-success);
+  --chat-warning: var(--sx-warning);
+  --chat-focus: var(--sx-focus);
+  --chat-scrim: var(--sx-scrim);
+
+  --bg: var(--chat-surface-deep);
+  --sidebar-bg: var(--chat-surface);
+  --chat-bg: var(--chat-canvas);
+  --panel-bg: var(--chat-surface);
+  --text-primary: var(--chat-text-strong);
+  --text-secondary: var(--chat-muted);
+  --text-muted: var(--chat-faint);
+  --accent: var(--chat-accent);
+  --accent1: var(--chat-accent);
+  --accent2: var(--chat-success);
+  --brand-gradient-start: #0a0a0a;
+  --brand-gradient-end: #525252;
+  --discord-scrollbar-thumb: #c4c4c4;
+}

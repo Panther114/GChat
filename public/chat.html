@@ -5,23 +5,23 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="description" content="Encrypted group messaging" />
   <meta name="application-name" content="GChat" />
-  <meta name="theme-color" content="#0a0a0f" />
+  <meta name="theme-color" content="#1e1f22" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="GChat" />
   <link rel="manifest" href="/manifest.json?v=20260512-v125" />
-  <link rel="icon" href="/gchat_icon.png?v=20260512-v125" type="image/png" />
-  <link rel="apple-touch-icon" href="/gchat_icon.png?v=20260512-v125" type="image/png" sizes="1254x1254" />
+  <link rel="icon" href="/gchat_icon.png?v=20260715-v1" type="image/png" />
+  <link rel="apple-touch-icon" href="/gchat_icon.png?v=20260715-v1" type="image/png" sizes="1254x1254" />
   <title>GChat </title>
-  <script src="theme-init.js?v=20260512-v124"></script>
-  <link rel="stylesheet" href="style.css?v=20260512-v124" />
+  <script src="theme-init.js?v=1.3.0-release1"></script>
+  <link rel="stylesheet" href="style.css?v=1.3.0-release1" />
 </head>
 <body class="chat-body">
 
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-brand">
-      <img class="brand-icon" src="/gchat_icon.png?v=20260512-v125" alt="GChat logo" />
+      <img class="brand-icon" src="/gchat_icon.png?v=20260715-v1" alt="GChat logo" />
       <span class="brand-name">GChat</span>
       <button class="btn-icon brand-cache-btn" id="clear-cache-btn" title="Clear cache and restart" aria-label="Clear cache and restart" data-icon="refresh-cw" data-icon-only="true"></button>
       <span class="brand-version" id="app-version-label">v—</span>
@@ -33,8 +33,8 @@
       <button class="btn-icon conn-diagnostics-btn" id="open-diagnostics-btn" title="Connection diagnostics" aria-label="Connection diagnostics" data-icon="activity" data-icon-only="true"></button>
     </div>
     <div class="mobile-sidebar-actions-menu" id="mobile-sidebar-actions-menu" hidden>
-      <button class="btn-action mobile-sidebar-action" id="mobile-new-group-btn" data-icon="plus">New Group</button>
-      <button class="btn-action mobile-sidebar-action" id="mobile-join-group-btn" data-icon="log-in">Join Group</button>
+      <button class="btn-action mobile-sidebar-action" id="mobile-new-group-btn" data-icon="plus">New</button>
+      <button class="btn-action mobile-sidebar-action" id="mobile-join-group-btn" data-icon="log-in">Join</button>
       <button class="btn-action mobile-sidebar-action" id="mobile-user-list-btn" data-icon="users">User List</button>
       <button class="btn-action mobile-sidebar-action" id="mobile-diagnostics-btn" data-icon="activity">Diagnostics</button>
     </div>
@@ -42,14 +42,14 @@
       <div class="empty-groups" id="empty-groups">No groups yet.<br>Create or join one below!</div>
     </nav>
     <div class="sidebar-actions">
-      <button class="btn-action" id="new-group-btn" data-icon="plus">New Group</button>
-      <button class="btn-action" id="join-group-btn" data-icon="log-in">Join Group</button>
+      <button class="btn-action" id="new-group-btn" data-icon="plus">New</button>
+      <button class="btn-action" id="join-group-btn" data-icon="log-in">Join</button>
     </div>
       <div class="sidebar-user" id="sidebar-user-btn">
         <div class="avatar" id="user-avatar" style="background:#4A90D9"></div>
         <span class="sidebar-username" id="user-username">Loading…</span>
-        <button class="btn-icon sidebar-user-list-btn" id="sidebar-user-list-btn" title="User list" aria-label="User list" data-icon="users" data-icon-only="true"></button>
-        <button class="btn-icon wallpaper-btn" id="wallpaper-btn" title="Chat wallpaper" aria-label="Chat wallpaper" data-icon="image" data-icon-only="true"></button>
+        <button class="btn-icon theme-toggle-btn" id="theme-toggle-btn" type="button" title="Switch to light mode" aria-label="Switch to light mode" data-icon="sun" data-icon-only="true" data-theme-state="dark"></button>
+        <button class="btn-icon wallpaper-btn" id="wallpaper-btn" title="Chat wallpaper" aria-label="Chat wallpaper" data-icon="image" data-icon-only="true" hidden></button>
         <button class="btn-icon logout-btn" id="logout-btn" title="Logout" aria-label="Logout" data-icon="log-out" data-icon-only="true"></button>
       </div>
   </aside>
@@ -59,7 +59,7 @@
     <div class="chat-empty" id="chat-empty">
       <button class="btn-icon sidebar-toggle mobile-only-toggle" id="sidebar-toggle-empty" title="Menu" aria-label="Menu" data-icon="menu" data-icon-only="true"></button>
       <button class="btn-icon right-panel-toggle mobile-only-toggle" id="right-panel-toggle-empty" title="Group details" aria-label="Group details" data-icon="panel-right" data-icon-only="true"></button>
-       <img class="chat-empty-icon" src="/gchat_icon.png?v=20260512-v125" alt="GChat logo" />
+       <img class="chat-empty-icon" src="/gchat_icon.png?v=20260715-v1" alt="GChat logo" />
       <p class="chat-empty-title">Select a group to start chatting</p>
       <p class="chat-empty-sub">Your messages are end-to-end encrypted</p>
     </div>
@@ -119,7 +119,7 @@
           <div class="message-token-strip" id="message-token-strip" hidden></div>
           <textarea
             id="message-input"
-            placeholder="Type a message…"
+            placeholder="Message…"
             autocomplete="off"
             rows="1"
           ></textarea>
@@ -128,11 +128,7 @@
               <span class="slash-command-name">Whisper</span>
               <span class="slash-command-hint">/w username</span>
             </button>
-            <button class="slash-command-item" type="button" data-command="/# ">
-              <span class="slash-command-name">Hashtag</span>
-              <span class="slash-command-hint">/# topic</span>
-            </button>
-            <button class="slash-command-item" type="button" data-command="/ai " id="slash-command-ai-item">
+            <button class="slash-command-item" type="button" data-command="/ai " id="slash-command-ai-item" hidden>
               <span class="slash-command-name">Ask AI</span>
               <span class="slash-command-hint">/ai opens Ask AI</span>
             </button>
@@ -163,73 +159,101 @@
       </div>
     </div>
     <div class="right-panel-inner" id="right-panel-content" hidden>
-      <div class="panel-section panel-section-identity">
-        <div class="panel-section-label">Group</div>
+      <section class="panel-section panel-section-identity">
         <div class="right-panel-group-name-row">
-          <input type="text" class="right-panel-title-input" id="edit-group-name-input" value="Group" />
+          <input type="text" class="right-panel-title-input" id="edit-group-name-input" value="Group" title="Group name" aria-label="Group name" />
+          <button class="btn-icon btn-group-color" id="set-group-color-btn" type="button" title="Set group color" aria-label="Set group color" data-icon="palette" data-icon-only="true"></button>
         </div>
-        <button class="btn-action-sm btn-group-color" id="set-group-color-btn" data-icon="palette">Set Group Color</button>
         <div class="right-panel-code">
-          <span>Code: </span><strong id="right-group-code">—</strong>
-          <button class="btn-copy" id="copy-code-btn" title="Copy code" aria-label="Copy code" data-icon="copy" data-icon-only="true"></button>
+          <div class="right-panel-code-copy">
+            <span class="right-panel-code-label">Invite</span>
+            <strong id="right-group-code">Copy link</strong>
+          </div>
+          <button class="btn-icon btn-copy" id="copy-code-btn" type="button" title="Copy secure invite" aria-label="Copy secure invite" data-icon="copy" data-icon-only="true"></button>
         </div>
-      </div>
-      <div class="panel-section">
+      </section>
+
+      <section class="panel-section panel-section-search">
         <div class="panel-section-label">Search</div>
         <div class="search-bar">
           <span class="search-icon" data-icon="search" data-icon-only="true" aria-hidden="true"></span>
           <input type="text" id="search-input" placeholder="Search messages" />
-          <button class="btn-clear-search" id="clear-search-btn" aria-label="Clear search" data-icon="x" data-icon-only="true"></button>
-          <span class="search-results-count" id="search-results-count"></span>
+          <button class="btn-icon btn-clear-search" id="clear-search-btn" type="button" aria-label="Clear search" data-icon="x" data-icon-only="true"></button>
         </div>
-      </div>
-      <div class="panel-section">
+        <span class="search-results-count" id="search-results-count"></span>
+      </section>
+
+      <section class="panel-section panel-section-members">
         <div class="panel-section-label">Members</div>
         <ul class="members-list" id="members-list"></ul>
-      </div>
-      <div class="panel-section right-panel-owner-actions" id="owner-actions" hidden>
-        <div class="panel-section-label">Owner controls</div>
-        <label class="toggle-label toggle-switch-row" for="allow-member-clear-toggle">
-          <span>Members can clear</span>
-          <input type="checkbox" id="allow-member-clear-toggle" />
-          <span class="toggle-switch-ui" aria-hidden="true"></span>
-        </label>
-        <label class="toggle-label toggle-switch-row" for="allow-member-clear-tag-toggle">
-          <span>Members can clear #</span>
-          <input type="checkbox" id="allow-member-clear-tag-toggle" />
-          <span class="toggle-switch-ui" aria-hidden="true"></span>
-        </label>
-        <label class="toggle-label toggle-switch-row" for="allow-member-export-toggle">
-          <span>Members can export</span>
-          <input type="checkbox" id="allow-member-export-toggle" />
-          <span class="toggle-switch-ui" aria-hidden="true"></span>
-        </label>
-        <label class="toggle-label toggle-switch-row" for="allow-member-kick-toggle">
-          <span>Members can kick</span>
-          <input type="checkbox" id="allow-member-kick-toggle" />
-          <span class="toggle-switch-ui" aria-hidden="true"></span>
-        </label>
-        <label class="toggle-label toggle-switch-row" for="ai-mode-toggle">
-          <span>AI mode</span>
-          <input type="checkbox" id="ai-mode-toggle" />
-          <span class="toggle-switch-ui" aria-hidden="true"></span>
-        </label>
-      </div>
-      <div class="panel-section right-panel-common-actions" id="common-actions" hidden>
-        <div class="panel-section-label">Quick actions</div>
-        <div class="quick-actions-row">
-          <button class="btn-quick-action btn-export" id="export-btn" title="Export chat as TXT" aria-label="Export chat as TXT" data-icon="download" data-icon-only="true"></button>
-          <button class="btn-quick-action btn-clear-history" id="clear-history-btn" title="Clear chat history" aria-label="Clear chat history" data-icon="trash-2" data-icon-only="true"></button>
-          <button class="btn-quick-action btn-leave" id="leave-group-btn" title="Exit group" aria-label="Exit group" data-icon="door-open" data-icon-only="true"></button>
-          <button class="btn-quick-action btn-disband" id="disband-btn" title="Disband group" aria-label="Disband group" data-icon="alert-triangle" data-icon-only="true"></button>
+      </section>
+
+      <section class="panel-section right-panel-owner-actions" id="owner-actions" hidden>
+        <div class="panel-section-label">Permissions</div>
+        <div class="owner-toggles">
+          <label class="toggle-label toggle-switch-row" for="allow-member-clear-toggle">
+            <span>Clear history</span>
+            <input type="checkbox" id="allow-member-clear-toggle" />
+            <span class="toggle-switch-ui" aria-hidden="true"></span>
+          </label>
+          <label class="toggle-label toggle-switch-row" for="allow-member-clear-tag-toggle">
+            <span>Clear channels</span>
+            <input type="checkbox" id="allow-member-clear-tag-toggle" />
+            <span class="toggle-switch-ui" aria-hidden="true"></span>
+          </label>
+          <label class="toggle-label toggle-switch-row" for="allow-member-export-toggle">
+            <span>Export chat</span>
+            <input type="checkbox" id="allow-member-export-toggle" />
+            <span class="toggle-switch-ui" aria-hidden="true"></span>
+          </label>
+          <label class="toggle-label toggle-switch-row" for="allow-member-kick-toggle">
+            <span>Kick members</span>
+            <input type="checkbox" id="allow-member-kick-toggle" />
+            <span class="toggle-switch-ui" aria-hidden="true"></span>
+          </label>
+          <label class="toggle-label toggle-switch-row" for="ai-mode-toggle" hidden style="display:none!important">
+            <span>AI mode</span>
+            <input type="checkbox" id="ai-mode-toggle" />
+            <span class="toggle-switch-ui" aria-hidden="true"></span>
+          </label>
         </div>
-      </div>
+      </section>
+
+      <section class="panel-section right-panel-common-actions" id="common-actions" hidden>
+        <div class="panel-section-label">Actions</div>
+        <div class="quick-actions-row">
+          <button class="btn-quick-action btn-export" id="export-btn" type="button" title="Export chat as TXT" aria-label="Export chat as TXT" data-icon="download" data-icon-only="true"></button>
+          <button class="btn-quick-action btn-clear-history" id="clear-history-btn" type="button" title="Clear chat history" aria-label="Clear chat history" data-icon="trash-2" data-icon-only="true"></button>
+          <button class="btn-quick-action btn-leave" id="leave-group-btn" type="button" title="Exit group" aria-label="Exit group" data-icon="door-open" data-icon-only="true"></button>
+          <button class="btn-quick-action btn-disband" id="disband-btn" type="button" title="Disband group" aria-label="Disband group" data-icon="alert-triangle" data-icon-only="true"></button>
+        </div>
+      </section>
     </div>
     <div class="right-panel-empty" id="right-panel-empty">
       <p>Select a group to see details</p>
     </div>
   </aside>
 
+
+  <div class="modal-overlay" id="channel-modal" hidden>
+    <div class="modal modal-channel">
+      <h2>Create channel</h2>
+      <p class="modal-help">Channels are separate chats inside this group. Max 12 characters.</p>
+      <div class="form-group">
+        <label for="channel-name-input">Channel name</label>
+        <div class="channel-name-field">
+          <span class="channel-name-prefix" aria-hidden="true">#</span>
+          <input type="text" id="channel-name-input" maxlength="12" autocomplete="off" spellcheck="false" placeholder="general" />
+        </div>
+        <small class="form-hint">Letters, numbers, underscore, hyphen only</small>
+      </div>
+      <p class="form-error" id="channel-error"></p>
+      <div class="modal-actions">
+        <button class="btn-secondary" id="channel-cancel-btn" type="button">Cancel</button>
+        <button class="btn-primary" id="channel-confirm-btn" type="button">Create</button>
+      </div>
+    </div>
+  </div>
 
   <div class="modal-overlay" id="create-modal" hidden>
     <div class="modal">
@@ -255,7 +279,7 @@
       <h2>Join a Group</h2>
       <div class="form-group">
         <label>Group Code</label>
-        <input type="text" id="join-group-code" placeholder="Enter the group code" />
+        <input type="text" id="join-group-code" placeholder="Paste a secure invite link" />
       </div>
       <p class="form-error" id="join-error"></p>
       <div class="modal-actions">
@@ -266,86 +290,96 @@
   </div>
 
   <div class="modal-overlay" id="profile-modal" hidden>
-    <div class="modal modal-page">
-      <div class="modal-title-row">
-        <h2 data-icon="user">Profile</h2>
+    <div class="modal modal-page profile-modal-card">
+      <header class="profile-modal-header">
+        <h2>Settings</h2>
         <button class="btn-icon profile-close-btn" id="profile-close-btn" title="Close" aria-label="Close" data-icon="x" data-icon-only="true"></button>
-      </div>
-      <div class="profile-sections">
-        <section class="profile-section">
-          <div class="profile-section-title">Account</div>
-          <div class="form-group">
-            <label>Change Username</label>
-            <input type="text" id="profile-username" placeholder="New username" />
-            <button class="btn-primary btn-sm" id="profile-save-username">Save</button>
+      </header>
+
+      <div class="profile-body">
+        <div class="profile-row">
+          <div class="profile-row-label">Username</div>
+          <div class="profile-row-main">
+            <span class="field-shell profile-field-shell">
+              <input type="text" id="profile-username" placeholder="Username" autocomplete="username" />
+            </span>
+            <button class="btn-primary btn-sm" id="profile-save-username" type="button">Save</button>
           </div>
-        </section>
-        <section class="profile-section">
-          <div class="profile-section-title">Notifications</div>
-          <div class="profile-push-card" id="profile-push-card">
-            <div class="profile-push-header">
-              <div>
-                <div class="profile-push-title">Notifications</div>
-                <div class="profile-push-status" id="push-status-text">Checking support…</div>
+        </div>
+
+        <div class="profile-row profile-row-avatar">
+          <div class="profile-row-label">Avatar</div>
+          <div class="profile-row-main profile-avatar-stack">
+            <div class="profile-mode-tabs" role="tablist" aria-label="Avatar mode">
+              <button type="button" class="profile-mode-chip active" id="profile-mode-color-label" role="tab" aria-selected="true" aria-controls="profile-picture-color-section">Color</button>
+              <button type="button" class="profile-mode-chip" id="profile-mode-image-label" role="tab" aria-selected="false" aria-controls="profile-picture-upload-section">Image</button>
+              <input type="range" id="profile-picture-mode-slider" min="0" max="1" step="1" value="0" hidden aria-hidden="true" tabindex="-1" />
+            </div>
+
+            <!-- Color mode only: no image controls -->
+            <div id="profile-picture-color-section" class="profile-mode-panel" role="tabpanel">
+              <span class="field-shell profile-color-shell">
+                <span class="profile-color-swatch" id="profile-color-swatch" aria-hidden="true"></span>
+                <input type="color" id="profile-color" value="#4A90D9" aria-label="Icon color" />
+                <span class="profile-color-value" id="profile-color-value">#4A90D9</span>
+              </span>
+              <button class="btn-primary btn-sm" id="profile-save-color" type="button">Save</button>
+            </div>
+
+            <!-- Image mode only: no color controls; preview only after a file is chosen -->
+            <div id="profile-picture-upload-section" class="profile-mode-panel" role="tabpanel" hidden>
+              <input type="file" id="profile-picture-input" accept="image/*" class="profile-file-input" />
+              <button type="button" class="btn-secondary btn-sm" id="profile-picture-pick-btn">Choose</button>
+              <span class="profile-file-name" id="profile-picture-file-name">Max 2MB</span>
+              <button class="btn-primary btn-sm" id="profile-save-picture" type="button">Save</button>
+              <button class="btn-secondary btn-sm" id="profile-remove-picture" type="button" hidden>Remove</button>
+              <div id="profile-picture-preview" class="profile-picture-preview" hidden>
+                <img id="profile-picture-preview-img" alt="Selected image preview" />
               </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="profile-row">
+          <div class="profile-row-label">Push</div>
+          <div class="profile-row-main profile-push-stack" id="profile-push-card">
+            <div class="profile-push-line">
+              <span class="profile-push-status" id="push-status-text">Checking…</span>
               <span class="profile-push-permission" id="push-permission-pill">Default</span>
             </div>
             <p class="profile-push-hint" id="push-platform-hint" hidden></p>
-            <div class="profile-push-meta" id="push-unread-meta">Unread badge sync is available when supported by your browser.</div>
+            <div class="profile-push-meta" id="push-unread-meta">Unread badge when supported</div>
             <div class="profile-push-actions">
-              <button class="btn-primary btn-sm" id="enable-push-btn" type="button">Enable notifications</button>
-              <button class="btn-secondary btn-sm" id="disable-push-btn" type="button" hidden>Disable notifications</button>
+              <button class="btn-primary btn-sm" id="enable-push-btn" type="button">Enable</button>
+              <button class="btn-secondary btn-sm" id="disable-push-btn" type="button" hidden>Disable</button>
+              <button class="btn-secondary btn-sm profile-diagnostics-btn" id="profile-diagnostics-btn" type="button" data-icon="activity">Diagnostics</button>
             </div>
           </div>
-          <button class="btn-secondary btn-sm profile-diagnostics-btn" id="profile-diagnostics-btn" type="button" data-icon="activity">Connection diagnostics</button>
-        </section>
-        <section class="profile-section">
-          <div class="profile-section-title">AI usage</div>
-          <div class="profile-ai-usage-card" id="profile-ai-usage-card">
+        </div>
+
+        <div class="profile-row" data-ai-feature hidden>
+          <div class="profile-row-label">AI</div>
+          <div class="profile-row-main profile-ai-stack" id="profile-ai-usage-card">
             <div class="profile-ai-usage-header">
-              <span>Daily AI usage</span>
-              <strong id="profile-ai-usage-value">0 / 0 tokens</strong>
+              <span>Daily tokens</span>
+              <strong id="profile-ai-usage-value">0 / 0</strong>
             </div>
             <div class="usage-bar-track">
               <div class="usage-bar-fill" id="profile-ai-usage-fill"></div>
             </div>
-            <div class="profile-ai-usage-note" id="profile-ai-usage-note">Resets at 4:00 AM Shanghai time</div>
+            <div class="profile-ai-usage-note" id="profile-ai-usage-note">Resets 4:00 AM Shanghai</div>
           </div>
-        </section>
-        <section class="profile-section">
-          <div class="profile-section-title">Appearance & profile picture</div>
-          <div class="form-group">
-            <label>Profile Picture</label>
-            <div class="profile-picture-mode">
-              <span class="profile-mode-label" id="profile-mode-color-label">Color</span>
-              <input type="range" id="profile-picture-mode-slider" min="0" max="1" step="1" value="0" />
-              <span class="profile-mode-label" id="profile-mode-image-label">Upload Image</span>
-            </div>
-            <div id="profile-picture-color-section">
-              <label>Icon Color</label>
-              <div class="color-pick-row">
-                <input type="color" id="profile-color" value="#4A90D9" />
-                <button class="btn-primary btn-sm" id="profile-save-color">Save</button>
-              </div>
-            </div>
-            <div id="profile-picture-upload-section" hidden>
-              <label>Upload Profile Picture (max 2MB)</label>
-              <input type="file" id="profile-picture-input" accept="image/*" />
-              <div id="profile-picture-preview" hidden>
-                <img id="profile-picture-preview-img" src="" alt="Preview" style="max-width: 100px; max-height: 100px; border-radius: 50%;" />
-              </div>
-              <div class="profile-picture-actions">
-                <button class="btn-primary btn-sm" id="profile-save-picture">Save Picture</button>
-                <button class="btn-secondary btn-sm" id="profile-remove-picture">Remove Picture</button>
-              </div>
-            </div>
-          </div>
-        </section>
+        </div>
+
         <p class="form-error" id="profile-error"></p>
-        <section class="profile-section profile-section-danger">
-          <div class="profile-section-title">Danger zone</div>
-          <button class="btn-danger" id="profile-delete-btn" data-icon="trash-2">Delete Account</button>
-        </section>
+
+        <div class="profile-row profile-row-danger">
+          <div class="profile-row-label profile-danger-title">Account</div>
+          <div class="profile-row-main profile-danger-main">
+            <span class="profile-danger-copy">Permanently delete</span>
+            <button class="btn-danger btn-sm" id="profile-delete-btn" type="button" data-icon="trash-2">Delete</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -363,6 +397,8 @@
 
   <div class="ctx-menu" id="ctx-menu" hidden>
     <button class="ctx-item" id="ctx-reply" data-icon="reply">Reply</button>
+    <button class="ctx-item" id="ctx-edit" data-icon="pencil">Edit</button>
+    <button class="ctx-item" id="ctx-delete" data-icon="trash-2">Delete</button>
     <button class="ctx-item" id="ctx-copy" data-icon="copy">Copy</button>
     <button class="ctx-item" id="ctx-download" data-icon="download">Download</button>
   </div>
@@ -545,7 +581,7 @@
   <div class="sidebar-overlay" id="sidebar-overlay" hidden></div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/pwa.js?v=20260512-v124"></script>
-  <script src="app.js?v=20260512-v124"></script>
+  <script src="/pwa.js?v=1.3.0-release1"></script>
+  <script src="app.js?v=1.3.0-release1"></script>
 </body>
 </html>
