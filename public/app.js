@@ -19,6 +19,9 @@
   function generateGroupSecret() {
     return bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32)));
   }
+  function generateInviteCode() {
+    return crypto.randomUUID().replaceAll("-", "");
+  }
   async function keyCommitment(secret) {
     const digest = await crypto.subtle.digest("SHA-256", base64UrlToBytes(secret));
     return bytesToBase64Url(new Uint8Array(digest));
@@ -290,37 +293,7 @@
     if (!normalizedGroupId) return null;
     return groupKeyVaultCache.get(normalizedGroupId)?.secret || null;
   }
-  async function backupGroupKeyEntry(entry) {
-    if (!entry?.groupId || !entry.secret) return false;
-    try {
-      const response = await fetch("/api/groups/keys", {
-        method: "POST",
-        headers: apiHeaders(),
-        body: JSON.stringify({ keys: [{
-          groupId: String(entry.groupId),
-          secret: entry.secret,
-          joinCode: entry.joinCode || null
-        }] })
-      });
-      return response.ok;
-    } catch {
-      return false;
-    }
-  }
   async function loadGroupKeyVaultEntries() {
-    const remoteEntries = /* @__PURE__ */ new Map();
-    try {
-      const response = await fetch("/api/groups/keys", { cache: "no-store" });
-      const payload = await response.json().catch(() => ({}));
-      if (response.ok && Array.isArray(payload.keys)) {
-        for (const entry of payload.keys) {
-          if (entry?.groupId && entry.secret) remoteEntries.set(String(entry.groupId), entry);
-        }
-      }
-    } catch {
-    }
-    const localEntries = /* @__PURE__ */ new Map();
-    const uploads = [];
     for (const group of groups) {
       let entry = null;
       try {
@@ -332,29 +305,8 @@
       }
       if (entry?.secret) {
         const normalizedEntry = { ...entry, groupId: String(group.id) };
-        localEntries.set(String(group.id), normalizedEntry);
         groupKeyVaultCache.set(String(group.id), normalizedEntry);
-        const remote = remoteEntries.get(String(group.id));
-        if (!remote || remote.secret !== normalizedEntry.secret || normalizedEntry.joinCode && remote.joinCode !== normalizedEntry.joinCode) {
-          uploads.push(normalizedEntry);
-        }
       }
-    }
-    if (uploads.length) {
-      const synced = await Promise.all(uploads.slice(0, 100).map(backupGroupKeyEntry));
-      if (synced.some((value) => !value)) console.warn("Some group key backups could not be synced");
-    }
-    for (const group of groups) {
-      const groupId = String(group.id);
-      if (localEntries.has(groupId)) continue;
-      const remote = remoteEntries.get(groupId);
-      if (!remote?.secret) continue;
-      const entry = { groupId, secret: remote.secret, joinCode: remote.joinCode || null };
-      try {
-        await keyVault.put(entry);
-      } catch {
-      }
-      groupKeyVaultCache.set(groupId, entry);
     }
   }
   function v2Aad(msg, revision = msg.revision || 1) {
@@ -7003,19 +6955,18 @@
     });
     $("new-group-btn").addEventListener("click", () => {
       $("create-group-name").value = "";
-      $("create-group-code").value = "";
       $("create-error").textContent = "";
       $("create-modal").hidden = false;
     });
     $("create-cancel-btn").addEventListener("click", () => $("create-modal").hidden = true);
     $("create-confirm-btn").addEventListener("click", async () => {
       const name = $("create-group-name").value.trim();
-      const code = $("create-group-code").value.trim();
       $("create-error").textContent = "";
-      if (!name || !code) {
-        $("create-error").textContent = "Both fields are required";
+      if (!name) {
+        $("create-error").textContent = "Group name is required";
         return;
       }
+      const code = generateInviteCode();
       const secret = generateGroupSecret();
       const keyCommitment2 = await keyCommitment(secret);
       const res = await fetch("/api/groups/create", {
@@ -7031,7 +6982,6 @@
       const vaultEntry = { groupId: d.id, secret, joinCode: code };
       await keyVault.put(vaultEntry);
       groupKeyVaultCache.set(String(d.id), vaultEntry);
-      void backupGroupKeyEntry(vaultEntry);
       $("create-modal").hidden = true;
       groups.unshift(d);
       unreadCounts[d.id] = Math.max(0, Number(d.unreadCount) || 0);
@@ -7099,7 +7049,6 @@
       const vaultEntry = { groupId: d.id, secret: invite.secret, joinCode: code };
       await keyVault.put(vaultEntry);
       groupKeyVaultCache.set(String(d.id), vaultEntry);
-      void backupGroupKeyEntry(vaultEntry);
       pendingSecureInvite = null;
       sessionStorage.removeItem(SECURE_INVITE_SESSION_KEY);
       $("join-modal").hidden = true;

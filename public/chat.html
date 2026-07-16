@@ -258,10 +258,7 @@
         <label>Group Name</label>
         <input type="text" id="create-group-name" placeholder="e.g. Friends, Work, etc." />
       </div>
-      <div class="form-group">
-        <label>Group Code <small>(share to invite others)</small></label>
-        <input type="text" id="create-group-code" placeholder="e.g. secret-crew-2024" />
-      </div>
+      <p class="form-hint">A secure invitation link will be generated and copied after creation.</p>
       <p class="form-error" id="create-error"></p>
       <div class="modal-actions">
         <button class="btn-secondary" id="create-cancel-btn">Cancel</button>
@@ -274,8 +271,8 @@
     <div class="modal">
       <h2>Join a Group</h2>
       <div class="form-group">
-        <label>Group Code</label>
-        <input type="text" id="join-group-code" placeholder="Paste a secure invite link" />
+        <label>Invitation Link</label>
+        <input type="text" id="join-group-code" placeholder="Paste a secure invitation link" autocomplete="off" />
       </div>
       <p class="form-error" id="join-error"></p>
       <div class="modal-actions">

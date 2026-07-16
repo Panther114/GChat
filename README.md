@@ -102,13 +102,13 @@ Most product updates are delivered through the hosted web app. Native desktop up
 
 Gchat encrypts message content in the client before it is sent to the server.
 
-1. The browser generates a random 256-bit group secret and stores it in IndexedDB. An authenticated member can restore that existing key on another signed-in device from an encrypted-at-rest recovery copy, so switching between the desktop shell and web app does not hide message content.
+1. The browser generates a random 256-bit group secret and stores it in IndexedDB. A new device receives that key only through a secure invitation link.
 2. Secure invite URL fragments carry the join code and secret; fragments are removed immediately, kept only in same-tab session storage across authentication, and never reach the server.
 3. HKDF derives separate content, metadata, tag-index, and spam-signature keys.
 4. AES-256-GCM binds content and encrypted metadata to the group, client message ID, sender, type, key version, and revision.
-5. The server stores an HMAC of the join code, a key commitment, ciphertext, encrypted metadata, keyed blind indexes, and an encrypted-at-rest recovery copy of a member-supplied group key. The recovery copy is only returned to authenticated group members.
+5. The server stores an HMAC of the join code, a key commitment, ciphertext, encrypted metadata, and keyed blind indexes. It never stores a group-key recovery copy.
 
-The server does not receive plaintext message content. The recovery copy is a device-continuity trade-off: it keeps the message ciphertext client-encrypted at rest, but a server operator with database and server-secret access could recover a group key.
+The server does not receive plaintext message content or the group secret. Losing the secure invitation link means a new device cannot decrypt that group's existing history.
 
 Important limitations:
 
@@ -126,7 +126,7 @@ Important limitations:
 |---|---:|---|
 | `SESSION_SECRET` | Yes | Secret used to sign session cookies. Use a long random value in production. |
 | `PORT` | No | Server port. Railway provides this automatically. |
-| `DB_PATH` | Recommended | SQLite database path. Use `/data/gaychat.db` with a Railway volume for persistence. |
+| `DB_PATH` | Recommended | SQLite database path. Use `/data/gchat.db` with a Railway volume for persistence. |
 | `GROUP_CODE_PEPPER` | Recommended | At least 32 characters; used to HMAC normalized join codes. Falls back to the stable `SESSION_SECRET` during the v1.3.0 cutover. |
 | `AI_ENABLED` | No | Reserved for a later release. v1.3.0 keeps AI disabled in code even if this variable is set. |
 | `GCHAT_LOCAL_DEBUG` | No | Set to `1` only for the local `root/root` fixtures. |
@@ -142,13 +142,15 @@ Production load is bounded to 100 groups per user, 250 members per group, 100 me
 
 ### Increment A production cutover
 
-Before deploying v1.3.0, mount the persistent Railway volume at `/data`, set `DB_PATH=/data/gaychat.db`, set a stable 32+ character `GROUP_CODE_PEPPER`, and leave `AI_ENABLED` unset or `0`. Back up the database, then run the explicit chat-only reset once:
+Before deploying v1.3.0, mount the persistent Railway volume at `/data`, set `DB_PATH=/data/gchat.db`, set a stable 32+ character `GROUP_CODE_PEPPER`, and leave `AI_ENABLED` unset or `0`. Back up the database, then run the explicit chat-only reset once:
 
 ```bash
-CONFIRM_RESET=RESET_ALL_GCHAT_CHATS_FOR_INCREMENT_A DB_PATH=/data/gaychat.db npm run migrate:increment-a
+CONFIRM_RESET=RESET_ALL_GCHAT_CHATS_FOR_INCREMENT_A DB_PATH=/data/gchat.db npm run migrate:increment-a
 ```
 
-The reset is transactional, creates a timestamped backup, deletes groups, memberships, messages, read/disappearing state, and AI usage events, and preserves `users`, settings, sessions, and push subscriptions.
+The reset is transactional, creates a timestamped backup, deletes groups, memberships, messages, read/disappearing state, and AI usage events, and preserves `users`, settings, sessions, and push subscriptions. It records a durable completion marker and refuses to run again against the same database.
+
+For Railway, deploy this code first, stop or pause the web service to prevent concurrent writes, open its Shell, and run the command above. Confirm the JSON output reports `ok: true`; then resume the service. The command is intentionally not part of the normal server startup.
 | `LOGTO_ENDPOINT` | Optional* | Logto tenant URL for email verification (e.g. `https://your-tenant.logto.app`). |
 | `LOGTO_M2M_APP_ID` | Optional* | App ID of a Logto M2M application with Management API `all` role. |
 | `LOGTO_M2M_APP_SECRET` | Optional* | App Secret of the same Logto M2M application. |
@@ -173,7 +175,7 @@ Recommended Railway setup:
 3. Set:
 
 ```txt
-DB_PATH=/data/gaychat.db
+DB_PATH=/data/gchat.db
 ```
 
 This stores the SQLite database on persistent storage.
@@ -252,7 +254,7 @@ Client controls are hidden, `/api/ai/*` returns 404, socket AI sends are rejecte
 
 ```txt
 SESSION_SECRET=<long random secret>
-DB_PATH=/data/gaychat.db
+DB_PATH=/data/gchat.db
 GROUP_CODE_PEPPER=<stable random secret of at least 32 characters>
 AI_ENABLED=0
 ```
@@ -514,7 +516,7 @@ Before using Gchat with real users:
 
 - Set `SESSION_SECRET`.
 - Mount a Railway volume.
-- Set `DB_PATH=/data/gaychat.db`.
+- Set `DB_PATH=/data/gchat.db`.
 - Set a stable `GROUP_CODE_PEPPER`, or verify the `SESSION_SECRET` fallback before issuing invitation links.
 - Keep AI disabled; v1.3.0 does not require provider API keys.
 - Confirm login, invitation-link joining, message sending, and file upload behavior.

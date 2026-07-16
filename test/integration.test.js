@@ -1,7 +1,6 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -66,40 +65,15 @@ test('group API never returns the plaintext join code and stores only its HMAC',
   assert.match(stored.code, /^[a-f0-9]{64}$/);
 });
 
-test('authenticated members can recover a device key without storing it plaintext', async () => {
-  const recoveryCode = 'recovery-secure-room';
-  const secret = crypto.randomBytes(32).toString('base64url');
-  const commitment = crypto.createHash('sha256').update(Buffer.from(secret, 'base64url')).digest('base64url');
+test('group key recovery is invite-only and no server backup endpoint exists', async () => {
+  await owner.get('/api/groups/keys').expect(404);
   const ownerCsrf = await csrf(owner);
-  const created = await owner
-    .post('/api/groups/create')
+  await owner.post('/api/groups/keys')
     .set('X-CSRF-Token', ownerCsrf)
-    .send({ name: 'Recovery room', code: recoveryCode, keyCommitment: commitment })
-    .expect(201);
-
-  const memberJoinCsrf = await csrf(member);
-  await member
-    .post('/api/groups/join')
-    .set('X-CSRF-Token', memberJoinCsrf)
-    .send({ code: recoveryCode })
-    .expect(200);
-
-  const backupCsrf = await csrf(owner);
-  await owner
-    .post('/api/groups/keys')
-    .set('X-CSRF-Token', backupCsrf)
-    .send({ keys: [{ groupId: created.body.id, secret, joinCode: recoveryCode }] })
-    .expect(200, { ok: true, saved: 1 });
-
-  const stored = stmts.findGroupById.get(created.body.id);
-  assert.equal(stored.key_backup.includes(secret), false);
-
-  const recovered = await member.get('/api/groups/keys').expect(200);
-  assert.deepEqual(recovered.body.keys.find((entry) => entry.groupId === created.body.id), {
-    groupId: created.body.id,
-    secret,
-    joinCode: recoveryCode,
-  });
+    .send({ keys: [] })
+    .expect(404);
+  const stored = stmts.findGroupById.get(group.id);
+  assert.equal(stored.key_backup ?? null, null);
 });
 
 test('AI routes are unavailable while the feature flag is disabled', async () => {

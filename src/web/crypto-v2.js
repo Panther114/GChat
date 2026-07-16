@@ -22,6 +22,10 @@ export function generateGroupSecret() {
   return bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32)));
 }
 
+export function generateInviteCode() {
+  return crypto.randomUUID().replaceAll('-', '');
+}
+
 export async function keyCommitment(secret) {
   const digest = await crypto.subtle.digest('SHA-256', base64UrlToBytes(secret));
   return bytesToBase64Url(new Uint8Array(digest));
