@@ -4,6 +4,19 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## v1.3.0
+
+- Added an isolated web-debug environment on port `4400` with a `root/root` local account and encrypted offline chat fixtures.
+- Started the `Increment-A` web-optimization cycle and bumped the application version to **1.3.0**.
+- Added server-blind encryption v2 with IndexedDB key storage, HKDF-separated keys, authenticated metadata, secure invite fragments, HMAC join codes, and blind indexes.
+- Added author-only optimistic message editing/deletion, Discord-inspired left-aligned message series, System/Dark/Light themes, modular esbuild sources, and AI-off feature gating.
+- Added Node, integration, crypto, and Playwright tests plus a Node 22 verification workflow and a zero-finding production dependency audit.
+- Preserved secure invite fragments across unauthenticated login and registration so hosted invitation links complete the join flow.
+- Bounded hosted-server work to 100 groups per user, 250 members per group, 100 messages per page, and eight concurrent push deliveries; removed eager all-group client preloading.
+- Added a documented, transactional chat-only production reset that backs up the database and preserves user accounts.
+
+---
+
 ## v1.2.4
 
 - Forced the hosted PWA to use freshly versioned mobile icon assets so updated home-screen installs pick up the current branding on iOS and Android.

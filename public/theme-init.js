@@ -1,7 +1,9 @@
 (function () {
   const LEGACY_LOCAL_SETTINGS_KEY = 'gchat:local-settings';
   const ACTIVE_LOCAL_SETTINGS_KEY = 'gchat:active-local-settings';
-  const DEFAULT_WALLPAPER = "url('gchat_wallpaper.jpg')";
+  const THEME_CACHE_KEY = 'gchat:theme-preference';
+  // Solid Discord fills only — wallpaper images are intentionally disabled.
+  const DEFAULT_WALLPAPER = 'none';
   const DEFAULTS = Object.freeze({
     wallpaperDataUrl: null,
     wallpaperBlur: 0,
@@ -26,29 +28,50 @@
 
   function normalizeSettings(settings) {
     const next = settings && typeof settings === 'object' ? { ...settings } : {};
-    next.wallpaperDataUrl = typeof next.wallpaperDataUrl === 'string' && next.wallpaperDataUrl ? next.wallpaperDataUrl : null;
+    // Force solid fill: ignore any stored wallpaper image.
+    next.wallpaperDataUrl = null;
     next.wallpaperBlur = clampInteger(next.wallpaperBlur, 0, MAX_WALLPAPER_BLUR, DEFAULTS.wallpaperBlur);
-    next.wallpaperTransparency = clampInteger(next.wallpaperTransparency, 0, 100, DEFAULTS.wallpaperTransparency);
+    next.wallpaperTransparency = 100;
+    next.theme = ['system', 'dark', 'light'].includes(next.theme) ? next.theme : 'system';
     return next;
   }
 
-  function wallpaperCssValue(dataUrl) {
-    if (!dataUrl) return DEFAULT_WALLPAPER;
-    return `url(${JSON.stringify(String(dataUrl))})`;
+  function applyTheme(preference, root) {
+    const target = root || document.documentElement;
+    const selected = ['system', 'dark', 'light'].includes(preference) ? preference : 'system';
+    const resolved = selected === 'system'
+      ? (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+      : selected;
+    // Smooth theme cross-fade class for one transition cycle
+    target.classList.add('theme-switching');
+    target.dataset.theme = resolved;
+    target.dataset.themePreference = selected;
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.content = resolved === 'light' ? '#ffffff' : '#0a0a0a';
+    try {
+      localStorage.setItem(THEME_CACHE_KEY, selected);
+    } catch {
+      /* ignore quota / private mode */
+    }
+    window.setTimeout(() => target.classList.remove('theme-switching'), 360);
+    return selected;
   }
 
-  function getWallpaperOverlayOpacity(settings) {
-    const normalized = normalizeSettings(settings);
-    return (100 - normalized.wallpaperTransparency) / 100;
+  function wallpaperCssValue() {
+    return DEFAULT_WALLPAPER;
+  }
+
+  function getWallpaperOverlayOpacity() {
+    return 0;
   }
 
   function applyToRoot(settings, root) {
     const target = root || document.documentElement;
     const normalized = normalizeSettings(settings);
-    target.style.setProperty('--chat-wallpaper', wallpaperCssValue(normalized.wallpaperDataUrl));
-    target.style.setProperty('--auth-wallpaper', wallpaperCssValue(normalized.wallpaperDataUrl));
-    target.style.setProperty('--wallpaper-blur', `${normalized.wallpaperBlur}px`);
-    target.style.setProperty('--wallpaper-overlay-opacity', String(getWallpaperOverlayOpacity(normalized)));
+    target.style.setProperty('--chat-wallpaper', 'none');
+    target.style.setProperty('--auth-wallpaper', 'none');
+    target.style.setProperty('--wallpaper-blur', '0px');
+    target.style.setProperty('--wallpaper-overlay-opacity', '0');
     return normalized;
   }
 
@@ -57,7 +80,7 @@
     if (active && typeof active === 'object') return normalizeSettings(active);
     const legacy = readStoredSettings(LEGACY_LOCAL_SETTINGS_KEY);
     if (legacy && typeof legacy === 'object') return normalizeSettings(legacy);
-    return { ...DEFAULTS };
+    return { ...DEFAULTS, theme: 'system' };
   }
 
   window.GChatWallpaperTheme = {
@@ -71,7 +94,20 @@
     readSettingsFromStorage,
     readStoredSettings,
     wallpaperCssValue,
+    applyTheme,
   };
 
-  applyToRoot(readSettingsFromStorage());
+  const initialSettings = readSettingsFromStorage();
+  applyToRoot(initialSettings);
+  const cachedTheme = (() => {
+    try {
+      return localStorage.getItem(THEME_CACHE_KEY);
+    } catch {
+      return null;
+    }
+  })();
+  applyTheme(cachedTheme || initialSettings.theme || 'system');
+  matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
+    if (document.documentElement.dataset.themePreference === 'system') applyTheme('system');
+  });
 })();

@@ -4,7 +4,7 @@ Gchat is a client-side encrypted group chat application built with Node.js, Expr
 
 The hosted web app is the primary product. The desktop app is a native shell that loads the hosted Railway deployment.
 
-Current version: **v1.2.5**
+Current version: **v1.3.0**
 
 ---
 
@@ -13,7 +13,7 @@ Current version: **v1.2.5**
 ### Messaging
 
 - Real-time group chat via Socket.IO
-- Group creation and joining through shareable group codes
+- Group creation and joining through fragment-only secure invite links
 - Client-side encrypted text, image, file, whisper, tagged, and disappearing-text messages
 - Message replies, editing, deletion, and delivery/read indicators
 - Typing indicators and online presence
@@ -21,8 +21,7 @@ Current version: **v1.2.5**
 - Image viewer and automatic image compression
 - Emoji picker and mobile-responsive layout
 - Installable hosted PWA for Android Chrome/Chromium and iPhone/iPad Safari home screen
-- Ask AI modal with default `DeepSeek V4 Flash / Context / Casual` selections
-- OpenRouter-backed multi-model AI replies with Fast vs Context mode, tone prompts, tag-aware context scoping, asynchronous chat replies, and RMB cost metadata
+- AI is disabled in Increment A; dormant backend modules are retained behind `AI_ENABLED`
 
 ### Accounts and Groups
 
@@ -82,10 +81,10 @@ Most product updates are delivered through the hosted web app. Native desktop up
 | Backend | Node.js, Express |
 | Real-time transport | Socket.IO |
 | Database | SQLite via `better-sqlite3` |
-| Sessions | `express-session` + `connect-sqlite3` |
+| Sessions | `express-session` + bounded `better-sqlite3` store |
 | Password hashing | bcrypt |
 | Email delivery | Logto Cloud M2M API |
-| Encryption | Web Crypto API, AES-GCM, PBKDF2 |
+| Encryption | Web Crypto API, AES-256-GCM, HKDF-SHA-256 |
 | Frontend | HTML, CSS, vanilla JavaScript |
 | Desktop | Electron, Electron Builder |
 | Hosting | Railway |
@@ -103,11 +102,11 @@ Most product updates are delivered through the hosted web app. Native desktop up
 
 Gchat encrypts message content in the client before it is sent to the server.
 
-1. The client resolves a per-group passphrase automatically from group membership data.
-2. The client derives a symmetric key using PBKDF2 with SHA-256.
-3. Message content is encrypted with AES-GCM.
-4. The server stores only encrypted content and IV values.
-5. Group members can decrypt messages locally without manual key entry.
+1. The browser generates a random 256-bit group secret and stores it in IndexedDB.
+2. Secure invite URL fragments carry the join code and secret; fragments are removed immediately, kept only in same-tab session storage across authentication, and never reach the server.
+3. HKDF derives separate content, metadata, tag-index, and spam-signature keys.
+4. AES-256-GCM binds content and encrypted metadata to the group, client message ID, sender, type, key version, and revision.
+5. The server stores an HMAC of the join code, a key commitment, ciphertext, encrypted metadata, and keyed blind indexes—never the group secret.
 
 The server does not receive plaintext message content.
 
@@ -115,8 +114,8 @@ Important limitations:
 
 - Metadata such as usernames, group membership, timestamps, and message ownership is still visible to the server.
 - Disappearing-message metadata, timers, and per-user hidden-state records are also visible to the server so the app can keep access state consistent across reloads.
-- Short repeated-message spam detection hashes normalized short messages server-side, which can reveal when two short messages are identical even though the server still does not receive plaintext.
-- If a user explicitly uses Ask AI, eligible chat context is decrypted in the browser and sent to the Gchat server only for that one OpenRouter request.
+- Repetitive-message and hashtag equality within a group are visible through group-keyed blind indexes.
+- AI routes and active client controls are disabled by default in Increment A.
 - This is application-layer encryption, not a replacement for audited secure messaging infrastructure.
 
 ---
@@ -128,12 +127,28 @@ Important limitations:
 | `SESSION_SECRET` | Yes | Secret used to sign session cookies. Use a long random value in production. |
 | `PORT` | No | Server port. Railway provides this automatically. |
 | `DB_PATH` | Recommended | SQLite database path. Use `/data/Gchat.db` with a Railway volume for persistence. |
+| `GROUP_CODE_PEPPER` | Recommended | At least 32 characters; used to HMAC normalized join codes. Falls back to the stable `SESSION_SECRET` during the v1.3.0 cutover. |
+| `AI_ENABLED` | No | Reserved for a later release. v1.3.0 keeps AI disabled in code even if this variable is set. |
+| `GCHAT_LOCAL_DEBUG` | No | Set to `1` only for the local `root/root` fixtures. |
 | `ADMIN_SECRET` | Optional | Enables the admin users endpoint when set. |
 | `OPENROUTER_API_KEY` | Optional | Enables the server-side Ask AI integration for DeepSeek V4 Flash. Keep this only in server/runtime environment variables such as Railway service variables. |
 | `GETGOAPI_API_KEY` | Optional | Enables the server-side Ask AI integration for Grok 4.1 Fast through GetGoAPI. Keep this only in server/runtime environment variables such as Railway service variables. |
+
 | `VAPID_PUBLIC_KEY` | Optional | Public VAPID key used by the hosted PWA to subscribe to Web Push notifications. |
 | `VAPID_PRIVATE_KEY` | Optional | Private VAPID key used only on the server to send Web Push notifications. Never expose this to clients. |
 | `VAPID_SUBJECT` | Optional | VAPID contact subject such as `mailto:admin@example.com` or an HTTPS URL. |
+
+Production load is bounded to 100 groups per user, 250 members per group, 100 messages per page, and eight concurrent push deliveries. Chat data is loaded lazily when a group is opened; the client does not poll or preload every group.
+
+### Increment A production cutover
+
+Before deploying v1.3.0, mount the persistent Railway volume at `/data`, set `DB_PATH=/data/Gchat.db`, set a stable 32+ character `GROUP_CODE_PEPPER`, and leave `AI_ENABLED` unset or `0`. Back up the database, then run the explicit chat-only reset once:
+
+```bash
+CONFIRM_RESET=RESET_ALL_GCHAT_CHATS_FOR_INCREMENT_A DB_PATH=/data/Gchat.db npm run migrate:increment-a
+```
+
+The reset is transactional, creates a timestamped backup, deletes groups, memberships, messages, read/disappearing state, and AI usage events, and preserves `users`, settings, sessions, and push subscriptions.
 | `LOGTO_ENDPOINT` | Optional* | Logto tenant URL for email verification (e.g. `https://your-tenant.logto.app`). |
 | `LOGTO_M2M_APP_ID` | Optional* | App ID of a Logto M2M application with Management API `all` role. |
 | `LOGTO_M2M_APP_SECRET` | Optional* | App Secret of the same Logto M2M application. |
@@ -173,7 +188,18 @@ Install dependencies:
 npm install --include=dev
 ```
 
-Start the local server:
+The local-debug database is stored under `.gchat-local/` and is seeded with an
+`Increment A Playground` chat. Sign in with username `root` and password `root`.
+The account and fixture messages are enabled only when `GCHAT_LOCAL_DEBUG=1`;
+they are not created by the production start command.
+
+To start the isolated debug environment:
+
+```bash
+npm run dev:web
+```
+
+To start the regular local server without debug fixtures:
 
 ```bash
 node server.js
@@ -189,7 +215,9 @@ The main application pages are served from `public/`.
 
 ---
 
-## Ask AI (v1.2.4)
+## Ask AI (temporarily disabled in v1.3.0)
+
+Client controls are hidden, `/api/ai/*` returns 404, socket AI sends are rejected, group settings cannot enable AI, and the server reports `aiEnabled: false`. The notes below describe the dormant v1.2.4 implementation retained for a later reviewed release.
 
 - Typing `/ai ` in the chat composer or clicking **Ask AI** in the right panel opens the same modal before the AI-tagged prompt is sent into chat.
 - The modal defaults to:
@@ -225,8 +253,8 @@ The main application pages are served from `public/`.
 ```txt
 SESSION_SECRET=<long random secret>
 DB_PATH=/data/Gchat.db
-OPENROUTER_API_KEY=<openrouter api key>
-GETGOAPI_API_KEY=<getgoapi api key>
+GROUP_CODE_PEPPER=<stable random secret of at least 32 characters>
+AI_ENABLED=0
 ```
 
 5. Deploy.

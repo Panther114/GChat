@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_CACHE = 'gchat-pwa-v7';
+const APP_CACHE = 'gchat-pwa-v9';
 const APP_SHELL_ASSETS = [
   '/',
   '/index.html',
