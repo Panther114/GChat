@@ -63,31 +63,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   /**
-   * Read the desktop bootstrap state used by the local onboarding pages.
-   * @returns {Promise<{serverUrl: string, launchAtStartup: boolean, onboardingCompleted: boolean}>}
-   */
-  getDesktopBootstrap() {
-    return ipcRenderer.invoke('get-desktop-bootstrap');
-  },
-
-  /**
-   * Check that the locked Railway deployment is reachable.
-   * @returns {Promise<{ok: boolean, status?: number, url: string, error?: string, checkedAt: string}>}
-   */
-  checkServerConnectivity() {
-    return ipcRenderer.invoke('check-server-connectivity');
-  },
-
-  /**
-   * Persist onboarding choices and launch the hosted app.
-   * @param {{ launchAtStartup?: boolean }} payload
-   * @returns {Promise<{success: boolean}>}
-   */
-  completeOnboarding(payload) {
-    return ipcRenderer.invoke('complete-onboarding', payload);
-  },
-
-  /**
    * Retry connecting to the hosted app after a failed startup load.
    * @returns {Promise<boolean>}
    */
