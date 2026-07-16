@@ -2438,16 +2438,21 @@ function createAvatarImage(src) {
   return img;
 }
 
-function clearProfilePictureSelection() {
+function clearProfilePictureSelection({ keepSavedPreview = false } = {}) {
   const input = $('profile-picture-input');
   const preview = $('profile-picture-preview');
   const img = $('profile-picture-preview-img');
   const nameEl = $('profile-picture-file-name');
   if (input) input.value = '';
-  if (preview) preview.hidden = true;
+  if (preview) preview.hidden = !(keepSavedPreview && !!currentUser?.profilePicture);
   if (img) {
-    img.removeAttribute('src');
-    img.alt = 'Selected image preview';
+    if (keepSavedPreview && currentUser?.profilePicture) {
+      img.src = currentUser.profilePicture;
+      img.alt = 'Current avatar preview';
+    } else {
+      img.removeAttribute('src');
+      img.alt = 'Selected image preview';
+    }
   }
   if (nameEl) nameEl.textContent = 'Max 2MB';
 }
@@ -2460,7 +2465,7 @@ function updateProfileRemoveButton() {
   removeBtn.hidden = !hasSaved;
 }
 
-/** Exclusive avatar mode: color panel XOR image panel. Preview never shown without a chosen file. */
+/** Exclusive avatar mode: color panel XOR image panel, with a preview for a saved or newly chosen image. */
 function setProfilePictureMode(mode) {
   const slider = $('profile-picture-mode-slider');
   const colorSection = $('profile-picture-color-section');
@@ -2482,9 +2487,10 @@ function setProfilePictureMode(mode) {
   imageChip?.setAttribute('aria-selected', String(isImage));
 
   if (!isImage) {
-    // Leaving image mode clears any unsaved file pick + empty preview
+    // Leaving image mode clears any unsaved file pick and its preview.
     clearProfilePictureSelection();
   } else {
+    clearProfilePictureSelection({ keepSavedPreview: true });
     updateProfileRemoveButton();
   }
 }
@@ -4360,7 +4366,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   $('app-version-label').textContent = appVersionLabel;
 
-  await loadPushStatus();
   if (aiFeatureEnabled) {
     await refreshAiUsageSummary();
     void loadAndRenderAiTones();
@@ -4371,7 +4376,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (event.data?.type !== 'push-unread-count') return;
       pushStatus.totalUnreadCount = Math.max(0, Number(event.data.totalUnreadCount) || 0);
       syncUnreadIndicators(pushStatus.totalUnreadCount);
-      renderPushSettings();
     });
   }
   initSocket();
@@ -7328,11 +7332,10 @@ function openGrokModal(options = {}) {
 function openProfileModal() {
   closeMobileActionMenu();
   void refreshAiUsageSummary();
-  void loadPushStatus();
   $('profile-username').value = currentUser.username;
   $('profile-color').value = currentUser.iconColor;
   $('profile-error').textContent = '';
-  // Never show a preview unless the user just chose a file in this session
+  // Reset an unfinished pick; image mode immediately restores the saved-avatar preview.
   clearProfilePictureSelection();
   syncProfilePictureModeUI();
   updateProfileRemoveButton();
@@ -7342,7 +7345,6 @@ function openProfileModal() {
   if (colorInput && swatch) swatch.style.background = colorInput.value;
   if (colorInput && value) value.textContent = String(colorInput.value || '').toUpperCase();
   renderProfileAiUsage();
-  renderPushSettings();
   $('profile-modal').hidden = false;
 }
 
@@ -7788,9 +7790,19 @@ function setupEventListeners() {
   // Profile modal
   $('sidebar-user-btn').addEventListener('click', openProfileModal);
   $('profile-close-btn').addEventListener('click', () => $('profile-modal').hidden = true);
-  $('profile-diagnostics-btn').addEventListener('click', openDiagnosticsModal);
-  $('enable-push-btn').addEventListener('click', () => { void enablePushNotifications(); });
-  $('disable-push-btn').addEventListener('click', () => { void disablePushNotifications(); });
+
+  document.querySelectorAll('.modal-overlay').forEach((modal) => {
+    modal.addEventListener('click', (event) => {
+      if (event.target !== modal) return;
+      if (modal.id === 'grok-modal') {
+        closeGrokModal();
+      } else if (modal.id === 'channel-modal') {
+        closeChannelCreateModal();
+      } else {
+        modal.hidden = true;
+      }
+    });
+  });
 
   $('profile-save-username').addEventListener('click', async () => {
     const username = $('profile-username').value.trim();

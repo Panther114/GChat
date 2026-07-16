@@ -1164,178 +1164,6 @@
       return null;
     }
   }
-  function isStandalonePwaMode() {
-    return window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
-  }
-  function getClientPlatformLabel() {
-    return navigator.userAgentData?.platform || navigator.platform || "";
-  }
-  function getPushPlatformHint() {
-    const userAgent = navigator.userAgent || "";
-    const platform = getClientPlatformLabel();
-    const isAppleMobile = /iPad|iPhone|iPod/.test(userAgent) || platform === "MacIntel" && navigator.maxTouchPoints > 1;
-    if (isAppleMobile && !isStandalonePwaMode()) {
-      return "Install GChat to Home Screen and open it from the icon before enabling notifications on iPhone or iPad.";
-    }
-    return "";
-  }
-  function normalizePushStatusPayload(value) {
-    const notificationSupported = "Notification" in window;
-    const serviceWorkerSupported = "serviceWorker" in navigator;
-    const pushManagerSupported = "PushManager" in window;
-    return {
-      supported: notificationSupported && serviceWorkerSupported && pushManagerSupported,
-      configured: !!value?.configured,
-      permission: getNotificationPermissionState(),
-      subscriptionActive: !!value?.subscriptionActive,
-      vapidPublicKey: typeof value?.vapidPublicKey === "string" ? value.vapidPublicKey : "",
-      totalUnreadCount: Math.max(0, Number(value?.totalUnreadCount) || 0)
-    };
-  }
-  function renderPushSettings() {
-    const statusEl = $("push-status-text");
-    const permissionEl = $("push-permission-pill");
-    const hintEl = $("push-platform-hint");
-    const metaEl = $("push-unread-meta");
-    const enableBtn = $("enable-push-btn");
-    const disableBtn = $("disable-push-btn");
-    if (!statusEl || !permissionEl || !hintEl || !metaEl || !enableBtn || !disableBtn) return;
-    const badgeSupported = typeof navigator.setAppBadge === "function" || typeof navigator.clearAppBadge === "function";
-    const installHint = getPushPlatformHint();
-    let statusText = "Notifications are unavailable on this browser.";
-    if (pushStatus.supported && !pushStatus.configured) {
-      statusText = "Push notifications are not configured on this server yet.";
-    } else if (pushStatus.subscriptionActive) {
-      statusText = "Notifications are enabled for this device.";
-    } else if (pushStatus.permission === "denied") {
-      statusText = "Notifications are blocked in browser settings for this device.";
-    } else if (pushStatus.supported) {
-      statusText = "Notifications are available but currently disabled.";
-    }
-    statusEl.textContent = statusText;
-    permissionEl.textContent = pushStatus.permission === "unsupported" ? "Unsupported" : pushStatus.permission;
-    hintEl.hidden = !installHint;
-    hintEl.textContent = installHint;
-    metaEl.textContent = `${pushStatus.totalUnreadCount > 0 ? `${pushStatus.totalUnreadCount} unread message${pushStatus.totalUnreadCount === 1 ? "" : "s"} total.` : "No unread messages right now."} ${badgeSupported ? "App icon badges update when your browser supports them." : "App icon badges are not supported on this browser."}`;
-    enableBtn.disabled = !pushStatus.supported || !pushStatus.configured || pushStatus.permission === "denied" || !!installHint;
-    disableBtn.hidden = !pushStatus.subscriptionActive;
-    enableBtn.hidden = pushStatus.subscriptionActive;
-  }
-  async function loadPushStatus() {
-    pushStatus = normalizePushStatusPayload(pushStatus);
-    renderPushSettings();
-    try {
-      const res = await fetch("/api/push/status");
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || "Failed to load notification status");
-      pushStatus = normalizePushStatusPayload(data);
-      renderPushSettings();
-      if (Object.keys(unreadCounts).length === 0) syncUnreadIndicators(pushStatus.totalUnreadCount);
-      return pushStatus;
-    } catch {
-      renderPushSettings();
-      return pushStatus;
-    }
-  }
-  function urlBase64ToUint8Array(base64String) {
-    const padding = "=".repeat((4 - base64String.length % 4) % 4);
-    const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
-    const rawData = atob(base64);
-    return Uint8Array.from(rawData, (char) => char.charCodeAt(0));
-  }
-  async function enablePushNotifications() {
-    if (!pushStatus.supported) {
-      showToast("This browser does not support push notifications", "error");
-      return;
-    }
-    if (!pushStatus.configured) {
-      showToast("Push notifications are not configured on this server", "error");
-      return;
-    }
-    const installHint = getPushPlatformHint();
-    if (installHint) {
-      showToast(installHint, "info");
-      renderPushSettings();
-      return;
-    }
-    try {
-      const permission = await Notification.requestPermission();
-      pushStatus.permission = permission || getNotificationPermissionState();
-      renderPushSettings();
-      if (permission !== "granted") {
-        showToast("Notification permission was not granted", "info");
-        return;
-      }
-      const registration = await navigator.serviceWorker.ready;
-      const vapidPublicKey = pushStatus.vapidPublicKey || await fetch("/api/push/vapid-public-key").then(async (res2) => {
-        const data2 = await res2.json().catch(() => ({}));
-        if (!res2.ok) throw new Error(data2.error || "Failed to load VAPID key");
-        return String(data2.publicKey || "");
-      });
-      if (!vapidPublicKey) throw new Error("Push key is unavailable");
-      const existingSubscription = await registration.pushManager.getSubscription();
-      const subscription = existingSubscription || await registration.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(vapidPublicKey)
-      });
-      const res = await fetch("/api/push/subscribe", {
-        method: "POST",
-        headers: apiHeaders(),
-        body: JSON.stringify({
-          subscription: subscription.toJSON(),
-          userAgent: navigator.userAgent || "",
-          platform: getClientPlatformLabel()
-        })
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || "Failed to save push subscription");
-      pushStatus = normalizePushStatusPayload({
-        ...pushStatus,
-        configured: true,
-        subscriptionActive: true,
-        vapidPublicKey,
-        totalUnreadCount: data.totalUnreadCount
-      });
-      renderPushSettings();
-      syncUnreadIndicators(pushStatus.totalUnreadCount);
-      showToast("Notifications enabled", "success");
-    } catch (err) {
-      showToast(String(err && err.message ? err.message : "Failed to enable notifications"), "error");
-      void loadPushStatus();
-    }
-  }
-  async function disablePushNotifications() {
-    try {
-      const registration = await navigator.serviceWorker.ready;
-      const subscription = await registration.pushManager.getSubscription();
-      const endpoint = subscription?.endpoint || null;
-      if (!endpoint) {
-        pushStatus = normalizePushStatusPayload({ ...pushStatus, subscriptionActive: false });
-        renderPushSettings();
-        showToast("Notifications are already disabled", "info");
-        return;
-      }
-      const res = await fetch("/api/push/unsubscribe", {
-        method: "POST",
-        headers: apiHeaders(),
-        body: JSON.stringify({ endpoint })
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || "Failed to disable notifications");
-      if (subscription) await subscription.unsubscribe().catch(() => {
-      });
-      pushStatus = normalizePushStatusPayload({
-        ...pushStatus,
-        subscriptionActive: false,
-        totalUnreadCount: data.totalUnreadCount
-      });
-      renderPushSettings();
-      showToast("Notifications disabled", "success");
-    } catch (err) {
-      showToast(String(err && err.message ? err.message : "Failed to disable notifications"), "error");
-      void loadPushStatus();
-    }
-  }
   function clearMarkdownRenderState(target) {
     if (!target) return;
     target.classList.remove("markdown-rendered");
@@ -2216,16 +2044,21 @@
     img.style.borderRadius = "50%";
     return img;
   }
-  function clearProfilePictureSelection() {
+  function clearProfilePictureSelection({ keepSavedPreview = false } = {}) {
     const input = $("profile-picture-input");
     const preview = $("profile-picture-preview");
     const img = $("profile-picture-preview-img");
     const nameEl = $("profile-picture-file-name");
     if (input) input.value = "";
-    if (preview) preview.hidden = true;
+    if (preview) preview.hidden = !(keepSavedPreview && !!currentUser?.profilePicture);
     if (img) {
-      img.removeAttribute("src");
-      img.alt = "Selected image preview";
+      if (keepSavedPreview && currentUser?.profilePicture) {
+        img.src = currentUser.profilePicture;
+        img.alt = "Current avatar preview";
+      } else {
+        img.removeAttribute("src");
+        img.alt = "Selected image preview";
+      }
     }
     if (nameEl) nameEl.textContent = "Max 2MB";
   }
@@ -2253,6 +2086,7 @@
     if (!isImage) {
       clearProfilePictureSelection();
     } else {
+      clearProfilePictureSelection({ keepSavedPreview: true });
       updateProfileRemoveButton();
     }
   }
@@ -3896,7 +3730,6 @@
       aiFeatureEnabled = versionInfo.aiEnabled === true;
     }
     $("app-version-label").textContent = appVersionLabel;
-    await loadPushStatus();
     if (aiFeatureEnabled) {
       await refreshAiUsageSummary();
       void loadAndRenderAiTones();
@@ -3907,7 +3740,6 @@
         if (event.data?.type !== "push-unread-count") return;
         pushStatus.totalUnreadCount = Math.max(0, Number(event.data.totalUnreadCount) || 0);
         syncUnreadIndicators(pushStatus.totalUnreadCount);
-        renderPushSettings();
       });
     }
     initSocket();
@@ -6506,7 +6338,6 @@
   function openProfileModal() {
     closeMobileActionMenu();
     void refreshAiUsageSummary();
-    void loadPushStatus();
     $("profile-username").value = currentUser.username;
     $("profile-color").value = currentUser.iconColor;
     $("profile-error").textContent = "";
@@ -6519,7 +6350,6 @@
     if (colorInput && swatch) swatch.style.background = colorInput.value;
     if (colorInput && value) value.textContent = String(colorInput.value || "").toUpperCase();
     renderProfileAiUsage();
-    renderPushSettings();
     $("profile-modal").hidden = false;
   }
   async function buildGrokContextMessages(groupId, options = {}) {
@@ -6930,12 +6760,17 @@
     });
     $("sidebar-user-btn").addEventListener("click", openProfileModal);
     $("profile-close-btn").addEventListener("click", () => $("profile-modal").hidden = true);
-    $("profile-diagnostics-btn").addEventListener("click", openDiagnosticsModal);
-    $("enable-push-btn").addEventListener("click", () => {
-      void enablePushNotifications();
-    });
-    $("disable-push-btn").addEventListener("click", () => {
-      void disablePushNotifications();
+    document.querySelectorAll(".modal-overlay").forEach((modal) => {
+      modal.addEventListener("click", (event) => {
+        if (event.target !== modal) return;
+        if (modal.id === "grok-modal") {
+          closeGrokModal();
+        } else if (modal.id === "channel-modal") {
+          closeChannelCreateModal();
+        } else {
+          modal.hidden = true;
+        }
+      });
     });
     $("profile-save-username").addEventListener("click", async () => {
       const username = $("profile-username").value.trim();
