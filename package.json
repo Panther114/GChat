@@ -14,7 +14,6 @@
     "test:integration": "node --test test/integration.test.js",
     "test:e2e": "playwright test",
     "verify": "npm run lint && npm run build:web && npm test",
-    "migrate:increment-a": "node scripts/migrate-increment-a.js",
     "electron": "electron electron/main.js",
     "electron:dev": "cross-env NODE_ENV=development electron electron/main.js",
     "prebuild:win": "node scripts/build-electron-main.js && node scripts/ensure-electron-builder.js",

@@ -4,9 +4,15 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## Unreleased
+
+- Group creation now asks only for a group name and generates a secure invitation link for new members.
+- Removed server-side group-key recovery; a new device needs the user-held invitation link to decrypt existing history.
+- No database reset, row deletion, or destructive migration runs during normal startup or deployment.
+
 ## v1.3.2
 
-- Restored group message keys and invite-link data across authenticated web and desktop sessions through bounded, encrypted-at-rest device recovery.
+- Historical v1.3.2 desktop/web release: restored group message keys and invite-link data across authenticated sessions through bounded, encrypted-at-rest device recovery. The current invite-only follow-up is listed under Unreleased above.
 - Fixed v2 chat export to use the active v2 decryptor and removed encryption-state placeholders from visible messages and previews.
 - Made Invite Link and Group Color equal-width right-panel actions, with the color popup available from the visible Group Color button.
 - Ensured desktop native notifications appear for every incoming message, including messages in the active group.
@@ -25,7 +31,6 @@ This document tracks all changes to the Gchat project in a PR-based format.
 - Added Node, integration, crypto, and Playwright tests plus a Node 22 verification workflow and a zero-finding production dependency audit.
 - Preserved secure invite fragments across unauthenticated login and registration so hosted invitation links complete the join flow.
 - Bounded hosted-server work to 100 groups per user, 250 members per group, 100 messages per page, and eight concurrent push deliveries; removed eager all-group client preloading.
-- Added a documented, transactional chat-only production reset that backs up the database and preserves user accounts.
 
 ---
 
