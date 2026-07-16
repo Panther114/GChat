@@ -150,7 +150,7 @@ CONFIRM_RESET=RESET_ALL_GCHAT_CHATS_FOR_INCREMENT_A DB_PATH=/data/gchat.db npm r
 
 The reset is transactional, creates a timestamped backup, deletes groups, memberships, messages, read/disappearing state, and AI usage events, and preserves `users`, settings, sessions, and push subscriptions. It records a durable completion marker and refuses to run again against the same database.
 
-For Railway, deploy this code first, stop or pause the web service to prevent concurrent writes, open its Shell, and run the command above. Confirm the JSON output reports `ok: true`; then resume the service. The command is intentionally not part of the normal server startup.
+For Railway, deploy this code first, stop or pause the web service to prevent concurrent writes, and inspect the existing volume before choosing `DB_PATH`. If the live file is still `/data/gaychat.db`, run the reset against that exact path first; do not point the command at a new filename before the reset. Afterward, rename the file to `/data/gchat.db`, update the Railway `DB_PATH` variable, and resume the service. Confirm the JSON output reports `ok: true`. The command is intentionally not part of normal server startup.
 | `LOGTO_ENDPOINT` | Optional* | Logto tenant URL for email verification (e.g. `https://your-tenant.logto.app`). |
 | `LOGTO_M2M_APP_ID` | Optional* | App ID of a Logto M2M application with Management API `all` role. |
 | `LOGTO_M2M_APP_SECRET` | Optional* | App Secret of the same Logto M2M application. |
