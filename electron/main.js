@@ -8,7 +8,6 @@ const {
   nativeImage,
   ipcMain,
   shell,
-  dialog,
   Notification,
   clipboard,
 } = require('electron');
@@ -209,10 +208,11 @@ ipcMain.handle('reload-hosted-app', async () => {
 
 function setupAutoUpdater() {
   autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
   autoUpdater.on('update-downloaded', () => {
-    dialog.showMessageBox(mainWindow, { type: 'info', title: 'Update Ready', message: 'The latest Gchat update is ready to install.', buttons: ['Restart Now', 'Later'], defaultId: 0 })
-      .then(({ response }) => { if (response === 0) { isQuitting = true; autoUpdater.quitAndInstall(); } })
-      .catch(() => {});
+    // The installer is intentionally non-interactive. Restart once the verified update is ready.
+    isQuitting = true;
+    autoUpdater.quitAndInstall(true, true);
   });
   autoUpdater.on('error', (error) => console.error('[updater] error:', error.message));
   if (app.isPackaged) {

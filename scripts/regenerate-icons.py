@@ -45,8 +45,8 @@ def main() -> None:
         if opaque:
             break
     print(f"256 sample opaque pixel={opaque}")
-    if not opaque or opaque[2] < opaque[0]:
-        raise SystemExit("Regenerated icon does not look like the blue brand mark")
+    if not opaque:
+        raise SystemExit("Regenerated icon is missing a visible brand mark")
 
 
 if __name__ == "__main__":

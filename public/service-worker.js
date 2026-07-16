@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_CACHE = 'gchat-pwa-v9';
+const APP_CACHE = 'gchat-pwa-v10';
 const APP_SHELL_ASSETS = [
   '/',
   '/index.html',
@@ -14,6 +14,7 @@ const APP_SHELL_ASSETS = [
   '/app.js',
   '/socket.io/socket.io.js',
   '/gchat_icon.png',
+  '/favicon.png',
 ];
 
 function isCacheableResponse(response) {
