@@ -4,6 +4,14 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## v1.3.2
+
+- Restored group message keys and invite-link data across authenticated web and desktop sessions through bounded, encrypted-at-rest device recovery.
+- Fixed v2 chat export to use the active v2 decryptor and removed encryption-state placeholders from visible messages and previews.
+- Made Invite Link and Group Color equal-width right-panel actions, with the color popup available from the visible Group Color button.
+- Ensured desktop native notifications appear for every incoming message, including messages in the active group.
+- Reduced the Windows installer payload by packaging only the English Electron locale.
+
 ## v1.3.0
 
 - Reworked Gchat Desktop into a direct, persistent Electron wrapper for the hosted production web app: no first-run wizard, shared hosted feature set, and fast return to the saved authenticated session.

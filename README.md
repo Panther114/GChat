@@ -4,7 +4,7 @@ Gchat is a client-side encrypted group chat application built with Node.js, Expr
 
 The hosted web app is the primary product. The desktop app is a native shell that loads the hosted Railway deployment.
 
-Current version: **v1.3.0**
+Current version: **v1.3.2**
 
 ---
 
@@ -102,13 +102,13 @@ Most product updates are delivered through the hosted web app. Native desktop up
 
 Gchat encrypts message content in the client before it is sent to the server.
 
-1. The browser generates a random 256-bit group secret and stores it in IndexedDB.
+1. The browser generates a random 256-bit group secret and stores it in IndexedDB. An authenticated member can restore that existing key on another signed-in device from an encrypted-at-rest recovery copy, so switching between the desktop shell and web app does not hide message content.
 2. Secure invite URL fragments carry the join code and secret; fragments are removed immediately, kept only in same-tab session storage across authentication, and never reach the server.
 3. HKDF derives separate content, metadata, tag-index, and spam-signature keys.
 4. AES-256-GCM binds content and encrypted metadata to the group, client message ID, sender, type, key version, and revision.
-5. The server stores an HMAC of the join code, a key commitment, ciphertext, encrypted metadata, and keyed blind indexes—never the group secret.
+5. The server stores an HMAC of the join code, a key commitment, ciphertext, encrypted metadata, keyed blind indexes, and an encrypted-at-rest recovery copy of a member-supplied group key. The recovery copy is only returned to authenticated group members.
 
-The server does not receive plaintext message content.
+The server does not receive plaintext message content. The recovery copy is a device-continuity trade-off: it keeps the message ciphertext client-encrypted at rest, but a server operator with database and server-secret access could recover a group key.
 
 Important limitations:
 

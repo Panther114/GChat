@@ -499,29 +499,57 @@ body.sidebar-narrow .sidebar-actions {
   box-shadow: 0 0 0 1px var(--chat-focus) !important;
 }
 
-.btn-group-color {
-  width: 30px !important;
-  min-width: 30px !important;
-  height: 30px !important;
-  flex: 0 0 auto !important;
-  margin: 0 !important;
-  border-radius: var(--radius-sm) !important;
-  color: var(--chat-muted) !important;
-  background: transparent !important;
-  border: 1px solid transparent !important;
+.right-panel-action-row {
+  display: flex !important;
+  align-items: stretch !important;
+  gap: 8px !important;
+  width: 100% !important;
+  min-width: 0 !important;
 }
 
-.btn-group-color:hover {
+.right-panel-action {
+  flex: 1 1 50% !important;
+  min-width: 0 !important;
+  min-height: 36px !important;
+  border-radius: var(--radius-sm) !important;
+  padding: 7px 10px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 7px !important;
   color: var(--chat-text-strong) !important;
+  background: var(--chat-input) !important;
+  border: 1px solid var(--chat-border) !important;
+  font-size: 12px !important;
+  font-weight: 700 !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+
+.right-panel-action .icon-label {
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+
+.right-panel-action:hover {
   background: var(--chat-hover) !important;
+  border-color: var(--chat-focus) !important;
+}
+
+.right-panel-action.btn-group-color {
+  color: var(--chat-text-strong) !important;
+}
+
+.right-panel-action.btn-group-color:disabled {
+  cursor: not-allowed !important;
+  opacity: .55 !important;
 }
 
 .right-panel-code {
-  display: flex !important;
+  display: none !important;
   align-items: center !important;
   gap: 6px !important;
-  min-width: 0 !important;
-  padding: 6px 8px !important;
   border-radius: var(--radius-sm) !important;
   background: var(--chat-input) !important;
   border: 1px solid var(--chat-border) !important;

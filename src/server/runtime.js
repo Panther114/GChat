@@ -970,6 +970,7 @@ const migrations = [
   "ALTER TABLE group_chats ADD COLUMN group_color TEXT",
   "ALTER TABLE group_chats ADD COLUMN key_commitment TEXT",
   "ALTER TABLE group_chats ADD COLUMN encryption_version INTEGER NOT NULL DEFAULT 1",
+  "ALTER TABLE group_chats ADD COLUMN key_backup TEXT",
   "CREATE TABLE IF NOT EXISTS _config (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
   "ALTER TABLE users ADD COLUMN profile_picture TEXT",
   "ALTER TABLE users ADD COLUMN client_settings TEXT NOT NULL DEFAULT '{}'",
@@ -1044,6 +1045,51 @@ function getOrCreateSessionSecret() {
 }
 const SESSION_SECRET = getOrCreateSessionSecret();
 
+// Group secrets remain client-generated. This backup only makes a member's
+// existing key available on another authenticated device; it is encrypted at
+// rest with the server secret and never included in message responses.
+const GROUP_KEY_BACKUP_KEY = crypto.createHash('sha256')
+  .update(`${SESSION_SECRET}\u0000gchat-group-key-backup-v1`)
+  .digest();
+
+function encryptGroupKeyBackup(groupId, value) {
+  const iv = crypto.randomBytes(IV_BYTES);
+  const cipher = crypto.createCipheriv('aes-256-gcm', GROUP_KEY_BACKUP_KEY, iv);
+  cipher.setAAD(Buffer.from(String(groupId)));
+  const encrypted = Buffer.concat([
+    cipher.update(JSON.stringify(value), 'utf8'),
+    cipher.final(),
+    cipher.getAuthTag(),
+  ]);
+  return `${iv.toString('base64url')}.${encrypted.toString('base64url')}`;
+}
+
+function decryptGroupKeyBackup(groupId, payload) {
+  if (typeof payload !== 'string') return null;
+  const [ivValue, encryptedValue] = payload.split('.');
+  if (!ivValue || !encryptedValue) return null;
+  try {
+    const iv = Buffer.from(ivValue, 'base64url');
+    const encrypted = Buffer.from(encryptedValue, 'base64url');
+    if (iv.length !== IV_BYTES || encrypted.length <= 16) return null;
+    const decipher = crypto.createDecipheriv('aes-256-gcm', GROUP_KEY_BACKUP_KEY, iv);
+    decipher.setAAD(Buffer.from(String(groupId)));
+    decipher.setAuthTag(encrypted.subarray(-16));
+    const plaintext = Buffer.concat([
+      decipher.update(encrypted.subarray(0, -16)),
+      decipher.final(),
+    ]).toString('utf8');
+    const parsed = JSON.parse(plaintext);
+    if (!parsed || typeof parsed.secret !== 'string') return null;
+    return {
+      secret: parsed.secret,
+      joinCode: typeof parsed.joinCode === 'string' ? parsed.joinCode : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 // ── Prepared Statements ───────────────────────────────────────────────────────
 const stmts = {
   // Users
@@ -1088,6 +1134,15 @@ const stmts = {
   updateGroupAllowMemberKick: db.prepare('UPDATE group_chats SET allow_member_kick = ? WHERE id = ?'),
   updateGroupAiEnabled: db.prepare('UPDATE group_chats SET ai_enabled = ? WHERE id = ?'),
   updateGroupColor: db.prepare('UPDATE group_chats SET group_color = ? WHERE id = ?'),
+  updateGroupKeyBackup: db.prepare('UPDATE group_chats SET key_backup = ? WHERE id = ?'),
+  getUserGroupKeyBackups: db.prepare(`
+    SELECT g.id, g.key_commitment, g.key_backup
+    FROM group_chats g
+    JOIN group_members gm ON gm.group_id = g.id
+    WHERE gm.user_id = ? AND g.encryption_version = ?
+    ORDER BY g.created_at DESC
+    LIMIT 100
+  `),
   updateGroupOwner: db.prepare('UPDATE group_chats SET created_by = ? WHERE id = ?'),
   getGroupsCreatedByUser: db.prepare('SELECT id FROM group_chats WHERE created_by = ?'),
 
@@ -2506,6 +2561,46 @@ app.post('/api/groups/join', (req, res) => {
     aiEnabled: false,
     groupColor: group.group_color || null,
   });
+});
+
+// Group-key recovery is intentionally bounded to the user's group limit. The
+// client still creates and uses the E2E key; this endpoint only restores a key
+// that the authenticated member already possesses on another device.
+app.get('/api/groups/keys', (req, res) => {
+  const backups = stmts.getUserGroupKeyBackups.all(req.session.userId, ENCRYPTION_VERSION)
+    .map((group) => {
+      const backup = decryptGroupKeyBackup(group.id, group.key_backup);
+      if (!backup || !isValidBase64(backup.secret) || estimateBase64Bytes(backup.secret) !== 32) return null;
+      return { groupId: group.id, secret: backup.secret, joinCode: backup.joinCode };
+    })
+    .filter(Boolean);
+  res.json({ keys: backups });
+});
+
+app.post('/api/groups/keys', (req, res) => {
+  const requestedKeys = Array.isArray(req.body?.keys) ? req.body.keys.slice(0, MAX_GROUPS_PER_USER) : [];
+  if (!requestedKeys.length) return res.json({ ok: true, saved: 0 });
+
+  let saved = 0;
+  for (const entry of requestedKeys) {
+    const groupId = typeof entry?.groupId === 'string' ? entry.groupId.trim() : '';
+    const secret = typeof entry?.secret === 'string' ? entry.secret.trim() : '';
+    const joinCode = typeof entry?.joinCode === 'string' ? entry.joinCode.trim() : '';
+    if (!groupId || !isValidBase64(secret) || estimateBase64Bytes(secret) !== 32) continue;
+
+    const group = stmts.findGroupById.get(groupId);
+    if (!group || !stmts.isMember.get(groupId, req.session.userId)) continue;
+    if (group.key_commitment !== crypto.createHash('sha256').update(Buffer.from(secret, 'base64url')).digest('base64url')) continue;
+    if (joinCode && hashJoinCode(joinCode, APP_CONFIG.groupCodePepper) !== group.code) continue;
+
+    stmts.updateGroupKeyBackup.run(
+      encryptGroupKeyBackup(groupId, { secret, joinCode: joinCode || null }),
+      groupId
+    );
+    saved += 1;
+  }
+
+  res.json({ ok: true, saved });
 });
 
 app.get('/api/groups/mine', (req, res) => {

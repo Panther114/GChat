@@ -224,14 +224,70 @@ function getGroupKey(groupId) {
   return groupKeyVaultCache.get(normalizedGroupId)?.secret || null;
 }
 
+async function backupGroupKeyEntry(entry) {
+  if (!entry?.groupId || !entry.secret) return false;
+  try {
+    const response = await fetch('/api/groups/keys', {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify({ keys: [{
+        groupId: String(entry.groupId),
+        secret: entry.secret,
+        joinCode: entry.joinCode || null,
+      }] }),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 async function loadGroupKeyVaultEntries() {
+  const remoteEntries = new Map();
+  try {
+    const response = await fetch('/api/groups/keys', { cache: 'no-store' });
+    const payload = await response.json().catch(() => ({}));
+    if (response.ok && Array.isArray(payload.keys)) {
+      for (const entry of payload.keys) {
+        if (entry?.groupId && entry.secret) remoteEntries.set(String(entry.groupId), entry);
+      }
+    }
+  } catch {
+    // Local keys remain usable when the recovery endpoint is temporarily unavailable.
+  }
+
+  const localEntries = new Map();
+  const uploads = [];
   for (const group of groups) {
-    let entry = await GChatCryptoV2.keyVault.get(group.id);
+    let entry = null;
+    try { entry = await GChatCryptoV2.keyVault.get(group.id); } catch { /* use remote backup */ }
     if (!entry && currentUser?.username === 'root' && group.id === 'local-debug-increment-a') {
       entry = { groupId: group.id, secret: await GChatCryptoV2.localDebugSecret(), joinCode: 'increment-a-local' };
-      await GChatCryptoV2.keyVault.put(entry);
     }
-    if (entry) groupKeyVaultCache.set(String(group.id), entry);
+    if (entry?.secret) {
+      const normalizedEntry = { ...entry, groupId: String(group.id) };
+      localEntries.set(String(group.id), normalizedEntry);
+      groupKeyVaultCache.set(String(group.id), normalizedEntry);
+      const remote = remoteEntries.get(String(group.id));
+      if (!remote || remote.secret !== normalizedEntry.secret || (normalizedEntry.joinCode && remote.joinCode !== normalizedEntry.joinCode)) {
+        uploads.push(normalizedEntry);
+      }
+    }
+  }
+
+  if (uploads.length) {
+    const synced = await Promise.all(uploads.slice(0, 100).map(backupGroupKeyEntry));
+    if (synced.some((value) => !value)) console.warn('Some group key backups could not be synced');
+  }
+
+  for (const group of groups) {
+    const groupId = String(group.id);
+    if (localEntries.has(groupId)) continue;
+    const remote = remoteEntries.get(groupId);
+    if (!remote?.secret) continue;
+    const entry = { groupId, secret: remote.secret, joinCode: remote.joinCode || null };
+    try { await GChatCryptoV2.keyVault.put(entry); } catch { /* memory cache still keeps this session usable */ }
+    groupKeyVaultCache.set(groupId, entry);
   }
 }
 
@@ -266,6 +322,13 @@ async function decryptV2Message(msg, secret, groupId) {
     Object.assign(msg, metadata);
   }
   return content.text;
+}
+
+async function decryptMessageText(msg, secret, groupId = currentGroupId) {
+  if (!secret) return null;
+  return Number(msg.encryptionVersion) === 2
+    ? decryptV2Message(msg, secret, groupId)
+    : decryptMessage(msg.encryptedContent, msg.iv, secret, groupId);
 }
 
 async function decryptAttachmentBytes(msg, secret, groupId) {
@@ -2853,8 +2916,7 @@ async function ensureGroupDataPreloaded(groupId) {
 }
 
 // Decryption failure text constants (must match renderMsgContent output)
-const MSG_NO_KEY = '[Encryption unavailable]';
-const MSG_DECRYPT_FAIL = '[Unable to decrypt]';
+const MSG_CONTENT_UNAVAILABLE = 'Message unavailable';
 const GROUP_PREVIEW_EMPTY_TEXT = 'No messages yet';
 
 // Scroll threshold (px from top) that triggers loading older messages
@@ -4579,6 +4641,14 @@ function updateQuickActionButtonState(button, { enabled, labelEnabled }) {
   button.title = enabled ? labelEnabled : 'Feature disabled by owner';
 }
 
+function updateGroupColorAction(isOwner) {
+  const button = $('set-group-color-btn');
+  if (!button) return;
+  button.hidden = false;
+  button.disabled = !isOwner;
+  button.title = isOwner ? 'Change group color' : 'Only the group owner can change the color';
+}
+
 function updateGroupActionButtons(isOwner) {
   const exportBtn = $('export-btn');
   const clearBtn = $('clear-history-btn');
@@ -4641,7 +4711,7 @@ async function clearTagMessages(topic) {
       return;
     }
     const key = getGroupKey(currentGroupId);
-    if (!key) return showToast('Encryption is unavailable for this group', 'error');
+    if (!key) return showToast('Chat content is not ready yet', 'error');
     const tagIndex = await GChatCryptoV2.blindIndex(normalizedTopic, key, currentGroupId, 'tag-index');
     const res = await fetch(`/api/groups/${currentGroupId}/tags/${encodeURIComponent(tagIndex)}/messages`, {
       method: 'DELETE',
@@ -4697,7 +4767,7 @@ function getMessagePreviewFallbackText(msg) {
   const aiMentionPrefix = msg.aiMention ? `${buildAiMentionLabel(msg.aiMeta)} ` : '';
   const prefix = getMessageHashtagPrefix(msg);
   const typeLabel = getMessageTypePreviewLabel(msg);
-  return typeLabel ? aiMentionPrefix + prefix + typeLabel : aiMentionPrefix + prefix + '[encrypted]';
+  return typeLabel ? aiMentionPrefix + prefix + typeLabel : aiMentionPrefix + prefix + MSG_CONTENT_UNAVAILABLE;
 }
 
 async function getMessagePreviewText(msg, groupId = msg.groupId) {
@@ -4707,10 +4777,8 @@ async function getMessagePreviewText(msg, groupId = msg.groupId) {
   if (!key || msg.type !== 'text') return fallbackPreview;
   const aiMentionPrefix = msg.aiMention ? `${buildAiMentionLabel(msg.aiMeta)} ` : '';
   const prefix = getMessageHashtagPrefix(msg);
-  const plaintext = Number(msg.encryptionVersion) === 2
-    ? await decryptV2Message(msg, key, groupId).catch(() => null)
-    : await decryptMessage(msg.encryptedContent, msg.iv, key, groupId);
-  return aiMentionPrefix + prefix + (plaintext || '[encrypted]');
+  const plaintext = await decryptMessageText(msg, key, groupId).catch(() => null);
+  return aiMentionPrefix + prefix + (plaintext ?? MSG_CONTENT_UNAVAILABLE);
 }
 
 async function updateGroupPreviewFromMessage(groupId, msg) {
@@ -4821,7 +4889,6 @@ async function selectGroup(groupId) {
   // Set header
   $('chat-group-name').textContent = currentGroupData ? currentGroupData.name : '';
   $('edit-group-name-input').value = currentGroupData ? currentGroupData.name : '';
-  $('right-group-code').textContent = getGroupKey(currentGroupId) ? 'Copy link' : 'Key unavailable';
   syncRightPanelMobileTitle();
   $('right-panel-content').hidden = false;
   $('right-panel-empty').hidden = true;
@@ -4830,7 +4897,7 @@ async function selectGroup(groupId) {
   // Owner controls
   const isOwner = currentGroupData && currentGroupData.createdBy === currentUser.id;
   $('owner-actions').hidden = !isOwner;
-  $('set-group-color-btn').hidden = !isOwner;
+  updateGroupColorAction(isOwner);
   $('common-actions').hidden = false;
   if (currentGroupData) {
     $('allow-member-clear-toggle').checked = !!currentGroupData.allowMemberClear;
@@ -5327,7 +5394,7 @@ async function renderMsgContent(msg, textEl, bubble, groupId = currentGroupId) {
 
   if (msg.type === 'file') {
     if (!key) {
-      textEl.textContent = 'Locked: ' + (msg.filename || 'file');
+      textEl.textContent = 'File unavailable: ' + (msg.filename || 'file');
     } else {
       const buf = await decryptAttachmentBytes(msg, key, groupId);
       if (buf) {
@@ -5350,7 +5417,7 @@ async function renderMsgContent(msg, textEl, bubble, groupId = currentGroupId) {
         });
         bubble.appendChild(btn);
       } else {
-        textEl.textContent = 'Locked: ' + (msg.filename || 'file');
+        textEl.textContent = 'File unavailable: ' + (msg.filename || 'file');
       }
     }
     return;
@@ -5358,15 +5425,13 @@ async function renderMsgContent(msg, textEl, bubble, groupId = currentGroupId) {
 
   // Text message
   if (!key) {
-    renderPlainText(textEl, MSG_NO_KEY);
+    renderPlainText(textEl, MSG_CONTENT_UNAVAILABLE);
     return;
   }
 
-  const plaintext = Number(msg.encryptionVersion) === 2
-    ? (msg._decryptedText ?? await decryptV2Message(msg, key, groupId).catch(() => null))
-    : await decryptMessage(msg.encryptedContent, msg.iv, key, groupId);
+  const plaintext = msg._decryptedText ?? await decryptMessageText(msg, key, groupId).catch(() => null);
   if (plaintext === null) {
-    renderPlainText(textEl, MSG_DECRYPT_FAIL);
+    renderPlainText(textEl, MSG_CONTENT_UNAVAILABLE);
   } else {
     if (isAiAssistantMessage(msg)) renderMarkdown(textEl, plaintext);
     else renderPlainText(textEl, plaintext);
@@ -5529,12 +5594,12 @@ async function getAttachmentData(msg) {
   if (!msg || (msg.type !== 'image' && msg.type !== 'file')) return null;
   const key = currentGroupId ? getGroupKey(currentGroupId) : null;
   if (!key) {
-    showToast('Encryption is unavailable for this group', 'error');
+    showToast('Chat content is not ready yet', 'error');
     return null;
   }
   const bytes = await decryptAttachmentBytes(msg, key, currentGroupId);
   if (!bytes) {
-    showToast('Unable to decrypt file', 'error');
+    showToast('File unavailable', 'error');
     return null;
   }
   const detectedImageMime = msg.type === 'image' ? detectImageMime(bytes) : null;
@@ -5768,7 +5833,7 @@ async function startEditMessage(msg, currentPlaintext) {
     const newText = editInput.value.trim();
     if (!newText || newText === currentPlaintext) { cancelEdit(); return; }
     const key = getGroupKey(currentGroupId);
-    if (!key) { showToast('Encryption is unavailable for this group', 'error'); cancelEdit(); return; }
+    if (!key) { showToast('Chat content is not ready yet', 'error'); cancelEdit(); return; }
     editSave.disabled = true;
     try {
       const nextRevision = Number(msg.revision || 1) + 1;
@@ -5821,7 +5886,7 @@ async function doSend(text) {
   if (!currentGroupId || !socket) return;
   const key = getGroupKey(currentGroupId);
   if (!key) {
-    showToast('Encryption is unavailable for this group', 'error');
+    showToast('Chat content is not ready yet', 'error');
     return;
   }
   const parsedMessage = parseComposerMessageInput(text);
@@ -6094,7 +6159,7 @@ async function handleFileUpload(file) {
   if (!currentGroupId || !socket) return;
   const key = getGroupKey(currentGroupId);
   if (!key) {
-    showToast('Encryption is unavailable for this group', 'error');
+    showToast('Chat content is not ready yet', 'error');
     return;
   }
   if (composerTokens.hashtag && (composerTokens.whisper || (messageMode === 'whisper' && whisperRecipients.length > 0))) {
@@ -6574,8 +6639,9 @@ function initSocket() {
     // Update preview
     const preview2 = await getMessagePreviewText(msg, msg.groupId);
     updateGroupPreview(msg.groupId, preview2, msg.createdAt);
-    // Send native OS notification when the window is not focused (active group)
-    if (!document.hasFocus() && msg.senderId !== currentUser.id) {
+    // Desktop notifications are shown for every incoming message, including
+    // the active group. The native app decides how the popup is presented.
+    if (msg.senderId !== currentUser.id) {
       const totalUnread = getTotalUnreadCount();
       pushStatus.totalUnreadCount = totalUnread;
       sendNativeNotification(totalUnread, msg.groupId);
@@ -6640,12 +6706,10 @@ function initSocket() {
         // Re-decrypt and update display text
         const key = currentGroupId ? getGroupKey(currentGroupId) : null;
         if (key) {
-          const pt = Number(updated.encryptionVersion) === 2
-            ? await decryptV2Message(updated, key, currentGroupId).catch(() => null)
-            : await decryptMessage(encryptedContent, iv, key, currentGroupId);
-          textEl.textContent = pt !== null ? pt : MSG_DECRYPT_FAIL;
+          const pt = await decryptMessageText(updated, key, currentGroupId).catch(() => null);
+          textEl.textContent = pt !== null ? pt : MSG_CONTENT_UNAVAILABLE;
         } else {
-          textEl.textContent = MSG_NO_KEY;
+          textEl.textContent = MSG_CONTENT_UNAVAILABLE;
         }
         // Add or update the "(edited)" badge in the meta line
         const metaEl = bubble.querySelector('.msg-meta');
@@ -6780,7 +6844,7 @@ function initSocket() {
       currentGroupData.createdBy = createdBy;
       const isOwner = currentGroupData.createdBy === currentUser.id;
       $('owner-actions').hidden = !isOwner;
-      $('set-group-color-btn').hidden = !isOwner;
+      updateGroupColorAction(isOwner);
       updateGroupActionButtons(isOwner);
       renderMembersList();
     }
@@ -7127,10 +7191,10 @@ async function exportChat() {
     if (msg.type === 'image') content = '[Image]';
     else if (msg.type === 'file') content = '[File: ' + (msg.filename || '') + ']';
     else if (key) {
-      const pt = await decryptMessage(msg.encryptedContent, msg.iv, key, currentGroupId);
-      content = pt || MSG_DECRYPT_FAIL;
+      const pt = await decryptMessageText(msg, key, currentGroupId).catch(() => null);
+      content = pt ?? MSG_CONTENT_UNAVAILABLE;
     } else {
-      content = MSG_NO_KEY;
+      content = MSG_CONTENT_UNAVAILABLE;
     }
     lines.push('[' + time + '] ' + (msg.senderName || 'Unknown') + ': ' + content);
   }
@@ -7350,7 +7414,7 @@ function openProfileModal() {
 
 async function buildGrokContextMessages(groupId, options = {}) {
   const key = getGroupKey(groupId);
-  if (!key) throw new Error('Encryption is unavailable for this group');
+  if (!key) throw new Error('Chat content is not ready yet');
 
   const normalizedTag = normalizeHashtagTopic(options.tagFilter || null);
   const snapshot = Array.isArray(options.sourceMessages) ? options.sourceMessages : allMessages;
@@ -7362,7 +7426,7 @@ async function buildGrokContextMessages(groupId, options = {}) {
     if (msg.type === 'whisper' || msg.type === 'image' || msg.type === 'file' || isDisappearingMessage(msg)) return null;
 
     let content = '';
-    const plaintext = await decryptMessage(msg.encryptedContent, msg.iv, key, groupId);
+    const plaintext = await decryptMessageText(msg, key, groupId).catch(() => null);
     if (!plaintext) return null;
     content = plaintext.trim();
     if (!content) return null;
@@ -7504,7 +7568,7 @@ async function submitGrokPrompt() {
 
   try {
     const key = getGroupKey(groupId);
-    if (!key) throw new Error('Encryption is unavailable for this group');
+    if (!key) throw new Error('Chat content is not ready yet');
 
     let replyToData = null;
     if (replyingTo) {
@@ -7988,6 +8052,7 @@ function setupEventListeners() {
     const vaultEntry = { groupId: d.id, secret, joinCode: code };
     await GChatCryptoV2.keyVault.put(vaultEntry);
     groupKeyVaultCache.set(String(d.id), vaultEntry);
+    void backupGroupKeyEntry(vaultEntry);
     $('create-modal').hidden = true;
     groups.unshift(d);
     unreadCounts[d.id] = Math.max(0, Number(d.unreadCount) || 0);
@@ -8046,6 +8111,7 @@ function setupEventListeners() {
     const vaultEntry = { groupId: d.id, secret: invite.secret, joinCode: code };
     await GChatCryptoV2.keyVault.put(vaultEntry);
     groupKeyVaultCache.set(String(d.id), vaultEntry);
+    void backupGroupKeyEntry(vaultEntry);
     pendingSecureInvite = null;
     sessionStorage.removeItem(SECURE_INVITE_SESSION_KEY);
     $('join-modal').hidden = true;
@@ -8113,15 +8179,19 @@ function setupEventListeners() {
   // Copy a fragment-only invite. The secret never enters a request or server-rendered URL.
   $('copy-code-btn').addEventListener('click', async () => {
     if (!currentGroupData) return;
-    const entry = groupKeyVaultCache.get(String(currentGroupData.id));
+    let entry = groupKeyVaultCache.get(String(currentGroupData.id));
+    if (!entry?.secret) {
+      await loadGroupKeyVaultEntries();
+      entry = groupKeyVaultCache.get(String(currentGroupData.id));
+    }
     if (!entry?.secret || !entry?.joinCode) {
-      showToast('Secure invite is unavailable on this device', 'error');
+      showToast('Invite link is not ready yet', 'error');
       return;
     }
     const inviteUrl = `${location.origin}/${GChatCryptoV2.encodeInvite({ code: entry.joinCode, secret: entry.secret })}`;
     await navigator.clipboard.writeText(inviteUrl).catch(() => {});
-    setElementIcon($('copy-code-btn'), 'check', { iconOnly: true });
-    setTimeout(() => setElementIcon($('copy-code-btn'), 'copy', { iconOnly: true }), 1500);
+    setElementIcon($('copy-code-btn'), 'check', { label: 'Copied' });
+    setTimeout(() => setElementIcon($('copy-code-btn'), 'link', { label: 'Invite Link' }), 1500);
   });
 
   // Edit group name
@@ -8152,7 +8222,7 @@ function setupEventListeners() {
 
   // Group color
   $('set-group-color-btn').addEventListener('click', () => {
-    if (!currentGroupId) return;
+    if (!currentGroupId || $('set-group-color-btn').disabled) return;
     $('group-color-input').value = (currentGroupData && currentGroupData.groupColor) || '#4a90d9';
     $('group-color-modal').hidden = false;
   });
@@ -8321,7 +8391,7 @@ function setupEventListeners() {
     const msg = ctxMsg;
     const text = ctxText;
     hideContextMenu();
-    const isDecryptFail = text === MSG_NO_KEY || text === MSG_DECRYPT_FAIL;
+    const isDecryptFail = text === MSG_CONTENT_UNAVAILABLE;
     let preview;
     if (text && !isDecryptFail) {
       preview = text;
@@ -8330,7 +8400,7 @@ function setupEventListeners() {
     } else if (msg.type === 'file') {
       preview = '[file: ' + (msg.filename || '') + ']';
     } else {
-      preview = '[encrypted]';
+      preview = MSG_CONTENT_UNAVAILABLE;
     }
     replyingTo = {
       id: msg.id,
