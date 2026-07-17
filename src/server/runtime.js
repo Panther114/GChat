@@ -16,7 +16,8 @@ const crypto = require('crypto');
 const fs = require('fs');
 const webpush = require('web-push');
 const { ENCRYPTION_VERSION, readConfig } = require('./config');
-const { hashJoinCode, isValidKeyCommitment } = require('./group-security');
+const { hashJoinCode, isValidKeyCommitment, normalizeJoinCode, safeEqualString } = require('./group-security');
+const { decryptEscrowPayload, encryptEscrowPayload, isValidGroupSecret, keyCommitmentForSecret } = require('./group-key-escrow');
 const { validateEditEnvelope, validateV2MessageEnvelope } = require('./message-contract');
 const { createSqliteSessionStore } = require('./sqlite-session-store');
 
@@ -970,6 +971,9 @@ const migrations = [
   "ALTER TABLE group_chats ADD COLUMN group_color TEXT",
   "ALTER TABLE group_chats ADD COLUMN key_commitment TEXT",
   "ALTER TABLE group_chats ADD COLUMN encryption_version INTEGER NOT NULL DEFAULT 1",
+  "ALTER TABLE group_chats ADD COLUMN key_escrow_ciphertext TEXT",
+  "ALTER TABLE group_chats ADD COLUMN key_escrow_iv TEXT",
+  "ALTER TABLE group_chats ADD COLUMN key_escrow_version INTEGER",
   "CREATE TABLE IF NOT EXISTS _config (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
   "ALTER TABLE users ADD COLUMN profile_picture TEXT",
   "ALTER TABLE users ADD COLUMN client_settings TEXT NOT NULL DEFAULT '{}'",
@@ -1076,8 +1080,11 @@ const stmts = {
   insertGroup: db.prepare(
     'INSERT INTO group_chats (id, name, code, created_by) VALUES (?, ?, ?, ?)'
   ),
-  insertGroupV2: db.prepare(
-    'INSERT INTO group_chats (id, name, code, created_by, key_commitment, encryption_version) VALUES (?, ?, ?, ?, ?, ?)'
+  insertEscrowedGroup: db.prepare(
+    `INSERT INTO group_chats (
+      id, name, code, created_by, key_commitment, encryption_version,
+      key_escrow_ciphertext, key_escrow_iv, key_escrow_version
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ),
   findGroupByCode: db.prepare('SELECT * FROM group_chats WHERE code = ?'),
   findGroupById: db.prepare('SELECT * FROM group_chats WHERE id = ?'),
@@ -1125,6 +1132,17 @@ const stmts = {
     WHERE gm.user_id = ?
     ORDER BY g.created_at DESC
     LIMIT 100
+  `),
+  getEscrowedKeyMaterialForUser: db.prepare(`
+    SELECT g.id, g.key_escrow_ciphertext, g.key_escrow_iv, g.key_escrow_version
+    FROM group_chats g
+    JOIN group_members gm ON g.id = gm.group_id
+    WHERE gm.user_id = ?
+      AND g.key_escrow_ciphertext IS NOT NULL
+      AND g.key_escrow_iv IS NOT NULL
+      AND g.key_escrow_version IS NOT NULL
+    ORDER BY g.created_at DESC
+    LIMIT ?
   `),
   countUserGroups: db.prepare('SELECT COUNT(*) AS count FROM group_members WHERE user_id = ?'),
   getGroupMembers: db.prepare(`
@@ -1359,6 +1377,21 @@ const deleteMessageTx = db.transaction((messageId) => {
   return stmts.deleteMessage.run(messageId);
 });
 
+const createEscrowedGroupTx = db.transaction((group, ownerId) => {
+  stmts.insertEscrowedGroup.run(
+    group.id,
+    group.name,
+    group.codeHash,
+    ownerId,
+    group.keyCommitment,
+    ENCRYPTION_VERSION,
+    group.escrow.ciphertext,
+    group.escrow.iv,
+    group.escrow.version
+  );
+  stmts.insertMember.run(group.id, ownerId);
+});
+
 function encryptLocalFixtureJson(value, secret, groupId, purpose, aad) {
   const key = Buffer.from(crypto.hkdfSync('sha256', secret, Buffer.from(groupId), Buffer.from(`gchat-${purpose}-v2`), 32));
   const iv = crypto.randomBytes(IV_BYTES);
@@ -1381,6 +1414,10 @@ async function seedLocalDebugData() {
   const groupSecret = crypto.createHash('sha256').update('gchat-increment-a-local-debug-secret').digest();
   const codeHash = hashJoinCode(groupCode, APP_CONFIG.groupCodePepper);
   const keyCommitment = crypto.createHash('sha256').update(groupSecret).digest('base64url');
+  const groupEscrow = encryptEscrowPayload(APP_CONFIG.groupKeyEscrowMasterKey, groupId, {
+    secret: groupSecret.toString('base64url'),
+    joinCode: groupCode,
+  });
   const passwordHash = await bcrypt.hash('root', 12);
   const fixturePasswordHash = await bcrypt.hash(crypto.randomBytes(24).toString('hex'), 12);
 
@@ -1396,15 +1433,29 @@ async function seedLocalDebugData() {
   const resolvedRootUserId = stmts.findUserByUsername.get('root').id;
   const resolvedMiraUserId = stmts.findUserByUsername.get('Mira').id;
   db.prepare(`
-    INSERT INTO group_chats (id, name, code, key_commitment, encryption_version, created_by, group_color)
-    VALUES (?, 'Increment A Playground', ?, ?, 2, ?, '#7C5CFC')
+    INSERT INTO group_chats (
+      id, name, code, key_commitment, encryption_version, created_by, group_color,
+      key_escrow_ciphertext, key_escrow_iv, key_escrow_version
+    )
+    VALUES (?, 'Increment A Playground', ?, ?, 2, ?, '#7C5CFC', ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       code = excluded.code,
       key_commitment = excluded.key_commitment,
       encryption_version = 2,
-      created_by = excluded.created_by
-  `).run(groupId, codeHash, keyCommitment, resolvedRootUserId);
+      created_by = excluded.created_by,
+      key_escrow_ciphertext = excluded.key_escrow_ciphertext,
+      key_escrow_iv = excluded.key_escrow_iv,
+      key_escrow_version = excluded.key_escrow_version
+  `).run(
+    groupId,
+    codeHash,
+    keyCommitment,
+    resolvedRootUserId,
+    groupEscrow.ciphertext,
+    groupEscrow.iv,
+    groupEscrow.version
+  );
   stmts.insertMember.run(groupId, resolvedRootUserId);
   stmts.insertMember.run(groupId, resolvedMiraUserId);
 
@@ -2403,19 +2454,25 @@ app.post('/api/groups/create', (req, res) => {
   const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
   const code = typeof req.body.code === 'string' ? req.body.code.trim() : '';
   const keyCommitment = typeof req.body.keyCommitment === 'string' ? req.body.keyCommitment.trim() : '';
+  const secret = typeof req.body.secret === 'string' ? req.body.secret.trim() : '';
   const userId = req.session.userId;
 
-  if (!name || !code || !keyCommitment) {
-    return res.status(400).json({ error: 'Group name, join code, and key commitment are required' });
+  if (!name || !code || !keyCommitment || !secret) {
+    return res.status(400).json({ error: 'Group name, join code, encryption key, and key commitment are required' });
   }
   if (name.length < 1 || name.length > 64) {
     return res.status(400).json({ error: 'Group name must be 1–64 characters' });
   }
   let codeHash;
+  let normalizedCode;
+  let escrow;
   try {
     codeHash = hashJoinCode(code, APP_CONFIG.groupCodePepper);
+    normalizedCode = normalizeJoinCode(code);
     if (!codeHash) throw new Error('Join code must be 8-64 lowercase letters, numbers, or hyphens');
     if (!isValidKeyCommitment(keyCommitment)) throw new Error('Invalid key commitment');
+    if (!isValidGroupSecret(secret)) throw new Error('Invalid group encryption key');
+    if (!safeEqualString(keyCommitmentForSecret(secret), keyCommitment)) throw new Error('Key commitment does not match encryption key');
   } catch (error) {
     return res.status(400).json({ error: error.message });
   }
@@ -2429,8 +2486,13 @@ app.post('/api/groups/create', (req, res) => {
   }
 
   const groupId = crypto.randomUUID();
-  stmts.insertGroupV2.run(groupId, name, codeHash, userId, keyCommitment, ENCRYPTION_VERSION);
-  stmts.insertMember.run(groupId, userId);
+  try {
+    escrow = encryptEscrowPayload(APP_CONFIG.groupKeyEscrowMasterKey, groupId, { secret, joinCode: normalizedCode });
+    createEscrowedGroupTx({ id: groupId, name, codeHash, keyCommitment, escrow }, userId);
+  } catch (error) {
+    console.error('Group creation error:', error.message);
+    return res.status(500).json({ error: 'Failed to create group' });
+  }
 
   const group = stmts.findGroupById.get(groupId);
   res.status(201).json({
@@ -2451,10 +2513,11 @@ app.post('/api/groups/create', (req, res) => {
 
 app.post('/api/groups/join', (req, res) => {
   const code = typeof req.body.code === 'string' ? req.body.code.trim() : '';
+  const secret = typeof req.body.secret === 'string' ? req.body.secret.trim() : '';
   const userId = req.session.userId;
 
-  if (!code) {
-    return res.status(400).json({ error: 'Group code is required' });
+  if (!code || !secret) {
+    return res.status(400).json({ error: 'A secure invite link is required' });
   }
 
   let codeHash;
@@ -2467,6 +2530,12 @@ app.post('/api/groups/join', (req, res) => {
   const group = stmts.findGroupByCode.get(codeHash);
   if (!group) {
     return res.status(404).json({ error: 'Group not found' });
+  }
+  if (!group.key_escrow_ciphertext || !group.key_escrow_iv || !group.key_escrow_version) {
+    return res.status(410).json({ error: 'This legacy group has been reset' });
+  }
+  if (!isValidGroupSecret(secret) || !safeEqualString(keyCommitmentForSecret(secret), group.key_commitment)) {
+    return res.status(403).json({ error: 'This invite contains the wrong encryption key' });
   }
 
   const existingMembership = stmts.isMember.get(group.id, userId);
@@ -2506,6 +2575,27 @@ app.post('/api/groups/join', (req, res) => {
     aiEnabled: false,
     groupColor: group.group_color || null,
   });
+});
+
+// Returns one bounded batch of decryptable key material for the caller's current memberships.
+// The payload is intentionally no-store: it contains group secrets and join codes.
+app.get('/api/groups/keys', (req, res) => {
+  const rows = stmts.getEscrowedKeyMaterialForUser.all(req.session.userId, MAX_GROUPS_PER_USER);
+  try {
+    const keys = rows.map((row) => {
+      const payload = decryptEscrowPayload(APP_CONFIG.groupKeyEscrowMasterKey, row.id, {
+        ciphertext: row.key_escrow_ciphertext,
+        iv: row.key_escrow_iv,
+        version: row.key_escrow_version,
+      });
+      return { groupId: row.id, ...payload };
+    });
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ keys });
+  } catch (error) {
+    console.error('Group key escrow recovery error:', error.message);
+    return res.status(500).json({ error: 'Failed to recover group keys' });
+  }
 });
 
 app.get('/api/groups/mine', (req, res) => {

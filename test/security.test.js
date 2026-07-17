@@ -4,14 +4,32 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
 const { hashJoinCode, isValidKeyCommitment, normalizeJoinCode } = require('../src/server/group-security');
+const { decryptEscrowPayload, encryptEscrowPayload, parseEscrowMasterKey } = require('../src/server/group-key-escrow');
 const { validateEditEnvelope, validateV2MessageEnvelope } = require('../src/server/message-contract');
 const { readConfig } = require('../src/server/config');
 
 test('production config keeps AI disabled and can use the stable session secret as the join-code pepper', () => {
   const sessionSecret = 's'.repeat(32);
-  const config = readConfig({ NODE_ENV: 'production', SESSION_SECRET: sessionSecret, AI_ENABLED: '1' });
+  const config = readConfig({
+    NODE_ENV: 'production',
+    SESSION_SECRET: sessionSecret,
+    AI_ENABLED: '1',
+    GROUP_KEY_ESCROW_MASTER_KEY: Buffer.alloc(32, 7).toString('base64url'),
+  });
   assert.equal(config.aiEnabled, false);
   assert.equal(config.groupCodePepper, sessionSecret);
+  assert.throws(() => readConfig({ NODE_ENV: 'production', SESSION_SECRET: sessionSecret }));
+});
+
+test('group key escrow requires a canonical 256-bit master key and authenticates its group binding', () => {
+  const masterKey = parseEscrowMasterKey(Buffer.alloc(32, 9).toString('base64url'));
+  const payload = { secret: crypto.randomBytes(32).toString('base64url'), joinCode: 'security-test-room' };
+  const encrypted = encryptEscrowPayload(masterKey, 'group-one', payload);
+  assert.deepEqual(decryptEscrowPayload(masterKey, 'group-one', encrypted), payload);
+  assert.throws(() => decryptEscrowPayload(masterKey, 'group-two', encrypted));
+  assert.throws(() => parseEscrowMasterKey('not-a-256-bit-key'));
+  assert.equal(encrypted.ciphertext.includes(payload.secret), false);
+  assert.equal(encrypted.ciphertext.includes(payload.joinCode), false);
 });
 
 test('join codes are normalized and stored as keyed hashes', () => {

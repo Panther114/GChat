@@ -1,6 +1,6 @@
 # Gchat
 
-Gchat is a client-side encrypted group chat application built with Node.js, Express, Socket.IO, SQLite, and vanilla web technologies. It supports real-time group messaging, automatic per-group encryption, media/file messages, profile customization, group administration, and an optional Electron desktop wrapper.
+Gchat is a client-side encrypted group chat application built with Node.js, Express, Socket.IO, SQLite, and vanilla web technologies. It supports real-time group messaging, automatic per-group encryption with server-managed key recovery, media/file messages, profile customization, group administration, and an optional Electron desktop wrapper.
 
 The hosted web app is the primary product. The desktop app is a native shell that loads the hosted Railway deployment.
 
@@ -103,12 +103,12 @@ Most product updates are delivered through the hosted web app. Native desktop up
 Gchat encrypts message content in the client before it is sent to the server.
 
 1. The browser generates a random 256-bit group secret and stores it in IndexedDB. A new device receives that key only through a secure invitation link.
-2. Secure invite URL fragments carry the join code and secret; fragments are removed immediately, kept only in same-tab session storage across authentication, and never reach the server.
+2. Secure invite URL fragments carry the join code and secret; fragments are removed immediately and kept only in same-tab session storage across authentication. The values are sent over TLS when creating or joining a group so the server can validate and escrow them.
 3. HKDF derives separate content, metadata, tag-index, and spam-signature keys.
 4. AES-256-GCM binds content and encrypted metadata to the group, client message ID, sender, type, key version, and revision.
-5. The server stores an HMAC of the join code, a key commitment, ciphertext, encrypted metadata, and keyed blind indexes. It never stores a group-key recovery copy.
+5. The server stores an HMAC of the join code, a key commitment, message ciphertext, encrypted metadata, keyed blind indexes, and an AES-256-GCM encrypted group-key escrow record protected by `GROUP_KEY_ESCROW_MASTER_KEY`.
 
-The server does not receive plaintext message content or the group secret. Losing the secure invitation link means a new device cannot decrypt that group's existing history.
+The server does not receive plaintext message content, but it can recover group secrets from escrow. An authenticated member on a new device receives its group material over TLS and can decrypt existing history immediately. This is not zero-knowledge or end-to-end encryption against the server operator.
 
 Important limitations:
 
@@ -128,6 +128,7 @@ Important limitations:
 | `PORT` | No | Server port. Railway provides this automatically. |
 | `DB_PATH` | Recommended | SQLite database path. Use `/data/gchat.db` with a Railway volume for persistence. |
 | `GROUP_CODE_PEPPER` | Recommended | At least 32 characters; used to HMAC normalized join codes. Falls back to the stable `SESSION_SECRET` during the v1.3.0 cutover. |
+| `GROUP_KEY_ESCROW_MASTER_KEY` | Yes | Canonical base64url-encoded 32-byte server-only key that encrypts group secrets and join codes at rest. Store it only in deployment secrets. |
 | `AI_ENABLED` | No | Reserved for a later release. v1.3.0 keeps AI disabled in code even if this variable is set. |
 | `GCHAT_LOCAL_DEBUG` | No | Set to `1` only for the local `root/root` fixtures. |
 | `ADMIN_SECRET` | Optional | Enables the admin users endpoint when set. |
@@ -142,7 +143,7 @@ Production load is bounded to 100 groups per user, 250 members per group, 100 me
 
 ### Increment A deployment safety
 
-Mount the persistent Railway volume at `/data`, set `DB_PATH=/data/gchat.db`, set a stable 32+ character `GROUP_CODE_PEPPER`, and leave `AI_ENABLED` unset or `0`. Normal server startup runs no database reset or destructive migration. Existing Railway database files and rows are preserved by this update.
+Mount the persistent Railway volume at `/data`, set `DB_PATH=/data/gchat.db`, set a stable 32+ character `GROUP_CODE_PEPPER`, configure a random `GROUP_KEY_ESCROW_MASTER_KEY`, and leave `AI_ENABLED` unset or `0`. Normal server startup runs no database reset or destructive migration.
 | `LOGTO_ENDPOINT` | Optional* | Logto tenant URL for email verification (e.g. `https://your-tenant.logto.app`). |
 | `LOGTO_M2M_APP_ID` | Optional* | App ID of a Logto M2M application with Management API `all` role. |
 | `LOGTO_M2M_APP_SECRET` | Optional* | App Secret of the same Logto M2M application. |
@@ -248,6 +249,7 @@ Client controls are hidden, `/api/ai/*` returns 404, socket AI sends are rejecte
 SESSION_SECRET=<long random secret>
 DB_PATH=/data/gchat.db
 GROUP_CODE_PEPPER=<stable random secret of at least 32 characters>
+GROUP_KEY_ESCROW_MASTER_KEY=<random canonical base64url 32-byte secret>
 AI_ENABLED=0
 ```
 
@@ -496,7 +498,7 @@ Relevant Electron Builder behavior:
 - Production cookies use secure settings when deployed behind HTTPS.
 - SQLite database files should not be committed.
 - The server stores encrypted message payloads, not plaintext message content.
-- Group keys are client-managed and cannot be recovered by the server.
+- Group secrets and join codes are escrowed server-side under `GROUP_KEY_ESCROW_MASTER_KEY` so authenticated members can recover them on new devices.
 - The browser never calls AI providers directly; Ask AI requests are proxied through `server.js` with `OPENROUTER_API_KEY` and `GETGOAPI_API_KEY` kept server-side.
 - Large file handling should be reviewed carefully before public-scale deployment.
 
@@ -515,3 +517,16 @@ Before using Gchat with real users:
 - Test the desktop installer on a clean Windows machine.
 - Verify notification behavior in Windows settings.
 - Keep database backups if the app is used seriously.
+
+### One-time pre-escrow group reset
+
+Groups created before server-managed escrow cannot be recovered without their browser-only keys. This release intentionally removes those legacy groups instead of attempting to re-encrypt their history. After deploying the escrow-enabled code and confirming a verified database backup, stop the application and run the explicit offline maintenance command against the same database:
+
+```powershell
+$env:DB_PATH = '/data/gchat.db'
+$env:BACKUP_CONFIRMED = '1'
+$env:CONFIRM_LEGACY_GROUP_PURGE = 'DELETE_PRE_ESCROW_GROUPS'
+npm run purge:pre-escrow-groups
+```
+
+The command deletes only groups without a complete escrow record, plus their messages, memberships, read/disappearing state, and AI usage records. It never runs during normal server startup.

@@ -1,5 +1,7 @@
 'use strict';
 
+const { parseEscrowMasterKey } = require('./group-key-escrow');
+
 const CRYPTO_EPOCH = 2;
 const ENCRYPTION_VERSION = 2;
 const KEY_VERSION = 1;
@@ -11,11 +13,13 @@ function readConfig(env = process.env) {
   if (isProduction && groupCodePepper.length < 32) {
     throw new Error('GROUP_CODE_PEPPER or SESSION_SECRET must be at least 32 characters in production');
   }
+  const groupKeyEscrowMasterKey = parseEscrowMasterKey(env.GROUP_KEY_ESCROW_MASTER_KEY);
   return Object.freeze({
     aiEnabled: !AI_TEMPORARILY_DISABLED && env.AI_ENABLED === '1',
     cryptoEpoch: CRYPTO_EPOCH,
     encryptionVersion: ENCRYPTION_VERSION,
     groupCodePepper: groupCodePepper || 'gchat-local-development-pepper-change-before-production',
+    groupKeyEscrowMasterKey,
     isProduction,
     keyVersion: KEY_VERSION,
     localDebugEnabled: env.GCHAT_LOCAL_DEBUG === '1',

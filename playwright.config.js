@@ -6,14 +6,23 @@ module.exports = defineConfig({
   testDir: './test/e2e',
   timeout: 30_000,
   use: {
-    baseURL: 'http://127.0.0.1:4400',
+    baseURL: 'http://127.0.0.1:4401',
+    // A newly installed service worker takes control and deliberately reloads
+    // the page. That is correct PWA behavior, but races form-based assertions
+    // in an otherwise isolated browser context. PWA lifecycle is not covered
+    // by this suite, so keep functional E2E tests deterministic.
+    serviceWorkers: 'block',
     screenshot: 'only-on-failure',
     trace: 'retain-on-failure',
   },
   webServer: {
-    command: 'npm run dev:web',
-    url: 'http://127.0.0.1:4400/api/health',
-    reuseExistingServer: true,
+    command: 'npm run dev:web:e2e',
+    env: {
+      ...process.env,
+      GROUP_KEY_ESCROW_MASTER_KEY: process.env.GROUP_KEY_ESCROW_MASTER_KEY || Buffer.alloc(32, 8).toString('base64url'),
+    },
+    url: 'http://127.0.0.1:4401/api/health',
+    reuseExistingServer: false,
     timeout: 60_000,
   },
 });

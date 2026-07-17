@@ -6,9 +6,10 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ## Unreleased
 
-- Group creation now asks only for a group name and generates a secure invitation link for new members.
-- Removed server-side group-key recovery; a new device needs the user-held invitation link to decrypt existing history.
-- No database reset, row deletion, or destructive migration runs during normal startup or deployment.
+- Group creation still asks only for a group name and generates a secure invitation link for new members.
+- Added server-managed, encrypted-at-rest group-key escrow so authenticated members recover group history on a new device without a separate invite link.
+- Joining now verifies both the invite code and encryption secret before membership is granted.
+- Added an explicit backup-confirmed offline command that deletes unrecoverable pre-escrow groups; no destructive migration runs during normal startup or deployment.
 
 ## v1.3.2
 

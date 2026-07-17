@@ -106,10 +106,6 @@
     if (removeFromAddress) history.replaceState(null, "", `${location.pathname}${location.search}`);
     return payload;
   }
-  async function localDebugSecret() {
-    const digest = await crypto.subtle.digest("SHA-256", encoder.encode("gchat-increment-a-local-debug-secret"));
-    return bytesToBase64Url(new Uint8Array(digest));
-  }
 
   // src/web/legacy-app.js
   var derivedKeyCache = /* @__PURE__ */ new Map();
@@ -294,19 +290,35 @@
     return groupKeyVaultCache.get(normalizedGroupId)?.secret || null;
   }
   async function loadGroupKeyVaultEntries() {
-    for (const group of groups) {
-      let entry = null;
+    const groupsById = new Map(groups.map((group) => [String(group.id), group]));
+    const localEntries = await Promise.all(groups.map(async (group) => {
       try {
-        entry = await keyVault.get(group.id);
+        return [group, await keyVault.get(group.id)];
       } catch {
+        return [group, null];
       }
-      if (!entry && currentUser?.username === "root" && group.id === "local-debug-increment-a") {
-        entry = { groupId: group.id, secret: await localDebugSecret(), joinCode: "increment-a-local" };
+    }));
+    for (const [group, entry] of localEntries) {
+      if (!entry?.secret) continue;
+      const normalizedEntry = { ...entry, groupId: String(group.id) };
+      groupKeyVaultCache.set(String(group.id), normalizedEntry);
+    }
+    try {
+      const response = await fetch("/api/groups/keys", { cache: "no-store" });
+      if (!response.ok) return;
+      const payload = await response.json();
+      const recoveredEntries = Array.isArray(payload?.keys) ? payload.keys : [];
+      for (const recovered of recoveredEntries) {
+        const groupId = String(recovered?.groupId || "");
+        const group = groupsById.get(groupId);
+        if (!group || typeof recovered?.secret !== "string" || typeof recovered?.joinCode !== "string") continue;
+        const commitment = await keyCommitment(recovered.secret);
+        if (commitment !== group.keyCommitment) continue;
+        const entry = { groupId, secret: recovered.secret, joinCode: recovered.joinCode };
+        await keyVault.put(entry);
+        groupKeyVaultCache.set(groupId, entry);
       }
-      if (entry?.secret) {
-        const normalizedEntry = { ...entry, groupId: String(group.id) };
-        groupKeyVaultCache.set(String(group.id), normalizedEntry);
-      }
+    } catch {
     }
   }
   function v2Aad(msg, revision = msg.revision || 1) {
@@ -6972,7 +6984,7 @@
       const res = await fetch("/api/groups/create", {
         method: "POST",
         headers: apiHeaders(),
-        body: JSON.stringify({ name, code, keyCommitment: keyCommitment2 })
+        body: JSON.stringify({ name, code, secret, keyCommitment: keyCommitment2 })
       });
       const d = await res.json();
       if (!res.ok) {
@@ -7034,7 +7046,7 @@
       const res = await fetch("/api/groups/join", {
         method: "POST",
         headers: apiHeaders(),
-        body: JSON.stringify({ code })
+        body: JSON.stringify({ code, secret: invite.secret })
       });
       const d = await res.json();
       if (!res.ok) {
