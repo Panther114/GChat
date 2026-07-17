@@ -225,16 +225,37 @@ function getGroupKey(groupId) {
 }
 
 async function loadGroupKeyVaultEntries() {
-  for (const group of groups) {
-    let entry = null;
-    try { entry = await GChatCryptoV2.keyVault.get(group.id); } catch { /* invite recovery remains available */ }
-    if (!entry && currentUser?.username === 'root' && group.id === 'local-debug-increment-a') {
-      entry = { groupId: group.id, secret: await GChatCryptoV2.localDebugSecret(), joinCode: 'increment-a-local' };
+  const groupsById = new Map(groups.map((group) => [String(group.id), group]));
+  const localEntries = await Promise.all(groups.map(async (group) => {
+    try {
+      return [group, await GChatCryptoV2.keyVault.get(group.id)];
+    } catch {
+      return [group, null];
     }
-    if (entry?.secret) {
-      const normalizedEntry = { ...entry, groupId: String(group.id) };
-      groupKeyVaultCache.set(String(group.id), normalizedEntry);
+  }));
+  for (const [group, entry] of localEntries) {
+    if (!entry?.secret) continue;
+    const normalizedEntry = { ...entry, groupId: String(group.id) };
+    groupKeyVaultCache.set(String(group.id), normalizedEntry);
+  }
+
+  try {
+    const response = await fetch('/api/groups/keys', { cache: 'no-store' });
+    if (!response.ok) return;
+    const payload = await response.json();
+    const recoveredEntries = Array.isArray(payload?.keys) ? payload.keys : [];
+    for (const recovered of recoveredEntries) {
+      const groupId = String(recovered?.groupId || '');
+      const group = groupsById.get(groupId);
+      if (!group || typeof recovered?.secret !== 'string' || typeof recovered?.joinCode !== 'string') continue;
+      const commitment = await GChatCryptoV2.keyCommitment(recovered.secret);
+      if (commitment !== group.keyCommitment) continue;
+      const entry = { groupId, secret: recovered.secret, joinCode: recovered.joinCode };
+      await GChatCryptoV2.keyVault.put(entry);
+      groupKeyVaultCache.set(groupId, entry);
     }
+  } catch {
+    // A local vault entry remains usable if key recovery is temporarily unavailable.
   }
 }
 
@@ -7991,7 +8012,7 @@ function setupEventListeners() {
     const keyCommitment = await GChatCryptoV2.keyCommitment(secret);
     const res = await fetch('/api/groups/create', {
       method: 'POST', headers: apiHeaders(),
-      body: JSON.stringify({ name, code, keyCommitment }),
+      body: JSON.stringify({ name, code, secret, keyCommitment }),
     });
     const d = await res.json();
     if (!res.ok) { $('create-error').textContent = d.error || 'Failed'; return; }
@@ -8044,7 +8065,7 @@ function setupEventListeners() {
     const code = invite.code;
     const res = await fetch('/api/groups/join', {
       method: 'POST', headers: apiHeaders(),
-      body: JSON.stringify({ code }),
+      body: JSON.stringify({ code, secret: invite.secret }),
     });
     const d = await res.json();
     if (!res.ok) { $('join-error').textContent = d.error || 'Failed'; return; }

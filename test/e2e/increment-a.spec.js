@@ -2,16 +2,26 @@
 
 const { test, expect } = require('@playwright/test');
 
+async function signInAsLocalRoot(page) {
+  await page.goto('/');
+  const username = page.locator('#signin-username');
+  const password = page.locator('#signin-password');
+  await username.fill('root');
+  await password.fill('root');
+  await expect(username).toHaveValue('root');
+  await expect(password).toHaveValue('root');
+  await Promise.all([
+    page.waitForURL(/chat\.html/),
+    page.locator('#signin-btn').click(),
+  ]);
+}
+
 test('local root account loads v2 fixtures and switches themes', async ({ page }) => {
   const errors = [];
   page.on('console', (message) => {
     if (message.type() === 'error' && !message.text().includes('status of 401')) errors.push(message.text());
   });
-  await page.goto('/');
-  await page.locator('#signin-username').fill('root');
-  await page.locator('#signin-password').fill('root');
-  await page.locator('#signin-btn').click();
-  await expect(page).toHaveURL(/chat\.html/);
+  await signInAsLocalRoot(page);
   await expect(page.getByText('Increment A Playground')).toBeVisible();
   await page.getByText('Increment A Playground').click();
   await expect(page.getByText('Welcome to the local UI playground', { exact: false })).toBeVisible();
@@ -27,10 +37,7 @@ test('local root account loads v2 fixtures and switches themes', async ({ page }
 
 test('message stream remains usable at a mobile viewport', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto('/');
-  await page.locator('#signin-username').fill('root');
-  await page.locator('#signin-password').fill('root');
-  await page.locator('#signin-btn').click();
+  await signInAsLocalRoot(page);
   await page.getByText('Increment A Playground').click();
   await expect(page.locator('.msg-row').first()).toBeVisible();
   const width = await page.locator('.chat-panel').evaluate((element) => element.getBoundingClientRect().width);
@@ -43,12 +50,10 @@ test('startup fetches bounded group metadata without eager transcript hydration'
     const url = new URL(request.url());
     if (url.pathname.startsWith('/api/groups/')) apiPaths.push(url.pathname);
   });
-  await page.goto('/');
-  await page.locator('#signin-username').fill('root');
-  await page.locator('#signin-password').fill('root');
-  await page.locator('#signin-btn').click();
+  await signInAsLocalRoot(page);
   await expect(page.getByText('Increment A Playground')).toBeVisible();
   expect(apiPaths).toContain('/api/groups/mine');
+  expect(apiPaths).toContain('/api/groups/keys');
   expect(apiPaths).not.toContain('/api/groups/preload');
   expect(apiPaths.some((path) => /\/messages$|\/members$/.test(path))).toBe(false);
 });
@@ -60,9 +65,16 @@ test('secure invite fragment survives authentication and opens the join flow', a
   await expect(page).toHaveURL(new RegExp(`#invite=${invite}$`));
   await expect.poll(() => page.evaluate(() => sessionStorage.getItem('gchat:pending-secure-invite')))
     .toBe(`#invite=${invite}`);
-  await page.locator('#signin-username').fill('root');
-  await page.locator('#signin-password').fill('root');
-  await page.locator('#signin-btn').click();
+  const username = page.locator('#signin-username');
+  const password = page.locator('#signin-password');
+  await username.fill('root');
+  await password.fill('root');
+  await expect(username).toHaveValue('root');
+  await expect(password).toHaveValue('root');
+  await Promise.all([
+    page.waitForURL(/chat\.html$/),
+    page.locator('#signin-btn').click(),
+  ]);
   await expect(page.locator('#join-modal')).toBeVisible();
   await expect(page).toHaveURL(/chat\.html$/);
   await expect.poll(() => page.evaluate(() => sessionStorage.getItem('gchat:pending-secure-invite')))

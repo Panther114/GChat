@@ -6,12 +6,15 @@ const os = require('node:os');
 const path = require('node:path');
 const { after, before, test } = require('node:test');
 const request = require('supertest');
+const crypto = require('node:crypto');
+const { purgePreEscrowGroups } = require('../src/server/legacy-group-purge');
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-increment-a-'));
 process.env.DB_PATH = path.join(tempDir, 'test.db');
 process.env.SESSION_SECRET = 'integration-test-session-secret-at-least-32-chars';
 process.env.GROUP_CODE_PEPPER = 'integration-test-group-code-pepper-32-chars';
 process.env.AI_ENABLED = '0';
+process.env.GROUP_KEY_ESCROW_MASTER_KEY = Buffer.alloc(32, 4).toString('base64url');
 
 const { app, db, io, stmts } = require('../server');
 
@@ -28,7 +31,8 @@ let owner;
 let member;
 let group;
 const joinCode = 'integration-secure-room';
-const keyCommitment = 'A'.repeat(43);
+const groupSecret = Buffer.alloc(32, 5).toString('base64url');
+const keyCommitment = crypto.createHash('sha256').update(Buffer.from(groupSecret, 'base64url')).digest('base64url');
 
 before(async () => {
   owner = request.agent(app);
@@ -38,7 +42,7 @@ before(async () => {
   const createResponse = await owner
     .post('/api/groups/create')
     .set('X-CSRF-Token', ownerCsrf)
-    .send({ name: 'Encrypted room', code: joinCode, keyCommitment })
+    .send({ name: 'Encrypted room', code: joinCode, secret: groupSecret, keyCommitment })
     .expect(201);
   group = { ...createResponse.body, ownerId: ownerResponse.body.id };
   const memberResponse = await register(member, 'member-test');
@@ -47,7 +51,7 @@ before(async () => {
   await member
     .post('/api/groups/join')
     .set('X-CSRF-Token', memberCsrf)
-    .send({ code: joinCode })
+    .send({ code: joinCode, secret: groupSecret })
     .expect(200);
 });
 
@@ -65,15 +69,54 @@ test('group API never returns the plaintext join code and stores only its HMAC',
   assert.match(stored.code, /^[a-f0-9]{64}$/);
 });
 
-test('group key recovery is invite-only and no server backup endpoint exists', async () => {
-  await owner.get('/api/groups/keys').expect(404);
-  const ownerCsrf = await csrf(owner);
-  await owner.post('/api/groups/keys')
-    .set('X-CSRF-Token', ownerCsrf)
-    .send({ keys: [] })
-    .expect(404);
+test('group key recovery is membership-scoped and escrow data is not stored in plaintext', async () => {
+  const ownerKeys = await owner.get('/api/groups/keys').expect(200);
+  assert.deepEqual(ownerKeys.body, { keys: [{ groupId: group.id, secret: groupSecret, joinCode }] });
+  assert.match(ownerKeys.headers['cache-control'], /no-store/);
+
+  const freshDevice = request.agent(app);
+  await freshDevice.post('/api/auth/login').send({ username: 'owner-test', password: 'secure-password-123' }).expect(200);
+  const recovered = await freshDevice.get('/api/groups/keys').expect(200);
+  assert.deepEqual(recovered.body, ownerKeys.body);
+
   const stored = stmts.findGroupById.get(group.id);
-  assert.equal(stored.key_backup ?? null, null);
+  assert.equal(stored.key_escrow_ciphertext.includes(groupSecret), false);
+  assert.equal(stored.key_escrow_ciphertext.includes(joinCode), false);
+  assert.match(stored.key_escrow_iv, /^[A-Za-z0-9_-]{16}$/);
+  assert.equal(stored.key_escrow_version, 1);
+});
+
+test('joining requires the invite encryption key before granting membership', async () => {
+  const attacker = request.agent(app);
+  const attackerResponse = await register(attacker, 'attacker-test');
+  const attackerCsrf = await csrf(attacker);
+  await attacker
+    .post('/api/groups/join')
+    .set('X-CSRF-Token', attackerCsrf)
+    .send({ code: joinCode, secret: Buffer.alloc(32, 6).toString('base64url') })
+    .expect(403);
+  assert.equal(stmts.isMember.get(group.id, attackerResponse.body.id), undefined);
+  await attacker.get('/api/groups/keys').expect(200, { keys: [] });
+});
+
+test('legacy purge removes only pre-escrow groups and their dependent records', () => {
+  const legacyGroupId = 'legacy-group-for-purge';
+  const legacyMessageId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  db.prepare('INSERT INTO group_chats (id, name, code, created_by) VALUES (?, ?, ?, ?)')
+    .run(legacyGroupId, 'Legacy room', 'f'.repeat(64), group.ownerId);
+  stmts.insertMember.run(legacyGroupId, group.ownerId);
+  db.prepare('INSERT INTO messages (id, group_id, sender_id, encrypted_content, iv) VALUES (?, ?, ?, ?, ?)')
+    .run(legacyMessageId, legacyGroupId, group.ownerId, 'AAAA', 'AAAAAAAAAAAAAAAA');
+  stmts.markMessageRead.run(legacyMessageId, group.memberId);
+  db.prepare('INSERT INTO disappearing_message_states (message_id, user_id) VALUES (?, ?)').run(legacyMessageId, group.memberId);
+  db.prepare('INSERT INTO ai_usage_events (id, user_id, group_id) VALUES (?, ?, ?)')
+    .run('legacy-ai-usage', group.ownerId, legacyGroupId);
+
+  const result = purgePreEscrowGroups(db);
+  assert.deepEqual(result, { groups: 1, messages: 1, memberships: 1, aiUsageEvents: 1 });
+  assert.equal(stmts.findGroupById.get(legacyGroupId), undefined);
+  assert.equal(stmts.findMessageById.get(legacyMessageId), undefined);
+  assert.equal(stmts.findGroupById.get(group.id).key_escrow_version, 1);
 });
 
 test('AI routes are unavailable while the feature flag is disabled', async () => {
