@@ -46,8 +46,8 @@ const LOCAL_DEBUG_ENABLED = APP_CONFIG.localDebugEnabled;
 const VAPID_PUBLIC_KEY = typeof process.env.VAPID_PUBLIC_KEY === 'string' ? process.env.VAPID_PUBLIC_KEY.trim() : '';
 const VAPID_PRIVATE_KEY = typeof process.env.VAPID_PRIVATE_KEY === 'string' ? process.env.VAPID_PRIVATE_KEY.trim() : '';
 const VAPID_SUBJECT = typeof process.env.VAPID_SUBJECT === 'string' ? process.env.VAPID_SUBJECT.trim() : '';
-const MIN_DISAPPEARING_DURATION_MS = 6000;
-const MAX_DISAPPEARING_DURATION_MS = 45000;
+const MIN_DISAPPEARING_DURATION_MS = 3000;
+const MAX_DISAPPEARING_DURATION_MS = 22500;
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 const OPENROUTER_CHAT_COMPLETIONS_URL = `${OPENROUTER_BASE_URL}/chat/completions`;
 const GETGOAPI_BASE_URL = 'https://api.getgoapi.com';
@@ -3731,10 +3731,6 @@ io.on('connection', (socket) => {
       socket.emit('error', { message: `Metadata: ${metadataCheck.error}` });
       return;
     }
-    if (tagIndex) {
-      socket.emit('error', { message: 'Tags cannot be combined with whispers' });
-      return;
-    }
     if (replyToId) {
       const target = stmts.findMessageById.get(replyToId);
       if (!target || target.group_id !== groupId) {
@@ -3823,7 +3819,7 @@ io.on('connection', (socket) => {
       filename: null,
       whisperTo: whisperToStr,
       hashtag: null,
-      tagIndex: null,
+      tagIndex: tagIndex || null,
       aiMeta: null,
       aiMention: false,
       isDisappearing: normalizedIsDisappearing,

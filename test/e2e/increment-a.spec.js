@@ -59,6 +59,35 @@ test('message stream remains usable at a mobile viewport', async ({ page }) => {
   expect(width).toBeLessThanOrEqual(390.1);
 });
 
+test('composer modes use the active channel without legacy tokens or slash commands', async ({ page }) => {
+  await signInAsLocalRoot(page);
+  await page.getByText('Increment A Playground').click();
+
+  await page.locator('#whisper-mode-btn').click();
+  const recipients = page.locator('.whisper-picker-item input');
+  await expect(recipients).toHaveCount(1);
+  await recipients.check();
+  await page.locator('#whisper-picker-confirm').click();
+
+  await expect(page.locator('#message-token-strip')).toBeHidden();
+  await expect(page.locator('#whisper-mode-btn')).toHaveClass(/whisper-active/);
+  await expect(page.locator('#message-input')).toHaveAttribute('placeholder', /Whisper to Mira · #main · Increment A Playground/);
+  await page.locator('#message-input').press('Backspace');
+  await expect(page.locator('#whisper-mode-btn')).toHaveClass(/whisper-active/);
+
+  await page.locator('#whisper-mode-btn').click();
+  await expect(page.locator('#whisper-mode-btn')).toHaveClass(/disappearing-active/);
+  await expect(page.locator('#message-input')).toHaveAttribute('placeholder', /Disappearing message #main · Increment A Playground/);
+  await page.locator('#message-input').fill('Hi');
+  await expect(page.locator('#message-input')).toHaveCSS('color', 'rgb(220, 38, 38)');
+  await page.locator('#message-input').press('Enter');
+  await expect(page.getByText('Hi', { exact: true })).toBeVisible();
+  await expect(page.getByText('Disappears 3s after read', { exact: true })).toBeVisible();
+
+  await expect(page.locator('[data-command="/w "]')).toHaveCount(0);
+  await expect(page.locator('[data-command="/d "]')).toHaveCount(0);
+});
+
 test('image attachments reserve message-row space and open usable viewer actions', async ({ page }) => {
   await signInAsLocalRoot(page);
   await page.getByText('Increment A Playground').click();

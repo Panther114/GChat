@@ -178,9 +178,9 @@ const HOSTED_APP_UPDATE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
 const MESSAGE_VIEW_BASE_DELAY_MS = 2200;
 const MESSAGE_VIEW_PER_CHAR_MS = 200;
 const MESSAGE_VIEW_MAX_DELAY_MS = 18000;
-const MIN_DISAPPEARING_DURATION_MS = 6000;
-const DISAPPEARING_DURATION_PER_CHAR_MS = 180;
-const MAX_DISAPPEARING_DURATION_MS = 45000;
+const MIN_DISAPPEARING_DURATION_MS = 3000;
+const DISAPPEARING_DURATION_PER_CHAR_MS = 90;
+const MAX_DISAPPEARING_DURATION_MS = 22500;
 const SECURE_INVITE_SESSION_KEY = 'gchat:pending-secure-invite';
 function buildAuthRedirectUrl() { return 'index.html'; }
 async function fetchCsrfToken() {
@@ -2986,11 +2986,7 @@ function getUniqueWhisperRecipientIds(ids = []) {
 }
 
 function getActiveWhisperRecipientIds() {
-  return getUniqueWhisperRecipientIds(
-    composerTokens.whisper
-      ? [...whisperRecipients, composerTokens.whisper.memberId]
-      : whisperRecipients
-  );
+  return getUniqueWhisperRecipientIds(whisperRecipients);
 }
 
 function getWhisperRecipientMembers(recipientIds, groupId = currentGroupId) {
@@ -3120,29 +3116,15 @@ function setWhisperTokenFromMember(member, rawTarget = member && member.username
   if (!whisperRecipients.some((id) => normalizeId(id) === normalizeId(member.id))) {
     whisperRecipients.push(member.id);
   }
-  composerTokens.whisper = {
-    memberId: member.id,
-    username: member.username,
-    raw: `/w ${rawTarget} `,
-  };
   whisperRecipients = getUniqueWhisperRecipientIds(whisperRecipients);
   messageMode = 'whisper';
   return true;
 }
 
 function clearWhisperToken({ restoreText = false } = {}) {
-  const token = composerTokens.whisper;
-  if (!token) return;
   composerTokens.whisper = null;
   whisperRecipients = [];
   messageMode = 'normal';
-  if (restoreText) {
-    const input = $('message-input');
-    if (input) {
-      input.value = token.raw + input.value;
-      input.selectionStart = input.selectionEnd = token.raw.length;
-    }
-  }
 }
 
 function setHashtagToken(topic, options = {}) {
@@ -3198,20 +3180,6 @@ function syncComposerTokens() {
   if (!strip) return;
   strip.replaceChildren();
   const tokens = [];
-  const activeWhisperRecipientIds = getActiveWhisperRecipientIds();
-  if (messageMode === 'whisper' && activeWhisperRecipientIds.length) {
-    const token = document.createElement('span');
-    token.className = 'message-token message-token-whisper';
-    token.textContent = `Private message · ${formatWhisperRecipientLabel(activeWhisperRecipientIds, currentGroupId, { prefix: '' })}`;
-    tokens.push(token);
-  }
-  if (messageMode === 'disappearing') {
-    const token = document.createElement('span');
-    token.className = 'message-token message-token-disappearing';
-    token.textContent = 'Disappearing message';
-    tokens.push(token);
-  }
-  // Tags are top-bar sub-chats — never surface a hashtag chip in the composer.
   if (composerTokens.ai) {
     const token = document.createElement('span');
     token.className = 'message-token message-token-ai';
@@ -3228,9 +3196,8 @@ function updateSlashCommandMenu() {
   if (!menu || !input) return;
   const match = /^\/([^\s]*)$/.exec(input.value);
   const commandQuery = match ? match[1].toLowerCase() : null;
-  const availableCommands = aiFeatureEnabled ? ['w', 'd', 'ai'] : ['w', 'd'];
-  const shouldShow = !getActiveWhisperRecipientIds().length
-    && !composerTokens.ai
+  const availableCommands = aiFeatureEnabled ? ['ai'] : [];
+  const shouldShow = !composerTokens.ai
     && commandQuery != null
     && availableCommands.some((command) => command.startsWith(commandQuery));
   menu.hidden = !shouldShow;
@@ -3242,12 +3209,6 @@ function isAiModeEnabled(groupData = currentGroupData) {
 
 function getAiDisabledMessage() {
   return 'AI mode is disabled by the group owner';
-}
-
-function getWhisperCombinationError({ hasHashtag = false, hasAi = false } = {}) {
-  if (hasHashtag && hasAi) return 'AI requests and tags cannot be combined with whispers';
-  if (hasAi) return 'AI requests cannot be combined with whispers';
-  return 'Tags cannot be combined with whispers';
 }
 
 function canUseAiInCurrentGroup({ showError = false } = {}) {
@@ -3620,68 +3581,11 @@ function handleComposerBackspace(input) {
     autoResizeTextarea(input);
     return true;
   }
-  if (composerTokens.whisper) {
-    clearWhisperToken({ restoreText: true });
-    syncComposerTokens();
-    updateWhisperBtn();
-    updateSlashCommandMenu();
-    autoResizeTextarea(input);
-    return true;
-  }
-  if (messageMode === 'whisper' && whisperRecipients.length) {
-    whisperRecipients = [];
-    messageMode = 'normal';
-    syncComposerTokens();
-    updateWhisperBtn();
-    updateSlashCommandMenu();
-    autoResizeTextarea(input);
-    return true;
-  }
   return false;
 }
 
 function maybeTokenizeSlashCommand(input) {
   if (!input) return false;
-  const pendingWhisperMatch = WHISPER_COMMAND_PENDING_PATTERN.exec(input.value);
-  if (pendingWhisperMatch) {
-    if (composerTokens.hashtag || composerTokens.ai) {
-      showToast(getWhisperCombinationError({
-        hasHashtag: !!composerTokens.hashtag,
-        hasAi: !!composerTokens.ai,
-      }), 'error');
-      return false;
-    }
-    showWhisperPicker('command', pendingWhisperMatch.index + pendingWhisperMatch[0].length - pendingWhisperMatch[1].length);
-    return false;
-  }
-  if (pendingWhisperCommandStart != null && whisperPickerMode === 'command') {
-    hideWhisperPicker();
-  }
-  const whisperMatch = WHISPER_COMMAND_TARGET_PATTERN.exec(input.value);
-  if (whisperMatch) {
-    if (composerTokens.hashtag || composerTokens.ai) {
-      showToast(getWhisperCombinationError({
-        hasHashtag: !!composerTokens.hashtag,
-        hasAi: !!composerTokens.ai,
-      }), 'error');
-      return false;
-    }
-    const member = resolveSlashWhisperTarget(whisperMatch[1]);
-    if (!member) {
-      showToast('Whisper user not found in this group', 'error');
-      return false;
-    }
-    setWhisperTokenFromMember(member, whisperMatch[1]);
-    const commandStart = whisperMatch.index + (whisperMatch[0].startsWith(' ') ? 1 : 0);
-    input.value = input.value.slice(0, commandStart);
-    input.selectionStart = input.selectionEnd = input.value.length;
-    syncComposerTokens();
-    updateWhisperBtn();
-    renderWhisperPicker();
-    updateSlashCommandMenu();
-    autoResizeTextarea(input);
-    return true;
-  }
   // Channel creation is UI-only (Create channel modal). No /# command in composer.
   if (/^\/#(\s|$)/.test(input.value)) {
     showToast('Use + Create channel in the top bar', 'info');
@@ -3738,10 +3642,6 @@ function parseComposerMessageInput(rawText) {
     return { ok: false, error: 'Select at least one whisper recipient' };
   }
 
-  if (whisperRecipientIds.length && isAiPrompt) {
-    return { ok: false, error: getWhisperCombinationError({ hasHashtag: false, hasAi: true }) };
-  }
-
   // Active channel stamps every message. No inline /# channel switch from composer.
   if (!whisperRecipientIds.length) {
     if (parseCommandToken(body, '#')) {
@@ -3753,36 +3653,12 @@ function parseComposerMessageInput(rawText) {
       body = aiToken.prompt;
       const invalidWhisper = parseCommandToken(body, 'w');
       if (invalidWhisper) return { ok: false, error: 'AI requests cannot be combined with whispers' };
-    } else {
-      const whisperToken = parseCommandToken(body, 'w');
-      if (whisperToken) {
-        const member = resolveSlashWhisperTarget(whisperToken.value);
-        if (!member) return { ok: false, error: 'Whisper user not found in this group' };
-        whisperRecipientIds = [member.id];
-        body = whisperToken.rest;
-        if (parseCommandToken(body, '#')) {
-          return { ok: false, error: 'Channels cannot be combined with whispers' };
-        }
-      }
     }
-  } else if (parseCommandToken(body, '#') || parseAiCommand(body)) {
-    return {
-      ok: false,
-      error: getWhisperCombinationError({
-        hasHashtag: !!parseCommandToken(body, '#'),
-        hasAi: !!parseAiCommand(body),
-      }),
-    };
-  } else if (isAiPrompt && parseCommandToken(body, 'w')) {
-    return { ok: false, error: 'AI requests cannot be combined with whispers' };
   }
 
   if (isAiPrompt) {
     if (!canUseAiInCurrentGroup()) {
       return { ok: false, error: getAiDisabledMessage() };
-    }
-    if (/^\/d\s+/.test(body)) {
-      return { ok: false, error: 'AI requests cannot be combined with disappearing messages' };
     }
     if (!body) return { ok: false, error: 'AI prompt is required' };
     return {
@@ -3794,11 +3670,6 @@ function parseComposerMessageInput(rawText) {
       isDisappearing: false,
       disappearingDurationMs: 0,
     };
-  }
-
-  if (/^\/d\s+/.test(body)) {
-    isDisappearing = true;
-    body = body.replace(/^\/d\s+/, '').trim();
   }
 
   if (!body) return { ok: false, error: 'Message text is required' };
@@ -5001,9 +4872,16 @@ function updateKeyState() {
   input.disabled = modalBlockingInput;
   const groupName = currentGroupData?.name ? String(currentGroupData.name) : 'group';
   const channel = formatHashtagLabel(getActiveTagTopic());
-  input.placeholder = modalBlockingInput
-    ? 'Complete Ask AI first…'
-    : `Message ${channel} · ${groupName}`;
+  const whisperRecipients = getActiveWhisperRecipientIds();
+  if (modalBlockingInput) {
+    input.placeholder = 'Complete Ask AI first…';
+  } else if (messageMode === 'whisper' && whisperRecipients.length) {
+    input.placeholder = `Whisper to ${formatWhisperRecipientLabel(whisperRecipients, currentGroupId, { prefix: '' })} · ${channel} · ${groupName}`;
+  } else if (messageMode === 'disappearing') {
+    input.placeholder = `Disappearing message ${channel} · ${groupName}`;
+  } else {
+    input.placeholder = `Message ${channel} · ${groupName}`;
+  }
   if (modalBlockingInput) input.setAttribute('aria-describedby', 'composer-blocked-status');
   else input.removeAttribute('aria-describedby');
   sendBtn.disabled = modalBlockingInput;
@@ -5152,10 +5030,6 @@ function renderWhisperPicker() {
         setWhisperTokenFromMember(m);
       } else {
         whisperRecipients = whisperRecipients.filter((id) => normalizeId(id) !== normalizeId(m.id));
-        if (composerTokens.whisper && normalizeId(composerTokens.whisper.memberId) === normalizeId(m.id)) {
-          composerTokens.whisper = null;
-        }
-        if (!whisperRecipients.length && !composerTokens.whisper) messageMode = 'normal';
       }
       whisperRecipients = getUniqueWhisperRecipientIds(whisperRecipients);
       syncComposerTokens();
@@ -6219,10 +6093,6 @@ async function handleFileUpload(file) {
     showToast('Chat content is not ready yet', 'error');
     return;
   }
-  if (composerTokens.hashtag && (composerTokens.whisper || (messageMode === 'whisper' && whisperRecipients.length > 0))) {
-    showToast('Tags cannot be combined with whispers', 'error');
-    return;
-  }
   const uploadId = createUploadId();
 
   let processedFile = file;
@@ -7145,10 +7015,10 @@ function autoResizeTextarea(el) {
 function updateWhisperBtn() {
   const keepBottomPinned = isMessagesPinnedToBottom();
   const btn = $('whisper-mode-btn');
-  const whisperActive = messageMode === 'whisper' || !!composerTokens.whisper;
+  const whisperActive = messageMode === 'whisper';
   const disappearingActive = messageMode === 'disappearing';
   if (whisperActive) {
-    setElementIcon(btn, 'megaphone', { iconOnly: true });
+    setElementIcon(btn, 'megaphone', { iconOnly: true, label: 'Whisper message mode' });
     btn.classList.add('whisper-active');
     btn.classList.remove('disappearing-active');
     if (!whisperRecipients.length && whisperPickerMode == null) $('whisper-picker').hidden = true;
@@ -7163,6 +7033,10 @@ function updateWhisperBtn() {
     btn.classList.remove('disappearing-active');
     hideWhisperPicker();
   }
+  const composer = $('message-input-bar');
+  composer?.classList.toggle('whisper-mode-active', whisperActive);
+  composer?.classList.toggle('disappearing-mode-active', disappearingActive);
+  updateKeyState();
   syncWhisperPickerStatus();
   if (keepBottomPinned) pinMessagesToBottom();
 }
@@ -8715,19 +8589,12 @@ function setupEventListeners() {
   // Whisper mode toggle
   $('whisper-mode-btn').addEventListener('click', (event) => {
     event.stopPropagation();
-    if (composerTokens.hashtag) {
-      showToast('Tags cannot be combined with whispers', 'error');
-      return;
-    }
-    if (composerTokens.whisper) {
-      clearWhisperToken();
-      syncComposerTokens();
-      updateSlashCommandMenu();
-    } else {
-      if (messageMode === 'normal') messageMode = 'whisper';
-      else if (messageMode === 'whisper') { messageMode = 'disappearing'; whisperRecipients = []; }
-      else messageMode = 'normal';
-    }
+    if (messageMode === 'normal') messageMode = 'whisper';
+    else if (messageMode === 'whisper') {
+      messageMode = 'disappearing';
+      whisperRecipients = [];
+      composerTokens.whisper = null;
+    } else messageMode = 'normal';
     if (messageMode === 'whisper') showWhisperPicker('button');
     else hideWhisperPicker();
     syncComposerTokens();

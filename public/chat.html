@@ -15,7 +15,7 @@
   <link rel="apple-touch-icon" href="/gchat_icon.png?v=20260716-v132" type="image/png" sizes="1254x1254" />
   <title>GChat </title>
   <script src="theme-init.js?v=1.3.3-release1"></script>
-  <link rel="stylesheet" href="style.css?v=1.3.3-release1" />
+  <link rel="stylesheet" href="style.css?v=1.3.3-release2" />
 </head>
 <body class="chat-body">
 
@@ -124,17 +124,9 @@
             rows="1"
           ></textarea>
           <div class="slash-command-menu" id="slash-command-menu" hidden>
-            <button class="slash-command-item" type="button" data-command="/w ">
-              <span class="slash-command-name">Whisper</span>
-              <span class="slash-command-hint">/w username</span>
-            </button>
             <button class="slash-command-item" type="button" data-command="/ai " id="slash-command-ai-item" hidden>
               <span class="slash-command-name">Ask AI</span>
               <span class="slash-command-hint">/ai opens Ask AI</span>
-            </button>
-            <button class="slash-command-item" type="button" data-command="/d ">
-              <span class="slash-command-name">Disappearing</span>
-              <span class="slash-command-hint">/d message</span>
             </button>
           </div>
         </div>
@@ -572,6 +564,6 @@
 
   <script src="/socket.io/socket.io.js"></script>
   <script src="/pwa.js?v=20260716-v132"></script>
-  <script src="app.js?v=20260716-v132"></script>
+  <script src="app.js?v=20260723-v133"></script>
 </body>
 </html>

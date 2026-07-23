@@ -77,13 +77,14 @@
   padding: 1px 40px 1px 12px !important;
   align-items: start;
   position: relative;
-  /* Avoid paint containment so hover action bars are not clipped */
-  contain: layout style;
+  /* Children such as images must contribute their full intrinsic height. */
+  contain: style;
   overflow: visible !important;
   animation: none !important;
   flex-direction: row !important;
   gap: 0 !important;
   box-sizing: border-box;
+  flex: 0 0 auto !important;
   font-family: var(--font-ui) !important;
 }
 
@@ -397,7 +398,6 @@
 
 .btn-whisper-mode.whisper-active { color: var(--whisper-border) !important; }
 .btn-whisper-mode.disappearing-active { color: var(--chat-danger) !important; }
-.message-token-disappearing { color: var(--chat-danger) !important; border-color: var(--chat-danger) !important; }
 .whisper-picker-confirm { width: 100%; margin-top: 8px; }
 
 /* Reply */
@@ -849,6 +849,14 @@
 .message-input-bar textarea::placeholder,
 #message-input::placeholder {
   color: var(--chat-faint) !important;
+}
+
+.message-input-bar.whisper-mode-active #message-input {
+  color: var(--whisper-border) !important;
+}
+
+.message-input-bar.disappearing-mode-active #message-input {
+  color: var(--chat-danger) !important;
 }
 
 /* Send is a segment of the composer, not a primary CTA pill */
