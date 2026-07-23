@@ -14,6 +14,7 @@ const APP_SHELL_ASSETS = [
   '/app.js',
   '/socket.io/socket.io.js',
   '/gchat_icon.png',
+  '/gchat_icon_light.png',
   '/favicon.png',
 ];
 

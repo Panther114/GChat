@@ -1674,6 +1674,13 @@
   function themeToggleButtons() {
     return Array.from(document.querySelectorAll(".theme-toggle-btn"));
   }
+  function syncDesktopBrandIcon() {
+    const icon = document.querySelector(".brand-icon");
+    if (!icon || !window.electronAPI) return;
+    const isLightTheme = document.documentElement.dataset.theme === "light";
+    const nextSrc = isLightTheme ? icon.dataset.lightSrc : icon.dataset.darkSrc;
+    if (nextSrc && icon.getAttribute("src") !== nextSrc) icon.src = nextSrc;
+  }
   function syncThemeToggleControl() {
     const preference = ["dark", "light"].includes(appLocalSettings.theme) ? appLocalSettings.theme : resolveThemePreference(appLocalSettings.theme || "system");
     const resolved = resolveThemePreference(preference);
@@ -1685,6 +1692,7 @@
       btn.title = nextLabel;
       btn.setAttribute("aria-label", nextLabel);
     }
+    syncDesktopBrandIcon();
   }
   async function applyThemePreference(next) {
     const theme = next === "light" ? "light" : "dark";

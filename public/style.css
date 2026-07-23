@@ -4706,9 +4706,6 @@ body.electron-desktop-effects .chat-panel,
 body.electron-desktop-effects .right-panel {
   transform: none !important;
 }
-:root[data-theme=light] body.electron-desktop-effects .brand-icon {
-  filter: brightness(0);
-}
 :root[data-theme=dark] .right-panel .toggle-switch-row input:checked + .toggle-switch-ui {
   background: #525252 !important;
 }
