@@ -2472,12 +2472,14 @@ function clearPageTitleNotification() {
 }
 
 // ── Image Viewer ──────────────────────────────────────────────────────────────
-function showImageViewer(imageUrl, filename = 'image') {
+let imageViewerData = null;
+
+function showImageViewer(blob, filename = 'image') {
   const modal = $('image-viewer-modal');
   const img = $('image-viewer-img');
+  const imageUrl = URL.createObjectURL(blob);
+  imageViewerData = { blob, filename, imageUrl };
   img.src = imageUrl;
-  modal.dataset.imageUrl = imageUrl;
-  modal.dataset.filename = filename;
   imageViewerZoom = 1;
   img.style.transform = 'scale(1)';
   modal.hidden = false;
@@ -2487,8 +2489,8 @@ function hideImageViewer() {
   const modal = $('image-viewer-modal');
   const img = $('image-viewer-img');
   modal.hidden = true;
-  delete modal.dataset.imageUrl;
-  delete modal.dataset.filename;
+  if (imageViewerData?.imageUrl) URL.revokeObjectURL(imageViewerData.imageUrl);
+  imageViewerData = null;
   img.src = '';
   img.style.transform = 'scale(1)';
   imageViewerZoom = 1;
@@ -5363,8 +5365,10 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
     }
     bubble.appendChild(bodyRow);
   } else {
-    bubble.appendChild(textEl);
-    bubble.appendChild(meta);
+    const attachmentRow = document.createElement('div');
+    attachmentRow.className = 'msg-attachment-row';
+    attachmentRow.append(textEl, meta);
+    bubble.appendChild(attachmentRow);
   }
 
   const aiMetaEl = isAiAssistant ? createAiMetaElement(msg.aiMeta) : null;
@@ -5421,7 +5425,7 @@ async function renderMsgContent(msg, textEl, bubble, groupId = currentGroupId) {
       const locked = document.createElement('div');
       locked.className = 'msg-image-locked';
       locked.appendChild(createIcon('lock'));
-      bubble.appendChild(locked);
+      textEl.appendChild(locked);
     } else {
       const buf = await decryptAttachmentBytes(msg, key, groupId);
       if (buf) {
@@ -5433,16 +5437,20 @@ async function renderMsgContent(msg, textEl, bubble, groupId = currentGroupId) {
         img.src = url;
         img.alt = 'image';
         img.style.cursor = 'pointer';
+        await new Promise((resolve) => {
+          img.addEventListener('load', resolve, { once: true });
+          img.addEventListener('error', resolve, { once: true });
+        });
         img.addEventListener('click', (e) => {
           e.stopPropagation();
-          showImageViewer(url, msg.filename || 'image');
+          showImageViewer(blob, msg.filename || 'image');
         });
-        bubble.appendChild(img);
+        textEl.appendChild(img);
       } else {
         const locked = document.createElement('div');
         locked.className = 'msg-image-locked';
         locked.appendChild(createIcon('lock'));
-        bubble.appendChild(locked);
+        textEl.appendChild(locked);
       }
     }
     return;
@@ -5481,7 +5489,7 @@ async function renderMsgContent(msg, textEl, bubble, groupId = currentGroupId) {
           a.href = url; a.download = msg.filename || 'download';
           a.click(); URL.revokeObjectURL(url);
         });
-        bubble.appendChild(btn);
+        textEl.appendChild(btn);
       } else {
         textEl.textContent = 'File unavailable: ' + (msg.filename || 'file');
       }
@@ -5657,6 +5665,13 @@ function hideTagContextMenu() {
 }
 
 async function getAttachmentData(msg) {
+  if (msg?._viewerData) {
+    return {
+      blob: msg._viewerData.blob,
+      filename: msg._viewerData.filename || 'image',
+      mimeType: msg._viewerData.blob.type || 'image/png',
+    };
+  }
   if (!msg || (msg.type !== 'image' && msg.type !== 'file')) return null;
   const key = currentGroupId ? getGroupKey(currentGroupId) : null;
   if (!key) {
@@ -5705,13 +5720,17 @@ async function copyAttachmentToClipboard(msg) {
     }
 
     if (navigator.clipboard?.write && typeof ClipboardItem !== 'undefined') {
-      const item = new ClipboardItem({
-        [data.mimeType]: data.blob,
-        'text/plain': new Blob([data.filename], { type: 'text/plain' }),
-      });
-      await navigator.clipboard.write([item]);
-      showToast('Copied to clipboard', 'success');
-      return;
+      try {
+        const item = new ClipboardItem({
+          [data.mimeType]: data.blob,
+          'text/plain': new Blob([data.filename], { type: 'text/plain' }),
+        });
+        await navigator.clipboard.write([item]);
+        showToast('Copied to clipboard', 'success');
+        return;
+      } catch (err) {
+        console.warn('Binary clipboard write failed; falling back to filename copy', err);
+      }
     }
 
     if (typeof navigator.clipboard?.writeText === 'function') {
@@ -8795,29 +8814,22 @@ function setupEventListeners() {
     updateImageViewerZoom(imageViewerZoom + (e.deltaY < 0 ? 0.2 : -0.2));
   }, { passive: false });
   $('image-viewer-download-btn').addEventListener('click', async () => {
-    const modal = $('image-viewer-modal');
-    const url = modal.dataset.imageUrl;
-    if (!url) return;
-    const blob = await fetch(url).then((response) => response.blob()).catch(() => null);
-    if (!blob) { showToast('Could not download image', 'error'); return; }
+    if (!imageViewerData) return;
+    const url = URL.createObjectURL(imageViewerData.blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = modal.dataset.filename || 'image';
+    link.download = imageViewerData.filename || 'image';
+    document.body.appendChild(link);
     link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 100);
   });
   $('image-viewer-copy-btn').addEventListener('click', async () => {
-    const url = $('image-viewer-modal').dataset.imageUrl;
-    const blob = url ? await fetch(url).then((response) => response.blob()).catch(() => null) : null;
-    if (!blob || typeof ClipboardItem === 'undefined' || !navigator.clipboard?.write) {
-      showToast('Image copying is unavailable in this browser', 'error');
-      return;
-    }
-    try {
-      await navigator.clipboard.write([new ClipboardItem({ [blob.type || 'image/png']: blob })]);
-      showToast('Image copied', 'success');
-    } catch {
-      showToast('Could not copy image', 'error');
-    }
+    if (!imageViewerData) return;
+    await copyAttachmentToClipboard({
+      type: 'image',
+      _viewerData: imageViewerData,
+    });
   });
 }
 

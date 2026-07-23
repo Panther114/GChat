@@ -2074,12 +2074,13 @@
     unreadNotificationCount = 0;
     updatePageTitleNotification();
   }
-  function showImageViewer(imageUrl, filename = "image") {
+  var imageViewerData = null;
+  function showImageViewer(blob, filename = "image") {
     const modal = $("image-viewer-modal");
     const img = $("image-viewer-img");
+    const imageUrl = URL.createObjectURL(blob);
+    imageViewerData = { blob, filename, imageUrl };
     img.src = imageUrl;
-    modal.dataset.imageUrl = imageUrl;
-    modal.dataset.filename = filename;
     imageViewerZoom = 1;
     img.style.transform = "scale(1)";
     modal.hidden = false;
@@ -2088,8 +2089,8 @@
     const modal = $("image-viewer-modal");
     const img = $("image-viewer-img");
     modal.hidden = true;
-    delete modal.dataset.imageUrl;
-    delete modal.dataset.filename;
+    if (imageViewerData?.imageUrl) URL.revokeObjectURL(imageViewerData.imageUrl);
+    imageViewerData = null;
     img.src = "";
     img.style.transform = "scale(1)";
     imageViewerZoom = 1;
@@ -4609,8 +4610,10 @@
       }
       bubble.appendChild(bodyRow);
     } else {
-      bubble.appendChild(textEl);
-      bubble.appendChild(meta);
+      const attachmentRow = document.createElement("div");
+      attachmentRow.className = "msg-attachment-row";
+      attachmentRow.append(textEl, meta);
+      bubble.appendChild(attachmentRow);
     }
     const aiMetaEl = isAiAssistant ? createAiMetaElement(msg.aiMeta) : null;
     if (aiMetaEl) bubble.appendChild(aiMetaEl);
@@ -4655,7 +4658,7 @@
         const locked = document.createElement("div");
         locked.className = "msg-image-locked";
         locked.appendChild(createIcon("lock"));
-        bubble.appendChild(locked);
+        textEl.appendChild(locked);
       } else {
         const buf = await decryptAttachmentBytes(msg, key, groupId);
         if (buf) {
@@ -4667,16 +4670,20 @@
           img.src = url;
           img.alt = "image";
           img.style.cursor = "pointer";
+          await new Promise((resolve) => {
+            img.addEventListener("load", resolve, { once: true });
+            img.addEventListener("error", resolve, { once: true });
+          });
           img.addEventListener("click", (e) => {
             e.stopPropagation();
-            showImageViewer(url, msg.filename || "image");
+            showImageViewer(blob, msg.filename || "image");
           });
-          bubble.appendChild(img);
+          textEl.appendChild(img);
         } else {
           const locked = document.createElement("div");
           locked.className = "msg-image-locked";
           locked.appendChild(createIcon("lock"));
-          bubble.appendChild(locked);
+          textEl.appendChild(locked);
         }
       }
       return;
@@ -4716,7 +4723,7 @@
             a.click();
             URL.revokeObjectURL(url);
           });
-          bubble.appendChild(btn);
+          textEl.appendChild(btn);
         } else {
           textEl.textContent = "File unavailable: " + (msg.filename || "file");
         }
@@ -4869,6 +4876,13 @@
     ctxTagTopic = null;
   }
   async function getAttachmentData(msg) {
+    if (msg?._viewerData) {
+      return {
+        blob: msg._viewerData.blob,
+        filename: msg._viewerData.filename || "image",
+        mimeType: msg._viewerData.blob.type || "image/png"
+      };
+    }
     if (!msg || msg.type !== "image" && msg.type !== "file") return null;
     const key = currentGroupId ? getGroupKey(currentGroupId) : null;
     if (!key) {
@@ -4891,6 +4905,67 @@
       else filename = msg.type === "image" ? "image.jpg" : "file.bin";
     }
     return { blob, filename, mimeType };
+  }
+  async function copyAttachmentToClipboard(msg) {
+    const data = await getAttachmentData(msg);
+    if (!data) return;
+    try {
+      if (window.electronAPI?.copyBinaryToClipboard) {
+        const ab = await data.blob.arrayBuffer();
+        const bytes = new Uint8Array(ab);
+        let binary = "";
+        const step = 32768;
+        for (let i = 0; i < bytes.length; i += step) {
+          binary += String.fromCharCode(...bytes.subarray(i, i + step));
+        }
+        const ok = await window.electronAPI.copyBinaryToClipboard({
+          base64: btoa(binary),
+          mimeType: data.mimeType,
+          filename: data.filename
+        });
+        if (ok) {
+          showToast("Copied to clipboard", "success");
+          return;
+        }
+      }
+      if (navigator.clipboard?.write && typeof ClipboardItem !== "undefined") {
+        try {
+          const item = new ClipboardItem({
+            [data.mimeType]: data.blob,
+            "text/plain": new Blob([data.filename], { type: "text/plain" })
+          });
+          await navigator.clipboard.write([item]);
+          showToast("Copied to clipboard", "success");
+          return;
+        } catch (err) {
+          console.warn("Binary clipboard write failed; falling back to filename copy", err);
+        }
+      }
+      if (typeof navigator.clipboard?.writeText === "function") {
+        await navigator.clipboard.writeText(data.filename);
+        showToast("Filename copied to clipboard", "success");
+        return;
+      }
+      const fallback = document.createElement("textarea");
+      fallback.value = data.filename;
+      fallback.setAttribute("readonly", "");
+      fallback.style.position = "fixed";
+      fallback.style.left = "-9999px";
+      document.body.appendChild(fallback);
+      fallback.select();
+      console.warn("Using deprecated execCommand clipboard fallback");
+      const copied = typeof document.execCommand === "function" && document.execCommand("copy");
+      document.body.removeChild(fallback);
+      if (copied) {
+        showToast("Filename copied to clipboard", "success");
+        return;
+      }
+      showToast("Failed to copy file to clipboard", "error");
+      return;
+    } catch (err) {
+      console.error("copyAttachmentToClipboard error:", err);
+      showToast("Failed to copy file to clipboard", "error");
+    }
   }
   function setWallpaperSaveState(enabled) {
     const saveBtn = $("wallpaper-save-btn");
@@ -7737,32 +7812,22 @@ ${grokResponseDraft}` : grokResponseDraft;
       updateImageViewerZoom(imageViewerZoom + (e.deltaY < 0 ? 0.2 : -0.2));
     }, { passive: false });
     $("image-viewer-download-btn").addEventListener("click", async () => {
-      const modal = $("image-viewer-modal");
-      const url = modal.dataset.imageUrl;
-      if (!url) return;
-      const blob = await fetch(url).then((response) => response.blob()).catch(() => null);
-      if (!blob) {
-        showToast("Could not download image", "error");
-        return;
-      }
+      if (!imageViewerData) return;
+      const url = URL.createObjectURL(imageViewerData.blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = modal.dataset.filename || "image";
+      link.download = imageViewerData.filename || "image";
+      document.body.appendChild(link);
       link.click();
+      document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(url), 100);
     });
     $("image-viewer-copy-btn").addEventListener("click", async () => {
-      const url = $("image-viewer-modal").dataset.imageUrl;
-      const blob = url ? await fetch(url).then((response) => response.blob()).catch(() => null) : null;
-      if (!blob || typeof ClipboardItem === "undefined" || !navigator.clipboard?.write) {
-        showToast("Image copying is unavailable in this browser", "error");
-        return;
-      }
-      try {
-        await navigator.clipboard.write([new ClipboardItem({ [blob.type || "image/png"]: blob })]);
-        showToast("Image copied", "success");
-      } catch {
-        showToast("Could not copy image", "error");
-      }
+      if (!imageViewerData) return;
+      await copyAttachmentToClipboard({
+        type: "image",
+        _viewerData: imageViewerData
+      });
     });
   }
   async function loadOlderMessages() {

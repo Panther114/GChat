@@ -59,6 +59,55 @@ test('message stream remains usable at a mobile viewport', async ({ page }) => {
   expect(width).toBeLessThanOrEqual(390.1);
 });
 
+test('image attachments reserve message-row space and open usable viewer actions', async ({ page }) => {
+  await signInAsLocalRoot(page);
+  await page.getByText('Increment A Playground').click();
+
+  await page.locator('#file-input').setInputFiles('public/gchat_icon.png');
+  const image = page.locator('.msg-image');
+  await expect(image).toBeVisible();
+
+  const imageRow = image.locator('xpath=ancestor::div[contains(@class, "msg-row")]');
+  await expect(imageRow).toHaveCount(1);
+  const imageHeight = await image.evaluate((element) => element.getBoundingClientRect().height);
+  expect(imageHeight).toBeGreaterThan(0);
+
+  const nextMessage = 'Attachment layout regression check';
+  await page.locator('#message-input').fill(nextMessage);
+  await page.locator('#message-input').press('Enter');
+  const nextMessageText = page.getByText(nextMessage, { exact: true });
+  await expect(nextMessageText).toBeVisible();
+  const layout = await nextMessageText.evaluate((element) => {
+    const imageElement = element.ownerDocument.querySelector('.msg-image');
+    const nextRow = element.closest('.msg-row');
+    if (!imageElement || !nextRow) return null;
+    const imageRect = imageElement.getBoundingClientRect();
+    const nextRowRect = nextRow.getBoundingClientRect();
+    return { imageBottom: imageRect.bottom, nextRowTop: nextRowRect.top };
+  });
+  expect(layout).not.toBeNull();
+  expect(layout.nextRowTop).toBeGreaterThanOrEqual(layout.imageBottom - 1);
+
+  await image.click();
+  await expect(page.locator('#image-viewer-modal')).toBeVisible();
+  await expect(page.locator('#image-viewer-copy-btn')).toBeVisible();
+  await expect(page.locator('#image-viewer-download-btn')).toBeVisible();
+
+  const imageDownload = page.waitForEvent('download');
+  await page.locator('#image-viewer-download-btn').click();
+  await expect(imageDownload).resolves.toBeTruthy();
+
+  await page.mouse.click(5, 5);
+  await expect(page.locator('#image-viewer-modal')).toBeHidden();
+  await page.locator('#file-input').setInputFiles('package.json');
+  const fileCard = page.locator('.msg-file-btn');
+  await expect(fileCard).toBeVisible();
+  await expect(fileCard.getByText('Download', { exact: true })).toBeVisible();
+  const fileDownload = page.waitForEvent('download');
+  await fileCard.click();
+  await expect(fileDownload).resolves.toBeTruthy();
+});
+
 test('startup fetches bounded group metadata without eager transcript hydration', async ({ page }) => {
   const apiPaths = [];
   page.on('request', (request) => {
