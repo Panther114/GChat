@@ -4471,9 +4471,9 @@
       const rb = document.createElement("div");
       rb.className = "msg-reply-box";
       if (!targetExists) {
-        rb.textContent = "Original message unavailable";
+        rb.textContent = "Replying to, original message unavailable";
       } else if (replyPreview) {
-        rb.innerHTML = '<span class="msg-reply-sender">' + escapeHtml(replyPreview.senderName || "") + "</span>" + escapeHtml(truncate(replyPreview.preview || "", 60));
+        rb.innerHTML = '<span class="msg-reply-sender">Replying to ' + escapeHtml(replyPreview.senderName || "") + "</span> " + escapeHtml(truncate(replyPreview.preview || "", 60));
         rb.addEventListener("click", () => scrollToMessage(msg.replyToId));
       }
       bubble.appendChild(rb);
@@ -4482,7 +4482,7 @@
         const rData = typeof msg.replyTo === "string" ? JSON.parse(msg.replyTo) : msg.replyTo;
         const rb = document.createElement("div");
         rb.className = "msg-reply-box";
-        rb.innerHTML = '<span class="msg-reply-sender">' + escapeHtml(rData.senderName || "") + "</span>" + escapeHtml(truncate(rData.preview || "", 60));
+        rb.innerHTML = '<span class="msg-reply-sender">Replying to ' + escapeHtml(rData.senderName || "") + "</span> " + escapeHtml(truncate(rData.preview || "", 60));
         rb.addEventListener("click", () => scrollToMessage(rData.id));
         bubble.appendChild(rb);
       } catch {
@@ -4554,7 +4554,7 @@
     if (isOwn && ["text", "whisper"].includes(msg.type)) addAction("Edit", "pencil", () => $("ctx-edit").click());
     if (isOwn) addAction("Delete", "trash-2", () => $("ctx-delete").click());
     content.appendChild(actions);
-    bubble.addEventListener("contextmenu", (e) => {
+    row.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       showContextMenu(e, msg, textEl.textContent);
     });
@@ -4747,7 +4747,7 @@
     $("ctx-delete").hidden = !isAuthor;
     $("ctx-download").hidden = !isAttachment;
     $("ctx-copy").hidden = isAttachment;
-    setElementIcon($("ctx-copy"), "copy", { label: "Copy Text" });
+    setElementIcon($("ctx-copy"), "copy", { label: "Copy" });
     menu.hidden = false;
     if (e) {
       menu.style.left = Math.min(e.clientX, window.innerWidth - 160) + "px";
@@ -4926,18 +4926,19 @@
     editCancel.textContent = "Cancel";
     editForm.append(editInput, editSave, editCancel);
     textEl.hidden = true;
-    bubble.insertBefore(editForm, textEl);
+    textEl.parentNode.insertBefore(editForm, textEl);
     editInput.focus();
     editInput.setSelectionRange(editInput.value.length, editInput.value.length);
+    let isSaving = false;
+    let isFinished = false;
     const cancelEdit = () => {
+      if (isFinished) return;
+      isFinished = true;
       editForm.remove();
       textEl.hidden = false;
     };
-    editCancel.addEventListener("click", cancelEdit);
-    editInput.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") cancelEdit();
-    });
-    editSave.addEventListener("click", async () => {
+    const saveEdit = async () => {
+      if (isSaving || isFinished) return;
       const newText = editInput.value.trim();
       if (!newText || newText === currentPlaintext) {
         cancelEdit();
@@ -4949,6 +4950,7 @@
         cancelEdit();
         return;
       }
+      isSaving = true;
       editSave.disabled = true;
       try {
         const nextRevision = Number(msg.revision || 1) + 1;
@@ -4981,16 +4983,29 @@
             renderGroupFromCache(currentGroupId);
           }
           showToast(d.error || "Edit failed", "error");
+          isSaving = false;
           editSave.disabled = false;
-        } else {
-          cancelEdit();
+          return;
         }
+        cancelEdit();
       } catch (err) {
         console.error("Edit error:", err);
         showToast("Edit failed", "error");
+        isSaving = false;
         editSave.disabled = false;
       }
+    };
+    editCancel.addEventListener("mousedown", (e) => e.preventDefault());
+    editCancel.addEventListener("click", cancelEdit);
+    editInput.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") cancelEdit();
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        void saveEdit();
+      }
     });
+    editInput.addEventListener("blur", () => void saveEdit());
+    editSave.addEventListener("click", () => void saveEdit());
   }
   async function doSend(text) {
     if (!currentGroupId || !socket) return;
@@ -5728,7 +5743,7 @@
     });
     socket.on("message_edited", async (updated) => {
       const messageId = updated.id || updated.messageId;
-      const { encryptedContent, iv, editedAt } = updated;
+      const { encryptedContent, iv, editedAt, revision } = updated;
       const row = document.querySelector('[data-msg-id="' + messageId + '"]');
       if (row) {
         const bubble = row.querySelector(".msg-bubble");
@@ -5760,6 +5775,7 @@
         stored.encryptedContent = encryptedContent;
         stored.iv = iv;
         stored.editedAt = editedAt;
+        stored.revision = revision;
         if (groupId !== currentGroupId) cache.rowsDirty = true;
         if (groupId === currentGroupId) allMessages = cache.messages;
         writeLocalGroupCache(groupId, cache);
@@ -6185,7 +6201,18 @@
       } else {
         content = MSG_CONTENT_UNAVAILABLE;
       }
-      lines.push("[" + time + "] " + (msg.senderName || "Unknown") + ": " + content);
+      let replyPrefix = "";
+      const reply = msg.replyPreview || (() => {
+        try {
+          return msg.replyTo ? typeof msg.replyTo === "string" ? JSON.parse(msg.replyTo) : msg.replyTo : null;
+        } catch {
+          return null;
+        }
+      })();
+      if (msg.replyToId || reply) {
+        replyPrefix = "Replying to, " + (reply?.senderName || "original message") + ": " + (reply?.preview || "Original message unavailable") + " \u2014 ";
+      }
+      lines.push("[" + time + "] " + (msg.senderName || "Unknown") + ": " + replyPrefix + content);
     }
     if (!lines.length) {
       showToast("No messages to export", "info");

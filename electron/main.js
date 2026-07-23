@@ -94,6 +94,9 @@ async function createWindow() {
       nodeIntegration: false,
       sandbox: true,
       spellcheck: true,
+      // Keep Socket.IO's normal heartbeat alive while the tray-hidden desktop
+      // window is in the background, avoiding an unnecessary reconnect on focus.
+      backgroundThrottling: false,
     },
   });
 

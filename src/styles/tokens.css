@@ -147,6 +147,7 @@
   --wallpaper-overlay-opacity: 0;
 
   --discord-scrollbar-thumb: #2a2a2a;
+  --desktop-pointer-glow: rgba(255, 255, 255, 0.16);
 }
 
 /* ── Light: SpaceX day ────────────────────────────────────────────── */
@@ -219,4 +220,5 @@
   --brand-gradient-start: #0a0a0a;
   --brand-gradient-end: #525252;
   --discord-scrollbar-thumb: #c4c4c4;
+  --desktop-pointer-glow: rgba(0, 0, 0, 0.12);
 }

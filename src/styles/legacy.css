@@ -3569,17 +3569,17 @@ body.electron-desktop-effects {
 body.electron-desktop-effects::before {
   content: '';
   position: fixed;
-  left: calc(var(--desktop-pointer-x) - 140px);
-  top: calc(var(--desktop-pointer-y) - 140px);
+  left: 0;
+  top: 0;
   width: 280px;
   height: 280px;
   border-radius: 50%;
   pointer-events: none;
-  background:
-    radial-gradient(circle, rgba(167,139,250,.18) 0%, rgba(108,99,255,.1) 38%, rgba(108,99,255,0) 72%);
-  filter: blur(18px);
-  opacity: .9;
+  background: radial-gradient(circle, var(--desktop-pointer-glow) 0%, transparent 72%);
+  opacity: .85;
   z-index: 2;
+  transform: translate3d(calc(var(--desktop-pointer-x) - 140px), calc(var(--desktop-pointer-y) - 140px), 0);
+  will-change: transform;
   transition: opacity .2s ease;
 }
 body.electron-desktop-effects .sidebar,

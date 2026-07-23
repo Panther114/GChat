@@ -5214,9 +5214,9 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
     const rb = document.createElement('div');
     rb.className = 'msg-reply-box';
     if (!targetExists) {
-      rb.textContent = 'Original message unavailable';
+      rb.textContent = 'Replying to, original message unavailable';
     } else if (replyPreview) {
-      rb.innerHTML = '<span class="msg-reply-sender">' + escapeHtml(replyPreview.senderName || '') + '</span>' + escapeHtml(truncate(replyPreview.preview || '', 60));
+      rb.innerHTML = '<span class="msg-reply-sender">Replying to ' + escapeHtml(replyPreview.senderName || '') + '</span> ' + escapeHtml(truncate(replyPreview.preview || '', 60));
       rb.addEventListener('click', () => scrollToMessage(msg.replyToId));
     }
     bubble.appendChild(rb);
@@ -5225,7 +5225,7 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
       const rData = typeof msg.replyTo === 'string' ? JSON.parse(msg.replyTo) : msg.replyTo;
       const rb = document.createElement('div');
       rb.className = 'msg-reply-box';
-      rb.innerHTML = '<span class="msg-reply-sender">' + escapeHtml(rData.senderName || '') + '</span>' + escapeHtml(truncate(rData.preview || '', 60));
+      rb.innerHTML = '<span class="msg-reply-sender">Replying to ' + escapeHtml(rData.senderName || '') + '</span> ' + escapeHtml(truncate(rData.preview || '', 60));
       rb.addEventListener('click', () => scrollToMessage(rData.id));
       bubble.appendChild(rb);
     } catch { /* malformed reply data */ }
@@ -5306,7 +5306,7 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
   content.appendChild(actions);
 
   // Right-click context menu
-  bubble.addEventListener('contextmenu', (e) => {
+  row.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     showContextMenu(e, msg, textEl.textContent);
   });
@@ -5528,7 +5528,7 @@ function showContextMenu(e, msg, text) {
   $('ctx-delete').hidden = !isAuthor;
   $('ctx-download').hidden = !isAttachment;
   $('ctx-copy').hidden = isAttachment;
-  setElementIcon($('ctx-copy'), 'copy', { label: 'Copy Text' });
+  setElementIcon($('ctx-copy'), 'copy', { label: 'Copy' });
   menu.hidden = false;
   if (e) {
     menu.style.left = Math.min(e.clientX, window.innerWidth - 160) + 'px';
@@ -5781,27 +5781,29 @@ async function startEditMessage(msg, currentPlaintext) {
   editCancel.textContent = 'Cancel';
   editForm.append(editInput, editSave, editCancel);
 
-  // Hide the text span, inject form
+  // The text node lives inside .msg-body-row, not directly in the bubble.
+  // Insert beside it so the editor replaces the message in place.
   textEl.hidden = true;
-  bubble.insertBefore(editForm, textEl);
+  textEl.parentNode.insertBefore(editForm, textEl);
   editInput.focus();
   editInput.setSelectionRange(editInput.value.length, editInput.value.length);
 
+  let isSaving = false;
+  let isFinished = false;
   const cancelEdit = () => {
+    if (isFinished) return;
+    isFinished = true;
     editForm.remove();
     textEl.hidden = false;
   };
 
-  editCancel.addEventListener('click', cancelEdit);
-  editInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') cancelEdit();
-  });
-
-  editSave.addEventListener('click', async () => {
+  const saveEdit = async () => {
+    if (isSaving || isFinished) return;
     const newText = editInput.value.trim();
     if (!newText || newText === currentPlaintext) { cancelEdit(); return; }
     const key = getGroupKey(currentGroupId);
     if (!key) { showToast('Chat content is not ready yet', 'error'); cancelEdit(); return; }
+    isSaving = true;
     editSave.disabled = true;
     try {
       const nextRevision = Number(msg.revision || 1) + 1;
@@ -5836,17 +5838,32 @@ async function startEditMessage(msg, currentPlaintext) {
           renderGroupFromCache(currentGroupId);
         }
         showToast(d.error || 'Edit failed', 'error');
+        isSaving = false;
         editSave.disabled = false;
-      } else {
-        cancelEdit();
-        // The message_edited socket event will update the bubble for everyone
+        return;
       }
-    } catch(err) {
+      cancelEdit();
+      // The message_edited socket event updates every rendered copy of the message.
+    } catch (err) {
       console.error('Edit error:', err);
       showToast('Edit failed', 'error');
+      isSaving = false;
       editSave.disabled = false;
     }
+  };
+
+  // Keep a Cancel click from blurring the input first (blur saves by design).
+  editCancel.addEventListener('mousedown', (e) => e.preventDefault());
+  editCancel.addEventListener('click', cancelEdit);
+  editInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') cancelEdit();
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      void saveEdit();
+    }
   });
+  editInput.addEventListener('blur', () => void saveEdit());
+  editSave.addEventListener('click', () => void saveEdit());
 }
 
 // ── Send message ──────────────────────────────────────────────────────────────
@@ -6661,7 +6678,7 @@ function initSocket() {
 
   socket.on('message_edited', async (updated) => {
     const messageId = updated.id || updated.messageId;
-    const { encryptedContent, iv, editedAt } = updated;
+    const { encryptedContent, iv, editedAt, revision } = updated;
     const row = document.querySelector('[data-msg-id="' + messageId + '"]');
     if (row) {
       const bubble = row.querySelector('.msg-bubble');
@@ -6700,6 +6717,7 @@ function initSocket() {
       stored.encryptedContent = encryptedContent;
       stored.iv = iv;
       stored.editedAt = editedAt;
+      stored.revision = revision;
       if (groupId !== currentGroupId) cache.rowsDirty = true;
       if (groupId === currentGroupId) allMessages = cache.messages;
       writeLocalGroupCache(groupId, cache);
@@ -7164,7 +7182,14 @@ async function exportChat() {
     } else {
       content = MSG_CONTENT_UNAVAILABLE;
     }
-    lines.push('[' + time + '] ' + (msg.senderName || 'Unknown') + ': ' + content);
+    let replyPrefix = '';
+    const reply = msg.replyPreview || (() => {
+      try { return msg.replyTo ? (typeof msg.replyTo === 'string' ? JSON.parse(msg.replyTo) : msg.replyTo) : null; } catch { return null; }
+    })();
+    if (msg.replyToId || reply) {
+      replyPrefix = 'Replying to, ' + (reply?.senderName || 'original message') + ': ' + (reply?.preview || 'Original message unavailable') + ' — ';
+    }
+    lines.push('[' + time + '] ' + (msg.senderName || 'Unknown') + ': ' + replyPrefix + content);
   }
   if (!lines.length) { showToast('No messages to export', 'info'); return; }
   const blob = new Blob([lines.join('\n')], { type: 'text/plain' });

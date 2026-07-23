@@ -4238,8 +4238,8 @@ body.electron-desktop-effects {
 body.electron-desktop-effects::before {
   content: "";
   position: fixed;
-  left: calc(var(--desktop-pointer-x) - 140px);
-  top: calc(var(--desktop-pointer-y) - 140px);
+  left: 0;
+  top: 0;
   width: 280px;
   height: 280px;
   border-radius: 50%;
@@ -4247,12 +4247,12 @@ body.electron-desktop-effects::before {
   background:
     radial-gradient(
       circle,
-      rgba(167, 139, 250, .18) 0%,
-      rgba(108, 99, 255, .1) 38%,
-      rgba(108, 99, 255, 0) 72%);
-  filter: blur(18px);
-  opacity: .9;
+      var(--desktop-pointer-glow) 0%,
+      transparent 72%);
+  opacity: .85;
   z-index: 2;
+  transform: translate3d(calc(var(--desktop-pointer-x) - 140px), calc(var(--desktop-pointer-y) - 140px), 0);
+  will-change: transform;
   transition: opacity .2s ease;
 }
 body.electron-desktop-effects .sidebar,
@@ -4516,6 +4516,7 @@ body.electron-desktop-effects .right-panel {
   --wallpaper-blur: 0px;
   --wallpaper-overlay-opacity: 0;
   --discord-scrollbar-thumb: #2a2a2a;
+  --desktop-pointer-glow: rgba(255, 255, 255, 0.16);
 }
 :root[data-theme=light] {
   color-scheme: light;
@@ -4583,6 +4584,7 @@ body.electron-desktop-effects .right-panel {
   --brand-gradient-start: #0a0a0a;
   --brand-gradient-end: #525252;
   --discord-scrollbar-thumb: #c4c4c4;
+  --desktop-pointer-glow: rgba(0, 0, 0, 0.12);
 }
 
 /* src/styles/themes.css */
@@ -4691,8 +4693,7 @@ button:active,
 .chat-panel::after,
 body.chat-body.mobile-layout .chat-panel::after,
 .auth-shell::before,
-.auth-shell::after,
-body.electron-desktop-effects::before {
+.auth-shell::after {
   display: none !important;
   content: none !important;
   background: none !important;
@@ -4704,6 +4705,12 @@ body.electron-desktop-effects .sidebar,
 body.electron-desktop-effects .chat-panel,
 body.electron-desktop-effects .right-panel {
   transform: none !important;
+}
+:root[data-theme=light] body.electron-desktop-effects .brand-icon {
+  filter: brightness(0);
+}
+:root[data-theme=dark] .right-panel .toggle-switch-row input:checked + .toggle-switch-ui {
+  background: #525252 !important;
 }
 .sidebar,
 .right-panel {

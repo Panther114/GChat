@@ -117,8 +117,7 @@ button:active,
 .chat-panel::after,
 body.chat-body.mobile-layout .chat-panel::after,
 .auth-shell::before,
-.auth-shell::after,
-body.electron-desktop-effects::before {
+.auth-shell::after {
   display: none !important;
   content: none !important;
   background: none !important;
@@ -131,6 +130,15 @@ body.electron-desktop-effects .sidebar,
 body.electron-desktop-effects .chat-panel,
 body.electron-desktop-effects .right-panel {
   transform: none !important;
+}
+
+/* Desktop-only branding and pointer glow stay legible in either theme. */
+:root[data-theme='light'] body.electron-desktop-effects .brand-icon {
+  filter: brightness(0);
+}
+
+:root[data-theme='dark'] .right-panel .toggle-switch-row input:checked + .toggle-switch-ui {
+  background: #525252 !important;
 }
 
 /* Surfaces */
