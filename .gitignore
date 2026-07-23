@@ -15,4 +15,5 @@ scripts/ui-screenshot.js
 # Electron build output
 dist/
 electron/main.bundle.cjs
+electron/updater.bundle.cjs
 build/icon.icns

@@ -10,8 +10,8 @@
     "dev:web:e2e": "cross-env NODE_ENV=development GCHAT_LOCAL_DEBUG=1 PORT=4401 DB_PATH=.gchat-local/e2e/Gchat.db node scripts/dev-web.js",
     "build:web": "node scripts/build-web.js",
     "purge:pre-escrow-groups": "node scripts/purge-pre-escrow-groups.js",
-    "lint": "eslint server.js src/server scripts test",
-    "test": "node --test test/security.test.js test/web-crypto.test.js test/integration.test.js",
+    "lint": "eslint server.js src/server electron scripts test",
+    "test": "node --test test/security.test.js test/web-crypto.test.js test/integration.test.js test/electron-runtime.test.js test/electron-packaging.test.js",
     "test:unit": "node --test test/security.test.js test/web-crypto.test.js",
     "test:integration": "node --test test/integration.test.js",
     "test:e2e": "playwright test",
@@ -53,6 +53,7 @@
     "copyright": "Copyright © 2024-2026 Gchat",
     "asar": true,
     "compression": "maximum",
+    "afterPack": "scripts/after-pack.js",
     "electronLanguages": [
       "en-US"
     ],
@@ -65,6 +66,7 @@
     },
     "files": [
       "electron/main.bundle.cjs",
+      "electron/updater.bundle.cjs",
       "electron/preload.js",
       "electron/offline.html",
       "electron/offline.js",
