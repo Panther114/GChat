@@ -31,6 +31,30 @@ function persistUserWallpaperSettings(user) {
 
 applyAuthWallpaperFromStorage();
 
+function syncAuthThemeControls() {
+  const isLight = document.documentElement.dataset.theme === 'light';
+  const logo = document.querySelector('.auth-logo-icon');
+  if (logo) {
+    const nextSrc = isLight ? logo.dataset.lightSrc : logo.dataset.darkSrc;
+    if (nextSrc && logo.getAttribute('src') !== nextSrc) logo.src = nextSrc;
+  }
+  const toggle = document.getElementById('auth-theme-toggle');
+  if (!toggle) return;
+  const label = isLight ? 'Switch to dark mode' : 'Switch to light mode';
+  toggle.textContent = isLight ? '☾' : '☀';
+  toggle.title = label;
+  toggle.setAttribute('aria-label', label);
+}
+
+document.getElementById('auth-theme-toggle')?.addEventListener('click', () => {
+  const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+  if (wallpaperTheme) wallpaperTheme.applyTheme(next);
+  else document.documentElement.dataset.theme = next;
+  syncAuthThemeControls();
+});
+
+syncAuthThemeControls();
+
 async function fetchCsrfToken() {
   try {
     const res = await fetch('/api/auth/csrf');

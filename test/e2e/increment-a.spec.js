@@ -16,6 +16,23 @@ async function signInAsLocalRoot(page) {
   ]);
 }
 
+test('auth theme toggle swaps the GChat logo for the active theme', async ({ page }) => {
+  await page.addInitScript(() => globalThis.localStorage.setItem('gchat:theme-preference', 'dark'));
+  await page.goto('/index.html');
+
+  const toggle = page.locator('#auth-theme-toggle');
+  const logo = page.locator('.auth-logo-icon');
+  await expect(toggle).toBeVisible();
+
+  await toggle.click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await expect(logo).toHaveAttribute('src', '/gchat_icon_light.png');
+
+  await toggle.click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await expect(logo).toHaveAttribute('src', '/gchat_icon.png?v=20260716-v132');
+});
+
 test('local root account loads v2 fixtures and switches themes', async ({ page }) => {
   const errors = [];
   page.on('console', (message) => {
