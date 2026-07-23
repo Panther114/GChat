@@ -546,10 +546,10 @@ body.sidebar-resizing * {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 12px;
+  padding: 8px 9px 8px 6px;
   cursor: pointer;
   border-radius: 10px;
-  margin: 2px 8px;
+  margin: 2px 5px 2px 2px;
   transition: background .15s;
   position: relative;
   border-left: 3px solid transparent;

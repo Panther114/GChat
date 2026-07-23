@@ -743,14 +743,6 @@ const memoryPruneTimer = setInterval(() => {
   for (const [userId, data] of settingsUpdateAttempts) {
     if (now - data.windowStart > SETTINGS_UPDATE_WINDOW) settingsUpdateAttempts.delete(userId);
   }
-  // Prune stale socketRateMap entries for users with no recent activity.
-  // The disconnect handler covers most cases, but if a socket drops uncleanly
-  // or the disconnect cleanup is skipped, stale entries can accumulate.
-  for (const [userId, data] of socketRateMap) {
-    if (!data.timestamps.length) { socketRateMap.delete(userId); continue; }
-    const newest = data.timestamps[data.timestamps.length - 1];
-    if (now - newest > 30000) socketRateMap.delete(userId);
-  }
 }, 5 * 60 * 1000); // every 5 minutes
 memoryPruneTimer.unref();
 
@@ -969,6 +961,7 @@ const migrations = [
   "ALTER TABLE group_chats ADD COLUMN allow_member_kick INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE group_chats ADD COLUMN ai_enabled INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE group_chats ADD COLUMN group_color TEXT",
+  "ALTER TABLE group_chats ADD COLUMN group_icon TEXT",
   "ALTER TABLE group_chats ADD COLUMN key_commitment TEXT",
   "ALTER TABLE group_chats ADD COLUMN encryption_version INTEGER NOT NULL DEFAULT 1",
   "ALTER TABLE group_chats ADD COLUMN key_escrow_ciphertext TEXT",
@@ -1095,6 +1088,7 @@ const stmts = {
   updateGroupAllowMemberKick: db.prepare('UPDATE group_chats SET allow_member_kick = ? WHERE id = ?'),
   updateGroupAiEnabled: db.prepare('UPDATE group_chats SET ai_enabled = ? WHERE id = ?'),
   updateGroupColor: db.prepare('UPDATE group_chats SET group_color = ? WHERE id = ?'),
+  updateGroupIcon: db.prepare('UPDATE group_chats SET group_icon = ? WHERE id = ?'),
   updateGroupOwner: db.prepare('UPDATE group_chats SET created_by = ? WHERE id = ?'),
   getGroupsCreatedByUser: db.prepare('SELECT id FROM group_chats WHERE created_by = ?'),
 
@@ -1106,7 +1100,7 @@ const stmts = {
     'SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?'
   ),
   getUserGroups: db.prepare(`
-    SELECT g.id, g.name, g.code, g.created_by, g.created_at, g.allow_member_clear, g.allow_member_clear_tag, g.allow_member_export, g.allow_member_kick, g.ai_enabled, g.group_color, g.key_commitment, g.encryption_version,
+    SELECT g.id, g.name, g.code, g.created_by, g.created_at, g.allow_member_clear, g.allow_member_clear_tag, g.allow_member_export, g.allow_member_kick, g.ai_enabled, g.group_color, g.group_icon, g.key_commitment, g.encryption_version,
            (
              SELECT COUNT(*)
              FROM messages m
@@ -2508,6 +2502,7 @@ app.post('/api/groups/create', (req, res) => {
     allowMemberKick: group.allow_member_kick || 0,
     aiEnabled: false,
     groupColor: group.group_color || null,
+    groupIcon: group.group_icon || null,
   });
 });
 
@@ -2574,6 +2569,7 @@ app.post('/api/groups/join', (req, res) => {
     allowMemberKick: group.allow_member_kick || 0,
     aiEnabled: false,
     groupColor: group.group_color || null,
+    groupIcon: group.group_icon || null,
   });
 });
 
@@ -2615,6 +2611,7 @@ app.get('/api/groups/mine', (req, res) => {
       allowMemberKick: g.allow_member_kick || 0,
       aiEnabled: false,
       groupColor: g.group_color || null,
+      groupIcon: g.group_icon || null,
     }))
   );
 });
@@ -2651,6 +2648,7 @@ app.get('/api/groups/preload', (req, res) => {
         allowMemberKick: g.allow_member_kick || 0,
         aiEnabled: false,
         groupColor: g.group_color || null,
+        groupIcon: g.group_icon || null,
         preloaded: {
           messages: rows,
           members,
@@ -2682,7 +2680,7 @@ app.patch('/api/groups/:groupId/name', (req, res) => {
 app.patch('/api/groups/:groupId/settings', (req, res) => {
   const { groupId } = req.params;
   const userId = req.session.userId;
-  const { allowMemberClear, allowMemberClearTag, allowMemberExport, allowMemberKick, aiEnabled, groupColor } = req.body;
+  const { allowMemberClear, allowMemberClearTag, allowMemberExport, allowMemberKick, aiEnabled, groupColor, groupIcon } = req.body;
 
   const group = stmts.findGroupById.get(groupId);
   if (!group) return res.status(404).json({ error: 'Group not found' });
@@ -2715,6 +2713,13 @@ app.patch('/api/groups/:groupId/settings', (req, res) => {
     }
     stmts.updateGroupColor.run(groupColor, groupId);
   }
+  if (groupIcon !== undefined) {
+    if (groupIcon !== null) {
+      const parsedIcon = parseImageDataUrl(groupIcon, MAX_PROFILE_PICTURE_BYTES);
+      if (!parsedIcon.ok) return res.status(400).json({ error: getProfilePictureValidationError(parsedIcon) });
+    }
+    stmts.updateGroupIcon.run(groupIcon, groupId);
+  }
   const updated = stmts.findGroupById.get(groupId);
   io.to(groupId).emit('group_settings_updated', {
     groupId,
@@ -2724,6 +2729,7 @@ app.patch('/api/groups/:groupId/settings', (req, res) => {
     allowMemberKick: !!updated.allow_member_kick,
     aiEnabled: APP_CONFIG.aiEnabled && !!updated.ai_enabled,
     groupColor: updated.group_color || null,
+    groupIcon: updated.group_icon || null,
   });
   res.json({ ok: true });
 });
@@ -2817,6 +2823,9 @@ app.delete('/api/groups/:groupId/messages/:messageId', (req, res) => {
   if (message.sender_id !== userId) {
     return res.status(403).json({ error: 'Only the author can delete this message' });
   }
+  if (message.is_disappearing) {
+    return res.status(403).json({ error: 'Disappearing messages cannot be deleted' });
+  }
   deleteMessageTx(messageId);
   io.to(groupId).emit('message_deleted', { groupId, messageId });
   return res.json({ ok: true, messageId });
@@ -2834,6 +2843,9 @@ app.patch('/api/groups/:groupId/messages/:messageId', (req, res) => {
   }
   if (current.sender_id !== userId) {
     return res.status(403).json({ error: 'Only the author can edit this message' });
+  }
+  if (current.is_disappearing) {
+    return res.status(403).json({ error: 'Disappearing messages cannot be edited' });
   }
   if (!['text', 'whisper'].includes(current.type)) {
     return res.status(400).json({ error: 'This message type cannot be edited' });
@@ -3285,15 +3297,8 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
 
 // ── Socket.IO ─────────────────────────────────────────────────────────────────
 
-// Per-socket rate limiting state
-const socketRateMap = new Map(); // socketId -> { timestamps: [], lastContent: '', repeatCount: 0 }
-
 // Per-room presence tracking: groupId -> Set<socketId>
 const roomPresence = new Map();
-
-function getSpamSignature(value) {
-  return typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value) ? value.toLowerCase() : null;
-}
 
 function addPresence(groupId, socketId) {
   if (!roomPresence.has(groupId)) roomPresence.set(groupId, new Set());
@@ -3359,11 +3364,6 @@ io.use((socket, next) => {
 
 io.on('connection', (socket) => {
   console.log(`Socket connected: ${socket.username} (${socket.userId})`);
-  // Rate limit keyed by userId to prevent multi-connection bypass
-  if (!socketRateMap.has(socket.userId)) {
-    socketRateMap.set(socket.userId, { timestamps: [], lastContent: '', repeatCount: 0 });
-  }
-
   // ── join_room ──────────────────────────────────────────────────────────────
   socket.on('join_room', (groupId) => {
     if (!groupId) return;
@@ -3463,31 +3463,6 @@ io.on('connection', (socket) => {
     if (!envelope.ok) {
       fail(envelope.error);
       return;
-    }
-
-    // Server-side rate limiting: max 10 messages per 5 seconds, keyed by userId.
-    // The stable signature is a keyed blind index, never plaintext.
-    const rateData = socketRateMap.get(socket.userId);
-    if (rateData) {
-      const now = Date.now();
-      rateData.timestamps = rateData.timestamps.filter(t => now - t < 5000);
-      if (rateData.timestamps.length >= 10) {
-        fail('Rate limit exceeded. Please slow down.');
-        return;
-      }
-      // Check for repeated identical messages (3+ in a row)
-      const messageSignature = getSpamSignature(spamSignature) || encryptedContent;
-      if (messageSignature === rateData.lastContent) {
-        rateData.repeatCount = (rateData.repeatCount || 0) + 1;
-        if (rateData.repeatCount >= 3) {
-          fail('Don\'t send the same message repeatedly.');
-          return;
-        }
-      } else {
-        rateData.repeatCount = 0;
-        rateData.lastContent = messageSignature;
-      }
-      rateData.timestamps.push(now);
     }
 
     const payloadCheck = validateEncryptedTextPayload(encryptedContent, iv);
@@ -3738,29 +3713,6 @@ io.on('connection', (socket) => {
     if (!envelope.ok) {
       socket.emit('error', { message: envelope.error });
       return;
-    }
-
-    // Rate limiting (same limits as send_message, keyed by userId)
-    const rateData = socketRateMap.get(socket.userId);
-    if (rateData) {
-      const now = Date.now();
-      rateData.timestamps = rateData.timestamps.filter(t => now - t < 5000);
-      if (rateData.timestamps.length >= 10) {
-        socket.emit('error', { message: 'Rate limit exceeded. Please slow down.' });
-        return;
-      }
-      const messageSignature = getSpamSignature(spamSignature) || encryptedContent;
-      if (messageSignature === rateData.lastContent) {
-        rateData.repeatCount = (rateData.repeatCount || 0) + 1;
-        if (rateData.repeatCount >= 3) {
-          socket.emit('error', { message: 'Don\'t send the same message repeatedly.' });
-          return;
-        }
-      } else {
-        rateData.repeatCount = 0;
-        rateData.lastContent = messageSignature;
-      }
-      rateData.timestamps.push(now);
     }
 
     const member = stmts.isMember.get(groupId, socket.userId);
@@ -4015,23 +3967,6 @@ io.on('connection', (socket) => {
       });
     }
 
-    // Clean up rate-limit state for this user when no more sockets are active.
-    // Prune timestamps older than the rate window; if none remain (and no
-    // repeated-message flag is set) remove the entry entirely to prevent the
-    // map from growing unboundedly (#4 memory leak, #30 stale state).
-    const hasOtherSockets = [...io.sockets.sockets.values()].some(
-      s => s !== socket && s.userId === socket.userId
-    );
-    if (!hasOtherSockets) {
-      const rateData = socketRateMap.get(socket.userId);
-      if (rateData) {
-        const now = Date.now();
-        rateData.timestamps = rateData.timestamps.filter(t => now - t < 5000);
-        if (rateData.timestamps.length === 0) {
-          socketRateMap.delete(socket.userId);
-        }
-      }
-    }
   });
 });
 

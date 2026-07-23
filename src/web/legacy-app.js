@@ -1807,7 +1807,19 @@ async function hydrateMessageChannel(msg, groupId = msg?.groupId || currentGroup
     const key = groupId ? getGroupKey(groupId) : null;
     if (key && msg.encryptedMetadata && msg.metadataIv) {
       try {
-        await decryptV2Message(msg, key, groupId);
+        if (msg.type === 'image' || msg.type === 'file') {
+          const metadata = await GChatCryptoV2.decryptJson(
+            msg.encryptedMetadata,
+            msg.metadataIv,
+            key,
+            groupId,
+            'metadata',
+            v2Aad({ ...msg, groupId }),
+          );
+          Object.assign(msg, metadata);
+        } else {
+          await decryptV2Message(msg, key, groupId);
+        }
       } catch {
         /* keep fallback */
       }
@@ -2020,6 +2032,15 @@ function resolveThemePreference(preference) {
 
 function themeToggleButtons() {
   return Array.from(document.querySelectorAll('.theme-toggle-btn'));
+}
+
+function readFileAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Unable to read image'));
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.readAsDataURL(file);
+  });
 }
 
 function syncDesktopBrandIcon() {
@@ -2451,10 +2472,12 @@ function clearPageTitleNotification() {
 }
 
 // ── Image Viewer ──────────────────────────────────────────────────────────────
-function showImageViewer(imageUrl) {
+function showImageViewer(imageUrl, filename = 'image') {
   const modal = $('image-viewer-modal');
   const img = $('image-viewer-img');
   img.src = imageUrl;
+  modal.dataset.imageUrl = imageUrl;
+  modal.dataset.filename = filename;
   imageViewerZoom = 1;
   img.style.transform = 'scale(1)';
   modal.hidden = false;
@@ -2464,6 +2487,8 @@ function hideImageViewer() {
   const modal = $('image-viewer-modal');
   const img = $('image-viewer-img');
   modal.hidden = true;
+  delete modal.dataset.imageUrl;
+  delete modal.dataset.filename;
   img.src = '';
   img.style.transform = 'scale(1)';
   imageViewerZoom = 1;
@@ -2571,7 +2596,7 @@ let currentGroupData = null;
 let groups = [];
 let members = [];
 let socket = null;
-let messageMode = 'normal'; // 'normal' | 'whisper'
+let messageMode = 'normal'; // 'normal' | 'whisper' | 'disappearing'
 let whisperRecipients = [];
 let replyingTo = null;
 let unreadCounts = {};
@@ -2580,7 +2605,6 @@ let onlineUsers = new Set();
 let allMessages = [];
 let oldestMessageId = null;
 let loadingOlder = false;
-let clientRateLimiter = { times: [], lastContent: '', repeatCount: 0 };
 let originalPageTitle = 'GChat ';
 let unreadNotificationCount = 0;
 let titleBlinkInterval = null;
@@ -3176,7 +3200,13 @@ function syncComposerTokens() {
   if (messageMode === 'whisper' && activeWhisperRecipientIds.length) {
     const token = document.createElement('span');
     token.className = 'message-token message-token-whisper';
-    token.textContent = formatWhisperRecipientLabel(activeWhisperRecipientIds);
+    token.textContent = `Private message · ${formatWhisperRecipientLabel(activeWhisperRecipientIds, currentGroupId, { prefix: '' })}`;
+    tokens.push(token);
+  }
+  if (messageMode === 'disappearing') {
+    const token = document.createElement('span');
+    token.className = 'message-token message-token-disappearing';
+    token.textContent = 'Disappearing message';
     tokens.push(token);
   }
   // Tags are top-bar sub-chats — never surface a hashtag chip in the composer.
@@ -3700,7 +3730,7 @@ function parseComposerMessageInput(rawText) {
   // Every message is stamped with the active sub-chat channel (default #main).
   let hashtag = getActiveTagTopic();
   let isAiPrompt = !!composerTokens.ai;
-  let isDisappearing = false;
+  let isDisappearing = messageMode === 'disappearing';
 
   if (messageMode === 'whisper' && !composerTokens.whisper && whisperRecipients.length === 0) {
     return { ok: false, error: 'Select at least one whisper recipient' };
@@ -4046,6 +4076,12 @@ const ICON_SPECS = {
     ['circle', { cx: '9', cy: '10', r: '1.5' }],
     ['path', { d: 'm21 15-5-5L5 21' }],
   ],
+  file: [
+    ['path', { d: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z' }],
+    ['polyline', { points: '14 2 14 8 20 8' }],
+    ['line', { x1: '8', y1: '13', x2: '16', y2: '13' }],
+    ['line', { x1: '8', y1: '17', x2: '14', y2: '17' }],
+  ],
   sparkles: [
     ['path', { d: 'M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6L12 3z' }],
     ['path', { d: 'M18.5 14l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z' }],
@@ -4075,6 +4111,12 @@ const ICON_SPECS = {
   ],
   moon: [
     ['path', { d: 'M21 14.5A8.5 8.5 0 1 1 9.5 3a7 7 0 0 0 11.5 11.5Z' }],
+  ],
+  timer: [
+    ['circle', { cx: '12', cy: '13', r: '8' }],
+    ['path', { d: 'M12 9v4l3 2' }],
+    ['path', { d: 'M9 2h6' }],
+    ['path', { d: 'M12 2v3' }],
   ],
 };
 
@@ -4586,8 +4628,7 @@ function buildGroupItem(g) {
 
   const av = document.createElement('div');
   av.className = 'group-item-avatar';
-  av.style.background = groupAvatarColor(g);
-  av.textContent = g.name[0].toUpperCase();
+  renderGroupAvatarElement(av, g);
 
   const info = document.createElement('div');
   info.className = 'group-item-info';
@@ -4636,6 +4677,18 @@ function groupAvatarColor(group) {
   return '#' + Math.abs(hashCode(group && group.name ? group.name : 'group')).toString(16).slice(0, 6).padStart(6, '5');
 }
 
+function renderGroupAvatarElement(target, group = {}) {
+  if (!target) return;
+  target.replaceChildren();
+  if (group.groupIcon) {
+    target.style.background = 'none';
+    target.appendChild(createAvatarImage(group.groupIcon));
+    return;
+  }
+  target.style.background = groupAvatarColor(group);
+  target.textContent = String(group.name || '?')[0].toUpperCase();
+}
+
 function updateQuickActionButtonState(button, { enabled, labelEnabled }) {
   if (!button) return;
   button.disabled = !enabled;
@@ -4648,7 +4701,7 @@ function updateGroupColorAction(isOwner) {
   if (!button) return;
   button.hidden = false;
   button.disabled = !isOwner;
-  button.title = isOwner ? 'Change group color' : 'Only the group owner can change the color';
+  button.title = isOwner ? 'Change group icon' : 'Only the group owner can change the group icon';
 }
 
 function updateGroupActionButtons(isOwner) {
@@ -5223,7 +5276,8 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
   if (isDisappearingMessage(msg)) {
     const disappearingLabel = document.createElement('span');
     disappearingLabel.className = 'disappearing-label';
-    disappearingLabel.textContent = 'Disappearing';
+    const seconds = Math.max(1, Math.round((Number(msg.disappearingDurationMs) || MIN_DISAPPEARING_DURATION_MS) / 1000));
+    disappearingLabel.textContent = isOwn ? `Disappears ${seconds}s after read` : 'Disappearing';
     prefixRow.appendChild(disappearingLabel);
     hasPrefixContent = true;
   }
@@ -5335,8 +5389,8 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
     actions.appendChild(button);
   };
   addAction('Reply', 'reply', () => $('ctx-reply').click());
-  if (isOwn && ['text', 'whisper'].includes(msg.type)) addAction('Edit', 'pencil', () => $('ctx-edit').click());
-  if (isOwn) addAction('Delete', 'trash-2', () => $('ctx-delete').click());
+  if (!isDisappearingMessage(msg) && isOwn && ['text', 'whisper'].includes(msg.type)) addAction('Edit', 'pencil', () => $('ctx-edit').click());
+  if (!isDisappearingMessage(msg) && isOwn) addAction('Delete', 'trash-2', () => $('ctx-delete').click());
   content.appendChild(actions);
 
   // Right-click context menu
@@ -5381,7 +5435,7 @@ async function renderMsgContent(msg, textEl, bubble, groupId = currentGroupId) {
         img.style.cursor = 'pointer';
         img.addEventListener('click', (e) => {
           e.stopPropagation();
-          showImageViewer(url);
+          showImageViewer(url, msg.filename || 'image');
         });
         bubble.appendChild(img);
       } else {
@@ -5400,17 +5454,27 @@ async function renderMsgContent(msg, textEl, bubble, groupId = currentGroupId) {
     } else {
       const buf = await decryptAttachmentBytes(msg, key, groupId);
       if (buf) {
-        const btn = document.createElement('a');
+        const btn = document.createElement('button');
+        btn.type = 'button';
         btn.className = 'msg-file-btn';
         const fileIcon = document.createElement('span');
         fileIcon.className = 'msg-file-icon';
-        fileIcon.appendChild(createIcon('paperclip'));
+        fileIcon.appendChild(createIcon('file'));
         btn.appendChild(fileIcon);
         const info = document.createElement('span');
-        info.textContent = msg.filename || 'file';
+        info.className = 'msg-file-info';
+        const fileName = document.createElement('strong');
+        fileName.textContent = msg.filename || 'file';
+        const fileMeta = document.createElement('small');
+        const extension = (msg.filename || '').split('.').pop()?.toUpperCase() || 'FILE';
+        fileMeta.textContent = `${extension} · ${formatBytes(buf.byteLength)}`;
+        info.append(fileName, fileMeta);
         btn.appendChild(info);
+        const downloadLabel = document.createElement('span');
+        downloadLabel.className = 'msg-file-download-label';
+        downloadLabel.textContent = 'Download';
+        btn.appendChild(downloadLabel);
         btn.addEventListener('click', (e) => {
-          e.preventDefault();
           const blob = new Blob([buf]);
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
@@ -5555,13 +5619,13 @@ function showContextMenu(e, msg, text) {
   ctxMsg = msg; ctxText = text;
   hideTagContextMenu();
   const menu = $('ctx-menu');
-  const isAttachment = msg.type === 'image' || msg.type === 'file';
   const isAuthor = msg.senderId === currentUser?.id;
   $('ctx-reply').hidden = false;
-  $('ctx-edit').hidden = !isAuthor || !['text', 'whisper'].includes(msg.type);
-  $('ctx-delete').hidden = !isAuthor;
-  $('ctx-download').hidden = !isAttachment;
-  $('ctx-copy').hidden = isAttachment;
+  const isDisappearing = isDisappearingMessage(msg);
+  $('ctx-edit').hidden = isDisappearing || !isAuthor || !['text', 'whisper'].includes(msg.type);
+  $('ctx-delete').hidden = isDisappearing || !isAuthor;
+  $('ctx-download').hidden = true;
+  $('ctx-copy').hidden = isAttachment || isDisappearing;
   setElementIcon($('ctx-copy'), 'copy', { label: 'Copy' });
   menu.hidden = false;
   if (e) {
@@ -5922,49 +5986,6 @@ async function doSend(text) {
     return;
   }
   const messageText = parsedMessage.text;
-  const hasNewline = /[\r\n]/.test(messageText);
-  const normalizedText = messageText.trim().replace(/\s+/g, ' ');
-  const normalizedSignatureText = normalizedText.toLowerCase();
-  const shouldInspectShortSpam = !hasNewline && normalizedText.length <= 80;
-  const shortSpamChars = shouldInspectShortSpam
-    ? Array.from(normalizedText).filter((char) => char.trim())
-    : [];
-  if (shouldInspectShortSpam) {
-    const uniqueVisibleChars = new Set(shortSpamChars.map((char) => char.toLowerCase()));
-    if (shortSpamChars.length >= 8 && uniqueVisibleChars.size <= 2) {
-      showToast('Please avoid sending repetitive short messages', 'error');
-      return;
-    }
-    const shortTokens = normalizedText.split(' ').filter(Boolean);
-    if (shortTokens.length >= 4 && shortTokens.length <= 24) {
-      const tokenSet = new Set(shortTokens.map((token) => token.toLowerCase()));
-      if (tokenSet.size === 1 && shortTokens[0].length <= 8) {
-        showToast('Please avoid repeating the same short message', 'error');
-        return;
-      }
-    }
-  }
-
-  // Client-side rate limiting
-  const now = Date.now();
-  clientRateLimiter.times = clientRateLimiter.times.filter(t => now - t < 3000);
-  if (clientRateLimiter.times.length >= 5) {
-    showToast('Sending too fast, slow down', 'error');
-    return;
-  }
-  // Repeated message check
-  if (normalizedText === clientRateLimiter.lastContent) {
-    clientRateLimiter.repeatCount = (clientRateLimiter.repeatCount || 0) + 1;
-    if (clientRateLimiter.repeatCount >= 3) {
-      showToast("Don't send the same message repeatedly", 'error');
-      return;
-    }
-  } else {
-    clientRateLimiter.repeatCount = 0;
-    clientRateLimiter.lastContent = normalizedText;
-  }
-  clientRateLimiter.times.push(now);
-
   try {
     const messageId = crypto.randomUUID();
     const type = parsedMessage.whisperRecipientIds?.length ? 'whisper' : 'text';
@@ -5987,7 +6008,6 @@ async function doSend(text) {
       showToast('Message too large', 'error');
       return;
     }
-    const spamSignature = await GChatCryptoV2.blindIndex(normalizedSignatureText, key, currentGroupId, 'spam-signature');
     const hashtag = parsedMessage.hashtag || null;
     const tagIndex = hashtag ? await GChatCryptoV2.blindIndex(hashtag, key, currentGroupId, 'tag-index') : null;
     const replyToId = replyingTo?.id || null;
@@ -5999,7 +6019,6 @@ async function doSend(text) {
       metadataIv,
       replyToId,
       tagIndex,
-      spamSignature,
       isDisappearing: parsedMessage.isDisappearing,
       disappearingDurationMs: parsedMessage.disappearingDurationMs,
     };
@@ -6818,7 +6837,7 @@ function initSocket() {
     renderGroupList();
   });
 
-  socket.on('group_settings_updated', ({ groupId, allowMemberClear, allowMemberClearTag, allowMemberExport, allowMemberKick, aiEnabled, groupColor }) => {
+  socket.on('group_settings_updated', ({ groupId, allowMemberClear, allowMemberClearTag, allowMemberExport, allowMemberKick, aiEnabled, groupColor, groupIcon }) => {
     const group = groups.find((g) => g.id === groupId);
     if (group) {
       if (allowMemberClear !== undefined) group.allowMemberClear = !!allowMemberClear;
@@ -6827,6 +6846,7 @@ function initSocket() {
       if (allowMemberKick !== undefined) group.allowMemberKick = !!allowMemberKick;
       if (aiEnabled !== undefined) group.aiEnabled = !!aiEnabled;
       if (groupColor !== undefined) group.groupColor = groupColor || null;
+      if (groupIcon !== undefined) group.groupIcon = groupIcon || null;
     }
     const cache = ensureGroupCacheEntry(groupId);
     if (cache && cache.messages) cache.rowsDirty = true;
@@ -6841,6 +6861,7 @@ function initSocket() {
       if (allowMemberKick !== undefined) currentGroupData.allowMemberKick = !!allowMemberKick;
       if (aiEnabled !== undefined) currentGroupData.aiEnabled = !!aiEnabled;
       if (groupColor !== undefined) currentGroupData.groupColor = groupColor || null;
+      if (groupIcon !== undefined) currentGroupData.groupIcon = groupIcon || null;
     }
     const isOwner = currentGroupData && currentGroupData.createdBy === currentUser.id;
     if (isOwner) {
@@ -7106,13 +7127,21 @@ function updateWhisperBtn() {
   const keepBottomPinned = isMessagesPinnedToBottom();
   const btn = $('whisper-mode-btn');
   const whisperActive = messageMode === 'whisper' || !!composerTokens.whisper;
+  const disappearingActive = messageMode === 'disappearing';
   if (whisperActive) {
     setElementIcon(btn, 'megaphone', { iconOnly: true });
     btn.classList.add('whisper-active');
+    btn.classList.remove('disappearing-active');
     if (!whisperRecipients.length && whisperPickerMode == null) $('whisper-picker').hidden = true;
+  } else if (disappearingActive) {
+    setElementIcon(btn, 'timer', { iconOnly: true, label: 'Disappearing message mode' });
+    btn.classList.remove('whisper-active');
+    btn.classList.add('disappearing-active');
+    hideWhisperPicker();
   } else {
     setElementIcon(btn, 'message-square', { iconOnly: true });
     btn.classList.remove('whisper-active');
+    btn.classList.remove('disappearing-active');
     hideWhisperPicker();
   }
   syncWhisperPickerStatus();
@@ -8247,22 +8276,67 @@ function setupEventListeners() {
   });
   $('edit-group-name-input').addEventListener('blur', saveGroupName);
 
-  // Group color
+  // Group icon
+  let groupIconMode = 'color';
+  const syncGroupIconMode = (mode) => {
+    groupIconMode = mode;
+    const isImage = mode === 'image';
+    $('group-icon-color-section').hidden = isImage;
+    $('group-icon-image-section').hidden = !isImage;
+    $('group-icon-mode-color').classList.toggle('active', !isImage);
+    $('group-icon-mode-image').classList.toggle('active', isImage);
+    $('group-icon-mode-color').setAttribute('aria-selected', String(!isImage));
+    $('group-icon-mode-image').setAttribute('aria-selected', String(isImage));
+  };
   $('set-group-color-btn').addEventListener('click', () => {
     if (!currentGroupId || $('set-group-color-btn').disabled) return;
     $('group-color-input').value = (currentGroupData && currentGroupData.groupColor) || '#4a90d9';
+    $('group-icon-input').value = '';
+    $('group-icon-file-name').textContent = 'JPEG, PNG, GIF, or WebP · max 2MB';
+    $('group-icon-preview').hidden = true;
+    syncGroupIconMode(currentGroupData?.groupIcon ? 'image' : 'color');
     $('group-color-modal').hidden = false;
   });
   $('group-color-cancel-btn').addEventListener('click', () => { $('group-color-modal').hidden = true; });
+  $('group-icon-mode-color').addEventListener('click', () => syncGroupIconMode('color'));
+  $('group-icon-mode-image').addEventListener('click', () => syncGroupIconMode('image'));
+  $('group-icon-input').addEventListener('change', (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (!isAllowedUploadImageType(file.type) || file.size > MAX_PROFILE_PICTURE_BYTES) {
+      showToast(!isAllowedUploadImageType(file.type) ? 'Only JPEG, PNG, GIF, and WebP images are supported' : PROFILE_PICTURE_TOO_LARGE_MSG, 'error');
+      event.target.value = '';
+      return;
+    }
+    $('group-icon-file-name').textContent = file.name;
+    const reader = new FileReader();
+    reader.onload = () => {
+      $('group-icon-preview-img').src = String(reader.result || '');
+      $('group-icon-preview').hidden = false;
+    };
+    reader.readAsDataURL(file);
+  });
   $('group-color-save-btn').addEventListener('click', async () => {
-    const groupColor = $('group-color-input').value;
+    let payload;
+    if (groupIconMode === 'image') {
+      const file = $('group-icon-input').files?.[0];
+      if (!file) {
+        if (currentGroupData?.groupIcon) payload = { groupIcon: currentGroupData.groupIcon };
+        else { showToast('Choose an image for the group icon', 'error'); return; }
+      } else {
+        const groupIcon = await readFileAsDataURL(file);
+        payload = { groupIcon };
+      }
+    } else {
+      payload = { groupColor: $('group-color-input').value, groupIcon: null };
+    }
     const res = await fetch('/api/groups/' + currentGroupId + '/settings', {
       method: 'PATCH', headers: apiHeaders(),
-      body: JSON.stringify({ groupColor }),
+      body: JSON.stringify(payload),
     });
     if (!res.ok) {
       const d = await res.json().catch(() => ({}));
-      showToast(d.error || 'Failed to set group color', 'error');
+      showToast(d.error || 'Failed to set group icon', 'error');
       return;
     }
     $('group-color-modal').hidden = true;
@@ -8512,7 +8586,7 @@ function setupEventListeners() {
     if (!$('slash-command-menu').contains(e.target) && e.target !== $('message-input')) {
       $('slash-command-menu').hidden = true;
     }
-    if (!$('whisper-picker').contains(e.target) && e.target !== $('whisper-mode-btn') && e.target !== $('message-input')) {
+    if (!$('whisper-picker').contains(e.target) && !$('whisper-mode-btn').contains(e.target) && e.target !== $('message-input')) {
       hideWhisperPicker();
     }
   });
@@ -8620,7 +8694,8 @@ function setupEventListeners() {
   });
 
   // Whisper mode toggle
-  $('whisper-mode-btn').addEventListener('click', () => {
+  $('whisper-mode-btn').addEventListener('click', (event) => {
+    event.stopPropagation();
     if (composerTokens.hashtag) {
       showToast('Tags cannot be combined with whispers', 'error');
       return;
@@ -8630,11 +8705,22 @@ function setupEventListeners() {
       syncComposerTokens();
       updateSlashCommandMenu();
     } else {
-      messageMode = messageMode === 'normal' ? 'whisper' : 'normal';
-      if (messageMode !== 'whisper') whisperRecipients = [];
+      if (messageMode === 'normal') messageMode = 'whisper';
+      else if (messageMode === 'whisper') { messageMode = 'disappearing'; whisperRecipients = []; }
+      else messageMode = 'normal';
     }
     if (messageMode === 'whisper') showWhisperPicker('button');
     else hideWhisperPicker();
+    syncComposerTokens();
+    updateWhisperBtn();
+  });
+  $('whisper-picker-confirm').addEventListener('click', () => {
+    if (!getActiveWhisperRecipientIds().length) {
+      showToast('Select at least one recipient', 'error');
+      return;
+    }
+    hideWhisperPicker();
+    syncComposerTokens();
     updateWhisperBtn();
   });
 
@@ -8708,6 +8794,31 @@ function setupEventListeners() {
     e.preventDefault();
     updateImageViewerZoom(imageViewerZoom + (e.deltaY < 0 ? 0.2 : -0.2));
   }, { passive: false });
+  $('image-viewer-download-btn').addEventListener('click', async () => {
+    const modal = $('image-viewer-modal');
+    const url = modal.dataset.imageUrl;
+    if (!url) return;
+    const blob = await fetch(url).then((response) => response.blob()).catch(() => null);
+    if (!blob) { showToast('Could not download image', 'error'); return; }
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = modal.dataset.filename || 'image';
+    link.click();
+  });
+  $('image-viewer-copy-btn').addEventListener('click', async () => {
+    const url = $('image-viewer-modal').dataset.imageUrl;
+    const blob = url ? await fetch(url).then((response) => response.blob()).catch(() => null) : null;
+    if (!blob || typeof ClipboardItem === 'undefined' || !navigator.clipboard?.write) {
+      showToast('Image copying is unavailable in this browser', 'error');
+      return;
+    }
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ [blob.type || 'image/png']: blob })]);
+      showToast('Image copied', 'success');
+    } catch {
+      showToast('Could not copy image', 'error');
+    }
+  });
 }
 
 async function loadOlderMessages() {

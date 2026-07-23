@@ -25,6 +25,13 @@ test('local root account loads v2 fixtures and switches themes', async ({ page }
   await expect(page.getByText('Increment A Playground')).toBeVisible();
   await page.getByText('Increment A Playground').click();
   await expect(page.getByText('Welcome to the local UI playground', { exact: false })).toBeVisible();
+  await page.locator('#right-panel-toggle').click();
+  await expect(page.locator('#right-panel')).toHaveClass(/desktop-collapsed/);
+  await page.locator('#right-panel-toggle').click();
+  await expect(page.locator('#right-panel')).not.toHaveClass(/desktop-collapsed/);
+  await page.locator('#whisper-mode-btn').click();
+  await expect(page.locator('#whisper-picker')).toBeVisible();
+  await expect(page.locator('#whisper-picker-confirm')).toBeVisible();
   await page.locator('#theme-toggle-btn').click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', /^(light|dark)$/);
   const afterFirst = await page.locator('html').getAttribute('data-theme');

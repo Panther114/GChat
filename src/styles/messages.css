@@ -392,8 +392,13 @@
 }
 
 .msg-row.unseen {
-  box-shadow: inset 2px 0 0 var(--chat-text-strong);
+  box-shadow: inset 3px 0 0 var(--chat-accent), 0 0 0 1px color-mix(in srgb, var(--chat-accent) 32%, transparent);
 }
+
+.btn-whisper-mode.whisper-active { color: var(--whisper-border) !important; }
+.btn-whisper-mode.disappearing-active { color: var(--chat-danger) !important; }
+.message-token-disappearing { color: var(--chat-danger) !important; border-color: var(--chat-danger) !important; }
+.whisper-picker-confirm { width: 100%; margin-top: 8px; }
 
 /* Reply */
 .msg-reply-box {
@@ -469,7 +474,17 @@
   font-family: var(--font-ui);
   text-decoration: none;
   max-width: 100%;
+  min-width: 220px;
+  text-align: left;
+  cursor: pointer;
 }
+
+.msg-file-info { display: grid; min-width: 0; flex: 1; }
+.msg-file-info strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.msg-file-info small { color: var(--chat-muted); font-size: var(--type-xs); margin-top: 2px; }
+.msg-file-download-label { color: var(--chat-accent); font-weight: 600; font-size: var(--type-xs); }
+
+.image-viewer-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 10px 0 0; }
 
 .msg-file-btn:hover {
   background: var(--chat-hover) !important;
