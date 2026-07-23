@@ -4724,6 +4724,7 @@
     hideTagContextMenu();
     const menu = $("ctx-menu");
     const isAuthor = msg.senderId === currentUser?.id;
+    const isAttachment = msg.type === "image" || msg.type === "file";
     $("ctx-reply").hidden = false;
     const isDisappearing = isDisappearingMessage(msg);
     $("ctx-edit").hidden = isDisappearing || !isAuthor || !["text", "whisper"].includes(msg.type);
@@ -4791,6 +4792,22 @@
     }
     return { blob, filename, mimeType };
   }
+  async function convertImageBlobToPng(blob) {
+    if (blob.type === "image/png") return blob;
+    if (!blob.type.startsWith("image/") || typeof createImageBitmap !== "function") return null;
+    const bitmap = await createImageBitmap(blob);
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      const context = canvas.getContext("2d");
+      if (!context) return null;
+      context.drawImage(bitmap, 0, 0);
+      return await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    } finally {
+      bitmap.close?.();
+    }
+  }
   async function copyAttachmentToClipboard(msg) {
     const data = await getAttachmentData(msg);
     if (!data) return;
@@ -4814,42 +4831,15 @@
         }
       }
       if (navigator.clipboard?.write && typeof ClipboardItem !== "undefined") {
-        try {
-          const item = new ClipboardItem({
-            [data.mimeType]: data.blob,
-            "text/plain": new Blob([data.filename], { type: "text/plain" })
-          });
-          await navigator.clipboard.write([item]);
-          showToast("Copied to clipboard", "success");
-          return;
-        } catch (err) {
-          console.warn("Binary clipboard write failed; falling back to filename copy", err);
-        }
+        const clipboardBlob = await convertImageBlobToPng(data.blob);
+        if (!clipboardBlob) return;
+        await navigator.clipboard.write([
+          new ClipboardItem({ [clipboardBlob.type]: clipboardBlob })
+        ]);
+        showToast("Image copied to clipboard", "success");
       }
-      if (typeof navigator.clipboard?.writeText === "function") {
-        await navigator.clipboard.writeText(data.filename);
-        showToast("Filename copied to clipboard", "success");
-        return;
-      }
-      const fallback = document.createElement("textarea");
-      fallback.value = data.filename;
-      fallback.setAttribute("readonly", "");
-      fallback.style.position = "fixed";
-      fallback.style.left = "-9999px";
-      document.body.appendChild(fallback);
-      fallback.select();
-      console.warn("Using deprecated execCommand clipboard fallback");
-      const copied = typeof document.execCommand === "function" && document.execCommand("copy");
-      document.body.removeChild(fallback);
-      if (copied) {
-        showToast("Filename copied to clipboard", "success");
-        return;
-      }
-      showToast("Failed to copy file to clipboard", "error");
-      return;
     } catch (err) {
       console.error("copyAttachmentToClipboard error:", err);
-      showToast("Failed to copy file to clipboard", "error");
     }
   }
   function setWallpaperSaveState(enabled) {
@@ -5359,7 +5349,6 @@
       updatePendingAttachmentProgress(uploadId, totalBytes, totalBytes);
       setPendingAttachmentStatus(uploadId, "Finalizing\u2026");
       emitProgress(totalBytes, totalBytes, true);
-      removePendingAttachment(uploadId);
     } catch (err) {
       console.error("File upload error:", err);
       removePendingAttachment(uploadId);
@@ -5654,7 +5643,6 @@
       removePendingAttachment(uploadId);
     });
     socket.on("new_message", async (msg) => {
-      if (msg.clientUploadId) removePendingAttachment(msg.clientUploadId);
       if (!document.hasFocus() && msg.senderId !== currentUser.id) {
         unreadNotificationCount++;
         updatePageTitleNotification();
@@ -5693,10 +5681,12 @@
           pushStatus.totalUnreadCount = totalUnread;
           sendNativeNotification(totalUnread, msg.groupId);
         }
+        if (msg.clientUploadId) removePendingAttachment(msg.clientUploadId);
         return;
       }
       applyCurrentUserReadState(msg);
       await appendMessageBubble(msg, true, msg.groupId);
+      if (msg.clientUploadId) removePendingAttachment(msg.clientUploadId);
       if (msg.senderId !== currentUser.id) {
         observeCurrentGroupRowsForRead();
         syncGroupUnreadCount(msg.groupId);

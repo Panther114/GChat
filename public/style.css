@@ -4965,6 +4965,12 @@ body.sidebar-narrow .sidebar-actions {
   z-index: var(--z-dropdown) !important;
   overflow: visible !important;
 }
+.right-panel.desktop-collapsed {
+  width: 0 !important;
+  min-width: 0 !important;
+  border-left-width: 0 !important;
+  overflow: hidden !important;
+}
 .right-panel-inner {
   padding: 10px 10px 36px !important;
   gap: 0 !important;
@@ -6700,12 +6706,13 @@ input:checked + .toggle-switch-ui,
   display: block;
   max-width: 100%;
   margin: 1px 0 3px;
-  padding: 2px 0 2px 8px !important;
+  padding: 1px 0 1px 6px !important;
   background: transparent !important;
   border: 0 !important;
   border-radius: 0 !important;
-  border-left: 2px solid var(--chat-text-strong) !important;
-  font-size: var(--type-sm) !important;
+  border-left: 1px solid var(--chat-muted) !important;
+  font-size: 10px !important;
+  line-height: 1.35;
   font-family: var(--font-ui) !important;
   color: var(--chat-muted) !important;
   cursor: pointer;
@@ -6716,14 +6723,14 @@ input:checked + .toggle-switch-ui,
 }
 .msg-reply-sender {
   display: inline !important;
-  font-weight: 600;
-  color: var(--chat-header) !important;
+  font-weight: 400;
+  color: var(--chat-muted) !important;
   margin: 0 4px 0 0 !important;
 }
 .msg-row.own .msg-reply-box {
   background: transparent !important;
   color: var(--chat-muted) !important;
-  border-left-color: var(--chat-text-strong) !important;
+  border-left-color: var(--chat-muted) !important;
 }
 .msg-image {
   max-width: min(360px, 100%);

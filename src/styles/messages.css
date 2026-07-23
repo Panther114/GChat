@@ -406,12 +406,13 @@
   display: block;
   max-width: 100%;
   margin: 1px 0 3px;
-  padding: 2px 0 2px 8px !important;
+  padding: 1px 0 1px 6px !important;
   background: transparent !important;
   border: 0 !important;
   border-radius: 0 !important;
-  border-left: 2px solid var(--chat-text-strong) !important;
-  font-size: var(--type-sm) !important;
+  border-left: 1px solid var(--chat-muted) !important;
+  font-size: 10px !important;
+  line-height: 1.35;
   font-family: var(--font-ui) !important;
   color: var(--chat-muted) !important;
   cursor: pointer;
@@ -424,15 +425,15 @@
 
 .msg-reply-sender {
   display: inline !important;
-  font-weight: 600;
-  color: var(--chat-header) !important;
+  font-weight: 400;
+  color: var(--chat-muted) !important;
   margin: 0 4px 0 0 !important;
 }
 
 .msg-row.own .msg-reply-box {
   background: transparent !important;
   color: var(--chat-muted) !important;
-  border-left-color: var(--chat-text-strong) !important;
+  border-left-color: var(--chat-muted) !important;
 }
 
 /* Media */

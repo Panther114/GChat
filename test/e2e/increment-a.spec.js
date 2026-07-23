@@ -42,10 +42,28 @@ test('local root account loads v2 fixtures and switches themes', async ({ page }
   await expect(page.getByText('Increment A Playground')).toBeVisible();
   await page.getByText('Increment A Playground').click();
   await expect(page.getByText('Welcome to the local UI playground', { exact: false })).toBeVisible();
+  const chatPanel = page.locator('#chat-panel');
+  const rightPanel = page.locator('#right-panel');
+  const expandedChatWidth = await chatPanel.evaluate((element) => element.getBoundingClientRect().width);
   await page.locator('#right-panel-toggle').click();
-  await expect(page.locator('#right-panel')).toHaveClass(/desktop-collapsed/);
+  await expect(rightPanel).toHaveClass(/desktop-collapsed/);
+  await expect(rightPanel).toHaveCSS('width', '0px');
+  await expect.poll(() => chatPanel.evaluate((element) => element.getBoundingClientRect().width))
+    .toBeGreaterThan(expandedChatWidth + 200);
   await page.locator('#right-panel-toggle').click();
-  await expect(page.locator('#right-panel')).not.toHaveClass(/desktop-collapsed/);
+  await expect(rightPanel).not.toHaveClass(/desktop-collapsed/);
+
+  const welcomeRow = page.getByText('Welcome to the local UI playground', { exact: false }).locator('xpath=ancestor::div[contains(@class, "msg-row")]');
+  await welcomeRow.click({ button: 'right' });
+  await expect(page.locator('#ctx-menu')).toBeVisible();
+  await expect(page.locator('#ctx-copy')).toBeVisible();
+  await page.mouse.click(4, 4);
+  await expect(page.locator('#ctx-menu')).toBeHidden();
+
+  const replyBox = page.locator('.msg-reply-box').first();
+  await expect(replyBox).toHaveCSS('font-size', '10px');
+  await expect(replyBox).toHaveCSS('border-left-width', '1px');
+  await expect(replyBox.locator('.msg-reply-sender')).toHaveCSS('font-weight', '400');
   await page.locator('#whisper-mode-btn').click();
   await expect(page.locator('#whisper-picker')).toBeVisible();
   await expect(page.locator('#whisper-picker-confirm')).toBeVisible();
@@ -122,9 +140,27 @@ test('image attachments reserve message-row space and open usable viewer actions
   await signInAsLocalRoot(page);
   await page.getByText('Increment A Playground').click();
 
+  const baselineImageCount = await page.locator('.msg-image').count();
+  await page.locator('#messages-area').evaluate((area) => {
+    const baselineImages = area.querySelectorAll('.msg-image').length;
+    const state = { sawPending: false, gap: false };
+    const inspect = () => {
+      const hasPending = !!area.querySelector('.msg-row.pending');
+      const hasNewImage = area.querySelectorAll('.msg-image').length > baselineImages;
+      if (hasPending) state.sawPending = true;
+      if (state.sawPending && !hasPending && !hasNewImage) state.gap = true;
+    };
+    const observer = new globalThis.MutationObserver(inspect);
+    observer.observe(area, { childList: true, subtree: true });
+    globalThis.__attachmentContinuity = state;
+    globalThis.__attachmentContinuityObserver = observer;
+  });
   await page.locator('#file-input').setInputFiles('public/gchat_icon.png');
-  const image = page.locator('.msg-image');
+  await expect(page.locator('.msg-image')).toHaveCount(baselineImageCount + 1);
+  const image = page.locator('.msg-image').last();
   await expect(image).toBeVisible();
+  expect(await page.evaluate(() => globalThis.__attachmentContinuity.gap)).toBe(false);
+  await page.evaluate(() => globalThis.__attachmentContinuityObserver.disconnect());
 
   const imageRow = image.locator('xpath=ancestor::div[contains(@class, "msg-row")]');
   await expect(imageRow).toHaveCount(1);
@@ -152,14 +188,27 @@ test('image attachments reserve message-row space and open usable viewer actions
   await expect(page.locator('#image-viewer-copy-btn')).toBeVisible();
   await expect(page.locator('#image-viewer-download-btn')).toBeVisible();
 
+  await page.evaluate(() => {
+    Object.defineProperty(globalThis.navigator.clipboard, 'write', {
+      configurable: true,
+      value: async (items) => {
+        globalThis.__copiedImageTypes = items[0].types;
+      },
+    });
+  });
+  await page.locator('#image-viewer-copy-btn').click();
+  await expect.poll(() => page.evaluate(() => globalThis.__copiedImageTypes)).toEqual(['image/png']);
+
   const imageDownload = page.waitForEvent('download');
   await page.locator('#image-viewer-download-btn').click();
   await expect(imageDownload).resolves.toBeTruthy();
 
   await page.mouse.click(5, 5);
   await expect(page.locator('#image-viewer-modal')).toBeHidden();
+  const baselineFileCount = await page.locator('.msg-file-btn').count();
   await page.locator('#file-input').setInputFiles('package.json');
-  const fileCard = page.locator('.msg-file-btn');
+  await expect(page.locator('.msg-file-btn')).toHaveCount(baselineFileCount + 1);
+  const fileCard = page.locator('.msg-file-btn').last();
   await expect(fileCard).toBeVisible();
   await expect(fileCard.getByText('Download', { exact: true })).toBeVisible();
   const fileDownload = page.waitForEvent('download');
