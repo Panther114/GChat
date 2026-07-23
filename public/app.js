@@ -1676,10 +1676,31 @@
   }
   function syncDesktopBrandIcon() {
     const icon = document.querySelector(".brand-icon");
-    if (!icon || !window.electronAPI) return;
+    if (!icon) return;
     const isLightTheme = document.documentElement.dataset.theme === "light";
     const nextSrc = isLightTheme ? icon.dataset.lightSrc : icon.dataset.darkSrc;
     if (nextSrc && icon.getAttribute("src") !== nextSrc) icon.src = nextSrc;
+  }
+  function secureInviteUrl(invite) {
+    return `${location.origin}/index.html${encodeInvite(invite)}`;
+  }
+  async function copyTextToClipboard(text) {
+    if (typeof navigator.clipboard?.writeText === "function") {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch {
+      }
+    }
+    const copyTarget = document.createElement("textarea");
+    copyTarget.value = text;
+    copyTarget.setAttribute("readonly", "");
+    copyTarget.style.cssText = "position:fixed;opacity:0;pointer-events:none;";
+    document.body.append(copyTarget);
+    copyTarget.select();
+    const copied = document.execCommand("copy");
+    copyTarget.remove();
+    return copied;
   }
   function syncThemeToggleControl() {
     const preference = ["dark", "light"].includes(appLocalSettings.theme) ? appLocalSettings.theme : resolveThemePreference(appLocalSettings.theme || "system");
@@ -7036,10 +7057,9 @@
       syncUnreadIndicators();
       await selectGroup(d.id);
       addSystemMessage('Group "' + d.name + '" created.');
-      const inviteUrl = `${location.origin}/${encodeInvite({ code, secret })}`;
-      navigator.clipboard?.writeText(inviteUrl).catch(() => {
-      });
-      showToast("Secure invite link copied", "info");
+      const inviteUrl = secureInviteUrl({ code, secret });
+      const copied = await copyTextToClipboard(inviteUrl);
+      showToast(copied ? "Secure invite link copied" : "Could not copy invite link", copied ? "info" : "error");
     });
     $("join-group-btn").addEventListener("click", () => {
       $("join-group-code").value = pendingSecureInvite ? "Secure invite ready" : "";
@@ -7172,9 +7192,11 @@ ${grokResponseDraft}` : grokResponseDraft;
         showToast("Invite link is not ready yet", "error");
         return;
       }
-      const inviteUrl = `${location.origin}/${encodeInvite({ code: entry.joinCode, secret: entry.secret })}`;
-      await navigator.clipboard.writeText(inviteUrl).catch(() => {
-      });
+      const inviteUrl = secureInviteUrl({ code: entry.joinCode, secret: entry.secret });
+      if (!await copyTextToClipboard(inviteUrl)) {
+        showToast("Could not copy invite link", "error");
+        return;
+      }
       setElementIcon($("copy-code-btn"), "check", { label: "Copied" });
       setTimeout(() => setElementIcon($("copy-code-btn"), "link", { label: "Invite Link" }), 1500);
     });

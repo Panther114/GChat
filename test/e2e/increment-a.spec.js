@@ -28,10 +28,18 @@ test('local root account loads v2 fixtures and switches themes', async ({ page }
   await page.locator('#theme-toggle-btn').click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', /^(light|dark)$/);
   const afterFirst = await page.locator('html').getAttribute('data-theme');
+  await expect(page.locator('.brand-icon')).toHaveAttribute(
+    'src',
+    afterFirst === 'light' ? /gchat_icon_light\.png$/ : /gchat_icon\.png\?v=20260716-v132$/,
+  );
   await page.locator('#theme-toggle-btn').click();
   const afterSecond = await page.locator('html').getAttribute('data-theme');
   expect(afterSecond).not.toBe(afterFirst);
   expect(['light', 'dark']).toContain(afterSecond);
+  await expect(page.locator('.brand-icon')).toHaveAttribute(
+    'src',
+    afterSecond === 'light' ? /gchat_icon_light\.png$/ : /gchat_icon\.png\?v=20260716-v132$/,
+  );
   expect(errors).toEqual([]);
 });
 
@@ -61,7 +69,7 @@ test('startup fetches bounded group metadata without eager transcript hydration'
 test('secure invite fragment survives authentication and opens the join flow', async ({ page }) => {
   const secret = Buffer.alloc(32, 7).toString('base64url');
   const invite = Buffer.from(JSON.stringify({ v: 2, code: 'hosted-invite-test', secret })).toString('base64url');
-  await page.goto(`/#invite=${invite}`);
+  await page.goto(`/index.html#invite=${invite}`);
   await expect(page).toHaveURL(new RegExp(`#invite=${invite}$`));
   await expect.poll(() => page.evaluate(() => sessionStorage.getItem('gchat:pending-secure-invite')))
     .toBe(`#invite=${invite}`);
