@@ -64,6 +64,19 @@ test('composer modes use the active channel without legacy tokens or slash comma
   await page.getByText('Increment A Playground').click();
 
   await page.locator('#whisper-mode-btn').click();
+  await expect(page.locator('#whisper-mode-btn')).toHaveCSS('color', 'rgb(124, 58, 237)');
+  const pickerWidth = await page.locator('#whisper-picker').evaluate((element) => element.getBoundingClientRect().width);
+  expect(pickerWidth).toBeLessThanOrEqual(280.1);
+  await page.locator('#whisper-picker-cancel').click();
+  await expect(page.locator('#whisper-picker')).toBeHidden();
+  await expect(page.locator('#whisper-mode-btn')).not.toHaveClass(/whisper-active/);
+
+  await page.locator('#whisper-mode-btn').click();
+  await page.locator('#message-input').press('Escape');
+  await expect(page.locator('#whisper-picker')).toBeHidden();
+  await expect(page.locator('#whisper-mode-btn')).not.toHaveClass(/whisper-active/);
+
+  await page.locator('#whisper-mode-btn').click();
   const recipients = page.locator('.whisper-picker-item input');
   await expect(recipients).toHaveCount(1);
   await recipients.check();

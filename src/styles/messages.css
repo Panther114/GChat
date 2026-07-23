@@ -398,7 +398,8 @@
 
 .btn-whisper-mode.whisper-active { color: var(--whisper-border) !important; }
 .btn-whisper-mode.disappearing-active { color: var(--chat-danger) !important; }
-.whisper-picker-confirm { width: 100%; margin-top: 8px; }
+.whisper-picker-actions { display: flex; gap: 6px; margin-top: 8px; }
+.whisper-picker-actions > button { flex: 1; }
 
 /* Reply */
 .msg-reply-box {
@@ -851,6 +852,26 @@
   color: var(--chat-faint) !important;
 }
 
+.message-input-bar.whisper-mode-active .message-input-tools {
+  border-color: var(--whisper-border) !important;
+  background: color-mix(in srgb, var(--whisper-border) 10%, var(--chat-input)) !important;
+}
+
+.message-input-bar.disappearing-mode-active .message-input-tools {
+  border-color: var(--chat-danger) !important;
+  background: color-mix(in srgb, var(--chat-danger) 10%, var(--chat-input)) !important;
+}
+
+.message-input-bar.whisper-mode-active #whisper-mode-btn,
+.message-input-bar.whisper-mode-active #whisper-mode-btn .ui-icon {
+  color: var(--whisper-border) !important;
+}
+
+.message-input-bar.disappearing-mode-active #whisper-mode-btn,
+.message-input-bar.disappearing-mode-active #whisper-mode-btn .ui-icon {
+  color: var(--chat-danger) !important;
+}
+
 .message-input-bar.whisper-mode-active #message-input {
   color: var(--whisper-border) !important;
 }
@@ -918,6 +939,12 @@
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35) !important;
   color: var(--chat-text) !important;
   font-family: var(--font-ui) !important;
+}
+
+.whisper-picker {
+  left: calc(12px + var(--safe-area-left));
+  right: auto;
+  width: min(280px, calc(100vw - 24px - var(--safe-area-left) - var(--safe-area-right)));
 }
 
 .slash-command-item {

@@ -2627,6 +2627,18 @@
     whisperRecipients = [];
     messageMode = "normal";
   }
+  function cancelWhisperSelection() {
+    const picker = $("whisper-picker");
+    if (!picker || picker.hidden) return false;
+    hideWhisperPicker();
+    whisperRecipients = [];
+    composerTokens.whisper = null;
+    messageMode = "normal";
+    syncComposerTokens();
+    updateWhisperBtn();
+    updateSlashCommandMenu();
+    return true;
+  }
   function clearHashtagToken({ restoreText = false } = {}) {
     const token = composerTokens.hashtag;
     if (!token) return;
@@ -6078,7 +6090,7 @@
         });
         $("ctx-menu").hidden = true;
         $("emoji-picker").hidden = true;
-        $("whisper-picker").hidden = true;
+        cancelWhisperSelection();
         $("slash-command-menu").hidden = true;
         hideImageViewer();
         replyingTo = null;
@@ -7506,7 +7518,7 @@ ${grokResponseDraft}` : grokResponseDraft;
         $("slash-command-menu").hidden = true;
       }
       if (!$("whisper-picker").contains(e.target) && !$("whisper-mode-btn").contains(e.target) && e.target !== $("message-input")) {
-        hideWhisperPicker();
+        cancelWhisperSelection();
       }
     });
     $("reply-cancel-btn").addEventListener("click", () => {
@@ -7620,6 +7632,7 @@ ${grokResponseDraft}` : grokResponseDraft;
       syncComposerTokens();
       updateWhisperBtn();
     });
+    $("whisper-picker-cancel").addEventListener("click", cancelWhisperSelection);
     $("scroll-bottom-btn").addEventListener("click", () => scrollToBottom());
     let scrollRafPending = false;
     messagesArea().addEventListener("scroll", () => {

@@ -3127,6 +3127,19 @@ function clearWhisperToken({ restoreText = false } = {}) {
   messageMode = 'normal';
 }
 
+function cancelWhisperSelection() {
+  const picker = $('whisper-picker');
+  if (!picker || picker.hidden) return false;
+  hideWhisperPicker();
+  whisperRecipients = [];
+  composerTokens.whisper = null;
+  messageMode = 'normal';
+  syncComposerTokens();
+  updateWhisperBtn();
+  updateSlashCommandMenu();
+  return true;
+}
+
 function setHashtagToken(topic, options = {}) {
   const normalizedTopic = normalizeHashtagTopic(topic);
   if (!normalizedTopic) return false;
@@ -6991,7 +7004,7 @@ function setupKeyboardShortcuts() {
       });
       $('ctx-menu').hidden = true;
       $('emoji-picker').hidden = true;
-      $('whisper-picker').hidden = true;
+      cancelWhisperSelection();
       $('slash-command-menu').hidden = true;
       // Close image viewer
       hideImageViewer();
@@ -8480,7 +8493,7 @@ function setupEventListeners() {
       $('slash-command-menu').hidden = true;
     }
     if (!$('whisper-picker').contains(e.target) && !$('whisper-mode-btn').contains(e.target) && e.target !== $('message-input')) {
-      hideWhisperPicker();
+      cancelWhisperSelection();
     }
   });
 
@@ -8609,6 +8622,7 @@ function setupEventListeners() {
     syncComposerTokens();
     updateWhisperBtn();
   });
+  $('whisper-picker-cancel').addEventListener('click', cancelWhisperSelection);
 
   // Scroll to bottom button
   $('scroll-bottom-btn').addEventListener('click', () => scrollToBottom());
