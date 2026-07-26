@@ -321,7 +321,7 @@ body.sidebar-resizing .sidebar-resizer::before {
 }
 
 /* The three extra navigation actions belong to the mobile five-button dock only. */
-.mobile-bottom-action {
+.sidebar-actions .mobile-bottom-action {
   display: none !important;
 }
 

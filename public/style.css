@@ -4864,7 +4864,7 @@ body.sidebar-resizing .sidebar-resizer::before {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.mobile-bottom-action {
+.sidebar-actions .mobile-bottom-action {
   display: none !important;
 }
 body.sidebar-actions-icons .sidebar-actions .btn-action .icon-label,
