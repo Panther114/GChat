@@ -101,6 +101,69 @@ test('joining by invite code grants membership and returns escrowed key material
   assert.equal(joined.body.secret, groupSecret);
   assert.ok(stmts.isMember.get(group.id, attackerResponse.body.id));
   await attacker.get('/api/groups/keys').expect(200, { keys: [{ groupId: group.id, secret: groupSecret, joinCode }] });
+  const repeatedJoin = await attacker
+    .post('/api/groups/join')
+    .set('X-CSRF-Token', attackerCsrf)
+    .send({ code: joinCode })
+    .expect(200);
+  assert.equal(repeatedJoin.body.alreadyJoined, true);
+});
+
+test('only owners manage administrator roles and administrators receive bounded elevated permissions', async () => {
+  const memberCsrf = await csrf(member);
+  await member
+    .patch(`/api/groups/${group.id}/settings`)
+    .set('X-CSRF-Token', memberCsrf)
+    .send({ allowMemberExport: true })
+    .expect(403);
+
+  const ownerCsrf = await csrf(owner);
+  await owner
+    .patch(`/api/groups/${group.id}/members/${group.memberId}/administrator`)
+    .set('X-CSRF-Token', ownerCsrf)
+    .send({ isAdministrator: true })
+    .expect(200, { ok: true, isAdministrator: true });
+
+  const memberList = await member.get(`/api/groups/${group.id}/members`).expect(200);
+  assert.equal(memberList.body.find((entry) => entry.id === group.memberId).isAdministrator, true);
+  const memberGroups = await member.get('/api/groups/mine').expect(200);
+  assert.equal(memberGroups.body.find((entry) => entry.id === group.id).viewerIsAdmin, true);
+
+  await member
+    .patch(`/api/groups/${group.id}/settings`)
+    .set('X-CSRF-Token', memberCsrf)
+    .send({ allowMemberExport: true })
+    .expect(200, { ok: true });
+
+  const secondAdmin = request.agent(app);
+  const secondAdminResponse = await register(secondAdmin, 'second-admin-test');
+  const secondAdminCsrf = await csrf(secondAdmin);
+  await secondAdmin
+    .post('/api/groups/join')
+    .set('X-CSRF-Token', secondAdminCsrf)
+    .send({ code: joinCode })
+    .expect(200);
+  await owner
+    .patch(`/api/groups/${group.id}/members/${secondAdminResponse.body.id}/administrator`)
+    .set('X-CSRF-Token', ownerCsrf)
+    .send({ isAdministrator: true })
+    .expect(200);
+
+  await member
+    .delete(`/api/groups/${group.id}/members/${secondAdminResponse.body.id}`)
+    .set('X-CSRF-Token', memberCsrf)
+    .expect(403, { error: 'Administrators cannot remove other administrators' });
+
+  await owner
+    .patch(`/api/groups/${group.id}/members/${group.memberId}/administrator`)
+    .set('X-CSRF-Token', ownerCsrf)
+    .send({ isAdministrator: false })
+    .expect(200, { ok: true, isAdministrator: false });
+  await member
+    .patch(`/api/groups/${group.id}/settings`)
+    .set('X-CSRF-Token', memberCsrf)
+    .send({ allowMemberExport: false })
+    .expect(403);
 });
 
 test('explicit invite-code migration preserves the encryption secret and is idempotent', () => {

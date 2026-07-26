@@ -36,6 +36,65 @@ function persistUserWallpaperSettings(user) {
 
 applyAuthWallpaperFromStorage();
 
+function startAuthWaveAnimation() {
+  const canvas = document.getElementById('auth-wave-canvas');
+  const context = canvas?.getContext('2d', { alpha: true });
+  if (!canvas || !context) return;
+
+  let width = 0;
+  let height = 0;
+  let pixelRatio = 1;
+  let animationFrame = 0;
+  let lastPaint = 0;
+  const frameInterval = 1000 / 30;
+
+  const resize = () => {
+    width = window.innerWidth;
+    height = window.innerHeight;
+    pixelRatio = Math.min(window.devicePixelRatio || 1, 1.5);
+    canvas.width = Math.max(1, Math.round(width * pixelRatio));
+    canvas.height = Math.max(1, Math.round(height * pixelRatio));
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+    context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  };
+
+  const paint = (timestamp) => {
+    animationFrame = window.requestAnimationFrame(paint);
+    if (document.hidden || timestamp - lastPaint < frameInterval) return;
+    lastPaint = timestamp;
+    context.clearRect(0, 0, width, height);
+
+    const spacing = width < 600 ? 34 : 38;
+    const columns = Math.ceil(width / spacing) + 2;
+    const rows = Math.ceil(height / spacing) + 2;
+    const isLight = document.documentElement.dataset.theme === 'light';
+    context.fillStyle = isLight ? 'rgba(12, 16, 24, 0.42)' : 'rgba(255, 255, 255, 0.48)';
+    const phase = timestamp * 0.00105;
+
+    for (let row = -1; row < rows; row += 1) {
+      for (let column = -1; column < columns; column += 1) {
+        const baseX = column * spacing + (row % 2 ? spacing * 0.5 : 0);
+        const wave = Math.sin(column * 0.48 + phase * 2.1)
+          + Math.cos(row * 0.42 - phase * 1.45);
+        const x = baseX + Math.sin(row * 0.31 + phase) * 3;
+        const y = row * spacing + wave * 5;
+        const radius = 1.05 + (wave + 2) * 0.22;
+        context.beginPath();
+        context.arc(x, y, radius, 0, Math.PI * 2);
+        context.fill();
+      }
+    }
+  };
+
+  resize();
+  window.addEventListener('resize', resize, { passive: true });
+  animationFrame = window.requestAnimationFrame(paint);
+  window.addEventListener('pagehide', () => window.cancelAnimationFrame(animationFrame), { once: true });
+}
+
+startAuthWaveAnimation();
+
 function syncAuthThemeControls() {
   const isLight = document.documentElement.dataset.theme === 'light';
   const logo = document.querySelector('.auth-logo-icon');

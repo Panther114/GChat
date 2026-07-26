@@ -183,14 +183,18 @@
 
       <section class="panel-section right-panel-owner-actions" id="owner-actions" hidden>
         <div class="panel-section-label">Group members can</div>
-        <div class="owner-toggles">
+        <div class="owner-permissions-lock" id="owner-permissions-lock" hidden>
+          <span data-icon="lock" data-icon-only="true" aria-hidden="true"></span>
+          <span>Owner or administrator access</span>
+        </div>
+        <div class="owner-toggles" id="owner-toggles">
           <label class="toggle-label toggle-switch-row" for="allow-member-clear-toggle">
-            <span>Clear history</span>
+            <span>Clear global history</span>
             <input type="checkbox" id="allow-member-clear-toggle" />
             <span class="toggle-switch-ui" aria-hidden="true"></span>
           </label>
           <label class="toggle-label toggle-switch-row" for="allow-member-clear-tag-toggle">
-            <span>Clear channels</span>
+            <span>Clear channel history</span>
             <input type="checkbox" id="allow-member-clear-tag-toggle" />
             <span class="toggle-switch-ui" aria-hidden="true"></span>
           </label>
@@ -300,7 +304,8 @@
         <div class="profile-row profile-row-avatar">
           <div class="profile-row-label">Avatar</div>
           <div class="profile-row-main profile-avatar-stack">
-            <div class="profile-mode-tabs" role="tablist" aria-label="Avatar mode">
+            <div class="profile-mode-tabs" data-mode="color" role="tablist" aria-label="Avatar mode">
+              <span class="profile-mode-slider" aria-hidden="true"></span>
               <button type="button" class="profile-mode-chip active" id="profile-mode-color-label" role="tab" aria-selected="true" aria-controls="profile-picture-color-section">Color</button>
               <button type="button" class="profile-mode-chip" id="profile-mode-image-label" role="tab" aria-selected="false" aria-controls="profile-picture-upload-section">Image</button>
               <input type="range" id="profile-picture-mode-slider" min="0" max="1" step="1" value="0" hidden aria-hidden="true" tabindex="-1" />
@@ -321,8 +326,12 @@
               <input type="file" id="profile-picture-input" accept="image/*" class="profile-file-input" />
               <button type="button" class="btn-secondary btn-sm" id="profile-picture-pick-btn">Choose</button>
               <span class="profile-file-name" id="profile-picture-file-name">Max 2MB</span>
-              <button class="btn-primary btn-sm" id="profile-save-picture" type="button">Save</button>
+              <button class="btn-primary btn-sm" id="profile-save-picture" type="button" disabled>Save</button>
               <button class="btn-secondary btn-sm" id="profile-remove-picture" type="button" hidden>Remove</button>
+              <div class="upload-progress" id="profile-picture-progress" hidden role="status" aria-live="polite">
+                <span class="upload-progress-track" aria-hidden="true"><span></span></span>
+                <span id="profile-picture-progress-label">Preparing image…</span>
+              </div>
               <div id="profile-picture-preview" class="profile-picture-preview" hidden>
                 <img id="profile-picture-preview-img" alt="Selected image preview" />
               </div>
@@ -384,7 +393,8 @@
   <div class="modal-overlay" id="group-color-modal" hidden>
     <div class="modal">
       <h2>Group Icon</h2>
-      <div class="profile-mode-tabs" role="tablist" aria-label="Group icon mode">
+      <div class="profile-mode-tabs group-icon-mode-tabs" data-mode="color" role="tablist" aria-label="Group icon mode">
+        <span class="profile-mode-slider" aria-hidden="true"></span>
         <button type="button" class="profile-mode-chip active" id="group-icon-mode-color" role="tab" aria-selected="true">Color</button>
         <button type="button" class="profile-mode-chip" id="group-icon-mode-image" role="tab" aria-selected="false">Image</button>
       </div>
@@ -394,9 +404,14 @@
       </div>
       <div class="form-group" id="group-icon-image-section" hidden>
         <label for="group-icon-input">Icon image</label>
-        <input type="file" id="group-icon-input" accept="image/jpeg,image/png,image/gif,image/webp" />
+        <input type="file" id="group-icon-input" accept="image/jpeg,image/png,image/gif,image/webp" class="profile-file-input" />
+        <button type="button" class="btn-secondary btn-sm" id="group-icon-pick-btn">Choose image</button>
         <small class="form-hint" id="group-icon-file-name">JPEG, PNG, GIF, or WebP · max 2MB</small>
         <div class="profile-picture-preview" id="group-icon-preview" hidden><img id="group-icon-preview-img" alt="Selected group icon preview" /></div>
+        <div class="upload-progress" id="group-icon-progress" hidden role="status" aria-live="polite">
+          <span class="upload-progress-track" aria-hidden="true"><span></span></span>
+          <span id="group-icon-progress-label">Preparing image…</span>
+        </div>
       </div>
       <div class="modal-actions">
         <button class="btn-secondary" id="group-color-cancel-btn">Cancel</button>

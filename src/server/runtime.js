@@ -904,6 +904,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS group_members (
     group_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
+    is_admin INTEGER NOT NULL DEFAULT 0,
     joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (group_id, user_id)
   );
@@ -962,6 +963,7 @@ const migrations = [
   "ALTER TABLE group_chats ADD COLUMN ai_enabled INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE group_chats ADD COLUMN group_color TEXT",
   "ALTER TABLE group_chats ADD COLUMN group_icon TEXT",
+  "ALTER TABLE group_members ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE group_chats ADD COLUMN key_commitment TEXT",
   "ALTER TABLE group_chats ADD COLUMN encryption_version INTEGER NOT NULL DEFAULT 1",
   "ALTER TABLE group_chats ADD COLUMN key_escrow_ciphertext TEXT",
@@ -1097,10 +1099,10 @@ const stmts = {
     'INSERT OR IGNORE INTO group_members (group_id, user_id) VALUES (?, ?)'
   ),
   isMember: db.prepare(
-    'SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?'
+    'SELECT is_admin FROM group_members WHERE group_id = ? AND user_id = ?'
   ),
   getUserGroups: db.prepare(`
-    SELECT g.id, g.name, g.code, g.created_by, g.created_at, g.allow_member_clear, g.allow_member_clear_tag, g.allow_member_export, g.allow_member_kick, g.ai_enabled, g.group_color, g.group_icon, g.key_commitment, g.encryption_version,
+    SELECT g.id, g.name, g.code, g.created_by, g.created_at, g.allow_member_clear, g.allow_member_clear_tag, g.allow_member_export, g.allow_member_kick, g.ai_enabled, g.group_color, g.group_icon, g.key_commitment, g.encryption_version, gm.is_admin,
            (
              SELECT COUNT(*)
              FROM messages m
@@ -1140,7 +1142,7 @@ const stmts = {
   `),
   countUserGroups: db.prepare('SELECT COUNT(*) AS count FROM group_members WHERE user_id = ?'),
   getGroupMembers: db.prepare(`
-    SELECT u.id, u.username, u.icon_color, u.profile_picture
+    SELECT u.id, u.username, u.icon_color, u.profile_picture, gm.is_admin
     FROM users u
     JOIN group_members gm ON u.id = gm.user_id
     WHERE gm.group_id = ?
@@ -1148,6 +1150,7 @@ const stmts = {
     LIMIT 250
   `),
   countGroupMembers: db.prepare('SELECT COUNT(*) AS count FROM group_members WHERE group_id = ?'),
+  updateMemberAdmin: db.prepare('UPDATE group_members SET is_admin = ? WHERE group_id = ? AND user_id = ?'),
   getGroupMemberIds: db.prepare('SELECT user_id FROM group_members WHERE group_id = ? LIMIT 250'),
   getOtherGroupMemberIds: db.prepare('SELECT user_id FROM group_members WHERE group_id = ? AND user_id != ? LIMIT 250'),
 
@@ -2495,6 +2498,7 @@ app.post('/api/groups/create', (req, res) => {
     keyCommitment: group.key_commitment,
     encryptionVersion: group.encryption_version,
     createdBy: group.created_by,
+    viewerIsAdmin: false,
     unreadCount: 0,
     allowMemberClear: group.allow_member_clear || 0,
     allowMemberClearTag: group.allow_member_clear_tag || 0,
@@ -2569,6 +2573,7 @@ app.post('/api/groups/join', (req, res) => {
     keyCommitment: group.key_commitment,
     encryptionVersion: group.encryption_version,
     createdBy: group.created_by,
+    viewerIsAdmin: !!existingMembership?.is_admin,
     alreadyJoined: joined.changes === 0,
     unreadCount: 0,
     allowMemberClear: group.allow_member_clear || 0,
@@ -2613,6 +2618,7 @@ app.get('/api/groups/mine', (req, res) => {
       keyCommitment: g.key_commitment,
       encryptionVersion: g.encryption_version,
       createdBy: g.created_by,
+      viewerIsAdmin: !!g.is_admin,
       unreadCount: Math.max(0, Number(g.unread_count) || 0),
       allowMemberClear: g.allow_member_clear || 0,
       allowMemberClearTag: g.allow_member_clear_tag || 0,
@@ -2643,6 +2649,7 @@ app.get('/api/groups/preload', (req, res) => {
         username: u.username,
         iconColor: u.icon_color,
         profilePicture: u.profile_picture || null,
+        isAdministrator: !!u.is_admin,
       }));
       return {
         id: g.id,
@@ -2650,6 +2657,7 @@ app.get('/api/groups/preload', (req, res) => {
         keyCommitment: g.key_commitment,
         encryptionVersion: g.encryption_version,
         createdBy: g.created_by,
+        viewerIsAdmin: !!g.is_admin,
         unreadCount: Math.max(0, Number(g.unread_count) || 0),
         allowMemberClear: g.allow_member_clear || 0,
         allowMemberClearTag: g.allow_member_clear_tag || 0,
@@ -2685,7 +2693,7 @@ app.patch('/api/groups/:groupId/name', (req, res) => {
   res.json({ ok: true });
 });
 
-// PATCH /api/groups/:groupId/settings — update group settings (owner only)
+// PATCH /api/groups/:groupId/settings — update group settings (owner or administrator)
 app.patch('/api/groups/:groupId/settings', (req, res) => {
   const { groupId } = req.params;
   const userId = req.session.userId;
@@ -2693,7 +2701,11 @@ app.patch('/api/groups/:groupId/settings', (req, res) => {
 
   const group = stmts.findGroupById.get(groupId);
   if (!group) return res.status(404).json({ error: 'Group not found' });
-  if (group.created_by !== userId) return res.status(403).json({ error: 'Only the group owner can change settings' });
+  const membership = stmts.isMember.get(groupId, userId);
+  const isOwner = String(group.created_by) === String(userId);
+  if (!isOwner && !membership?.is_admin) {
+    return res.status(403).json({ error: 'Only the group owner or an administrator can change settings' });
+  }
   const nextAllowMemberClear = allowMemberClear !== undefined
     ? !!allowMemberClear
     : !!group.allow_member_clear;
@@ -2788,7 +2800,7 @@ app.delete('/api/groups/:groupId/messages', (req, res) => {
   if (!member) return res.status(403).json({ error: 'Not a member of this group' });
 
   const isOwner = group.created_by === userId;
-  if (!isOwner && !group.allow_member_clear) {
+  if (!isOwner && !member.is_admin && !group.allow_member_clear) {
     return res.status(403).json({ error: 'Only the group owner can clear chat history' });
   }
 
@@ -2810,7 +2822,7 @@ app.delete('/api/groups/:groupId/tags/:tagIndex/messages', (req, res) => {
   if (!/^[A-Za-z0-9_-]{43}$/.test(tagIndex)) return res.status(400).json({ error: 'Invalid tag index' });
 
   const isOwner = group.created_by === userId;
-  if (!isOwner && !group.allow_member_clear && !group.allow_member_clear_tag) {
+  if (!isOwner && !member.is_admin && !group.allow_member_clear && !group.allow_member_clear_tag) {
     return res.status(403).json({ error: 'Only the group owner can clear this hashtag' });
   }
 
@@ -2941,8 +2953,30 @@ app.get('/api/groups/:groupId/members', (req, res) => {
       username: u.username,
       iconColor: u.icon_color,
       profilePicture: u.profile_picture || null,
+      isAdministrator: !!u.is_admin,
     }))
   );
+});
+
+// PATCH /api/groups/:groupId/members/:userId/administrator — owner-only role management
+app.patch('/api/groups/:groupId/members/:userId/administrator', (req, res) => {
+  const { groupId, userId: targetUserId } = req.params;
+  const userId = req.session.userId;
+  const group = stmts.findGroupById.get(groupId);
+  if (!group) return res.status(404).json({ error: 'Group not found' });
+  if (String(group.created_by) !== String(userId)) {
+    return res.status(403).json({ error: 'Only the group owner can manage administrators' });
+  }
+  if (String(targetUserId) === String(group.created_by)) {
+    return res.status(400).json({ error: 'The group owner already has full access' });
+  }
+  const targetMember = stmts.isMember.get(groupId, targetUserId);
+  if (!targetMember) return res.status(404).json({ error: 'Member not found' });
+
+  const isAdministrator = req.body.isAdministrator === true;
+  stmts.updateMemberAdmin.run(isAdministrator ? 1 : 0, groupId, targetUserId);
+  io.to(groupId).emit('member_role_updated', { groupId, userId: targetUserId, isAdministrator });
+  res.json({ ok: true, isAdministrator });
 });
 
 // POST /api/groups/:groupId/upload — upload encrypted file or image
@@ -3111,14 +3145,18 @@ app.delete('/api/groups/:groupId/members/:userId', (req, res) => {
   }
 
   const isOwner = String(group.created_by) === String(userId);
+  const isAdministrator = !!member.is_admin;
   const canMemberKick = !!group.allow_member_kick;
-  if (!isOwner && !canMemberKick) {
+  if (!isOwner && !isAdministrator && !canMemberKick) {
     return res.status(403).json({ error: 'Only the group owner can kick members' });
   }
 
   const targetMember = stmts.isMember.get(groupId, targetUserId);
   if (!targetMember) {
     return res.status(404).json({ error: 'Member not found' });
+  }
+  if (!isOwner && targetMember.is_admin) {
+    return res.status(403).json({ error: 'Administrators cannot remove other administrators' });
   }
 
   stmts.deleteMember.run(groupId, targetUserId);

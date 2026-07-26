@@ -2115,6 +2115,8 @@
       }
     }
     if (nameEl) nameEl.textContent = "Max 2MB";
+    const saveButton = $("profile-save-picture");
+    if (saveButton) saveButton.disabled = true;
   }
   function updateProfileRemoveButton() {
     const removeBtn = $("profile-remove-picture");
@@ -2129,6 +2131,7 @@
     if (!slider || !colorSection || !uploadSection) return;
     const isImage = mode === "image";
     slider.value = isImage ? "1" : "0";
+    slider.closest(".profile-mode-tabs")?.setAttribute("data-mode", isImage ? "image" : "color");
     colorSection.hidden = isImage;
     uploadSection.hidden = !isImage;
     const colorChip = $("profile-mode-color-label");
@@ -2146,6 +2149,19 @@
   }
   function syncProfilePictureModeUI() {
     setProfilePictureMode(currentUser && currentUser.profilePicture ? "image" : "color");
+  }
+  function setUploadProgress(containerId, labelId, { visible, label }) {
+    const container = $(containerId);
+    const labelElement = $(labelId);
+    if (container) container.hidden = !visible;
+    if (labelElement && label) labelElement.textContent = label;
+  }
+  function setButtonBusy(button, busy, busyLabel, idleLabel) {
+    if (!button) return;
+    button.disabled = !!busy;
+    button.classList.toggle("is-loading", !!busy);
+    button.setAttribute("aria-busy", String(!!busy));
+    button.textContent = busy ? busyLabel : idleLabel;
   }
   var currentUser = null;
   var currentGroupId = null;
@@ -3327,6 +3343,15 @@
       ["path", { d: "M23 21v-2a4 4 0 0 0-3-3.87" }],
       ["path", { d: "M16 3.13a4 4 0 0 1 0 7.75" }]
     ],
+    "shield-plus": [
+      ["path", { d: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z" }],
+      ["path", { d: "M12 8v8" }],
+      ["path", { d: "M8 12h8" }]
+    ],
+    "shield-minus": [
+      ["path", { d: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z" }],
+      ["path", { d: "M8 12h8" }]
+    ],
     image: [
       ["rect", { x: "3", y: "5", width: "18", height: "14", rx: "2" }],
       ["circle", { cx: "9", cy: "10", r: "1.5" }],
@@ -3877,12 +3902,16 @@
     button.dataset.label = enabled ? labelEnabled : "Feature disabled by owner";
     button.title = enabled ? labelEnabled : "Feature disabled by owner";
   }
-  function updateGroupColorAction(isOwner) {
+  function canCurrentUserManageGroup() {
+    if (!currentGroupData || !currentUser) return false;
+    return String(currentGroupData.createdBy) === String(currentUser.id) || !!currentGroupData.viewerIsAdmin;
+  }
+  function updateGroupColorAction(canManage) {
     const button = $("set-group-color-btn");
     if (!button) return;
     button.hidden = false;
-    button.disabled = !isOwner;
-    button.title = isOwner ? "Change group icon" : "Only the group owner can change the group icon";
+    button.disabled = !canManage;
+    button.title = canManage ? "Change group icon" : "Only the group owner or an administrator can change the group icon";
   }
   function updateGroupActionButtons(isOwner) {
     const exportBtn = $("export-btn");
@@ -3891,7 +3920,8 @@
     const disbandBtn = $("disband-btn");
     const canMemberExport = !!(currentGroupData && currentGroupData.allowMemberExport);
     const canMemberClear = !!(currentGroupData && currentGroupData.allowMemberClear);
-    if (isOwner) {
+    const isAdministrator = !!currentGroupData?.viewerIsAdmin;
+    if (isOwner || isAdministrator) {
       updateQuickActionButtonState(exportBtn, { enabled: true, labelEnabled: "Export chat as TXT" });
       updateQuickActionButtonState(clearBtn, { enabled: true, labelEnabled: "Clear chat history" });
     } else {
@@ -3910,6 +3940,7 @@
   function canCurrentUserClearTag() {
     if (!currentGroupData || !currentUser) return false;
     if (currentGroupData.createdBy === currentUser.id) return true;
+    if (currentGroupData.viewerIsAdmin) return true;
     return !!(currentGroupData.allowMemberClear || currentGroupData.allowMemberClearTag);
   }
   function syncAllowMemberClearTagToggleState() {
@@ -3966,7 +3997,31 @@
     if (String(targetUserId) === String(currentGroupData.createdBy)) return false;
     const isOwner = String(currentGroupData.createdBy) === String(currentUser.id);
     if (isOwner) return true;
+    const target = members.find((member) => String(member.id) === String(targetUserId));
+    if (target?.isAdministrator) return false;
+    if (currentGroupData.viewerIsAdmin) return true;
     return !!currentGroupData.allowMemberKick;
+  }
+  function syncGroupPermissionControls() {
+    if (!currentGroupData || !currentUser) return;
+    const canManage = canCurrentUserManageGroup();
+    const ownerActions = $("owner-actions");
+    const lock = $("owner-permissions-lock");
+    if (ownerActions) {
+      ownerActions.hidden = false;
+      ownerActions.classList.toggle("is-locked", !canManage);
+    }
+    if (lock) lock.hidden = canManage;
+    [
+      "allow-member-clear-toggle",
+      "allow-member-clear-tag-toggle",
+      "allow-member-export-toggle",
+      "allow-member-kick-toggle"
+    ].forEach((id) => {
+      const input = $(id);
+      if (input) input.disabled = !canManage;
+    });
+    if (canManage) syncAllowMemberClearTagToggleState();
   }
   function updateGroupPreview(groupId, text, time) {
     const el = $("preview-" + groupId);
@@ -4096,8 +4151,8 @@
     $("right-panel-empty").hidden = true;
     renderTagFilters();
     const isOwner = currentGroupData && currentGroupData.createdBy === currentUser.id;
-    $("owner-actions").hidden = !isOwner;
-    updateGroupColorAction(isOwner);
+    syncGroupPermissionControls();
+    updateGroupColorAction(canCurrentUserManageGroup());
     $("common-actions").hidden = false;
     if (currentGroupData) {
       $("allow-member-clear-toggle").checked = !!currentGroupData.allowMemberClear;
@@ -4107,6 +4162,7 @@
       $("ai-mode-toggle").checked = !!currentGroupData.aiEnabled;
     }
     syncAllowMemberClearTagToggleState();
+    syncGroupPermissionControls();
     updateAiControls();
     updateGroupActionButtons(isOwner);
     updateKeyState();
@@ -4252,6 +4308,25 @@
         tag.className = "member-owner-tag";
         tag.textContent = "Owner";
         li.appendChild(tag);
+      } else if (m.isAdministrator) {
+        const tag = document.createElement("span");
+        tag.className = "member-administrator-tag";
+        tag.textContent = "Administrator";
+        li.appendChild(tag);
+      }
+      const isOwner = String(currentGroupData?.createdBy) === String(currentUser?.id);
+      if (isOwner && String(m.id) !== String(currentGroupData?.createdBy)) {
+        const roleBtn = document.createElement("button");
+        roleBtn.className = `member-role-btn ${m.isAdministrator ? "is-demote" : "is-promote"}`;
+        const roleLabel = m.isAdministrator ? "Remove administrator privilege" : "Promote to administrator";
+        roleBtn.title = roleLabel;
+        roleBtn.setAttribute("aria-label", roleLabel);
+        setElementIcon(roleBtn, m.isAdministrator ? "shield-minus" : "shield-plus", { iconOnly: true });
+        roleBtn.addEventListener("click", (event) => {
+          event.stopPropagation();
+          updateMemberAdministrator(m, !m.isAdministrator);
+        });
+        li.appendChild(roleBtn);
       }
       if (canCurrentUserKickMember(m.id)) {
         const kickBtn = document.createElement("button");
@@ -5835,7 +5910,7 @@
         if (groupIcon !== void 0) currentGroupData.groupIcon = groupIcon || null;
       }
       const isOwner = currentGroupData && currentGroupData.createdBy === currentUser.id;
-      if (isOwner) {
+      if (canCurrentUserManageGroup()) {
         $("allow-member-clear-toggle").checked = !!currentGroupData.allowMemberClear;
         $("allow-member-clear-tag-toggle").checked = !!currentGroupData.allowMemberClearTag;
         $("allow-member-export-toggle").checked = !!currentGroupData.allowMemberExport;
@@ -5843,6 +5918,8 @@
         $("ai-mode-toggle").checked = !!currentGroupData.aiEnabled;
       }
       syncAllowMemberClearTagToggleState();
+      syncGroupPermissionControls();
+      updateGroupColorAction(canCurrentUserManageGroup());
       updateAiControls();
       updateGroupActionButtons(isOwner);
       renderMembersList();
@@ -5854,8 +5931,8 @@
       if (groupId === currentGroupId && currentGroupData) {
         currentGroupData.createdBy = createdBy;
         const isOwner = currentGroupData.createdBy === currentUser.id;
-        $("owner-actions").hidden = !isOwner;
-        updateGroupColorAction(isOwner);
+        syncGroupPermissionControls();
+        updateGroupColorAction(canCurrentUserManageGroup());
         updateGroupActionButtons(isOwner);
         renderMembersList();
       }
@@ -5864,7 +5941,7 @@
     socket.on("member_joined", ({ userId, username, iconColor, profilePicture, groupId }) => {
       const cache = ensureGroupCacheEntry(groupId);
       if (cache.members && !cache.members.find((m) => m.id === userId)) {
-        cache.members.push({ id: userId, username, iconColor, profilePicture: profilePicture || null });
+        cache.members.push({ id: userId, username, iconColor, profilePicture: profilePicture || null, isAdministrator: false });
         writeLocalGroupCache(groupId, cache);
       }
       if (groupId !== currentGroupId) return;
@@ -5873,6 +5950,24 @@
       renderMembersList();
       renderWhisperPicker();
       $("chat-member-count").textContent = members.length + " member" + (members.length !== 1 ? "s" : "");
+    });
+    socket.on("member_role_updated", ({ userId, groupId, isAdministrator }) => {
+      const cache = ensureGroupCacheEntry(groupId);
+      const cachedMember = cache.members?.find((member) => String(member.id) === String(userId));
+      if (cachedMember) cachedMember.isAdministrator = !!isAdministrator;
+      writeLocalGroupCache(groupId, cache);
+      if (groupId !== currentGroupId) return;
+      const currentMember = members.find((member) => String(member.id) === String(userId));
+      if (currentMember) currentMember.isAdministrator = !!isAdministrator;
+      if (String(userId) === String(currentUser?.id) && currentGroupData) {
+        currentGroupData.viewerIsAdmin = !!isAdministrator;
+        const group = groups.find((item) => String(item.id) === String(groupId));
+        if (group) group.viewerIsAdmin = !!isAdministrator;
+        syncGroupPermissionControls();
+        updateGroupColorAction(canCurrentUserManageGroup());
+        updateGroupActionButtons(currentGroupData.createdBy === currentUser.id);
+      }
+      renderMembersList();
     });
     socket.on("member_left", ({ userId, username, groupId }) => {
       const cache = ensureGroupCacheEntry(groupId);
@@ -6107,6 +6202,27 @@
         const d = await res.json().catch(() => ({}));
         showToast(d.error || "Failed to kick member", "error");
       }
+    });
+  }
+  async function updateMemberAdministrator(member, isAdministrator) {
+    if (!member || !currentGroupId) return;
+    const action = isAdministrator ? "Promote" : "Demote";
+    const description = isAdministrator ? `Give ${member.username} administrator access to group permissions and moderation?` : `Remove administrator access from ${member.username}?`;
+    showConfirm(`${action} member`, description, async () => {
+      const res = await fetch(`/api/groups/${currentGroupId}/members/${member.id}/administrator`, {
+        method: "PATCH",
+        headers: apiHeaders(),
+        body: JSON.stringify({ isAdministrator })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showToast(data.error || `Failed to ${action.toLowerCase()} member`, "error");
+        return;
+      }
+      showToast(
+        isAdministrator ? `${member.username} is now an administrator` : `${member.username} is now a group member`,
+        "success"
+      );
     });
   }
   var confirmCallback = null;
@@ -6885,33 +7001,48 @@
         if (nameEl) nameEl.textContent = "Max 2MB";
         if (preview) preview.hidden = true;
         if (img) img.removeAttribute("src");
+        $("profile-save-picture").disabled = true;
+        setUploadProgress("profile-picture-progress", "profile-picture-progress-label", { visible: false });
         return;
       }
       if (nameEl) nameEl.textContent = file.name;
+      $("profile-save-picture").disabled = true;
       if (!isAllowedUploadImageType(file.type)) {
         $("profile-error").textContent = "Only JPEG, PNG, GIF, and WebP images are supported";
         if (preview) preview.hidden = true;
+        setUploadProgress("profile-picture-progress", "profile-picture-progress-label", { visible: false });
         return;
       }
       if (file.size > MAX_PROFILE_PICTURE_BYTES) {
         $("profile-error").textContent = PROFILE_PICTURE_TOO_LARGE_MSG;
         if (preview) preview.hidden = true;
+        setUploadProgress("profile-picture-progress", "profile-picture-progress-label", { visible: false });
         return;
       }
       $("profile-error").textContent = "";
+      setUploadProgress("profile-picture-progress", "profile-picture-progress-label", {
+        visible: true,
+        label: "Preparing preview\u2026"
+      });
       const reader = new FileReader();
       reader.onerror = () => {
         $("profile-error").textContent = "Failed to read the selected image. Please try a different file.";
         if (preview) preview.hidden = true;
+        $("profile-save-picture").disabled = true;
+        setUploadProgress("profile-picture-progress", "profile-picture-progress-label", { visible: false });
       };
       reader.onload = (ev) => {
         if (!img || !preview) return;
         img.src = ev.target.result;
         preview.hidden = false;
+        $("profile-save-picture").disabled = false;
+        setUploadProgress("profile-picture-progress", "profile-picture-progress-label", { visible: false });
       };
       reader.readAsDataURL(file);
     });
     $("profile-save-picture").addEventListener("click", async () => {
+      const saveButton = $("profile-save-picture");
+      if (saveButton.disabled) return;
       const file = $("profile-picture-input").files[0];
       if (!file) {
         $("profile-error").textContent = "Please select an image";
@@ -6925,12 +7056,13 @@
         $("profile-error").textContent = PROFILE_PICTURE_TOO_LARGE_MSG;
         return;
       }
-      const reader = new FileReader();
-      reader.onerror = () => {
-        $("profile-error").textContent = "Failed to read the selected image. Please try a different file.";
-      };
-      reader.onload = async (e) => {
-        const profilePicture = e.target.result;
+      setButtonBusy(saveButton, true, "Uploading\u2026", "Save");
+      setUploadProgress("profile-picture-progress", "profile-picture-progress-label", {
+        visible: true,
+        label: "Uploading image\u2026"
+      });
+      try {
+        const profilePicture = await readFileAsDataURL(file);
         const res = await fetch("/api/auth/profile", {
           method: "PATCH",
           headers: apiHeaders(),
@@ -6948,8 +7080,13 @@
         updateProfileRemoveButton();
         if (!$("user-management-modal").hidden) void loadUserManagementSummary();
         $("profile-error").textContent = "\u2713 Saved";
-      };
-      reader.readAsDataURL(file);
+      } catch {
+        $("profile-error").textContent = "Could not upload the image. Check your connection and try again.";
+      } finally {
+        setUploadProgress("profile-picture-progress", "profile-picture-progress-label", { visible: false });
+        setButtonBusy(saveButton, false, "Uploading\u2026", "Save");
+        saveButton.disabled = !$("profile-picture-input").files[0];
+      }
     });
     $("profile-remove-picture").addEventListener("click", async () => {
       const res = await fetch("/api/auth/profile", {
@@ -7037,7 +7174,9 @@
         }
       );
     });
+    let joinGroupInFlight = false;
     $("join-confirm-btn").addEventListener("click", async () => {
+      if (joinGroupInFlight) return;
       const inviteInput = $("join-group-code").value.trim();
       $("join-error").textContent = "";
       if (!inviteInput) {
@@ -7045,33 +7184,42 @@
         return;
       }
       const code = inviteInput.toLowerCase();
-      const res = await fetch("/api/groups/join", {
-        method: "POST",
-        headers: apiHeaders(),
-        body: JSON.stringify({ code })
-      });
-      const d = await res.json();
-      if (!res.ok) {
-        $("join-error").textContent = d.error || "Failed";
-        return;
+      joinGroupInFlight = true;
+      setButtonBusy($("join-confirm-btn"), true, "Joining\u2026", "Join");
+      try {
+        const res = await fetch("/api/groups/join", {
+          method: "POST",
+          headers: apiHeaders(),
+          body: JSON.stringify({ code })
+        });
+        const d = await res.json();
+        if (!res.ok) {
+          $("join-error").textContent = d.error || "Failed";
+          return;
+        }
+        const commitment = await keyCommitment(d.secret);
+        if (commitment !== d.keyCommitment) {
+          $("join-error").textContent = "This invite code returned the wrong encryption key";
+          return;
+        }
+        const vaultEntry = { groupId: d.id, secret: d.secret, joinCode: code };
+        await keyVault.put(vaultEntry);
+        groupKeyVaultCache.set(String(d.id), vaultEntry);
+        $("join-modal").hidden = true;
+        if (!groups.find((g) => g.id === d.id)) {
+          groups.unshift(d);
+          unreadCounts[d.id] = Math.max(0, Number(d.unreadCount) || 0);
+          renderGroupList();
+          syncUnreadIndicators();
+        }
+        await selectGroup(d.id);
+        addSystemMessage(d.alreadyJoined ? `You are already a member of "${d.name}".` : `You joined "${d.name}".`);
+      } catch {
+        $("join-error").textContent = "Could not join the group. Check your connection and try again.";
+      } finally {
+        joinGroupInFlight = false;
+        setButtonBusy($("join-confirm-btn"), false, "Joining\u2026", "Join");
       }
-      const commitment = await keyCommitment(d.secret);
-      if (commitment !== d.keyCommitment) {
-        $("join-error").textContent = "This invite code returned the wrong encryption key";
-        return;
-      }
-      const vaultEntry = { groupId: d.id, secret: d.secret, joinCode: code };
-      await keyVault.put(vaultEntry);
-      groupKeyVaultCache.set(String(d.id), vaultEntry);
-      $("join-modal").hidden = true;
-      if (!groups.find((g) => g.id === d.id)) {
-        groups.unshift(d);
-        unreadCounts[d.id] = Math.max(0, Number(d.unreadCount) || 0);
-        renderGroupList();
-        syncUnreadIndicators();
-      }
-      await selectGroup(d.id);
-      addSystemMessage('You joined "' + d.name + '".');
     });
     $("grok-close-btn").addEventListener("click", closeGrokModal);
     $("grok-cancel-btn").addEventListener("click", closeGrokModal);
@@ -7142,7 +7290,7 @@ ${grokResponseDraft}` : grokResponseDraft;
         return;
       }
       setElementIcon($("copy-code-btn"), "check", { label: "Copied" });
-      setTimeout(() => setElementIcon($("copy-code-btn"), "key-round", { label: "Invite Code" }), 1500);
+      setTimeout(() => setElementIcon($("copy-code-btn"), "key-round", { label: "Invite" }), 1500);
     });
     let groupRenameInFlight = false;
     const saveGroupName = async () => {
@@ -7150,16 +7298,22 @@ ${grokResponseDraft}` : grokResponseDraft;
       if (!name || !currentGroupId || groupRenameInFlight) return;
       if (currentGroupData && name === currentGroupData.name) return;
       groupRenameInFlight = true;
-      const res = await fetch("/api/groups/" + currentGroupId + "/name", {
-        method: "PATCH",
-        headers: apiHeaders(),
-        body: JSON.stringify({ name })
-      });
-      groupRenameInFlight = false;
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({}));
-        showToast(d.error || "Failed to rename", "error");
+      try {
+        const res = await fetch("/api/groups/" + currentGroupId + "/name", {
+          method: "PATCH",
+          headers: apiHeaders(),
+          body: JSON.stringify({ name })
+        });
+        if (!res.ok) {
+          const d = await res.json().catch(() => ({}));
+          showToast(d.error || "Failed to rename", "error");
+          $("edit-group-name-input").value = currentGroupData ? currentGroupData.name : "";
+        }
+      } catch {
+        showToast("Could not rename the group. Check your connection and try again.", "error");
         $("edit-group-name-input").value = currentGroupData ? currentGroupData.name : "";
+      } finally {
+        groupRenameInFlight = false;
       }
     };
     $("edit-group-name-input").addEventListener("keydown", (e) => {
@@ -7173,12 +7327,14 @@ ${grokResponseDraft}` : grokResponseDraft;
     const syncGroupIconMode = (mode) => {
       groupIconMode = mode;
       const isImage = mode === "image";
+      document.querySelector(".group-icon-mode-tabs")?.setAttribute("data-mode", isImage ? "image" : "color");
       $("group-icon-color-section").hidden = isImage;
       $("group-icon-image-section").hidden = !isImage;
       $("group-icon-mode-color").classList.toggle("active", !isImage);
       $("group-icon-mode-image").classList.toggle("active", isImage);
       $("group-icon-mode-color").setAttribute("aria-selected", String(!isImage));
       $("group-icon-mode-image").setAttribute("aria-selected", String(isImage));
+      $("group-color-save-btn").disabled = isImage && !$("group-icon-input").files?.[0] && !currentGroupData?.groupIcon;
     };
     $("set-group-color-btn").addEventListener("click", () => {
       if (!currentGroupId || $("set-group-color-btn").disabled) return;
@@ -7186,6 +7342,7 @@ ${grokResponseDraft}` : grokResponseDraft;
       $("group-icon-input").value = "";
       $("group-icon-file-name").textContent = "JPEG, PNG, GIF, or WebP \xB7 max 2MB";
       $("group-icon-preview").hidden = true;
+      setUploadProgress("group-icon-progress", "group-icon-progress-label", { visible: false });
       syncGroupIconMode(currentGroupData?.groupIcon ? "image" : "color");
       $("group-color-modal").hidden = false;
     });
@@ -7194,50 +7351,81 @@ ${grokResponseDraft}` : grokResponseDraft;
     });
     $("group-icon-mode-color").addEventListener("click", () => syncGroupIconMode("color"));
     $("group-icon-mode-image").addEventListener("click", () => syncGroupIconMode("image"));
+    $("group-icon-pick-btn").addEventListener("click", () => $("group-icon-input").click());
     $("group-icon-input").addEventListener("change", (event) => {
       const file = event.target.files?.[0];
       if (!file) return;
       if (!isAllowedUploadImageType(file.type) || file.size > MAX_PROFILE_PICTURE_BYTES) {
         showToast(!isAllowedUploadImageType(file.type) ? "Only JPEG, PNG, GIF, and WebP images are supported" : PROFILE_PICTURE_TOO_LARGE_MSG, "error");
         event.target.value = "";
+        $("group-color-save-btn").disabled = !currentGroupData?.groupIcon;
         return;
       }
       $("group-icon-file-name").textContent = file.name;
+      $("group-color-save-btn").disabled = true;
+      setUploadProgress("group-icon-progress", "group-icon-progress-label", {
+        visible: true,
+        label: "Preparing preview\u2026"
+      });
       const reader = new FileReader();
+      reader.onerror = () => {
+        showToast("Failed to read the selected image. Please try a different file.", "error");
+        event.target.value = "";
+        $("group-icon-preview").hidden = true;
+        $("group-color-save-btn").disabled = !currentGroupData?.groupIcon;
+        setUploadProgress("group-icon-progress", "group-icon-progress-label", { visible: false });
+      };
       reader.onload = () => {
         $("group-icon-preview-img").src = String(reader.result || "");
         $("group-icon-preview").hidden = false;
+        $("group-color-save-btn").disabled = false;
+        setUploadProgress("group-icon-progress", "group-icon-progress-label", { visible: false });
       };
       reader.readAsDataURL(file);
     });
     $("group-color-save-btn").addEventListener("click", async () => {
+      const saveButton = $("group-color-save-btn");
+      if (saveButton.disabled) return;
+      setButtonBusy(saveButton, true, groupIconMode === "image" ? "Uploading\u2026" : "Saving\u2026", "Confirm");
+      setUploadProgress("group-icon-progress", "group-icon-progress-label", {
+        visible: true,
+        label: groupIconMode === "image" ? "Uploading group icon\u2026" : "Saving icon color\u2026"
+      });
       let payload;
-      if (groupIconMode === "image") {
-        const file = $("group-icon-input").files?.[0];
-        if (!file) {
-          if (currentGroupData?.groupIcon) payload = { groupIcon: currentGroupData.groupIcon };
-          else {
-            showToast("Choose an image for the group icon", "error");
-            return;
+      try {
+        if (groupIconMode === "image") {
+          const file = $("group-icon-input").files?.[0];
+          if (!file) {
+            if (currentGroupData?.groupIcon) payload = { groupIcon: currentGroupData.groupIcon };
+            else {
+              showToast("Choose an image for the group icon", "error");
+              return;
+            }
+          } else {
+            const groupIcon = await readFileAsDataURL(file);
+            payload = { groupIcon };
           }
         } else {
-          const groupIcon = await readFileAsDataURL(file);
-          payload = { groupIcon };
+          payload = { groupColor: $("group-color-input").value, groupIcon: null };
         }
-      } else {
-        payload = { groupColor: $("group-color-input").value, groupIcon: null };
+        const res = await fetch("/api/groups/" + currentGroupId + "/settings", {
+          method: "PATCH",
+          headers: apiHeaders(),
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) {
+          const d = await res.json().catch(() => ({}));
+          showToast(d.error || "Failed to set group icon", "error");
+          return;
+        }
+        $("group-color-modal").hidden = true;
+      } catch {
+        showToast("Could not upload the group icon. Check your connection and try again.", "error");
+      } finally {
+        setUploadProgress("group-icon-progress", "group-icon-progress-label", { visible: false });
+        setButtonBusy(saveButton, false, "Uploading\u2026", "Confirm");
+        saveButton.disabled = groupIconMode === "image" && !$("group-icon-input").files?.[0] && !currentGroupData?.groupIcon;
       }
-      const res = await fetch("/api/groups/" + currentGroupId + "/settings", {
-        method: "PATCH",
-        headers: apiHeaders(),
-        body: JSON.stringify(payload)
-      });
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({}));
-        showToast(d.error || "Failed to set group icon", "error");
-        return;
-      }
-      $("group-color-modal").hidden = true;
     });
     $("clear-history-btn").addEventListener("click", () => {
       if ($("clear-history-btn").disabled) return;

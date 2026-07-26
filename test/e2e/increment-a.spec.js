@@ -33,6 +33,26 @@ test('auth theme toggle swaps the GChat logo for the active theme', async ({ pag
   await expect(logo).toHaveAttribute('src', '/gchat_icon.png?v=20260716-v132');
 });
 
+test('auth screen renders a theme-aware animated dot canvas behind the card', async ({ page }) => {
+  await page.goto('/index.html');
+  const canvas = page.locator('#auth-wave-canvas');
+  const card = page.locator('.auth-card');
+  await expect(canvas).toBeVisible();
+  await expect(card).toBeVisible();
+  const layers = await page.evaluate(() => {
+    const canvasElement = globalThis.document.querySelector('#auth-wave-canvas');
+    const cardElement = globalThis.document.querySelector('.auth-card');
+    return {
+      canvasPixels: [canvasElement.width, canvasElement.height],
+      canvasZ: Number(globalThis.getComputedStyle(canvasElement).zIndex),
+      cardZ: Number(globalThis.getComputedStyle(cardElement).zIndex),
+    };
+  });
+  expect(layers.canvasPixels[0]).toBeGreaterThan(0);
+  expect(layers.canvasPixels[1]).toBeGreaterThan(0);
+  expect(layers.cardZ).toBeGreaterThan(layers.canvasZ);
+});
+
 test('local root account loads v2 fixtures and switches themes', async ({ page }) => {
   const errors = [];
   page.on('console', (message) => {
@@ -236,4 +256,27 @@ test('join flow accepts a six-character invite code', async ({ page }) => {
   await expect(page.locator('#join-modal')).toBeVisible();
   await expect(page.locator('#join-modal').getByText('Invite Code', { exact: true })).toBeVisible();
   await expect(page.locator('#join-group-code')).toHaveAttribute('maxlength', '6');
+});
+
+test('group details keep Invite stable and render a bounded group-icon preview', async ({ page }) => {
+  await signInAsLocalRoot(page);
+  await page.getByText('Increment A Playground').click();
+
+  const invite = page.locator('#copy-code-btn');
+  await expect(invite).toHaveText('Invite');
+  await invite.click();
+  await page.waitForTimeout(1700);
+  await expect(invite).toHaveText('Invite');
+
+  await page.locator('#set-group-color-btn').click();
+  await page.locator('#group-icon-mode-image').click();
+  const confirm = page.locator('#group-color-save-btn');
+  await expect(confirm).toBeDisabled();
+  await page.locator('#group-icon-input').setInputFiles('public/gchat_icon.png');
+  await expect(confirm).toBeEnabled();
+  const preview = page.locator('#group-icon-preview-img');
+  await expect(preview).toBeVisible();
+  await expect(preview).toHaveCSS('width', '96px');
+  await expect(preview).toHaveCSS('height', '96px');
+  await expect(preview).toHaveCSS('object-fit', 'cover');
 });

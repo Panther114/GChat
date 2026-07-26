@@ -6,6 +6,9 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ## v1.3.4
 
+- Added owner-managed group administrators with elevated permission and moderation access, protected administrator boundaries, real-time role updates, and locked permission previews for regular members.
+- Improved profile/group icon uploads with responsive previews, sliding Color/Image selectors, preparation/upload feedback, and guarded save states.
+- Fixed the Invite action label reset, duplicate join feedback under repeated clicks, and rename retry lockups; added a lightweight theme-aware wave-dot auth background.
 - Added a universal macOS desktop release for Apple Silicon and Intel Macs, with DMG/ZIP distribution, updater metadata, dock unread badges, and parallel Windows/macOS GitHub Release builds.
 - Replaced invite links with permanent six-character invite codes, code-only joining, encrypted server-side key recovery, and an explicit backup-confirmed migration command for existing groups.
 - Made received disappearing messages indistinguishable from ordinary messages, retained sender-only indicators, and repaired message-series headers after disappearance.
