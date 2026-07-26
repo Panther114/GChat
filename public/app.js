@@ -4310,8 +4310,8 @@
         li.appendChild(tag);
       } else if (m.isAdministrator) {
         const tag = document.createElement("span");
-        tag.className = "member-administrator-tag";
-        tag.textContent = "Administrator";
+        tag.className = "member-owner-tag";
+        tag.textContent = "Admin";
         li.appendChild(tag);
       }
       const isOwner = String(currentGroupData?.createdBy) === String(currentUser?.id);

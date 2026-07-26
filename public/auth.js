@@ -38,7 +38,7 @@ applyAuthWallpaperFromStorage();
 
 function startAuthWaveAnimation() {
   const canvas = document.getElementById('auth-wave-canvas');
-  const context = canvas?.getContext('2d', { alpha: true });
+  const context = canvas?.getContext('2d', { alpha: false });
   if (!canvas || !context) return;
 
   let width = 0;
@@ -46,7 +46,8 @@ function startAuthWaveAnimation() {
   let pixelRatio = 1;
   let animationFrame = 0;
   let lastPaint = 0;
-  const frameInterval = 1000 / 30;
+  let pointX = new Float32Array(0);
+  let pointZ = new Float32Array(0);
 
   const resize = () => {
     width = window.innerWidth;
@@ -57,34 +58,68 @@ function startAuthWaveAnimation() {
     canvas.style.width = `${width}px`;
     canvas.style.height = `${height}px`;
     context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+
+    const mobile = width < 600;
+    const depthStep = mobile ? 28 : 24;
+    const columnStep = mobile ? 30 : 27;
+    const farDepth = 1200;
+    const halfWorldWidth = Math.max(760, width * 1.12);
+    const columns = Math.ceil((halfWorldWidth * 2) / columnStep) + 1;
+    const rows = Math.ceil(farDepth / depthStep) + 1;
+    const pointCount = columns * rows;
+    pointX = new Float32Array(pointCount);
+    pointZ = new Float32Array(pointCount);
+
+    let pointIndex = 0;
+    for (let row = 0; row < rows; row += 1) {
+      const z = row * depthStep;
+      for (let column = 0; column < columns; column += 1) {
+        pointX[pointIndex] = -halfWorldWidth + column * columnStep;
+        pointZ[pointIndex] = z;
+        pointIndex += 1;
+      }
+    }
+    canvas.dataset.pointCount = String(pointCount);
+    canvas.dataset.renderer = 'perspective-dot-wave';
   };
 
   const paint = (timestamp) => {
     animationFrame = window.requestAnimationFrame(paint);
+    const frameInterval = 1000 / (width < 600 ? 24 : 30);
     if (document.hidden || timestamp - lastPaint < frameInterval) return;
     lastPaint = timestamp;
-    context.clearRect(0, 0, width, height);
-
-    const spacing = width < 600 ? 34 : 38;
-    const columns = Math.ceil(width / spacing) + 2;
-    const rows = Math.ceil(height / spacing) + 2;
     const isLight = document.documentElement.dataset.theme === 'light';
-    context.fillStyle = isLight ? 'rgba(12, 16, 24, 0.42)' : 'rgba(255, 255, 255, 0.48)';
-    const phase = timestamp * 0.00105;
+    context.fillStyle = isLight ? '#f0f0f0' : '#050505';
+    context.fillRect(0, 0, width, height);
+    context.fillStyle = isLight ? '#000000' : '#ffffff';
 
-    for (let row = -1; row < rows; row += 1) {
-      for (let column = -1; column < columns; column += 1) {
-        const baseX = column * spacing + (row % 2 ? spacing * 0.5 : 0);
-        const wave = Math.sin(column * 0.48 + phase * 2.1)
-          + Math.cos(row * 0.42 - phase * 1.45);
-        const x = baseX + Math.sin(row * 0.31 + phase) * 3;
-        const y = row * spacing + wave * 5;
-        const radius = 1.05 + (wave + 2) * 0.22;
-        context.beginPath();
-        context.arc(x, y, radius, 0, Math.PI * 2);
-        context.fill();
-      }
+    const phase = timestamp * 0.001;
+    const focalLength = Math.min(640, Math.max(430, width * 0.48));
+    const cameraDistance = 178;
+    const cameraHeight = height < 620 ? 142 : 172;
+    const horizon = height * (width < 600 ? 0.12 : 0.1);
+    const vanishingX = width * 0.5;
+    const lateralDrift = Math.sin(phase * 0.27) * 18;
+
+    context.beginPath();
+    for (let index = pointX.length - 1; index >= 0; index -= 1) {
+      const x = pointX[index];
+      const z = pointZ[index];
+      const depth = z + cameraDistance;
+      const perspective = focalLength / depth;
+      const primaryWave = Math.sin(x * 0.0125 + z * 0.009 - phase * 1.35);
+      const crossingWave = Math.cos(x * 0.006 - z * 0.015 + phase * 0.92);
+      const longSwell = Math.sin((x + z) * 0.0042 + phase * 0.58);
+      const elevation = primaryWave * 24 + crossingWave * 15 + longSwell * 11;
+      const screenX = vanishingX + (x + lateralDrift) * perspective;
+      const screenY = horizon + (cameraHeight - elevation) * perspective;
+      if (screenX < -4 || screenX > width + 4 || screenY < -4 || screenY > height + 4) continue;
+
+      const radius = Math.min(2.45, Math.max(0.72, perspective * 0.92));
+      context.moveTo(screenX + radius, screenY);
+      context.arc(screenX, screenY, radius, 0, Math.PI * 2);
     }
+    context.fill();
   };
 
   resize();

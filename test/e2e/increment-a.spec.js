@@ -46,11 +46,16 @@ test('auth screen renders a theme-aware animated dot canvas behind the card', as
       canvasPixels: [canvasElement.width, canvasElement.height],
       canvasZ: Number(globalThis.getComputedStyle(canvasElement).zIndex),
       cardZ: Number(globalThis.getComputedStyle(cardElement).zIndex),
+      pointCount: Number(canvasElement.dataset.pointCount),
+      renderer: canvasElement.dataset.renderer,
     };
   });
   expect(layers.canvasPixels[0]).toBeGreaterThan(0);
   expect(layers.canvasPixels[1]).toBeGreaterThan(0);
   expect(layers.cardZ).toBeGreaterThan(layers.canvasZ);
+  expect(layers.pointCount).toBeGreaterThan(2000);
+  expect(layers.pointCount).toBeLessThan(8000);
+  expect(layers.renderer).toBe('perspective-dot-wave');
 });
 
 test('local root account loads v2 fixtures and switches themes', async ({ page }) => {
