@@ -31,7 +31,7 @@
   "dependencies": {
     "bcrypt": "^6.0.0",
     "better-sqlite3": "12.8.0",
-    "electron-updater": "^6.3.0",
+    "electron-updater": "^6.8.9",
     "express": "^4.22.2",
     "express-session": "^1.17.3",
     "socket.io": "^4.8.3",
@@ -40,10 +40,10 @@
   "devDependencies": {
     "@playwright/test": "^1.55.0",
     "cross-env": "^7.0.3",
-    "esbuild": "^0.25.0",
-    "eslint": "^9.0.0",
     "electron": "^41.0.0",
     "electron-builder": "^25.0.0",
+    "esbuild": "^0.25.0",
+    "eslint": "^9.0.0",
     "socket.io-client": "^4.8.3",
     "supertest": "^7.1.4"
   },
