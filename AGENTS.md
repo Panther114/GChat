@@ -14,8 +14,7 @@ The Railway deployment must never be subjected to large, continuous, or unbounde
 
 ## Repository workflow
 
-- Preserve the `main` and `Increment-A` branch history; do not commit, push, deploy, or run destructive production migrations unless explicitly requested.
-- For implementation requests, commit validated changes and push them directly to `origin/main` once complete, unless the user explicitly says not to push.
+- Preserve the `main` and `Increment-A` branch history. For implementation requests, commit validated changes and push them directly to `origin/main` once complete unless the user explicitly says not to push. Do not deploy or run destructive production migrations unless explicitly requested.
 - Add focused regression tests before security fixes or behavior-preserving refactors.
 - Treat `public/app.js`, `public/style.css`, and generated bundles as build outputs once the modular source pipeline is active; edit their source modules instead.
 
