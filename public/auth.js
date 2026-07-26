@@ -62,17 +62,18 @@ function startAuthWaveAnimation() {
     const mobile = width < 600;
     const depthStep = mobile ? 28 : 24;
     const columnStep = mobile ? 30 : 27;
+    const nearDepth = -120;
     const farDepth = 1200;
     const halfWorldWidth = Math.max(760, width * 1.12);
     const columns = Math.ceil((halfWorldWidth * 2) / columnStep) + 1;
-    const rows = Math.ceil(farDepth / depthStep) + 1;
+    const rows = Math.ceil((farDepth - nearDepth) / depthStep) + 1;
     const pointCount = columns * rows;
     pointX = new Float32Array(pointCount);
     pointZ = new Float32Array(pointCount);
 
     let pointIndex = 0;
     for (let row = 0; row < rows; row += 1) {
-      const z = row * depthStep;
+      const z = nearDepth + row * depthStep;
       for (let column = 0; column < columns; column += 1) {
         pointX[pointIndex] = -halfWorldWidth + column * columnStep;
         pointZ[pointIndex] = z;
@@ -80,6 +81,7 @@ function startAuthWaveAnimation() {
       }
     }
     canvas.dataset.pointCount = String(pointCount);
+    canvas.dataset.nearDepth = String(nearDepth);
     canvas.dataset.renderer = 'perspective-dot-wave';
   };
 

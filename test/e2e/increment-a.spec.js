@@ -37,6 +37,24 @@ test('auth screen renders a theme-aware animated dot canvas behind the card', as
   await page.goto('/index.html');
   const canvas = page.locator('#auth-wave-canvas');
   const card = page.locator('.auth-card');
+  const bottomDotPixels = () => page.evaluate(() => {
+    const canvasElement = globalThis.document.querySelector('#auth-wave-canvas');
+    const context = canvasElement.getContext('2d');
+    const stripHeight = Math.max(1, Math.round(18 * (canvasElement.height / globalThis.innerHeight)));
+    const pixels = context.getImageData(
+      0,
+      canvasElement.height - stripHeight,
+      canvasElement.width,
+      stripHeight,
+    ).data;
+    let visibleDots = 0;
+    for (let index = 0; index < pixels.length; index += 4) {
+      if (pixels[index] > 230 && pixels[index + 1] > 230 && pixels[index + 2] > 230) {
+        visibleDots += 1;
+      }
+    }
+    return visibleDots;
+  });
   await expect(canvas).toBeVisible();
   await expect(card).toBeVisible();
   const layers = await page.evaluate(() => {
@@ -47,6 +65,7 @@ test('auth screen renders a theme-aware animated dot canvas behind the card', as
       canvasZ: Number(globalThis.getComputedStyle(canvasElement).zIndex),
       cardZ: Number(globalThis.getComputedStyle(cardElement).zIndex),
       pointCount: Number(canvasElement.dataset.pointCount),
+      nearDepth: Number(canvasElement.dataset.nearDepth),
       renderer: canvasElement.dataset.renderer,
     };
   });
@@ -55,7 +74,13 @@ test('auth screen renders a theme-aware animated dot canvas behind the card', as
   expect(layers.cardZ).toBeGreaterThan(layers.canvasZ);
   expect(layers.pointCount).toBeGreaterThan(2000);
   expect(layers.pointCount).toBeLessThan(8000);
+  expect(layers.nearDepth).toBeLessThan(0);
   expect(layers.renderer).toBe('perspective-dot-wave');
+  await expect.poll(bottomDotPixels).toBeGreaterThan(0);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(canvas).toBeVisible();
+  await expect.poll(bottomDotPixels).toBeGreaterThan(0);
 });
 
 test('local root account loads v2 fixtures and switches themes', async ({ page }) => {
