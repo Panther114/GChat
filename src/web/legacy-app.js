@@ -5259,7 +5259,7 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
     });
     actions.appendChild(button);
   };
-  addAction('Reply', 'reply', () => $('ctx-reply').click());
+  if (!isDisappearingMessage(msg)) addAction('Reply', 'reply', () => $('ctx-reply').click());
   if (!isDisappearingMessage(msg) && isOwn && ['text', 'whisper'].includes(msg.type)) addAction('Edit', 'pencil', () => $('ctx-edit').click());
   if (!isDisappearingMessage(msg) && isOwn) addAction('Delete', 'trash-2', () => $('ctx-delete').click());
   content.appendChild(actions);
@@ -5496,8 +5496,8 @@ function showContextMenu(e, msg, text) {
   const menu = $('ctx-menu');
   const isAuthor = msg.senderId === currentUser?.id;
   const isAttachment = msg.type === 'image' || msg.type === 'file';
-  $('ctx-reply').hidden = false;
   const isDisappearing = isDisappearingMessage(msg);
+  $('ctx-reply').hidden = isDisappearing;
   $('ctx-edit').hidden = isDisappearing || !isAuthor || !['text', 'whisper'].includes(msg.type);
   $('ctx-delete').hidden = isDisappearing || !isAuthor;
   $('ctx-download').hidden = true;
@@ -8357,6 +8357,10 @@ function setupEventListeners() {
   $('ctx-reply').addEventListener('click', () => {
     if (!ctxMsg) return;
     const msg = ctxMsg;
+    if (isDisappearingMessage(msg)) {
+      hideContextMenu();
+      return;
+    }
     const text = ctxText;
     hideContextMenu();
     const isDecryptFail = text === MSG_CONTENT_UNAVAILABLE;

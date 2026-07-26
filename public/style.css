@@ -4864,6 +4864,9 @@ body.sidebar-resizing .sidebar-resizer::before {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.mobile-bottom-action {
+  display: none !important;
+}
 body.sidebar-actions-icons .sidebar-actions .btn-action .icon-label,
 body.sidebar-compact .sidebar-actions .btn-action .icon-label,
 body.sidebar-narrow .sidebar-actions .btn-action .icon-label {
@@ -6348,6 +6351,9 @@ input:checked + .toggle-switch-ui,
     color: var(--chat-text-strong) !important;
     font-size: 10px !important;
     line-height: 1.1;
+  }
+  body.chat-body.mobile-layout .sidebar-actions .mobile-bottom-action {
+    display: inline-flex !important;
   }
   body.chat-body.mobile-layout .sidebar-actions .btn-action .ui-icon {
     width: 18px !important;
