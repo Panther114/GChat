@@ -457,6 +457,8 @@ Relevant Electron Builder behavior:
 
 - `npmRebuild` is disabled for desktop packaging.
 - Backend modules such as SQLite server dependencies are not needed inside the Electron shell.
+- The main-process cold path has a 32 KiB bundle budget; `electron-updater` is packaged separately and initialized after startup.
+- WebGPU is disabled, allowing the Windows package hook to omit its optional DXIL compiler binaries while retaining normal graphics fallbacks and media codecs.
 - Railway still installs production server dependencies and runs `server.js`.
 
 ---

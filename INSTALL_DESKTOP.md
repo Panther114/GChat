@@ -26,6 +26,8 @@ The installer is written to `release/`:
 | `Gchat-Setup-<version>.exe` | Assisted, per-user Windows installer with destination and shortcut choices. |
 | `latest.yml` and `.blockmap` | Update metadata for `electron-updater`; keep these alongside the installer in GitHub Releases. |
 
+The build keeps the main-process cold-start bundle under a 32 KiB budget and packages the updater separately. Packaged apps initialize update checks after the window is usable, while the tray's manual update action remains available immediately. Because Gchat does not use WebGPU, the Windows build disables it and removes only its optional DXIL compiler binaries; Chromium's normal graphics fallbacks and media codecs remain packaged.
+
 ## Desktop behavior
 
 - Uses the production hosted service only; no local chat server is packaged.

@@ -13,13 +13,20 @@ const {
 } = require('electron');
 const fs = require('fs');
 const path = require('path');
-const { autoUpdater } = require('electron-updater');
+const {
+  badgeLabelForUnread,
+  normalizeUnreadCount,
+} = require('./runtime-helpers');
 
 const OFFICIAL_SERVER_URL = 'https://gchat.up.railway.app';
 const OFFICIAL_SERVER_ORIGIN = new URL(OFFICIAL_SERVER_URL).origin;
 const APP_USER_MODEL_ID = 'com.Gchat.app';
 const ERR_ABORTED = -3;
-const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
+const UPDATE_START_DELAY_MS = 15 * 1000;
+
+// GChat does not use WebGPU. Disabling it allows the Windows package to omit
+// Dawn's optional DXIL compiler binaries without affecting DOM/CSS rendering.
+app.commandLine.appendSwitch('disable-features', 'WebGPU');
 
 if (process.platform === 'win32') app.setAppUserModelId(APP_USER_MODEL_ID);
 
@@ -27,13 +34,21 @@ let mainWindow = null;
 let tray = null;
 let isQuitting = false;
 let lastLoadError = null;
+let iconPathCache = null;
+let appIconCache = null;
+let trayIconCache = null;
+let updaterController = null;
+let updaterStartTimer = null;
+let lastUnreadCount = null;
+const badgeIconCache = new Map();
 
 function getIconPath() {
+  if (iconPathCache !== null) return iconPathCache;
   const candidates = [
     path.join(__dirname, '..', 'public', 'gchat_icon.png'),
     path.join(process.resourcesPath, 'public', 'gchat_icon.png'),
   ];
-  return candidates.find((candidate) => {
+  iconPathCache = candidates.find((candidate) => {
     try {
       fs.accessSync(candidate);
       return true;
@@ -41,6 +56,20 @@ function getIconPath() {
       return false;
     }
   }) || '';
+  return iconPathCache;
+}
+
+function getAppIcon() {
+  if (!appIconCache) appIconCache = nativeImage.createFromPath(getIconPath());
+  return appIconCache;
+}
+
+function getTrayIcon() {
+  if (!trayIconCache) {
+    const source = getAppIcon();
+    trayIconCache = source.isEmpty() ? source : source.resize({ width: 16, height: 16 });
+  }
+  return trayIconCache;
 }
 
 function isHostedUrl(url) {
@@ -74,7 +103,7 @@ async function loadHostedApp() {
 }
 
 async function createWindow() {
-  const icon = nativeImage.createFromPath(getIconPath());
+  const icon = getAppIcon();
   if (process.platform === 'darwin' && app.dock && !icon.isEmpty()) app.dock.setIcon(icon);
 
   mainWindow = new BrowserWindow({
@@ -127,8 +156,7 @@ async function createWindow() {
 }
 
 async function createTray() {
-  const source = nativeImage.createFromPath(getIconPath());
-  tray = new Tray(source.isEmpty() ? source : source.resize({ width: 16, height: 16 }));
+  tray = new Tray(getTrayIcon());
   tray.on('click', () => {
     if (!mainWindow) return;
     if (mainWindow.isVisible()) mainWindow.hide();
@@ -141,13 +169,14 @@ async function createTray() {
 }
 
 function updateTrayMenu(unread = 0) {
-  if (!tray) return;
+  if (!tray || unread === lastUnreadCount) return;
+  lastUnreadCount = unread;
   const label = unread > 0 ? `Gchat (${unread} unread)` : 'Gchat';
   tray.setContextMenu(Menu.buildFromTemplate([
     { label, enabled: false },
     { type: 'separator' },
     { label: 'Open Gchat', click: () => { mainWindow?.show(); mainWindow?.focus(); } },
-    { label: 'Check for Updates', click: () => autoUpdater.checkForUpdatesAndNotify() },
+    { label: 'Check for Updates', click: () => getUpdaterController().checkForUpdates() },
     { type: 'separator' },
     { label: 'Quit', click: () => { isQuitting = true; app.quit(); } },
   ]));
@@ -155,13 +184,18 @@ function updateTrayMenu(unread = 0) {
 }
 
 function createBadgeIcon(count) {
-  const label = count > 99 ? '99+' : String(count);
+  const label = badgeLabelForUnread(count);
+  const cached = badgeIconCache.get(label);
+  if (cached) return cached;
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><circle cx="10" cy="10" r="10" fill="#e74c3c"/><text x="50%" y="50%" text-anchor="middle" dominant-baseline="central" font-family="Arial,sans-serif" font-size="${label.length > 1 ? 9 : 12}" font-weight="bold" fill="white">${label}</text></svg>`;
-  return nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`);
+  const icon = nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`);
+  badgeIconCache.set(label, icon);
+  return icon;
 }
 
 ipcMain.on('set-unread-count', (_event, count) => {
-  const unread = Math.max(0, Number(count) || 0);
+  const unread = normalizeUnreadCount(count);
+  if (unread === lastUnreadCount) return;
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.setOverlayIcon(unread ? createBadgeIcon(unread) : null, unread ? `${unread} unread message${unread === 1 ? '' : 's'}` : '');
     if (unread && !mainWindow.isFocused()) mainWindow.flashFrame(true);
@@ -170,7 +204,7 @@ ipcMain.on('set-unread-count', (_event, count) => {
 });
 ipcMain.on('show-notification', (_event, { title, body, groupId } = {}) => {
   if (!Notification.isSupported()) return;
-  const notification = new Notification({ title: title || 'Gchat', body: body || 'New message', icon: getIconPath(), urgency: 'normal' });
+  const notification = new Notification({ title: title || 'Gchat', body: body || 'New message', icon: getAppIcon(), urgency: 'normal' });
   notification.on('click', () => {
     mainWindow?.show();
     mainWindow?.focus();
@@ -210,26 +244,42 @@ ipcMain.handle('reload-hosted-app', async () => {
   return true;
 });
 
-function setupAutoUpdater() {
-  autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
-  autoUpdater.on('update-downloaded', () => {
-    // Restart once the verified assisted installer update is ready.
-    isQuitting = true;
-    autoUpdater.quitAndInstall(true, true);
-  });
-  autoUpdater.on('error', (error) => console.error('[updater] error:', error.message));
-  if (app.isPackaged) {
-    autoUpdater.checkForUpdatesAndNotify().catch(() => {});
-    setInterval(() => autoUpdater.checkForUpdatesAndNotify().catch(() => {}), UPDATE_CHECK_INTERVAL_MS);
+function getUpdaterController() {
+  if (!updaterController) {
+    // Keep the updater's dependency tree off the cold startup path.
+    const { createUpdaterController } = require('./updater.bundle.cjs');
+    updaterController = createUpdaterController({
+      isPackaged: app.isPackaged,
+      onUpdateReady() {
+        isQuitting = true;
+      },
+      onError(error) {
+        console.error('[updater] error:', error.message);
+      },
+    });
   }
+  return updaterController;
+}
+
+function scheduleAutoUpdater() {
+  if (!app.isPackaged || updaterStartTimer) return;
+  updaterStartTimer = setTimeout(() => {
+    updaterStartTimer = null;
+    getUpdaterController().start();
+  }, UPDATE_START_DELAY_MS);
+  updaterStartTimer.unref?.();
 }
 
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on('second-instance', () => { mainWindow?.show(); mainWindow?.focus(); });
-  app.whenReady().then(async () => { await createWindow(); await createTray(); setupAutoUpdater(); });
+  app.whenReady().then(async () => { await createWindow(); await createTray(); scheduleAutoUpdater(); });
 }
 app.on('window-all-closed', () => { if (process.platform !== 'darwin' && isQuitting) app.quit(); });
 app.on('activate', async () => { if (BrowserWindow.getAllWindows().length === 0) await createWindow(); else { mainWindow?.show(); mainWindow?.focus(); } });
-app.on('before-quit', () => { isQuitting = true; });
+app.on('before-quit', () => {
+  isQuitting = true;
+  if (updaterStartTimer) clearTimeout(updaterStartTimer);
+  updaterStartTimer = null;
+  updaterController?.dispose();
+});

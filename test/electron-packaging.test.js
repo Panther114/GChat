@@ -1,0 +1,31 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+
+const {
+  WINDOWS_OPTIONAL_GPU_FILES,
+  removeOptionalWindowsGpuFiles,
+} = require('../scripts/after-pack');
+
+test('desktop packaging removes only the disabled WebGPU compiler binaries', async (t) => {
+  const outputRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'gchat-after-pack-'));
+  t.after(() => fs.rm(outputRoot, { force: true, recursive: true }));
+
+  const retainedFile = path.join(outputRoot, 'ffmpeg.dll');
+  await fs.writeFile(retainedFile, Buffer.alloc(7));
+  for (const filename of WINDOWS_OPTIONAL_GPU_FILES) {
+    await fs.writeFile(path.join(outputRoot, filename), Buffer.alloc(11));
+  }
+
+  const reclaimedBytes = await removeOptionalWindowsGpuFiles(outputRoot);
+
+  assert.equal(reclaimedBytes, WINDOWS_OPTIONAL_GPU_FILES.length * 11);
+  assert.equal((await fs.stat(retainedFile)).size, 7);
+  for (const filename of WINDOWS_OPTIONAL_GPU_FILES) {
+    await assert.rejects(fs.stat(path.join(outputRoot, filename)), { code: 'ENOENT' });
+  }
+});

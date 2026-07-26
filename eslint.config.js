@@ -5,7 +5,7 @@ module.exports = [
     ignores: ['scripts/ui-screenshot.js'],
   },
   {
-    files: ['src/server/**/*.js', 'scripts/**/*.js', 'test/**/*.js'],
+    files: ['src/server/**/*.js', 'electron/**/*.js', 'scripts/**/*.js', 'test/**/*.js'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'commonjs',
@@ -18,6 +18,7 @@ module.exports = [
         __dirname: 'readonly',
         AbortController: 'readonly',
         URL: 'readonly',
+        clearInterval: 'readonly',
         clearTimeout: 'readonly',
         fetch: 'readonly',
         setInterval: 'readonly',
@@ -29,6 +30,15 @@ module.exports = [
       'no-undef': 'error',
       'no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
       'no-constant-condition': 'error',
+    },
+  },
+  {
+    files: ['electron/offline.js'],
+    languageOptions: {
+      globals: {
+        document: 'readonly',
+        window: 'readonly',
+      },
     },
   },
 ];
