@@ -94,6 +94,8 @@ test('local root account loads v2 fixtures and switches themes', async ({ page }
   await expect(page.getByText('Welcome to the local UI playground', { exact: false })).toBeVisible();
   const chatPanel = page.locator('#chat-panel');
   const rightPanel = page.locator('#right-panel');
+  await expect(page.locator('.chat-topbar')).toHaveCSS('display', 'flex');
+  await expect(page.locator('.msg-mobile-actions-btn:visible')).toHaveCount(0);
   const expandedChatWidth = await chatPanel.evaluate((element) => element.getBoundingClientRect().width);
   await page.locator('#right-panel-toggle').click();
   await expect(rightPanel).toHaveClass(/desktop-collapsed/);
@@ -142,6 +144,43 @@ test('message stream remains usable at a mobile viewport', async ({ page }) => {
   await expect(page.locator('.msg-row').first()).toBeVisible();
   const width = await page.locator('.chat-panel').evaluate((element) => element.getBoundingClientRect().width);
   expect(width).toBeLessThanOrEqual(390.1);
+});
+
+test('mobile message actions and channel controls remain touch accessible', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await signInAsLocalRoot(page);
+  await page.getByText('Increment A Playground').click();
+
+  const topbarLayout = await page.locator('.chat-topbar').evaluate((topbar) => {
+    const filters = topbar.querySelector('#chat-tag-filters');
+    const details = topbar.querySelector('#right-panel-toggle');
+    const filtersRect = filters.getBoundingClientRect();
+    const detailsRect = details.getBoundingClientRect();
+    return {
+      filtersTop: filtersRect.top,
+      detailsBottom: detailsRect.bottom,
+      topbarHeight: topbar.getBoundingClientRect().height,
+    };
+  });
+  expect(topbarLayout.filtersTop).toBeGreaterThanOrEqual(topbarLayout.detailsBottom);
+  expect(topbarLayout.topbarHeight).toBeGreaterThanOrEqual(80);
+
+  const visualQaChannel = page.getByRole('button', { name: '#visual-qa', exact: true });
+  await visualQaChannel.scrollIntoViewIfNeeded();
+  await expect(visualQaChannel).toBeVisible();
+  await visualQaChannel.click();
+  await expect(visualQaChannel).toHaveClass(/active/);
+
+  await page.getByRole('button', { name: '#main', exact: true }).click();
+  const firstOwnMessage = page.locator('.msg-row.own').first();
+  const mobileActions = firstOwnMessage.getByRole('button', { name: 'Message actions', exact: true });
+  await expect(mobileActions).toBeVisible();
+  await expect(mobileActions).toHaveCSS('pointer-events', 'auto');
+  await mobileActions.click();
+  await expect(page.locator('#ctx-menu')).toBeVisible();
+  await expect(page.locator('#ctx-reply')).toBeVisible();
+  await expect(page.locator('#ctx-edit')).toBeVisible();
+  await expect(page.locator('#ctx-delete')).toBeVisible();
 });
 
 test('composer modes use the active channel without legacy tokens or slash commands', async ({ page }) => {

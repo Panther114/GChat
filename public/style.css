@@ -6557,6 +6557,32 @@ button.is-loading {
     min-width: 100vw !important;
     height: var(--app-viewport-height, 100dvh) !important;
   }
+  body.chat-body.mobile-layout .chat-topbar {
+    display: grid;
+    grid-template-columns: 34px minmax(0, 1fr) 34px;
+    grid-template-rows: minmax(34px, auto) auto;
+    column-gap: 10px;
+    row-gap: 8px;
+  }
+  body.chat-body.mobile-layout .chat-topbar > .sidebar-toggle {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  body.chat-body.mobile-layout .chat-topbar-info {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  body.chat-body.mobile-layout .chat-topbar > .right-panel-toggle {
+    grid-column: 3;
+    grid-row: 1;
+  }
+  body.chat-body.mobile-layout .chat-tag-filters {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    width: 100%;
+    max-width: none;
+    padding-bottom: 2px !important;
+  }
   body.chat-body.mobile-layout .sidebar-actions {
     display: grid !important;
     grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -7177,6 +7203,9 @@ button.is-loading {
   height: 14px !important;
   margin: 0 !important;
 }
+.msg-mobile-actions-btn {
+  display: none !important;
+}
 .msg-row.pending .msg-bubble {
   opacity: 0.65;
 }
@@ -7526,6 +7555,33 @@ button.is-loading {
   .msg-row.own .msg-content {
     max-width: none !important;
     width: 100% !important;
+  }
+  .msg-row .msg-actions,
+  .msg-row.own .msg-actions {
+    right: 6px;
+    top: 2px;
+    padding: 0;
+    border: 0;
+    background: transparent !important;
+    box-shadow: none;
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .msg-row .msg-actions .msg-action-btn:not(.msg-mobile-actions-btn),
+  .msg-row.own .msg-actions .msg-action-btn:not(.msg-mobile-actions-btn) {
+    display: none !important;
+  }
+  .msg-row .msg-mobile-actions-btn,
+  .msg-row.own .msg-mobile-actions-btn {
+    display: grid !important;
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+    min-height: 32px;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    box-shadow: none;
   }
   .msg-row .msg-bubble,
   .msg-row.own .msg-bubble,

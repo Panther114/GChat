@@ -579,6 +579,10 @@
   margin: 0 !important;
 }
 
+.msg-mobile-actions-btn {
+  display: none !important;
+}
+
 .msg-row.pending .msg-bubble {
   opacity: 0.65;
 }
@@ -987,6 +991,37 @@
   .msg-row.own .msg-content {
     max-width: none !important;
     width: 100% !important;
+  }
+
+  /* Touch has no dependable hover state. Use one flat overflow action instead. */
+  .msg-row .msg-actions,
+  .msg-row.own .msg-actions {
+    right: 6px;
+    top: 2px;
+    padding: 0;
+    border: 0;
+    background: transparent !important;
+    box-shadow: none;
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .msg-row .msg-actions .msg-action-btn:not(.msg-mobile-actions-btn),
+  .msg-row.own .msg-actions .msg-action-btn:not(.msg-mobile-actions-btn) {
+    display: none !important;
+  }
+
+  .msg-row .msg-mobile-actions-btn,
+  .msg-row.own .msg-mobile-actions-btn {
+    display: grid !important;
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+    min-height: 32px;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    box-shadow: none;
   }
 
   .msg-row .msg-bubble,

@@ -3224,6 +3224,11 @@
       ["line", { x1: "4", y1: "12", x2: "20", y2: "12" }],
       ["line", { x1: "4", y1: "18", x2: "20", y2: "18" }]
     ],
+    "more-horizontal": [
+      ["circle", { cx: "5", cy: "12", r: "1" }],
+      ["circle", { cx: "12", cy: "12", r: "1" }],
+      ["circle", { cx: "19", cy: "12", r: "1" }]
+    ],
     "panel-right": [
       ["rect", { x: "3", y: "4", width: "18", height: "16", rx: "2" }],
       ["line", { x1: "15", y1: "4", x2: "15", y2: "20" }]
@@ -4569,6 +4574,19 @@
     if (!isDisappearingMessage(msg)) addAction("Reply", "reply", () => $("ctx-reply").click());
     if (!isDisappearingMessage(msg) && isOwn && ["text", "whisper"].includes(msg.type)) addAction("Edit", "pencil", () => $("ctx-edit").click());
     if (!isDisappearingMessage(msg) && isOwn) addAction("Delete", "trash-2", () => $("ctx-delete").click());
+    if (!isDisappearingMessage(msg)) {
+      const mobileActionsButton = document.createElement("button");
+      mobileActionsButton.type = "button";
+      mobileActionsButton.className = "msg-action-btn msg-mobile-actions-btn";
+      mobileActionsButton.title = "Message actions";
+      mobileActionsButton.setAttribute("aria-label", "Message actions");
+      setElementIcon(mobileActionsButton, "more-horizontal", { iconOnly: true });
+      mobileActionsButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        showContextMenu(null, msg, textEl.textContent);
+      });
+      actions.appendChild(mobileActionsButton);
+    }
     content.appendChild(actions);
     row.addEventListener("contextmenu", (e) => {
       e.preventDefault();
@@ -4579,6 +4597,8 @@
       longPressTimer = setTimeout(() => showContextMenu(null, msg, textEl.textContent), 600);
     });
     bubble.addEventListener("touchend", () => clearTimeout(longPressTimer));
+    bubble.addEventListener("touchcancel", () => clearTimeout(longPressTimer));
+    bubble.addEventListener("touchmove", () => clearTimeout(longPressTimer), { passive: true });
     row.append(av, content);
     scheduleDisappearingTimerForMessage(msg);
     return row;
