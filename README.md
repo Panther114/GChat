@@ -13,7 +13,7 @@ Current version: **v1.3.3**
 ### Messaging
 
 - Real-time group chat via Socket.IO
-- Group creation and joining through fragment-only secure invite links
+- Group creation and joining through permanent six-character invite codes
 - Client-side encrypted text, image, file, whisper, tagged, and disappearing-text messages
 - Message replies, editing, deletion, and delivery/read indicators
 - Typing indicators and online presence
@@ -103,7 +103,7 @@ Most product updates are delivered through the hosted web app. Native desktop up
 Gchat encrypts message content in the client before it is sent to the server.
 
 1. The browser generates a random 256-bit group secret and stores it in IndexedDB. A new device receives that key only through a secure invitation link.
-2. Secure invite URL fragments carry the join code and secret; fragments are removed immediately and kept only in same-tab session storage across authentication. The values are sent over TLS when creating or joining a group so the server can validate and escrow them.
+2. Invite codes are six lowercase alphanumeric characters. After an authenticated code join succeeds, the server releases the group's escrowed key material over TLS so the member can decrypt the group.
 3. HKDF derives separate content, metadata, tag-index, and spam-signature keys.
 4. AES-256-GCM binds content and encrypted metadata to the group, client message ID, sender, type, key version, and revision.
 5. The server stores an HMAC of the join code, a key commitment, message ciphertext, encrypted metadata, keyed blind indexes, and an AES-256-GCM encrypted group-key escrow record protected by `GROUP_KEY_ESCROW_MASTER_KEY`.
@@ -500,7 +500,7 @@ Relevant Electron Builder behavior:
 - Production cookies use secure settings when deployed behind HTTPS.
 - SQLite database files should not be committed.
 - The server stores encrypted message payloads, not plaintext message content.
-- Group secrets and join codes are escrowed server-side under `GROUP_KEY_ESCROW_MASTER_KEY` so authenticated members can recover them on new devices.
+- Group secrets and invite codes are escrowed server-side under `GROUP_KEY_ESCROW_MASTER_KEY` so authenticated members can recover them on new devices. Run `npm run migrate:group-invite-codes` only after a verified backup; production runs additionally require `GCHAT_GROUP_CODE_MIGRATION_APPROVED=1`.
 - The browser never calls AI providers directly; Ask AI requests are proxied through `server.js` with `OPENROUTER_API_KEY` and `GETGOAPI_API_KEY` kept server-side.
 - Large file handling should be reviewed carefully before public-scale deployment.
 

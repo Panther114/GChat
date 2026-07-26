@@ -23,7 +23,7 @@ test('production config keeps AI disabled and can use the stable session secret 
 
 test('group key escrow requires a canonical 256-bit master key and authenticates its group binding', () => {
   const masterKey = parseEscrowMasterKey(Buffer.alloc(32, 9).toString('base64url'));
-  const payload = { secret: crypto.randomBytes(32).toString('base64url'), joinCode: 'security-test-room' };
+  const payload = { secret: crypto.randomBytes(32).toString('base64url'), joinCode: 'room01' };
   const encrypted = encryptEscrowPayload(masterKey, 'group-one', payload);
   assert.deepEqual(decryptEscrowPayload(masterKey, 'group-one', encrypted), payload);
   assert.throws(() => decryptEscrowPayload(masterKey, 'group-two', encrypted));
@@ -32,14 +32,16 @@ test('group key escrow requires a canonical 256-bit master key and authenticates
   assert.equal(encrypted.ciphertext.includes(payload.joinCode), false);
 });
 
-test('join codes are normalized and stored as keyed hashes', () => {
+test('invite codes are six lowercase alphanumeric characters and stored as keyed hashes', () => {
   const pepper = 'p'.repeat(32);
-  assert.equal(normalizeJoinCode('  My Secure Room  '), 'my-secure-room');
-  const digest = hashJoinCode('My Secure Room', pepper);
+  assert.equal(normalizeJoinCode('  A1B2C3  '), 'a1b2c3');
+  assert.equal(normalizeJoinCode('too-long'), null);
+  assert.equal(normalizeJoinCode('abc-12'), null);
+  const digest = hashJoinCode('a1b2c3', pepper);
   assert.match(digest, /^[a-f0-9]{64}$/);
-  assert.equal(digest, hashJoinCode('my-secure-room', pepper));
-  assert.notEqual(digest, hashJoinCode('another-room', pepper));
-  assert.equal(digest.includes('my-secure-room'), false);
+  assert.equal(digest, hashJoinCode('A1B2C3', pepper));
+  assert.notEqual(digest, hashJoinCode('z9y8x7', pepper));
+  assert.equal(digest.includes('a1b2c3'), false);
 });
 
 test('key commitments accept only 32-byte base64url digests', () => {

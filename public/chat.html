@@ -37,6 +37,9 @@
       <button class="btn-action mobile-sidebar-action" id="mobile-join-group-btn" data-icon="log-in">Join</button>
       <button class="btn-action mobile-sidebar-action" id="mobile-user-list-btn" data-icon="users">User List</button>
       <button class="btn-action mobile-sidebar-action" id="mobile-diagnostics-btn" data-icon="activity">Connection diagnostics</button>
+      <button class="btn-action mobile-sidebar-action" id="mobile-profile-btn" data-icon="user">Profile</button>
+      <button class="btn-action mobile-sidebar-action theme-toggle-btn" id="mobile-theme-toggle-btn" data-icon="sun">Theme</button>
+      <button class="btn-action mobile-sidebar-action" id="mobile-logout-btn" data-icon="log-out">Logout</button>
     </div>
     <nav class="group-list" id="group-list">
       <div class="empty-groups" id="empty-groups">No groups yet.<br>Create or join one below!</div>
@@ -160,8 +163,8 @@
           <input type="text" class="right-panel-title-input" id="edit-group-name-input" value="Group" title="Group name" aria-label="Group name" />
         </div>
         <div class="right-panel-action-row" aria-label="Group actions">
-          <button class="right-panel-action btn-copy" id="copy-code-btn" type="button" title="Copy invite link" aria-label="Invite Link" data-icon="link">Invite Link</button>
-          <button class="right-panel-action btn-group-color" id="set-group-color-btn" type="button" title="Change group icon" aria-label="Group Icon" data-icon="image">Group Icon</button>
+          <button class="right-panel-action btn-copy" id="copy-code-btn" type="button" title="Copy invite code" aria-label="Invite Code" data-icon="key-round">Invite Code</button>
+          <button class="right-panel-action btn-group-color" id="set-group-color-btn" type="button" title="Change group icon" aria-label="Icon" data-icon="image">Icon</button>
         </div>
       </section>
 
@@ -254,7 +257,7 @@
         <label>Group Name</label>
         <input type="text" id="create-group-name" placeholder="e.g. Friends, Work, etc." />
       </div>
-      <p class="form-hint">A secure invitation link will be generated and copied after creation.</p>
+      <p class="form-hint">A permanent six-character invite code will be generated and copied after creation.</p>
       <p class="form-error" id="create-error"></p>
       <div class="modal-actions">
         <button class="btn-secondary" id="create-cancel-btn">Cancel</button>
@@ -267,8 +270,8 @@
     <div class="modal">
       <h2>Join a Group</h2>
       <div class="form-group">
-        <label>Invitation Link</label>
-        <input type="text" id="join-group-code" placeholder="Paste a secure invitation link" autocomplete="off" />
+        <label>Invite Code</label>
+        <input type="text" id="join-group-code" placeholder="Enter a six-character invite code" autocomplete="off" maxlength="6" autocapitalize="none" spellcheck="false" />
       </div>
       <p class="form-error" id="join-error"></p>
       <div class="modal-actions">

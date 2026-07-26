@@ -356,7 +356,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  margin-bottom: 2px;
+  margin-bottom: 0;
 }
 
 .whisper-label {
@@ -387,7 +387,7 @@
   padding-left: 8px;
 }
 
-.msg-row.disappearing .msg-content {
+.msg-row.own.disappearing .msg-content {
   border-left: 1px solid var(--chat-danger);
   padding-left: 8px;
 }
@@ -853,16 +853,6 @@
   color: var(--chat-faint) !important;
 }
 
-.message-input-bar.whisper-mode-active .message-input-tools {
-  border-color: var(--whisper-border) !important;
-  background: color-mix(in srgb, var(--whisper-border) 10%, var(--chat-input)) !important;
-}
-
-.message-input-bar.disappearing-mode-active .message-input-tools {
-  border-color: var(--chat-danger) !important;
-  background: color-mix(in srgb, var(--chat-danger) 10%, var(--chat-input)) !important;
-}
-
 .message-input-bar.whisper-mode-active #whisper-mode-btn,
 .message-input-bar.whisper-mode-active #whisper-mode-btn .ui-icon {
   color: var(--whisper-border) !important;
@@ -873,13 +863,6 @@
   color: var(--chat-danger) !important;
 }
 
-.message-input-bar.whisper-mode-active #message-input {
-  color: var(--whisper-border) !important;
-}
-
-.message-input-bar.disappearing-mode-active #message-input {
-  color: var(--chat-danger) !important;
-}
 
 /* Send is a segment of the composer, not a primary CTA pill */
 .message-input-bar > .btn-send,

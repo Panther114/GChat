@@ -9,6 +9,7 @@
     "dev:web": "cross-env NODE_ENV=development GCHAT_LOCAL_DEBUG=1 PORT=4400 DB_PATH=.gchat-local/Gchat.db node scripts/dev-web.js",
     "dev:web:e2e": "cross-env NODE_ENV=development GCHAT_LOCAL_DEBUG=1 PORT=4401 DB_PATH=.gchat-local/e2e/Gchat.db node scripts/dev-web.js",
     "build:web": "node scripts/build-web.js",
+    "migrate:group-invite-codes": "node scripts/migrate-group-invite-codes.js",
     "purge:pre-escrow-groups": "node scripts/purge-pre-escrow-groups.js",
     "lint": "eslint server.js src/server electron scripts test",
     "test": "node --test test/security.test.js test/web-crypto.test.js test/integration.test.js test/electron-runtime.test.js test/electron-packaging.test.js",

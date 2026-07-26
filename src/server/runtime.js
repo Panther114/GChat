@@ -1404,7 +1404,7 @@ async function seedLocalDebugData() {
   const rootUserId = 'local-debug-root';
   const miraUserId = 'local-debug-mira';
   const groupId = 'local-debug-increment-a';
-  const groupCode = 'increment-a-local';
+const groupCode = 'inca01';
   const groupSecret = crypto.createHash('sha256').update('gchat-increment-a-local-debug-secret').digest();
   const codeHash = hashJoinCode(groupCode, APP_CONFIG.groupCodePepper);
   const keyCommitment = crypto.createHash('sha256').update(groupSecret).digest('base64url');
@@ -2508,11 +2508,10 @@ app.post('/api/groups/create', (req, res) => {
 
 app.post('/api/groups/join', (req, res) => {
   const code = typeof req.body.code === 'string' ? req.body.code.trim() : '';
-  const secret = typeof req.body.secret === 'string' ? req.body.secret.trim() : '';
   const userId = req.session.userId;
 
-  if (!code || !secret) {
-    return res.status(400).json({ error: 'A secure invite link is required' });
+  if (!code) {
+    return res.status(400).json({ error: 'An invite code is required' });
   }
 
   let codeHash;
@@ -2529,10 +2528,6 @@ app.post('/api/groups/join', (req, res) => {
   if (!group.key_escrow_ciphertext || !group.key_escrow_iv || !group.key_escrow_version) {
     return res.status(410).json({ error: 'This legacy group has been reset' });
   }
-  if (!isValidGroupSecret(secret) || !safeEqualString(keyCommitmentForSecret(secret), group.key_commitment)) {
-    return res.status(403).json({ error: 'This invite contains the wrong encryption key' });
-  }
-
   const existingMembership = stmts.isMember.get(group.id, userId);
   if (!existingMembership && (stmts.countUserGroups.get(userId)?.count || 0) >= MAX_GROUPS_PER_USER) {
     return res.status(409).json({ error: `You can belong to at most ${MAX_GROUPS_PER_USER} groups` });
@@ -2555,6 +2550,19 @@ app.post('/api/groups/join', (req, res) => {
     });
   }
 
+  let escrowPayload;
+  try {
+    escrowPayload = decryptEscrowPayload(APP_CONFIG.groupKeyEscrowMasterKey, group.id, {
+      ciphertext: group.key_escrow_ciphertext,
+      iv: group.key_escrow_iv,
+      version: group.key_escrow_version,
+    });
+  } catch (error) {
+    console.error('Group join key recovery error:', error.message);
+    return res.status(500).json({ error: 'Failed to recover group key' });
+  }
+
+  res.setHeader('Cache-Control', 'no-store');
   res.json({
     id: group.id,
     name: group.name,
@@ -2570,6 +2578,7 @@ app.post('/api/groups/join', (req, res) => {
     aiEnabled: false,
     groupColor: group.group_color || null,
     groupIcon: group.group_icon || null,
+    secret: escrowPayload.secret,
   });
 });
 

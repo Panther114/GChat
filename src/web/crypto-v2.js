@@ -23,7 +23,18 @@ export function generateGroupSecret() {
 }
 
 export function generateInviteCode() {
-  return crypto.randomUUID().replaceAll('-', '');
+  const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let code = '';
+  while (code.length < 6) {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    for (const byte of bytes) {
+      // Rejection sampling keeps every character equally likely.
+      if (byte >= 252) continue;
+      code += alphabet[byte % alphabet.length];
+      if (code.length === 6) break;
+    }
+  }
+  return code;
 }
 
 export async function keyCommitment(secret) {
@@ -106,22 +117,6 @@ export const keyVault = {
   put: (entry) => vaultOperation('readwrite', (store) => store.put({ ...entry, encryptionVersion: ENCRYPTION_VERSION })),
   remove: (groupId) => vaultOperation('readwrite', (store) => store.delete(groupId)),
 };
-
-export function encodeInvite({ code, secret }) {
-  const payload = bytesToBase64Url(encoder.encode(JSON.stringify({ v: 2, code, secret })));
-  return `#invite=${payload}`;
-}
-
-export function parseInviteFragment(fragment = location.hash, removeFromAddress = fragment === location.hash) {
-  const match = String(fragment).match(/(?:^#|&)invite=([^&]+)/);
-  if (!match) return null;
-  const payload = JSON.parse(decoder.decode(base64UrlToBytes(match[1])));
-  if (payload.v !== 2 || typeof payload.code !== 'string' || base64UrlToBytes(payload.secret).length !== 32) {
-    throw new Error('Invalid secure invite');
-  }
-  if (removeFromAddress) history.replaceState(null, '', `${location.pathname}${location.search}`);
-  return payload;
-}
 
 export async function localDebugSecret() {
   const digest = await crypto.subtle.digest('SHA-256', encoder.encode('gchat-increment-a-local-debug-secret'));

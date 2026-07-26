@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
-const { normalizeJoinCode } = require('./group-security');
+const { normalizeStoredJoinCode } = require('./group-security');
 
 const ESCROW_VERSION = 1;
 const MASTER_KEY_PATTERN = /^[A-Za-z0-9_-]{43}$/;
@@ -32,7 +32,8 @@ function isValidGroupSecret(value) {
 function normalizeEscrowPayload(value) {
   if (!value || typeof value !== 'object') throw new Error('Invalid group key escrow payload');
   const secret = typeof value.secret === 'string' ? value.secret : '';
-  const joinCode = normalizeJoinCode(value.joinCode);
+  // Migration needs to decrypt pre-six-character records before replacing them.
+  const joinCode = normalizeStoredJoinCode(value.joinCode);
   if (!isValidGroupSecret(secret) || !joinCode) throw new Error('Invalid group key escrow payload');
   return { secret, joinCode };
 }

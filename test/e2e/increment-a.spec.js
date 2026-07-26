@@ -127,10 +127,10 @@ test('composer modes use the active channel without legacy tokens or slash comma
   await expect(page.locator('#whisper-mode-btn')).toHaveClass(/disappearing-active/);
   await expect(page.locator('#message-input')).toHaveAttribute('placeholder', /Disappearing message #main · Increment A Playground/);
   await page.locator('#message-input').fill('Hi');
-  await expect(page.locator('#message-input')).toHaveCSS('color', 'rgb(220, 38, 38)');
+  await expect(page.locator('#message-input')).toHaveCSS('color', 'rgb(23, 23, 23)');
   await page.locator('#message-input').press('Enter');
-  await expect(page.getByText('Hi', { exact: true })).toBeVisible();
-  await expect(page.getByText('Disappears 3s after read', { exact: true })).toBeVisible();
+  await expect(page.locator('#messages-area').getByText('Hi', { exact: true })).toBeVisible();
+  await expect(page.locator('#messages-area').getByText('Disappears 3s after read', { exact: true })).toBeVisible();
 
   await expect(page.locator('[data-command="/w "]')).toHaveCount(0);
   await expect(page.locator('[data-command="/d "]')).toHaveCount(0);
@@ -170,7 +170,7 @@ test('image attachments reserve message-row space and open usable viewer actions
   const nextMessage = 'Attachment layout regression check';
   await page.locator('#message-input').fill(nextMessage);
   await page.locator('#message-input').press('Enter');
-  const nextMessageText = page.getByText(nextMessage, { exact: true });
+  const nextMessageText = page.locator('#messages-area').getByText(nextMessage, { exact: true });
   await expect(nextMessageText).toBeVisible();
   const layout = await nextMessageText.evaluate((element) => {
     const imageElement = element.ownerDocument.querySelector('.msg-image');
@@ -230,26 +230,10 @@ test('startup fetches bounded group metadata without eager transcript hydration'
   expect(apiPaths.some((path) => /\/messages$|\/members$/.test(path))).toBe(false);
 });
 
-test('secure invite fragment survives authentication and opens the join flow', async ({ page }) => {
-  const secret = Buffer.alloc(32, 7).toString('base64url');
-  const invite = Buffer.from(JSON.stringify({ v: 2, code: 'hosted-invite-test', secret })).toString('base64url');
-  await page.goto(`/index.html#invite=${invite}`);
-  await expect(page).toHaveURL(new RegExp(`#invite=${invite}$`));
-  await expect.poll(() => page.evaluate(() => sessionStorage.getItem('gchat:pending-secure-invite')))
-    .toBe(`#invite=${invite}`);
-  const username = page.locator('#signin-username');
-  const password = page.locator('#signin-password');
-  await username.fill('root');
-  await password.fill('root');
-  await expect(username).toHaveValue('root');
-  await expect(password).toHaveValue('root');
-  await Promise.all([
-    page.waitForURL(/chat\.html$/),
-    page.locator('#signin-btn').click(),
-  ]);
+test('join flow accepts a six-character invite code', async ({ page }) => {
+  await signInAsLocalRoot(page);
+  await page.locator('#join-group-btn').click();
   await expect(page.locator('#join-modal')).toBeVisible();
-  await expect(page).toHaveURL(/chat\.html$/);
-  await expect.poll(() => page.evaluate(() => sessionStorage.getItem('gchat:pending-secure-invite')))
-    .toBe(`#invite=${invite}`);
-  await expect(page.locator('#join-group-code')).toHaveValue('Secure invite ready');
+  await expect(page.locator('#join-modal').getByText('Invite Code', { exact: true })).toBeVisible();
+  await expect(page.locator('#join-group-code')).toHaveAttribute('maxlength', '6');
 });

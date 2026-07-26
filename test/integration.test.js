@@ -8,6 +8,9 @@ const { after, before, test } = require('node:test');
 const request = require('supertest');
 const crypto = require('node:crypto');
 const { purgePreEscrowGroups } = require('../src/server/legacy-group-purge');
+const { migrateGroupCodes } = require('../src/server/group-code-migration');
+const { decryptEscrowPayload, encryptEscrowPayload } = require('../src/server/group-key-escrow');
+const { hashJoinCode } = require('../src/server/group-security');
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-increment-a-'));
 process.env.DB_PATH = path.join(tempDir, 'test.db');
@@ -30,7 +33,7 @@ async function register(agent, username) {
 let owner;
 let member;
 let group;
-const joinCode = 'integration-secure-room';
+const joinCode = 'room01';
 const groupSecret = Buffer.alloc(32, 5).toString('base64url');
 const keyCommitment = crypto.createHash('sha256').update(Buffer.from(groupSecret, 'base64url')).digest('base64url');
 
@@ -51,7 +54,7 @@ before(async () => {
   await member
     .post('/api/groups/join')
     .set('X-CSRF-Token', memberCsrf)
-    .send({ code: joinCode, secret: groupSecret })
+    .send({ code: joinCode })
     .expect(200);
 });
 
@@ -86,17 +89,46 @@ test('group key recovery is membership-scoped and escrow data is not stored in p
   assert.equal(stored.key_escrow_version, 1);
 });
 
-test('joining requires the invite encryption key before granting membership', async () => {
+test('joining by invite code grants membership and returns escrowed key material', async () => {
   const attacker = request.agent(app);
   const attackerResponse = await register(attacker, 'attacker-test');
   const attackerCsrf = await csrf(attacker);
-  await attacker
+  const joined = await attacker
     .post('/api/groups/join')
     .set('X-CSRF-Token', attackerCsrf)
-    .send({ code: joinCode, secret: Buffer.alloc(32, 6).toString('base64url') })
-    .expect(403);
-  assert.equal(stmts.isMember.get(group.id, attackerResponse.body.id), undefined);
-  await attacker.get('/api/groups/keys').expect(200, { keys: [] });
+    .send({ code: joinCode })
+    .expect(200);
+  assert.equal(joined.body.secret, groupSecret);
+  assert.ok(stmts.isMember.get(group.id, attackerResponse.body.id));
+  await attacker.get('/api/groups/keys').expect(200, { keys: [{ groupId: group.id, secret: groupSecret, joinCode }] });
+});
+
+test('explicit invite-code migration preserves the encryption secret and is idempotent', () => {
+  const masterKey = Buffer.alloc(32, 4);
+  const legacyEscrow = encryptEscrowPayload(masterKey, group.id, { secret: groupSecret, joinCode: 'legacy-room' });
+  const legacyCodeHash = crypto.createHmac('sha256', process.env.GROUP_CODE_PEPPER).update('legacy-room', 'utf8').digest('hex');
+  db.prepare('UPDATE group_chats SET code = ?, key_escrow_ciphertext = ?, key_escrow_iv = ?, key_escrow_version = ? WHERE id = ?')
+    .run(legacyCodeHash, legacyEscrow.ciphertext, legacyEscrow.iv, legacyEscrow.version, group.id);
+  const result = migrateGroupCodes(db, {
+    groupCodePepper: process.env.GROUP_CODE_PEPPER,
+    groupKeyEscrowMasterKey: masterKey,
+    generateCode: () => 'migr8a',
+  });
+  assert.deepEqual(result, { migrated: 1 });
+  const stored = stmts.findGroupById.get(group.id);
+  const payload = decryptEscrowPayload(masterKey, group.id, {
+    ciphertext: stored.key_escrow_ciphertext,
+    iv: stored.key_escrow_iv,
+    version: stored.key_escrow_version,
+  });
+  assert.equal(payload.secret, groupSecret);
+  assert.equal(payload.joinCode, 'migr8a');
+  assert.equal(stored.code, hashJoinCode('migr8a', process.env.GROUP_CODE_PEPPER));
+  assert.deepEqual(migrateGroupCodes(db, {
+    groupCodePepper: process.env.GROUP_CODE_PEPPER,
+    groupKeyEscrowMasterKey: masterKey,
+    generateCode: () => 'migr8a',
+  }), { migrated: 0 });
 });
 
 test('legacy purge removes only pre-escrow groups and their dependent records', () => {

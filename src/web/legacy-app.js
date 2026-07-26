@@ -181,7 +181,6 @@ const MESSAGE_VIEW_MAX_DELAY_MS = 18000;
 const MIN_DISAPPEARING_DURATION_MS = 3000;
 const DISAPPEARING_DURATION_PER_CHAR_MS = 90;
 const MAX_DISAPPEARING_DURATION_MS = 22500;
-const SECURE_INVITE_SESSION_KEY = 'gchat:pending-secure-invite';
 function buildAuthRedirectUrl() { return 'index.html'; }
 async function fetchCsrfToken() {
   try {
@@ -200,19 +199,6 @@ function apiHeaders(options = {}) {
 
 // ── Per-group encryption secret resolution ───────────────────────────────────
 const groupKeyVaultCache = new Map();
-let pendingSecureInvite = null;
-try {
-  pendingSecureInvite = GChatCryptoV2.parseInviteFragment();
-  if (pendingSecureInvite) {
-    sessionStorage.setItem(SECURE_INVITE_SESSION_KEY, GChatCryptoV2.encodeInvite(pendingSecureInvite));
-  } else {
-    const storedInvite = sessionStorage.getItem(SECURE_INVITE_SESSION_KEY);
-    if (storedInvite) pendingSecureInvite = GChatCryptoV2.parseInviteFragment(storedInvite, false);
-  }
-} catch {
-  pendingSecureInvite = null;
-  sessionStorage.removeItem(SECURE_INVITE_SESSION_KEY);
-}
 for (let index = localStorage.length - 1; index >= 0; index -= 1) {
   const key = localStorage.key(index);
   if (key?.startsWith('gk:')) localStorage.removeItem(key);
@@ -2051,10 +2037,6 @@ function syncDesktopBrandIcon() {
   if (nextSrc && icon.getAttribute('src') !== nextSrc) icon.src = nextSrc;
 }
 
-function secureInviteUrl(invite) {
-  return `${location.origin}/index.html${GChatCryptoV2.encodeInvite(invite)}`;
-}
-
 async function copyTextToClipboard(text) {
   if (typeof navigator.clipboard?.writeText === 'function') {
     try {
@@ -2086,7 +2068,10 @@ function syncThemeToggleControl() {
   const nextLabel = resolved === 'dark' ? 'Switch to light mode' : 'Switch to dark mode';
   for (const btn of themeToggleButtons()) {
     btn.dataset.themeState = resolved;
-    setElementIcon(btn, nextIcon, { iconOnly: true, label: nextLabel });
+    setElementIcon(btn, nextIcon, {
+      iconOnly: btn.classList.contains('btn-icon'),
+      label: btn.classList.contains('btn-icon') ? nextLabel : 'Theme',
+    });
     btn.title = nextLabel;
     btn.setAttribute('aria-label', nextLabel);
   }
@@ -3759,8 +3744,8 @@ async function hideDisappearingMessageLocally(messageId, groupId = currentGroupI
     writeLocalGroupCache(cacheGroupId, cache);
     if (cacheGroupId === currentGroupId) {
       allMessages = cache.messages;
-      renderTagFilters();
-      applyActiveTagFilterToRenderedMessages();
+      await rebuildGroupMessageRows(cacheGroupId);
+      renderGroupFromCache(cacheGroupId);
     }
     await refreshGroupPreviewAfterHide(cacheGroupId);
     break;
@@ -4373,11 +4358,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   initSocket();
   bindOnlineOfflineListeners();
   setupEventListeners();
-  if (pendingSecureInvite) {
-    $('join-group-code').value = 'Secure invite ready';
-    $('join-error').textContent = '';
-    $('join-modal').hidden = false;
-  }
   syncProfilePictureModeUI();
   setupEmojiPicker();
   setupKeyboardShortcuts();
@@ -4535,7 +4515,8 @@ function buildGroupItem(g) {
   const preview = document.createElement('div');
   preview.className = 'group-item-preview';
   preview.id = 'preview-' + g.id;
-  preview.textContent = g._lastPreviewText ?? GROUP_PREVIEW_EMPTY_TEXT;
+  const cache = ensureGroupCacheEntry(g.id);
+  preview.textContent = g._lastPreviewText ?? (cache.messages === null ? 'Loading…' : GROUP_PREVIEW_EMPTY_TEXT);
 
   row.append(name, time);
   info.append(row, preview);
@@ -4706,9 +4687,8 @@ function updateGroupPreview(groupId, text, time) {
 function getMessagePreviewFallbackText(msg) {
   if (!msg) return '';
   const aiMentionPrefix = msg.aiMention ? `${buildAiMentionLabel(msg.aiMeta)} ` : '';
-  const prefix = getMessageHashtagPrefix(msg);
   const typeLabel = getMessageTypePreviewLabel(msg);
-  return typeLabel ? aiMentionPrefix + prefix + typeLabel : aiMentionPrefix + prefix + MSG_CONTENT_UNAVAILABLE;
+  return typeLabel ? aiMentionPrefix + typeLabel : aiMentionPrefix + MSG_CONTENT_UNAVAILABLE;
 }
 
 async function getMessagePreviewText(msg, groupId = msg.groupId) {
@@ -4717,9 +4697,8 @@ async function getMessagePreviewText(msg, groupId = msg.groupId) {
   const key = getGroupKey(groupId);
   if (!key || msg.type !== 'text') return fallbackPreview;
   const aiMentionPrefix = msg.aiMention ? `${buildAiMentionLabel(msg.aiMeta)} ` : '';
-  const prefix = getMessageHashtagPrefix(msg);
   const plaintext = await decryptMessageText(msg, key, groupId).catch(() => null);
-  return aiMentionPrefix + prefix + (plaintext ?? MSG_CONTENT_UNAVAILABLE);
+  return aiMentionPrefix + (plaintext ?? MSG_CONTENT_UNAVAILABLE);
 }
 
 async function updateGroupPreviewFromMessage(groupId, msg) {
@@ -5093,7 +5072,8 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
   row.className = 'msg-row'
     + (isOwn ? ' own' : '')
     + (msg.type === 'whisper' ? ' whisper' : '')
-    + (isDisappearingMessage(msg) ? ' disappearing' : '');
+    // A recipient must not be able to distinguish a disappearing message.
+    + (isOwn && isDisappearingMessage(msg) ? ' disappearing' : '');
   row.dataset.msgId = msg.id;
   row.dataset.groupId = groupId;
   row.dataset.senderId = msg.senderId;
@@ -5162,11 +5142,11 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
     hasPrefixContent = true;
   }
 
-  if (isDisappearingMessage(msg)) {
+  if (isOwn && isDisappearingMessage(msg)) {
     const disappearingLabel = document.createElement('span');
     disappearingLabel.className = 'disappearing-label';
     const seconds = Math.max(1, Math.round((Number(msg.disappearingDurationMs) || MIN_DISAPPEARING_DURATION_MS) / 1000));
-    disappearingLabel.textContent = isOwn ? `Disappears ${seconds}s after read` : 'Disappearing';
+    disappearingLabel.textContent = `Disappears ${seconds}s after read`;
     prefixRow.appendChild(disappearingLabel);
     hasPrefixContent = true;
   }
@@ -7362,6 +7342,11 @@ function openProfileModal() {
   $('profile-modal').hidden = false;
 }
 
+async function logoutCurrentUser() {
+  await fetch('/api/auth/logout', { method: 'POST', headers: apiHeaders() });
+  window.location.href = 'index.html';
+}
+
 async function buildGrokContextMessages(groupId, options = {}) {
   const key = getGroupKey(groupId);
   if (!key) throw new Error('Chat content is not ready yet');
@@ -7615,8 +7600,7 @@ function setupEventListeners() {
   // Logout
   $('logout-btn').addEventListener('click', async (e) => {
     e.stopPropagation();
-    await fetch('/api/auth/logout', { method: 'POST', headers: apiHeaders() });
-    window.location.href = 'index.html';
+    await logoutCurrentUser();
   });
   $('wallpaper-btn').addEventListener('click', (e) => {
     e.stopPropagation();
@@ -7776,6 +7760,13 @@ function setupEventListeners() {
   $('mobile-diagnostics-btn').addEventListener('click', () => {
     closeMobileActionMenu();
     openDiagnosticsModal();
+  });
+  $('mobile-profile-btn').addEventListener('click', () => {
+    openProfileModal();
+  });
+  $('mobile-logout-btn').addEventListener('click', async () => {
+    closeMobileActionMenu();
+    await logoutCurrentUser();
   });
   document.addEventListener('click', (event) => {
     if (event.target.closest('#mobile-sidebar-actions-menu') || event.target.closest('#sidebar-mobile-actions-btn')) return;
@@ -7989,14 +7980,20 @@ function setupEventListeners() {
     const name = $('create-group-name').value.trim();
     $('create-error').textContent = '';
     if (!name) { $('create-error').textContent = 'Group name is required'; return; }
-    const code = GChatCryptoV2.generateInviteCode();
     const secret = GChatCryptoV2.generateGroupSecret();
     const keyCommitment = await GChatCryptoV2.keyCommitment(secret);
-    const res = await fetch('/api/groups/create', {
-      method: 'POST', headers: apiHeaders(),
-      body: JSON.stringify({ name, code, secret, keyCommitment }),
-    });
-    const d = await res.json();
+    let code = '';
+    let res;
+    let d;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      code = GChatCryptoV2.generateInviteCode();
+      res = await fetch('/api/groups/create', {
+        method: 'POST', headers: apiHeaders(),
+        body: JSON.stringify({ name, code, secret, keyCommitment }),
+      });
+      d = await res.json();
+      if (res.ok || res.status !== 409 || d.error !== 'Group code already in use') break;
+    }
     if (!res.ok) { $('create-error').textContent = d.error || 'Failed'; return; }
     const vaultEntry = { groupId: d.id, secret, joinCode: code };
     await GChatCryptoV2.keyVault.put(vaultEntry);
@@ -8008,14 +8005,13 @@ function setupEventListeners() {
     syncUnreadIndicators();
     await selectGroup(d.id);
     addSystemMessage('Group "' + d.name + '" created.');
-    const inviteUrl = secureInviteUrl({ code, secret });
-    const copied = await copyTextToClipboard(inviteUrl);
-    showToast(copied ? 'Secure invite link copied' : 'Could not copy invite link', copied ? 'info' : 'error');
+    const copied = await copyTextToClipboard(code);
+    showToast(copied ? 'Invite code copied' : 'Could not copy invite code', copied ? 'info' : 'error');
   });
 
   // Join group
   $('join-group-btn').addEventListener('click', () => {
-    $('join-group-code').value = pendingSecureInvite ? 'Secure invite ready' : '';
+    $('join-group-code').value = '';
     $('join-error').textContent = '';
     $('join-modal').hidden = false;
   });
@@ -8032,35 +8028,22 @@ function setupEventListeners() {
   $('join-confirm-btn').addEventListener('click', async () => {
     const inviteInput = $('join-group-code').value.trim();
     $('join-error').textContent = '';
-    if (!inviteInput) { $('join-error').textContent = 'Enter a secure invite link'; return; }
-    let invite = pendingSecureInvite;
-    try {
-      if (!invite) {
-        const hash = inviteInput.includes('#') ? `#${inviteInput.split('#').slice(1).join('#')}` : inviteInput;
-        invite = GChatCryptoV2.parseInviteFragment(hash, false);
-      }
-    } catch {
-      $('join-error').textContent = 'Invalid secure invite link';
-      return;
-    }
-    if (!invite) { $('join-error').textContent = 'A secure invite link is required'; return; }
-    const code = invite.code;
+    if (!inviteInput) { $('join-error').textContent = 'Enter an invite code'; return; }
+    const code = inviteInput.toLowerCase();
     const res = await fetch('/api/groups/join', {
       method: 'POST', headers: apiHeaders(),
-      body: JSON.stringify({ code, secret: invite.secret }),
+      body: JSON.stringify({ code }),
     });
     const d = await res.json();
     if (!res.ok) { $('join-error').textContent = d.error || 'Failed'; return; }
-    const commitment = await GChatCryptoV2.keyCommitment(invite.secret);
+    const commitment = await GChatCryptoV2.keyCommitment(d.secret);
     if (commitment !== d.keyCommitment) {
-      $('join-error').textContent = 'This invite contains the wrong encryption key';
+      $('join-error').textContent = 'This invite code returned the wrong encryption key';
       return;
     }
-    const vaultEntry = { groupId: d.id, secret: invite.secret, joinCode: code };
+    const vaultEntry = { groupId: d.id, secret: d.secret, joinCode: code };
     await GChatCryptoV2.keyVault.put(vaultEntry);
     groupKeyVaultCache.set(String(d.id), vaultEntry);
-    pendingSecureInvite = null;
-    sessionStorage.removeItem(SECURE_INVITE_SESSION_KEY);
     $('join-modal').hidden = true;
     if (!groups.find(g => g.id === d.id)) {
       groups.unshift(d);
@@ -8123,7 +8106,7 @@ function setupEventListeners() {
     closeGrokModal();
     if (!input.disabled) input.focus();
   });
-  // Copy a fragment-only invite. The secret never enters a request or server-rendered URL.
+  // Copy the stable, human-shareable group invite code.
   $('copy-code-btn').addEventListener('click', async () => {
     if (!currentGroupData) return;
     let entry = groupKeyVaultCache.get(String(currentGroupData.id));
@@ -8131,17 +8114,16 @@ function setupEventListeners() {
       await loadGroupKeyVaultEntries();
       entry = groupKeyVaultCache.get(String(currentGroupData.id));
     }
-    if (!entry?.secret || !entry?.joinCode) {
-      showToast('Invite link is not ready yet', 'error');
+    if (!entry?.joinCode) {
+      showToast('Invite code is not ready yet', 'error');
       return;
     }
-    const inviteUrl = secureInviteUrl({ code: entry.joinCode, secret: entry.secret });
-    if (!await copyTextToClipboard(inviteUrl)) {
-      showToast('Could not copy invite link', 'error');
+    if (!await copyTextToClipboard(entry.joinCode)) {
+      showToast('Could not copy invite code', 'error');
       return;
     }
     setElementIcon($('copy-code-btn'), 'check', { label: 'Copied' });
-    setTimeout(() => setElementIcon($('copy-code-btn'), 'link', { label: 'Invite Link' }), 1500);
+    setTimeout(() => setElementIcon($('copy-code-btn'), 'key-round', { label: 'Invite Code' }), 1500);
   });
 
   // Edit group name

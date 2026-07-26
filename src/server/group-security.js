@@ -4,11 +4,19 @@ const crypto = require('crypto');
 
 const BASE64URL_32_BYTES = /^[A-Za-z0-9_-]{43}$/;
 
-function normalizeJoinCode(value) {
+const INVITE_CODE_PATTERN = /^[a-z0-9]{6}$/;
+const LEGACY_JOIN_CODE_PATTERN = /^[a-z0-9][a-z0-9-]{7,63}$/;
+
+function normalizeStoredJoinCode(value) {
   if (typeof value !== 'string') return null;
   const normalized = value.trim().toLowerCase().replace(/\s+/g, '-');
-  if (!/^[a-z0-9][a-z0-9-]{7,63}$/.test(normalized)) return null;
+  if (!INVITE_CODE_PATTERN.test(normalized) && !LEGACY_JOIN_CODE_PATTERN.test(normalized)) return null;
   return normalized;
+}
+
+function normalizeJoinCode(value) {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  return INVITE_CODE_PATTERN.test(normalized) ? normalized : null;
 }
 
 function hashJoinCode(value, pepper) {
@@ -32,5 +40,6 @@ module.exports = {
   hashJoinCode,
   isValidKeyCommitment,
   normalizeJoinCode,
+  normalizeStoredJoinCode,
   safeEqualString,
 };

@@ -4964,12 +4964,21 @@ body.sidebar-narrow .sidebar-actions {
   background: var(--chat-surface) !important;
   z-index: var(--z-dropdown) !important;
   overflow: visible !important;
+  transition:
+    width var(--dur-med) var(--ease-tech),
+    min-width var(--dur-med) var(--ease-tech),
+    opacity var(--dur-fast) var(--ease-tech),
+    transform var(--dur-med) var(--ease-tech),
+    border-color var(--dur-fast) var(--ease-tech) !important;
 }
 .right-panel.desktop-collapsed {
   width: 0 !important;
   min-width: 0 !important;
   border-left-width: 0 !important;
   overflow: hidden !important;
+  opacity: 0;
+  transform: translateX(12px);
+  pointer-events: none;
 }
 .right-panel-inner {
   padding: 10px 10px 36px !important;
@@ -5557,6 +5566,20 @@ html body.sidebar-compact .sidebar #clear-cache-btn {
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
   border-radius: var(--radius-md) !important;
+}
+.mobile-sidebar-actions-menu:not([hidden]) {
+  transform-origin: top right;
+  animation: mobileActionsIn var(--dur-fast) var(--ease-tech) both;
+}
+@keyframes mobileActionsIn {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 .form-group > input:not([type=checkbox]):not([type=radio]):not([type=file]):not([type=range]),
 .form-group > textarea,
@@ -6654,7 +6677,7 @@ input:checked + .toggle-switch-ui,
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  margin-bottom: 2px;
+  margin-bottom: 0;
 }
 .whisper-label {
   font-size: var(--type-xs);
@@ -6681,7 +6704,7 @@ input:checked + .toggle-switch-ui,
   border-left: 1px solid var(--whisper-border);
   padding-left: 8px;
 }
-.msg-row.disappearing .msg-content {
+.msg-row.own.disappearing .msg-content {
   border-left: 1px solid var(--chat-danger);
   padding-left: 8px;
 }
@@ -7111,26 +7134,12 @@ input:checked + .toggle-switch-ui,
 #message-input::placeholder {
   color: var(--chat-faint) !important;
 }
-.message-input-bar.whisper-mode-active .message-input-tools {
-  border-color: var(--whisper-border) !important;
-  background: color-mix(in srgb, var(--whisper-border) 10%, var(--chat-input)) !important;
-}
-.message-input-bar.disappearing-mode-active .message-input-tools {
-  border-color: var(--chat-danger) !important;
-  background: color-mix(in srgb, var(--chat-danger) 10%, var(--chat-input)) !important;
-}
 .message-input-bar.whisper-mode-active #whisper-mode-btn,
 .message-input-bar.whisper-mode-active #whisper-mode-btn .ui-icon {
   color: var(--whisper-border) !important;
 }
 .message-input-bar.disappearing-mode-active #whisper-mode-btn,
 .message-input-bar.disappearing-mode-active #whisper-mode-btn .ui-icon {
-  color: var(--chat-danger) !important;
-}
-.message-input-bar.whisper-mode-active #message-input {
-  color: var(--whisper-border) !important;
-}
-.message-input-bar.disappearing-mode-active #message-input {
   color: var(--chat-danger) !important;
 }
 .message-input-bar > .btn-send,
