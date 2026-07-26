@@ -52,7 +52,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         shell: node {0}
         run: |
-          const { version } = require('./package.json');
+          const path = require('node:path');
+          const { version } = require(path.join(process.env.GITHUB_WORKSPACE, 'package.json'));
           const expectedTag = `v${version}`;
           if (process.env.GITHUB_REF_NAME !== expectedTag) {
             throw new Error(`Tag ${process.env.GITHUB_REF_NAME} does not match package version ${expectedTag}`);
