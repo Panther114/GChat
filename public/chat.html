@@ -14,8 +14,8 @@
   <link rel="icon" href="/favicon.png?v=20260716-v132" type="image/png" />
   <link rel="apple-touch-icon" href="/gchat_icon.png?v=20260716-v132" type="image/png" sizes="1254x1254" />
   <title>GChat </title>
-  <script src="theme-init.js?v=1.3.3-release1"></script>
-  <link rel="stylesheet" href="style.css?v=1.3.3-release3" />
+  <script src="theme-init.js?v=1.3.4-release1"></script>
+  <link rel="stylesheet" href="style.css?v=1.3.4-release1" />
 </head>
 <body class="chat-body">
 
@@ -33,13 +33,8 @@
       <button class="btn-icon conn-diagnostics-btn" id="open-diagnostics-btn" title="Connection diagnostics" aria-label="Connection diagnostics" data-icon="activity" data-icon-only="true"></button>
     </div>
     <div class="mobile-sidebar-actions-menu" id="mobile-sidebar-actions-menu" hidden>
-      <button class="btn-action mobile-sidebar-action" id="mobile-new-group-btn" data-icon="plus">New</button>
-      <button class="btn-action mobile-sidebar-action" id="mobile-join-group-btn" data-icon="log-in">Join</button>
       <button class="btn-action mobile-sidebar-action" id="mobile-user-list-btn" data-icon="users">User List</button>
       <button class="btn-action mobile-sidebar-action" id="mobile-diagnostics-btn" data-icon="activity">Connection diagnostics</button>
-      <button class="btn-action mobile-sidebar-action" id="mobile-profile-btn" data-icon="user">Profile</button>
-      <button class="btn-action mobile-sidebar-action theme-toggle-btn" id="mobile-theme-toggle-btn" data-icon="sun">Theme</button>
-      <button class="btn-action mobile-sidebar-action" id="mobile-logout-btn" data-icon="log-out">Logout</button>
     </div>
     <nav class="group-list" id="group-list">
       <div class="empty-groups" id="empty-groups">No groups yet.<br>Create or join one below!</div>
@@ -47,6 +42,9 @@
     <div class="sidebar-actions">
       <button class="btn-action" id="new-group-btn" data-icon="plus">New</button>
       <button class="btn-action" id="join-group-btn" data-icon="log-in">Join</button>
+      <button class="btn-action mobile-bottom-action" id="mobile-bottom-profile-btn" data-icon="user">Profile</button>
+      <button class="btn-action mobile-bottom-action theme-toggle-btn" id="mobile-bottom-theme-toggle-btn" data-icon="sun">Theme</button>
+      <button class="btn-action mobile-bottom-action" id="mobile-bottom-logout-btn" data-icon="log-out">Logout</button>
     </div>
       <div class="sidebar-user" id="sidebar-user-btn">
         <div class="avatar" id="user-avatar" style="background:#4A90D9"></div>
@@ -163,7 +161,7 @@
           <input type="text" class="right-panel-title-input" id="edit-group-name-input" value="Group" title="Group name" aria-label="Group name" />
         </div>
         <div class="right-panel-action-row" aria-label="Group actions">
-          <button class="right-panel-action btn-copy" id="copy-code-btn" type="button" title="Copy invite code" aria-label="Invite Code" data-icon="key-round">Invite Code</button>
+          <button class="right-panel-action btn-copy" id="copy-code-btn" type="button" title="Copy invite code" aria-label="Invite" data-icon="key-round">Invite</button>
           <button class="right-panel-action btn-group-color" id="set-group-color-btn" type="button" title="Change group icon" aria-label="Icon" data-icon="image">Icon</button>
         </div>
       </section>

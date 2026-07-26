@@ -4,12 +4,13 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
-## Unreleased
+## v1.3.4
 
-- Group creation still asks only for a group name and generates a secure invitation link for new members.
-- Added server-managed, encrypted-at-rest group-key escrow so authenticated members recover group history on a new device without a separate invite link.
-- Joining now verifies both the invite code and encryption secret before membership is granted.
-- Added an explicit backup-confirmed offline command that deletes unrecoverable pre-escrow groups; no destructive migration runs during normal startup or deployment.
+- Replaced invite links with permanent six-character invite codes, code-only joining, encrypted server-side key recovery, and an explicit backup-confirmed migration command for existing groups.
+- Made received disappearing messages indistinguishable from ordinary messages, retained sender-only indicators, and repaired message-series headers after disappearance.
+- Improved group previews, composer modes, reply/disappearing metadata spacing, panel transitions, and desktop sidebar-width startup behavior.
+- Made light mode the first-run default and synchronized theme preference between auth and chat views.
+- Refined the mobile chat list, full-width Group Details panel, compact plus menu, and five-action bottom navigation.
 
 ## v1.3.2
 

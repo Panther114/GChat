@@ -12,12 +12,17 @@ function applyAuthWallpaperFromStorage() {
 
 function persistUserWallpaperSettings(user) {
   if (!wallpaperTheme || !user || typeof user !== 'object') return;
-  const normalized = wallpaperTheme.normalizeSettings(user.clientSettings || {});
+  const stored = wallpaperTheme.readSettingsFromStorage();
+  const sourceSettings = user.clientSettings && typeof user.clientSettings === 'object'
+    ? { ...user.clientSettings, theme: user.clientSettings.theme || stored.theme }
+    : stored;
+  const normalized = wallpaperTheme.normalizeSettings(sourceSettings);
   const payload = JSON.stringify({
     ...(user.clientSettings && typeof user.clientSettings === 'object' ? user.clientSettings : {}),
     wallpaperDataUrl: normalized.wallpaperDataUrl,
     wallpaperBlur: normalized.wallpaperBlur,
     wallpaperTransparency: normalized.wallpaperTransparency,
+    theme: normalized.theme,
   });
   try {
     localStorage.setItem(ACTIVE_LOCAL_SETTINGS_KEY, payload);

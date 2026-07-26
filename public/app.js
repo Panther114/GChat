@@ -1647,7 +1647,7 @@
         wallpaperDataUrl: null,
         wallpaperBlur: 0,
         wallpaperTransparency: 100,
-        theme: appLocalSettings.theme || "system"
+        theme: appLocalSettings.theme || "light"
       });
     }
     applyWallpaperPreviewStyle(null, 0, 100);
@@ -1695,7 +1695,7 @@
     return copied;
   }
   function syncThemeToggleControl() {
-    const preference = ["dark", "light"].includes(appLocalSettings.theme) ? appLocalSettings.theme : resolveThemePreference(appLocalSettings.theme || "system");
+    const preference = ["dark", "light"].includes(appLocalSettings.theme) ? appLocalSettings.theme : resolveThemePreference(appLocalSettings.theme || "light");
     const resolved = resolveThemePreference(preference);
     const nextIcon = resolved === "dark" ? "sun" : "moon";
     const nextLabel = resolved === "dark" ? "Switch to light mode" : "Switch to dark mode";
@@ -1727,7 +1727,7 @@
       btn.addEventListener("click", async (event) => {
         event.preventDefault();
         event.stopPropagation();
-        const current = resolveThemePreference(appLocalSettings.theme || "system");
+        const current = resolveThemePreference(appLocalSettings.theme || "light");
         await applyThemePreference(current === "dark" ? "light" : "dark");
       });
     }
@@ -1740,7 +1740,7 @@
       wallpaperBlur: getWallpaperSettings(appLocalSettings).wallpaperBlur,
       wallpaperTransparency: getWallpaperSettings(appLocalSettings).wallpaperTransparency,
       hideProfileDot: !!appLocalSettings.hideProfileDot,
-      theme: appLocalSettings.theme || "system"
+      theme: appLocalSettings.theme || "light"
     };
     const body = JSON.stringify(payload);
     if (typeof options.onUploadProgress === "function" || typeof options.onUploadComplete === "function") {
@@ -1799,7 +1799,7 @@
       appLocalSettings.wallpaperBlur = data.wallpaperBlur;
       appLocalSettings.wallpaperTransparency = data.wallpaperTransparency;
       if (typeof data.hideProfileDot === "boolean") appLocalSettings.hideProfileDot = data.hideProfileDot;
-      appLocalSettings.theme = ["system", "dark", "light"].includes(data.theme) ? data.theme : "system";
+      if (["system", "dark", "light"].includes(data.theme)) appLocalSettings.theme = data.theme;
     } catch {
     }
   }
@@ -1809,7 +1809,7 @@
     appLocalSettings.wallpaperBlur = local.wallpaperBlur;
     appLocalSettings.wallpaperTransparency = local.wallpaperTransparency;
     if (typeof local.hideProfileDot === "boolean") appLocalSettings.hideProfileDot = local.hideProfileDot;
-    appLocalSettings.theme = ["system", "dark", "light"].includes(local.theme) ? local.theme : "system";
+    appLocalSettings.theme = ["system", "dark", "light"].includes(local.theme) ? local.theme : "light";
     applyWallpaperFromSettings();
     wallpaperTheme?.applyTheme(appLocalSettings.theme);
   }
@@ -2189,7 +2189,7 @@
     wallpaperBlur: DEFAULT_WALLPAPER_BLUR,
     wallpaperTransparency: DEFAULT_WALLPAPER_TRANSPARENCY,
     hideProfileDot: true,
-    theme: "system"
+    theme: "light"
   };
   var wallpaperDraft = null;
   var desktopSidebarWidth = DESKTOP_DEFAULT_SIDEBAR_WIDTH;
@@ -6762,14 +6762,6 @@
       event.stopPropagation();
       toggleMobileActionMenu();
     });
-    $("mobile-new-group-btn").addEventListener("click", () => {
-      closeMobileActionMenu();
-      $("new-group-btn").click();
-    });
-    $("mobile-join-group-btn").addEventListener("click", () => {
-      closeMobileActionMenu();
-      $("join-group-btn").click();
-    });
     $("mobile-user-list-btn").addEventListener("click", async () => {
       closeMobileActionMenu();
       await openUserManagementModal();
@@ -6778,11 +6770,10 @@
       closeMobileActionMenu();
       openDiagnosticsModal();
     });
-    $("mobile-profile-btn").addEventListener("click", () => {
+    $("mobile-bottom-profile-btn").addEventListener("click", () => {
       openProfileModal();
     });
-    $("mobile-logout-btn").addEventListener("click", async () => {
-      closeMobileActionMenu();
+    $("mobile-bottom-logout-btn").addEventListener("click", async () => {
       await logoutCurrentUser();
     });
     document.addEventListener("click", (event) => {

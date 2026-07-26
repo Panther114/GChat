@@ -127,7 +127,7 @@ test('composer modes use the active channel without legacy tokens or slash comma
   await expect(page.locator('#whisper-mode-btn')).toHaveClass(/disappearing-active/);
   await expect(page.locator('#message-input')).toHaveAttribute('placeholder', /Disappearing message #main · Increment A Playground/);
   await page.locator('#message-input').fill('Hi');
-  await expect(page.locator('#message-input')).toHaveCSS('color', 'rgb(23, 23, 23)');
+  await expect(page.locator('#message-input')).toHaveCSS('color', 'rgb(220, 38, 38)');
   await page.locator('#message-input').press('Enter');
   await expect(page.locator('#messages-area').getByText('Hi', { exact: true })).toBeVisible();
   await expect(page.locator('#messages-area').getByText('Disappears 3s after read', { exact: true })).toBeVisible();

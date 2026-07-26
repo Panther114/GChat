@@ -2,6 +2,7 @@
   const LEGACY_LOCAL_SETTINGS_KEY = 'gchat:local-settings';
   const ACTIVE_LOCAL_SETTINGS_KEY = 'gchat:active-local-settings';
   const THEME_CACHE_KEY = 'gchat:theme-preference';
+  const DESKTOP_SIDEBAR_WIDTH_STORAGE_KEY = 'gchat:desktop-sidebar-width';
   // Solid Discord fills only — wallpaper images are intentionally disabled.
   const DEFAULT_WALLPAPER = 'none';
   const DEFAULTS = Object.freeze({
@@ -32,7 +33,7 @@
     next.wallpaperDataUrl = null;
     next.wallpaperBlur = clampInteger(next.wallpaperBlur, 0, MAX_WALLPAPER_BLUR, DEFAULTS.wallpaperBlur);
     next.wallpaperTransparency = 100;
-    next.theme = ['system', 'dark', 'light'].includes(next.theme) ? next.theme : 'system';
+    next.theme = ['system', 'dark', 'light'].includes(next.theme) ? next.theme : 'light';
     return next;
   }
 
@@ -50,6 +51,8 @@
     if (meta) meta.content = resolved === 'light' ? '#ffffff' : '#0a0a0a';
     try {
       localStorage.setItem(THEME_CACHE_KEY, selected);
+      const settings = readSettingsFromStorage();
+      localStorage.setItem(ACTIVE_LOCAL_SETTINGS_KEY, JSON.stringify({ ...settings, theme: selected }));
     } catch {
       /* ignore quota / private mode */
     }
@@ -80,7 +83,7 @@
     if (active && typeof active === 'object') return normalizeSettings(active);
     const legacy = readStoredSettings(LEGACY_LOCAL_SETTINGS_KEY);
     if (legacy && typeof legacy === 'object') return normalizeSettings(legacy);
-    return { ...DEFAULTS, theme: 'system' };
+    return { ...DEFAULTS, theme: 'light' };
   }
 
   window.GChatWallpaperTheme = {
@@ -98,6 +101,12 @@
   };
 
   const initialSettings = readSettingsFromStorage();
+  try {
+    const width = Number(localStorage.getItem(DESKTOP_SIDEBAR_WIDTH_STORAGE_KEY));
+    if (Number.isFinite(width) && width >= 104) document.documentElement.style.setProperty('--sidebar-width', `${Math.round(width)}px`);
+  } catch {
+    /* ignore */
+  }
   applyToRoot(initialSettings);
   const cachedTheme = (() => {
     try {
@@ -106,7 +115,7 @@
       return null;
     }
   })();
-  applyTheme(cachedTheme || initialSettings.theme || 'system');
+  applyTheme(cachedTheme || initialSettings.theme || 'light');
   matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
     if (document.documentElement.dataset.themePreference === 'system') applyTheme('system');
   });
