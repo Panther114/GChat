@@ -10,6 +10,7 @@ const {
   WINDOWS_OPTIONAL_GPU_FILES,
   removeOptionalWindowsGpuFiles,
 } = require('../scripts/after-pack');
+const packageJson = require('../package.json');
 
 test('desktop packaging removes only the disabled WebGPU compiler binaries', async (t) => {
   const outputRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'gchat-after-pack-'));
@@ -28,4 +29,13 @@ test('desktop packaging removes only the disabled WebGPU compiler binaries', asy
   for (const filename of WINDOWS_OPTIONAL_GPU_FILES) {
     await assert.rejects(fs.stat(path.join(outputRoot, filename)), { code: 'ENOENT' });
   }
+});
+
+test('macOS packaging produces universal installer and updater targets', () => {
+  assert.equal(packageJson.build.mac.artifactName, 'Gchat-${version}-mac-${arch}.${ext}');
+  assert.deepEqual(packageJson.build.mac.target, [
+    { target: 'dmg', arch: ['universal'] },
+    { target: 'zip', arch: ['universal'] },
+  ]);
+  assert.equal(packageJson.build.publish.provider, 'github');
 });

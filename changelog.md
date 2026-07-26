@@ -6,6 +6,7 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ## v1.3.4
 
+- Added a universal macOS desktop release for Apple Silicon and Intel Macs, with DMG/ZIP distribution, updater metadata, dock unread badges, and parallel Windows/macOS GitHub Release builds.
 - Replaced invite links with permanent six-character invite codes, code-only joining, encrypted server-side key recovery, and an explicit backup-confirmed migration command for existing groups.
 - Made received disappearing messages indistinguishable from ordinary messages, retained sender-only indicators, and repaired message-series headers after disappearance.
 - Improved group previews, composer modes, reply/disappearing metadata spacing, panel transitions, and desktop sidebar-width startup behavior.

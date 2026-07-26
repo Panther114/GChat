@@ -197,7 +197,11 @@ ipcMain.on('set-unread-count', (_event, count) => {
   const unread = normalizeUnreadCount(count);
   if (unread === lastUnreadCount) return;
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.setOverlayIcon(unread ? createBadgeIcon(unread) : null, unread ? `${unread} unread message${unread === 1 ? '' : 's'}` : '');
+    if (process.platform === 'darwin') {
+      app.dock?.setBadge(unread ? badgeLabelForUnread(unread) : '');
+    } else {
+      mainWindow.setOverlayIcon(unread ? createBadgeIcon(unread) : null, unread ? `${unread} unread message${unread === 1 ? '' : 's'}` : '');
+    }
     if (unread && !mainWindow.isFocused()) mainWindow.flashFrame(true);
   }
   updateTrayMenu(unread);

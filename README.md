@@ -385,23 +385,23 @@ Password hashes are not returned.
 
 ## Desktop App
 
-The desktop app is an Electron wrapper around the hosted Gchat web app. It is intended for users who want a native Windows-style app experience without opening a browser manually.
+The desktop app is an Electron wrapper around the hosted Gchat web app. It provides the same hosted interface and functions on Windows and macOS without requiring a browser window.
 
 ### User Installation
 
-Download and run:
+Windows users download and run:
 
 ```txt
-Gchat Setup <version>.exe
+Gchat-Setup-<version>.exe
 ```
 
-For portable use, run:
+macOS users download:
 
 ```txt
-Gchat <version>.exe
+Gchat-<version>-mac-universal.dmg
 ```
 
-Users do not need Node.js, npm, Git, PowerShell, or Visual Studio Build Tools.
+The macOS package runs on Apple Silicon and Intel Macs. Users do not need Node.js, npm, Git, PowerShell, or build tools.
 
 ### Updating the Desktop App
 
@@ -431,21 +431,21 @@ Manual uninstall is usually not required.
 
 ### Building the Desktop App
 
-Use Node 20 for Windows packaging.
+Use Node 20 for desktop packaging. Run each target build on its native operating system.
 
 ```bash
 npm install --include=dev
 npm run build:win
 ```
 
-Output:
+On macOS:
 
-```txt
-dist/Gchat Setup <version>.exe
-dist/Gchat <version>.exe
+```bash
+npm install --include=dev
+npm run build:mac
 ```
 
-The GitHub Actions workflow can also build the Windows installer and upload it as an artifact.
+Pushing a version tag builds Windows and universal macOS packages in parallel and publishes all installers and updater metadata to the same GitHub Release.
 
 ---
 

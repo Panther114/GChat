@@ -105,8 +105,20 @@
       "deleteAppDataOnUninstall": false
     },
     "mac": {
+      "artifactName": "Gchat-${version}-mac-${arch}.${ext}",
       "target": [
-        "dmg"
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "universal"
+          ]
+        }
       ],
       "icon": "public/gchat_icon.png",
       "category": "public.app-category.social-networking"
