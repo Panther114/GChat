@@ -62,4 +62,5 @@ test('future desktop updates use signed latest-release metadata', () => {
   assert.match(updater.pubkey, /^[A-Za-z0-9+/]+=*$/);
   assert.ok(updater.pubkey.length > 100);
   assert.equal(tauriConfig.bundle.createUpdaterArtifacts, true);
+  assert.match(packageJson.scripts['build:mac'], /--bundles app,dmg/);
 });

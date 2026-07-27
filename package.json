@@ -21,7 +21,7 @@
     "desktop:dev": "tauri dev",
     "test:desktop": "cargo test --manifest-path src-tauri/Cargo.toml",
     "build:win": "tauri build --bundles nsis",
-    "build:mac": "tauri build --target universal-apple-darwin --bundles dmg",
+    "build:mac": "tauri build --target universal-apple-darwin --bundles app,dmg",
     "build:linux": "tauri build --bundles appimage,deb"
   },
   "engines": {
