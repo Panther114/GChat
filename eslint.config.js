@@ -5,7 +5,7 @@ module.exports = [
     ignores: ['scripts/ui-screenshot.js'],
   },
   {
-    files: ['src/server/**/*.js', 'electron/**/*.js', 'scripts/**/*.js', 'test/**/*.js'],
+    files: ['src/server/**/*.js', 'scripts/**/*.js', 'test/**/*.js'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'commonjs',
@@ -33,12 +33,19 @@ module.exports = [
     },
   },
   {
-    files: ['electron/offline.js'],
+    files: ['src-tauri/src/bridge.js'],
     languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'script',
       globals: {
+        console: 'readonly',
         document: 'readonly',
         window: 'readonly',
       },
+    },
+    rules: {
+      'no-undef': 'error',
+      'no-unused-vars': 'error',
     },
   },
 ];

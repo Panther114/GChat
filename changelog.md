@@ -4,6 +4,13 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## v1.3.5
+
+- Replaced the Electron desktop runtime with a Tauri 2 system-webview shell.
+- Preserved the hosted UI and native desktop bridge behavior without bundling Chromium.
+- Added exact-origin command permissions, bounded native payloads, signed updater artifacts, and Windows/macOS GitHub release builds.
+- Existing desktop users install the new lightweight package and sign in once; hosted account data and escrowed group keys are restored normally.
+
 ## v1.3.4
 
 - Added owner-managed group administrators with elevated permission and moderation access, protected administrator boundaries, real-time role updates, and locked permission previews for regular members.

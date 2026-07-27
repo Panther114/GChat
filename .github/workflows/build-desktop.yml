@@ -5,68 +5,101 @@ on:
   push:
     tags:
       - 'v*'
-  pull_request:
 
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --include=dev
+      - run: npm run verify
+
   build-desktop:
-    name: Build ${{ matrix.platform }} desktop
+    needs: verify
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: Windows
             runner: windows-latest
-            command: npm run build:win -- --publish never
+            target: x86_64-pc-windows-msvc
+            command: npm run build:win
             artifact: gchat-windows-desktop
-            artifact_paths: |
-              release/*.exe
-              release/*.exe.blockmap
-              release/latest.yml
           - platform: macOS
             runner: macos-latest
-            command: npm run build:mac -- --publish never
+            target: universal-apple-darwin
+            command: npm run build:mac
             artifact: gchat-macos-desktop
-            artifact_paths: |
-              release/*.dmg
-              release/*.dmg.blockmap
-              release/*.zip
-              release/*.zip.blockmap
-              release/latest-mac.yml
+    name: Build ${{ matrix.platform }} desktop
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
     env:
-      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
+          cache: npm
 
-      - name: Install dependencies
-        run: npm ci --include=dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target == 'universal-apple-darwin' && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci --include=dev
 
       - name: Verify release tag matches package version
         if: startsWith(github.ref, 'refs/tags/')
         shell: node {0}
         run: |
-          const path = require('node:path');
-          const { version } = require(path.join(process.env.GITHUB_WORKSPACE, 'package.json'));
-          const expectedTag = `v${version}`;
-          if (process.env.GITHUB_REF_NAME !== expectedTag) {
-            throw new Error(`Tag ${process.env.GITHUB_REF_NAME} does not match package version ${expectedTag}`);
+          const { version } = require('./package.json');
+          if (process.env.GITHUB_REF_NAME !== `v${version}`) {
+            throw new Error(`Tag ${process.env.GITHUB_REF_NAME} does not match v${version}`);
           }
 
-      - name: Build ${{ matrix.platform }} desktop packages
+      - name: Test native shell
+        run: npm run test:desktop
+
+      - name: Build desktop packages
         run: ${{ matrix.command }}
 
-      - name: Upload desktop artifacts
-        uses: actions/upload-artifact@v4
+      - name: Collect Windows artifacts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force staging | Out-Null
+          Get-ChildItem src-tauri/target/release/bundle -File -Recurse |
+            Where-Object { $_.Name -match '\.(exe|sig)$' } |
+            Copy-Item -Destination staging
+
+      - name: Collect macOS artifacts
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          mkdir -p staging
+          find src-tauri/target/universal-apple-darwin/release/bundle \
+            -type f \( -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.sig' \) \
+            -exec cp {} staging/ \;
+
+      - name: Enforce artifact size budgets
+        run: node scripts/check-desktop-artifact-budgets.js staging
+
+      - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact_paths }}
+          path: staging/*
           if-no-files-found: error
 
   publish-release:
@@ -77,13 +110,17 @@ jobs:
       contents: write
 
     steps:
-      - name: Download desktop artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
         with:
           path: release
           merge-multiple: true
 
-      - name: Publish GitHub release
+      - name: Generate updater manifest
+        run: node scripts/generate-tauri-update-manifest.js release "$GITHUB_REF_NAME" "$GITHUB_REPOSITORY"
+
+      - name: Publish latest stable release
         env:
           GH_TOKEN: ${{ github.token }}
         run: >-

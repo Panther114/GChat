@@ -1,10 +1,10 @@
 # Gchat
 
-Gchat is a client-side encrypted group chat application built with Node.js, Express, Socket.IO, SQLite, and vanilla web technologies. It supports real-time group messaging, automatic per-group encryption with server-managed key recovery, media/file messages, profile customization, group administration, and an optional Electron desktop wrapper.
+Gchat is a client-side encrypted group chat application built with Node.js, Express, Socket.IO, SQLite, and vanilla web technologies. It supports real-time group messaging, automatic per-group encryption with server-managed key recovery, media/file messages, profile customization, group administration, and an optional Tauri desktop shell.
 
 The hosted web app is the primary product. The desktop app is a native shell that loads the hosted Railway deployment.
 
-Current version: **v1.3.4**
+Current version: **v1.3.5**
 
 ---
 
@@ -39,20 +39,20 @@ Current version: **v1.3.4**
 
 ### Desktop Shell
 
-- Electron-based Windows desktop wrapper
-- First-run setup wizard
+- Lightweight Tauri shell for Windows and macOS
+- Hosted UI shared exactly with the browser version
 - System tray support
 - Native OS notifications
 - Taskbar unread badge and taskbar flash
 - Optional launch-at-startup
-- Windows installer and portable executable builds
+- Signed in-app update artifacts
 
 ---
 
 ## Architecture
 
 ```txt
-Browser / Electron shell
+Browser / Tauri shell
         |
         v
 Hosted Gchat web app
@@ -64,13 +64,13 @@ Express + Socket.IO server
 SQLite database
 ```
 
-The Electron desktop app does not run the chat server locally. It loads the hosted deployment:
+The Tauri desktop app does not run the chat server locally. It loads the hosted deployment:
 
 ```txt
 https://gchat.up.railway.app
 ```
 
-Most product updates are delivered through the hosted web app. Native desktop updates are only needed when changing Electron-specific behavior such as tray controls, native notifications, setup screens, installer metadata, or app icons.
+Most product updates are delivered through the hosted web app. Native desktop updates are only needed when changing tray controls, notifications, installer metadata, or other shell behavior.
 
 ---
 
@@ -86,7 +86,7 @@ Most product updates are delivered through the hosted web app. Native desktop up
 | Email delivery | Logto Cloud M2M API |
 | Encryption | Web Crypto API, AES-256-GCM, HKDF-SHA-256 |
 | Frontend | HTML, CSS, vanilla JavaScript |
-| Desktop | Electron, Electron Builder |
+| Desktop | Tauri 2, WebView2, WKWebView |
 | Hosting | Railway |
 
 ---
@@ -385,7 +385,7 @@ Password hashes are not returned.
 
 ## Desktop App
 
-The desktop app is an Electron wrapper around the hosted Gchat web app. It provides the same hosted interface and functions on Windows and macOS without requiring a browser window.
+The desktop app is a Tauri shell around the hosted Gchat web app. It provides the same hosted interface and functions on Windows and macOS without bundling Chromium.
 
 ### User Installation
 
@@ -407,9 +407,8 @@ The macOS package runs on Apple Silicon and Intel Macs. Users do not need Node.j
 
 Most Gchat updates are web/server updates and are delivered through the hosted Railway deployment. Users may only need to reload or restart the desktop app to see the latest web version.
 
-A new desktop installer is only needed when Electron-specific behavior changes, such as:
+A new desktop installer is only needed when native shell behavior changes, such as:
 
-- setup wizard
 - tray menu
 - native notifications
 - launch-at-startup
@@ -418,20 +417,11 @@ A new desktop installer is only needed when Electron-specific behavior changes, 
 - application icon
 - packaged dependency changes
 
-Current practical update flow:
-
-```txt
-Quit Gchat from the system tray
-Run the newer Gchat Setup <version>.exe
-Install over the existing app
-Launch Gchat again
-```
-
-Manual uninstall is usually not required.
+Tauri builds check the newest GitHub Release through signed `latest.json` metadata. Users moving from an Electron release install the newest Tauri package and sign in once.
 
 ### Building the Desktop App
 
-Use Node 20 for desktop packaging. Run each target build on its native operating system.
+Use Node 20+ and the stable Rust toolchain for desktop packaging. Run each target build on its native operating system.
 
 ```bash
 npm install --include=dev
@@ -451,15 +441,7 @@ Pushing a version tag builds Windows and universal macOS packages in parallel an
 
 ## Desktop Build Notes
 
-The repository contains both the web server and the desktop wrapper. The desktop build excludes unused backend runtime modules from the packaged Electron app and disables native dependency rebuilds during Electron packaging.
-
-Relevant Electron Builder behavior:
-
-- `npmRebuild` is disabled for desktop packaging.
-- Backend modules such as SQLite server dependencies are not needed inside the Electron shell.
-- The main-process cold path has a 32 KiB bundle budget; `electron-updater` is packaged separately and initialized after startup.
-- WebGPU is disabled, allowing the Windows package hook to omit its optional DXIL compiler binaries while retaining normal graphics fallbacks and media codecs.
-- Railway still installs production server dependencies and runs `server.js`.
+The desktop package contains only a compiled native shell and small recovery assets. Windows uses the shared Evergreen WebView2 runtime; macOS uses the system WKWebView. Backend modules and the hosted frontend are not packaged. Railway continues to install production server dependencies and run `server.js`.
 
 ---
 
@@ -472,12 +454,11 @@ Relevant Electron Builder behavior:
 ├── railway.json                 # Railway deployment configuration
 ├── README.md                    # Project documentation
 ├── INSTALL_DESKTOP.md           # Desktop installation notes
-├── electron/
-│   ├── main.js                  # Electron main process
-│   ├── preload.js               # Secure IPC bridge
-│   ├── wizard.html              # First-run desktop setup
-│   ├── offline.html             # Desktop connection recovery page
-│   └── desktop.css              # Desktop setup/recovery styling
+├── src-tauri/
+│   ├── src/lib.rs               # Native shell and bounded command bridge
+│   ├── src/bridge.js            # Hosted UI compatibility bridge
+│   ├── capabilities/            # Exact-origin native permissions
+│   └── tauri.conf.json          # Packaging and signed updater configuration
 ├── build/
 │   └── icon.ico                 # Generated desktop icon artifact
 └── public/

@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/remote-schema.json",
+  "identifier": "remote",
+  "description": "Minimal native bridge available only to the official hosted Gchat origin.",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["https://gchat.up.railway.app/*"]
+  },
+  "permissions": []
+}

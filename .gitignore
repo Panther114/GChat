@@ -12,8 +12,12 @@ AGENTS.md
 quickrun.bat
 scripts/ui-screenshot.js
 
-# Electron build output
+# Desktop build output
 dist/
-electron/main.bundle.cjs
-electron/updater.bundle.cjs
-build/icon.icns
+src-tauri/target/
+src-tauri/gen/schemas/
+src-tauri/icons/*
+!src-tauri/icons/icon.png
+!src-tauri/icons/icon.ico
+!src-tauri/icons/icon.icns
+electron/*.bundle.cjs

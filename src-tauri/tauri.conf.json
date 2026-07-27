@@ -1,0 +1,50 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Gchat",
+  "version": "1.3.5",
+  "identifier": "com.gchat.desktop",
+  "build": {
+    "frontendDist": "dist",
+    "removeUnusedCommands": true
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [],
+    "security": {
+      "capabilities": ["offline", "remote"]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "category": "SocialNetworking",
+    "copyright": "Copyright © 2024-2026 Gchat",
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico",
+      "icons/icon.icns"
+    ],
+    "longDescription": "Lightweight desktop shell for the hosted end-to-end encrypted Gchat application.",
+    "shortDescription": "End-to-end encrypted group chat",
+    "targets": "all",
+    "windows": {
+      "nsis": {
+        "compression": "lzma",
+        "displayLanguageSelector": false,
+        "installMode": "currentUser"
+      },
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/Panther114/GChat/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ2MzE2QjcwM0Y5RTg2RjMKUldUemhwNC9jR3N4MXE2ZncraHBCT1Q2YVViTk04SHFyK053em9qNnZGOXREa0ZEeDFMMjBxSnoK"
+    }
+  }
+}
