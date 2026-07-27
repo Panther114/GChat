@@ -3160,6 +3160,7 @@ app.delete('/api/groups/:groupId/members/:userId', (req, res) => {
   }
 
   stmts.deleteMember.run(groupId, targetUserId);
+  detachUserFromGroupRoom(groupId, targetUserId);
   io.to(groupId).emit('member_kicked', { userId: targetUserId, groupId });
   res.json({ ok: true });
 });
@@ -3363,6 +3364,33 @@ function getPresence(groupId) {
   return roomPresence.has(groupId) ? [...roomPresence.get(groupId)] : [];
 }
 
+function emitPresenceUpdate(groupId) {
+  const presenceSockets = getPresence(groupId);
+  const onlineUserIds = new Set();
+  for (const sid of presenceSockets) {
+    const s = io.sockets.sockets.get(sid);
+    if (s) onlineUserIds.add(s.userId);
+  }
+  io.to(groupId).emit('presence_update', {
+    groupId,
+    onlineUserIds: [...onlineUserIds],
+  });
+}
+
+/** Drop a user from a group room + presence (kick / leave / disband). */
+function detachUserFromGroupRoom(groupId, userId) {
+  for (const socket of io.sockets.sockets.values()) {
+    if (String(socket.userId) !== String(userId)) continue;
+    if (socket.joinedRooms instanceof Set) socket.joinedRooms.delete(groupId);
+    if (socket.currentRoom === groupId) socket.currentRoom = null;
+    if (socket.rooms.has(groupId)) {
+      removePresence(groupId, socket.id);
+      socket.leave(groupId);
+    }
+  }
+  emitPresenceUpdate(groupId);
+}
+
 function emitToUser(userId, event, payload) {
   for (const socket of io.sockets.sockets.values()) {
     if (socket.userId === userId) socket.emit(event, payload);
@@ -3427,28 +3455,44 @@ io.on('connection', (socket) => {
 
     markExpiredDisappearingMessagesHidden(socket.userId);
 
-    // Leave previous rooms (except own socket room)
-    for (const room of socket.rooms) {
-      if (room !== socket.id) {
-        removePresence(room, socket.id);
-        socket.leave(room);
-      }
-    }
-
-    socket.join(normalizedGroupId);
+    // Multi-room presence: stay joined to every group the client has opened.
+    // Switching chats must not drop presence (or realtime) in other groups.
+    if (!socket.joinedRooms) socket.joinedRooms = new Set();
     socket.currentRoom = normalizedGroupId;
+    if (!socket.rooms.has(normalizedGroupId)) {
+      socket.join(normalizedGroupId);
+    }
+    socket.joinedRooms.add(normalizedGroupId);
     addPresence(normalizedGroupId, socket.id);
 
-    // Notify room of updated presence
     const presenceSockets = getPresence(normalizedGroupId);
     const onlineUserIds = new Set();
     for (const sid of presenceSockets) {
       const s = io.sockets.sockets.get(sid);
       if (s) onlineUserIds.add(s.userId);
     }
-    io.to(normalizedGroupId).emit('presence_update', { groupId: normalizedGroupId, onlineUserIds: [...onlineUserIds] });
+    io.to(normalizedGroupId).emit('presence_update', {
+      groupId: normalizedGroupId,
+      onlineUserIds: [...onlineUserIds],
+    });
 
     console.log(`${socket.username} joined room ${normalizedGroupId}`);
+  });
+
+  socket.on('channel_announce', ({ groupId, channel, action } = {}) => {
+    if (!groupId || !channel) return;
+    const normalizedGroupId = String(groupId);
+    const member = stmts.isMember.get(normalizedGroupId, String(socket.userId));
+    if (!member) return;
+    const topic = String(channel).trim().replace(/^#/, '').toLowerCase().slice(0, 12);
+    if (!/^[a-z0-9_-]+$/.test(topic) || topic === 'main') return;
+    const nextAction = action === 'remove' ? 'remove' : 'add';
+    io.to(normalizedGroupId).emit('channel_announced', {
+      groupId: normalizedGroupId,
+      channel: topic,
+      action: nextAction,
+      byUserId: socket.userId,
+    });
   });
 
   socket.on('attachment_upload_progress', ({ groupId, uploadId, type, filename, totalBytes, loadedBytes }) => {
@@ -3996,20 +4040,23 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     console.log(`Socket disconnected: ${socket.username}`);
 
-    if (socket.currentRoom) {
-      removePresence(socket.currentRoom, socket.id);
-      const presenceSockets = getPresence(socket.currentRoom);
+    const rooms = socket.joinedRooms instanceof Set
+      ? [...socket.joinedRooms]
+      : (socket.currentRoom ? [socket.currentRoom] : []);
+
+    for (const roomId of rooms) {
+      removePresence(roomId, socket.id);
+      const presenceSockets = getPresence(roomId);
       const onlineUserIds = new Set();
       for (const sid of presenceSockets) {
         const s = io.sockets.sockets.get(sid);
         if (s) onlineUserIds.add(s.userId);
       }
-      io.to(socket.currentRoom).emit('presence_update', {
-        groupId: socket.currentRoom,
+      io.to(roomId).emit('presence_update', {
+        groupId: roomId,
         onlineUserIds: [...onlineUserIds],
       });
     }
-
   });
 });
 

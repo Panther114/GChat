@@ -335,14 +335,41 @@
   }
   async function decryptMessageText(msg, secret, groupId = currentGroupId) {
     if (!secret) return null;
-    return Number(msg.encryptionVersion) === 2 ? decryptV2Message(msg, secret, groupId) : decryptMessage(msg.encryptedContent, msg.iv, secret, groupId);
+    const version = Number(msg.encryptionVersion);
+    if (version === 2) {
+      try {
+        const v2 = await decryptV2Message(msg, secret, groupId);
+        if (v2 != null) return v2;
+      } catch {
+      }
+      return decryptMessage(msg.encryptedContent, msg.iv, secret, groupId);
+    }
+    const v1 = await decryptMessage(msg.encryptedContent, msg.iv, secret, groupId);
+    if (v1 != null) return v1;
+    try {
+      return await decryptV2Message(msg, secret, groupId);
+    } catch {
+      return null;
+    }
   }
   async function decryptAttachmentBytes(msg, secret, groupId) {
-    if (Number(msg.encryptionVersion) === 2) {
-      const bytes = base64UrlToBytes(msg.encryptedContent);
-      return decryptBytes(bytes, msg.iv, secret, groupId, v2Aad({ ...msg, groupId }));
+    const version = Number(msg.encryptionVersion);
+    if (version === 2) {
+      try {
+        const bytes = base64UrlToBytes(msg.encryptedContent);
+        return await decryptBytes(bytes, msg.iv, secret, groupId, v2Aad({ ...msg, groupId }));
+      } catch {
+        return decryptBytes2(msg.encryptedContent, msg.iv, secret, groupId);
+      }
     }
-    return decryptBytes2(msg.encryptedContent, msg.iv, secret, groupId);
+    const legacy = await decryptBytes2(msg.encryptedContent, msg.iv, secret, groupId);
+    if (legacy != null) return legacy;
+    try {
+      const bytes = base64UrlToBytes(msg.encryptedContent);
+      return await decryptBytes(bytes, msg.iv, secret, groupId, v2Aad({ ...msg, groupId }));
+    } catch {
+      return null;
+    }
   }
   function shouldPreserveLocalStorageEntry(key) {
     return !!(key && (key === ACTIVE_LOCAL_SETTINGS_KEY || key === LEGACY_LOCAL_SETTINGS_KEY || key.startsWith(LOCAL_SETTINGS_KEY_PREFIX)));
@@ -1463,6 +1490,15 @@
     if (!groupId || !userId) return null;
     return `${CHANNEL_PREF_KEY_PREFIX}${userId}:${groupId}`;
   }
+  function readStoredChannel(groupId) {
+    const key = channelPrefKey(groupId);
+    if (!key) return DEFAULT_TAG_TOPIC;
+    try {
+      return normalizeHashtagTopic(localStorage.getItem(key)) || DEFAULT_TAG_TOPIC;
+    } catch {
+      return DEFAULT_TAG_TOPIC;
+    }
+  }
   function writeStoredChannel(groupId, topic) {
     const key = channelPrefKey(groupId);
     if (!key) return;
@@ -2477,7 +2513,7 @@
       groupPreloadPromises.delete(groupId);
     }
   }
-  var MSG_CONTENT_UNAVAILABLE = "Message unavailable";
+  var MSG_CONTENT_UNAVAILABLE = "Unable to decrypt this message";
   var GROUP_PREVIEW_EMPTY_TEXT = "No messages yet";
   var SCROLL_LOAD_THRESHOLD = 1;
   var MOBILE_BREAKPOINT = 768;
@@ -2931,6 +2967,17 @@
     const err = $("channel-error");
     if (err) err.textContent = "";
   }
+  function announceChannelChange(groupId, topic, action) {
+    if (!socket || !groupId || !topic || topic === DEFAULT_TAG_TOPIC) return;
+    try {
+      socket.emit("channel_announce", {
+        groupId: String(groupId),
+        channel: topic,
+        action: action === "remove" ? "remove" : "add"
+      });
+    } catch {
+    }
+  }
   function confirmChannelCreate() {
     const input = $("channel-name-input");
     const err = $("channel-error");
@@ -2945,6 +2992,7 @@
     }
     closeChannelCreateModal();
     rememberChannel(currentGroupId, topic);
+    announceChannelChange(currentGroupId, topic, "add");
     selectTagChannel(topic);
   }
   function renderTagFilters() {
@@ -3988,6 +4036,7 @@
     }
     await removeTagMessagesFromCache(currentGroupId, normalizedTopic);
     forgetChannel(currentGroupId, normalizedTopic);
+    announceChannelChange(currentGroupId, normalizedTopic, "remove");
     if (getActiveTagTopic() === normalizedTopic) {
       selectTagChannel(DEFAULT_TAG_TOPIC, { focusComposer: false });
     } else {
@@ -4135,7 +4184,7 @@
     pendingAttachmentRows.clear();
     whisperRecipients = [];
     messageMode = "normal";
-    ensureActiveTag(DEFAULT_TAG_TOPIC);
+    ensureActiveTag(readStoredChannel(normalizedGroupId));
     composerTokens.whisper = null;
     composerTokens.hashtag = null;
     syncComposerTokens();
@@ -6062,6 +6111,22 @@
       if (groupId !== currentGroupId) return;
       onlineUsers = new Set(onlineUserIds);
       renderMembersList();
+    });
+    socket.on("channel_announced", ({ groupId, channel, action }) => {
+      const topic = normalizeHashtagTopic(channel);
+      if (!groupId || !topic || topic === DEFAULT_TAG_TOPIC) return;
+      if (action === "remove") {
+        forgetChannel(groupId, topic);
+        if (String(currentGroupId) === String(groupId) && getActiveTagTopic() === topic) {
+          selectTagChannel(DEFAULT_TAG_TOPIC, { focusComposer: false });
+          return;
+        }
+      } else {
+        rememberChannel(groupId, topic);
+      }
+      if (String(currentGroupId) === String(groupId)) {
+        renderTagFilters();
+      }
     });
     socket.on("user_updated", (user) => {
       for (const cache of groupDataCache.values()) {

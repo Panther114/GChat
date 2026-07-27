@@ -1,0 +1,15 @@
+[[permission]]
+identifier = "allow-desktop-bridge"
+description = "Allows the hosted Gchat UI and offline recovery page to use the bounded desktop bridge commands."
+commands.allow = [
+  "desktop_renderer_ready",
+  "set_unread_count",
+  "show_notification",
+  "get_launch_at_startup",
+  "set_launch_at_startup",
+  "retry_connection",
+  "get_connection_context",
+  "copy_binary_to_clipboard",
+  "clear_cache_and_restart",
+  "reload_hosted_app"
+]

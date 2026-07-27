@@ -1,6 +1,6 @@
 {
   "name": "Gchat",
-  "version": "1.3.5",
+  "version": "1.3.6",
   "description": "End-to-end encrypted group chat app",
   "author": "Gchat",
   "main": "server.js",

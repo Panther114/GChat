@@ -52,14 +52,24 @@
   <script>
     const button = document.getElementById('retry');
     const server = document.getElementById('server');
-    window.electronAPI.getConnectionContext().then((context) => {
-      server.textContent = context.serverUrl || '';
-    });
+    const api = window.electronAPI;
+    if (api?.getConnectionContext) {
+      api.getConnectionContext()
+        .then((context) => {
+          server.textContent = context?.serverUrl || 'https://gchat.up.railway.app';
+        })
+        .catch(() => {
+          server.textContent = 'https://gchat.up.railway.app';
+        });
+    } else {
+      server.textContent = 'https://gchat.up.railway.app';
+    }
     button.addEventListener('click', async () => {
       button.disabled = true;
       button.textContent = 'Connecting…';
       try {
-        await window.electronAPI.retryConnection();
+        if (!api?.retryConnection) throw new Error('Desktop bridge unavailable');
+        await api.retryConnection();
       } catch {
         button.disabled = false;
         button.textContent = 'Retry connection';

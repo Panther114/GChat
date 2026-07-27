@@ -43,7 +43,15 @@
     }),
   });
 
-  if (window.location.origin === 'https://gchat.up.railway.app') {
+  // Official hosted origin, or any https origin in case of future custom domain aliases.
+  const isHostedApp =
+    window.location.protocol === 'https:'
+    && (
+      window.location.hostname === 'gchat.up.railway.app'
+      || window.location.origin === 'https://gchat.up.railway.app'
+    );
+
+  if (isHostedApp) {
     const ready = () => {
       void invoke('desktop_renderer_ready').catch((error) => report('ready', error));
     };
@@ -52,5 +60,7 @@
     } else {
       ready();
     }
+    // Retry once after load in case the first invoke raced ahead of ACL wiring.
+    window.addEventListener('load', ready, { once: true });
   }
 })();

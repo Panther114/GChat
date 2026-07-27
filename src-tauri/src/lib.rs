@@ -13,7 +13,7 @@ use image::ImageReader;
 use serde::{Deserialize, Serialize};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
-    tray::{TrayIconBuilder, TrayIconEvent},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     webview::NewWindowResponse,
     AppHandle, Manager, Runtime, State, UserAttentionType, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder, WindowEvent,
@@ -145,12 +145,33 @@ fn main_window<R: Runtime>(app: &AppHandle<R>) -> Option<WebviewWindow<R>> {
     app.get_webview_window("main")
 }
 
+fn hide_to_tray<R: Runtime>(window: &WebviewWindow<R>) {
+    let _ = window.hide();
+    let _ = window.set_skip_taskbar(true);
+}
+
 fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = main_window(app) {
+        let _ = window.set_skip_taskbar(false);
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
+}
+
+/// Restore when hidden/minimized/unfocused; only hide when already frontmost.
+fn toggle_or_show_main_window<R: Runtime>(app: &AppHandle<R>) {
+    let Some(window) = main_window(app) else {
+        return;
+    };
+    let visible = window.is_visible().unwrap_or(false);
+    let minimized = window.is_minimized().unwrap_or(false);
+    let focused = window.is_focused().unwrap_or(false);
+    if visible && !minimized && focused {
+        hide_to_tray(&window);
+        return;
+    }
+    show_main_window(app);
 }
 
 fn update_tray_menu<R: Runtime>(app: &AppHandle<R>, unread: u32) -> tauri::Result<()> {
@@ -456,16 +477,22 @@ fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                 .clone(),
         )
         .tooltip("Gchat")
+        // Left-click restores/toggles the window; right-click still opens the menu.
+        .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click { .. } = event {
-                let app = tray.app_handle();
-                if let Some(window) = main_window(app) {
-                    if window.is_visible().unwrap_or(false) {
-                        let _ = window.hide();
-                    } else {
-                        show_main_window(app);
-                    }
+            match event {
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
                 }
+                | TrayIconEvent::DoubleClick {
+                    button: MouseButton::Left,
+                    ..
+                } => {
+                    toggle_or_show_main_window(tray.app_handle());
+                }
+                _ => {}
             }
         })
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -517,7 +544,15 @@ pub fn run() {
                 WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
                     if let Some(window) = main_window(&app_handle) {
-                        let _ = window.hide();
+                        hide_to_tray(&window);
+                    }
+                }
+                // Minimize goes to tray (same behavior as close), not the taskbar.
+                WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
+                    if let Some(window) = main_window(&app_handle) {
+                        if window.is_minimized().unwrap_or(false) {
+                            hide_to_tray(&window);
+                        }
                     }
                 }
                 WindowEvent::Focused(true) => {

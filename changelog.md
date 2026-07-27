@@ -4,6 +4,17 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## v1.3.6
+
+- Fixed Windows NSIS installer branding (`installerIcon`) and regenerated desktop icons as a navy square + white mark so tray, taskbar, and setup.exe stay visible.
+- Fixed tray restore: left-click opens/focuses when hidden, minimized, or unfocused; only hides when already frontmost. Minimize and close both go to tray (taskbar-skip while hidden).
+- Wired exact-origin desktop bridge ACL (`allow-desktop-bridge`) so unread badges, notifications, autostart, clipboard, ready-signal, and offline retry work again.
+- Restored last active channel when reopening a group; broadcast channel create/delete to other members via `channel_announce`.
+- Multi-room socket presence: joining one group no longer drops realtime/presence in others.
+- Hardened decrypt recovery for mixed/legacy message envelopes and clearer “Unable to decrypt this message” UI.
+- Unified PWA/HTML asset cache-bust to v136 and service-worker cache `gchat-pwa-v11`.
+- Docs now describe Tauri desktop (Windows + universal macOS) instead of Electron; GitHub tag builds publish both platform installers.
+
 ## v1.3.5
 
 - Replaced the Electron desktop runtime with a Tauri 2 system-webview shell.

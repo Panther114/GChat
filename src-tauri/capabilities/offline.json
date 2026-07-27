@@ -3,6 +3,7 @@
   "identifier": "offline",
   "description": "Bundled connection-recovery page access to the bounded application commands.",
   "windows": ["main"],
-  "permissions": []
+  "permissions": [
+    "allow-desktop-bridge"
+  ]
 }
-

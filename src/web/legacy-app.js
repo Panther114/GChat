@@ -280,17 +280,45 @@ async function decryptV2Message(msg, secret, groupId) {
 
 async function decryptMessageText(msg, secret, groupId = currentGroupId) {
   if (!secret) return null;
-  return Number(msg.encryptionVersion) === 2
-    ? decryptV2Message(msg, secret, groupId)
-    : decryptMessage(msg.encryptedContent, msg.iv, secret, groupId);
+  const version = Number(msg.encryptionVersion);
+  // Prefer the declared path, then fall back so mis-tagged / mixed-era history still recovers.
+  if (version === 2) {
+    try {
+      const v2 = await decryptV2Message(msg, secret, groupId);
+      if (v2 != null) return v2;
+    } catch {
+      /* try legacy path below */
+    }
+    return decryptMessage(msg.encryptedContent, msg.iv, secret, groupId);
+  }
+  const v1 = await decryptMessage(msg.encryptedContent, msg.iv, secret, groupId);
+  if (v1 != null) return v1;
+  // Ambiguous or missing encryptionVersion: attempt v2 as a recovery path.
+  try {
+    return await decryptV2Message(msg, secret, groupId);
+  } catch {
+    return null;
+  }
 }
 
 async function decryptAttachmentBytes(msg, secret, groupId) {
-  if (Number(msg.encryptionVersion) === 2) {
-    const bytes = GChatCryptoV2.base64UrlToBytes(msg.encryptedContent);
-    return GChatCryptoV2.decryptBytes(bytes, msg.iv, secret, groupId, v2Aad({ ...msg, groupId }));
+  const version = Number(msg.encryptionVersion);
+  if (version === 2) {
+    try {
+      const bytes = GChatCryptoV2.base64UrlToBytes(msg.encryptedContent);
+      return await GChatCryptoV2.decryptBytes(bytes, msg.iv, secret, groupId, v2Aad({ ...msg, groupId }));
+    } catch {
+      return decryptBytes(msg.encryptedContent, msg.iv, secret, groupId);
+    }
   }
-  return decryptBytes(msg.encryptedContent, msg.iv, secret, groupId);
+  const legacy = await decryptBytes(msg.encryptedContent, msg.iv, secret, groupId);
+  if (legacy != null) return legacy;
+  try {
+    const bytes = GChatCryptoV2.base64UrlToBytes(msg.encryptedContent);
+    return await GChatCryptoV2.decryptBytes(bytes, msg.iv, secret, groupId, v2Aad({ ...msg, groupId }));
+  } catch {
+    return null;
+  }
 }
 
 // Keep only long-lived user essentials across a local reset: legacy group keys
@@ -2947,7 +2975,7 @@ async function ensureGroupDataPreloaded(groupId) {
 }
 
 // Decryption failure text constants (must match renderMsgContent output)
-const MSG_CONTENT_UNAVAILABLE = 'Message unavailable';
+const MSG_CONTENT_UNAVAILABLE = 'Unable to decrypt this message';
 const GROUP_PREVIEW_EMPTY_TEXT = 'No messages yet';
 
 // Scroll threshold (px from top) that triggers loading older messages
@@ -3508,6 +3536,19 @@ function closeChannelCreateModal() {
   if (err) err.textContent = '';
 }
 
+function announceChannelChange(groupId, topic, action) {
+  if (!socket || !groupId || !topic || topic === DEFAULT_TAG_TOPIC) return;
+  try {
+    socket.emit('channel_announce', {
+      groupId: String(groupId),
+      channel: topic,
+      action: action === 'remove' ? 'remove' : 'add',
+    });
+  } catch {
+    /* ignore offline announce failures */
+  }
+}
+
 function confirmChannelCreate() {
   const input = $('channel-name-input');
   const err = $('channel-error');
@@ -3522,6 +3563,7 @@ function confirmChannelCreate() {
   }
   closeChannelCreateModal();
   rememberChannel(currentGroupId, topic);
+  announceChannelChange(currentGroupId, topic, 'add');
   // New channel starts empty — switch stream immediately.
   selectTagChannel(topic);
 }
@@ -4688,6 +4730,7 @@ async function clearTagMessages(topic) {
   // Always drop local channel state (works for empty newly created channels too).
   await removeTagMessagesFromCache(currentGroupId, normalizedTopic);
   forgetChannel(currentGroupId, normalizedTopic);
+  announceChannelChange(currentGroupId, normalizedTopic, 'remove');
   if (getActiveTagTopic() === normalizedTopic) {
     selectTagChannel(DEFAULT_TAG_TOPIC, { focusComposer: false });
   } else {
@@ -4849,8 +4892,8 @@ async function selectGroup(groupId) {
   pendingAttachmentRows.clear();
   whisperRecipients = [];
   messageMode = 'normal';
-  // Always land on #main when opening a group chat.
-  ensureActiveTag(DEFAULT_TAG_TOPIC);
+  // Restore the last channel the user had open in this group (default #main).
+  ensureActiveTag(readStoredChannel(normalizedGroupId));
   composerTokens.whisper = null;
   composerTokens.hashtag = null;
   syncComposerTokens();
@@ -6973,6 +7016,23 @@ function initSocket() {
     if (groupId !== currentGroupId) return;
     onlineUsers = new Set(onlineUserIds);
     renderMembersList();
+  });
+
+  socket.on('channel_announced', ({ groupId, channel, action }) => {
+    const topic = normalizeHashtagTopic(channel);
+    if (!groupId || !topic || topic === DEFAULT_TAG_TOPIC) return;
+    if (action === 'remove') {
+      forgetChannel(groupId, topic);
+      if (String(currentGroupId) === String(groupId) && getActiveTagTopic() === topic) {
+        selectTagChannel(DEFAULT_TAG_TOPIC, { focusComposer: false });
+        return;
+      }
+    } else {
+      rememberChannel(groupId, topic);
+    }
+    if (String(currentGroupId) === String(groupId)) {
+      renderTagFilters();
+    }
   });
 
   socket.on('user_updated', (user) => {

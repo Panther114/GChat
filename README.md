@@ -459,8 +459,8 @@ The desktop package contains only a compiled native shell and small recovery ass
 │   ├── src/bridge.js            # Hosted UI compatibility bridge
 │   ├── capabilities/            # Exact-origin native permissions
 │   └── tauri.conf.json          # Packaging and signed updater configuration
-├── build/
-│   └── icon.ico                 # Generated desktop icon artifact
+├── scripts/
+│   └── regenerate-icons.py      # Navy desktop icon source for tray/installer
 └── public/
     ├── index.html               # Sign-in/sign-up page
     ├── chat.html                # Main chat UI
@@ -468,7 +468,7 @@ The desktop package contains only a compiled native shell and small recovery ass
     ├── manifest.json            # Hosted PWA manifest
     ├── service-worker.js        # Hosted PWA offline/update handling
     ├── style.css                # Web UI styling
-    ├── gchat_icon.png           # App icon asset
+    ├── gchat_icon.png           # Web brand icon (dark UI)
     └── promo.html               # Static promotional page
 ```
 
@@ -495,7 +495,7 @@ Before using Gchat with real users:
 - Mount a Railway volume.
 - Set `DB_PATH=/data/gchat.db`.
 - Set a stable `GROUP_CODE_PEPPER`, or verify the `SESSION_SECRET` fallback before issuing invitation links.
-- Keep AI disabled; v1.3.0 does not require provider API keys.
+- Keep AI disabled unless provider keys and product policy explicitly enable it.
 - Confirm login, invitation-link joining, message sending, and file upload behavior.
 - Test the desktop installer on a clean Windows machine.
 - Verify notification behavior in Windows settings.

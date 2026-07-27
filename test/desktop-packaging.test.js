@@ -13,7 +13,7 @@ const cargoToml = fs.readFileSync(path.join(__dirname, '..', 'src-tauri', 'Cargo
 const bridge = fs.readFileSync(path.join(__dirname, '..', 'src-tauri', 'src', 'bridge.js'), 'utf8');
 
 test('desktop package versions stay aligned', () => {
-  assert.equal(packageJson.version, '1.3.5');
+  assert.equal(packageJson.version, '1.3.6');
   assert.equal(tauriConfig.version, packageJson.version);
   assert.match(cargoToml, new RegExp(`^version = "${packageJson.version.replaceAll('.', '\\.')}"$`, 'm'));
 });
@@ -29,7 +29,8 @@ test('desktop package excludes Electron and bundled browser runtimes', () => {
 test('remote native capability is locked to the exact production origin', () => {
   assert.deepEqual(capability.remote.urls, ['https://gchat.up.railway.app/*']);
   assert.deepEqual(capability.windows, ['main']);
-  assert.deepEqual(capability.permissions, []);
+  assert.deepEqual(capability.permissions, ['allow-desktop-bridge']);
+  assert.equal(tauriConfig.bundle.windows.nsis.installerIcon, 'icons/icon.ico');
   assert.equal(tauriConfig.app.withGlobalTauri, false);
   assert.ok(!JSON.stringify(capability).includes('shell:'));
   assert.ok(!JSON.stringify(capability).includes('fs:'));

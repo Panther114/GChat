@@ -138,24 +138,21 @@ This document tracks all implemented features in the Gchat application. All feat
 - [x] Static file serving from /public directory
 - [x] Trust proxy configuration for Railway
 
-## Desktop App (Electron)
-- [x] Electron main process (`electron/main.js`) — BrowserWindow, tray, IPC, updater
-- [x] Secure preload script (`electron/preload.js`) — contextBridge API surface
-- [x] System tray icon with show/hide window on click
-- [x] Hide-to-tray on window close (app keeps running in background)
+## Desktop App (Tauri 2)
+- [x] Tauri native shell (`src-tauri/src/lib.rs`) — WebView window, tray, IPC, updater
+- [x] Hosted UI bridge (`src-tauri/src/bridge.js`) — `window.electronAPI` compatibility surface
+- [x] Exact-origin ACL (`allow-desktop-bridge`) for remote Railway origin + offline recovery page
+- [x] System tray icon with left-click restore/focus and right-click menu
+- [x] Hide-to-tray on window close and minimize (app keeps running in background)
 - [x] Single-instance lock (second launch focuses existing window)
-- [x] Native OS notifications via IPC (Windows Action Center, macOS Notification Center)
-- [x] Notification click navigates to the relevant group
-- [x] Taskbar overlay badge with unread count
-- [x] Taskbar button flash on new messages when window is unfocused
-- [x] Auto-launch at system startup (configurable in the first-run desktop wizard)
-- [x] Auto-updater via electron-updater (GitHub Releases, automatic background download)
-- [x] Persistent config via electron-store (locked server target, window size, startup preference, wizard completion)
-- [x] First-run Windows desktop setup wizard with locked Railway deployment URL
-- [x] Open external links in default browser (not inside Electron)
-- [x] Spellcheck in message input
-- [x] Windows NSIS installer and portable executable via electron-builder
-- [x] macOS .dmg and Linux .AppImage/.deb builds supported
+- [x] Native OS notifications via the notification plugin
+- [x] Notification focus routes to the relevant group
+- [x] Dock/taskbar unread badge via native shell
+- [x] Auto-launch at system startup (settings toggle)
+- [x] Signed auto-updater via GitHub Releases (`latest.json`)
+- [x] Open external links in the default browser
+- [x] Windows NSIS installer with Gchat installer icon
+- [x] Universal macOS `.app` / `.dmg` builds (same hosted behavior as Windows)
 
 ## Additional Features
 - [x] Audio notification sound (Web Audio API)

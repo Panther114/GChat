@@ -1224,7 +1224,7 @@ dependencies = [
 
 [[package]]
 name = "gchat-desktop"
-version = "1.3.5"
+version = "1.3.6"
 dependencies = [
  "arboard",
  "base64 0.22.1",
