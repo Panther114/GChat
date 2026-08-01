@@ -192,7 +192,8 @@ body.sidebar-resizing .sidebar-resizer::before {
 .chat-topbar {
   min-height: 48px;
   gap: 8px;
-  padding-block: 8px;
+  padding-block-start: calc(8px + var(--safe-area-top));
+  padding-block-end: 8px;
   border-bottom: 1px solid var(--chat-border-strong) !important;
   z-index: var(--z-sticky);
 }

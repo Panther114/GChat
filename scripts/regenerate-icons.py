@@ -2,6 +2,7 @@
 """Regenerate desktop icon packs from public/gchat_icon.png (current brand).
 
 Writes:
+  - public/gchat_icon_ios.png  (opaque black square + white mark for iOS/PWA)
   - src-tauri/icons/app-icon-source.png  (navy square + white mark for tray/installer)
   - build/icon.ico + build/icons/*.png   (legacy Electron/build path)
   - then run: npx tauri icon src-tauri/icons/app-icon-source.png --output src-tauri/icons
@@ -13,10 +14,19 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "public" / "gchat_icon.png"
+IOS_ICON = ROOT / "public" / "gchat_icon_ios.png"
 BUILD = ROOT / "build"
 ICONS = BUILD / "icons"
 TAURI_ICONS = ROOT / "src-tauri" / "icons"
 NAVY = (11, 16, 32, 255)
+BLACK = (0, 0, 0, 255)
+
+
+def make_ios_icon(src: Image.Image) -> Image.Image:
+    """Use an opaque black tile so iOS does not supply a white icon background."""
+    icon = Image.new("RGBA", src.size, BLACK)
+    icon.alpha_composite(src)
+    return icon
 
 
 def make_desktop_icon(src: Image.Image, size: int) -> Image.Image:
@@ -31,6 +41,10 @@ def make_desktop_icon(src: Image.Image, size: int) -> Image.Image:
 def main() -> None:
     img = Image.open(SRC).convert("RGBA")
     print(f"source {SRC} size={img.size} bytes={SRC.stat().st_size}")
+
+    ios_icon = make_ios_icon(img)
+    ios_icon.save(IOS_ICON, format="PNG", optimize=True)
+    print(f"wrote {IOS_ICON.relative_to(ROOT)} ({IOS_ICON.stat().st_size} bytes)")
 
     TAURI_ICONS.mkdir(parents=True, exist_ok=True)
     master = make_desktop_icon(img, 1024)

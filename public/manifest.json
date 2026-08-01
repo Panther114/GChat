@@ -10,7 +10,7 @@
   "orientation": "portrait-primary",
   "icons": [
     {
-      "src": "/gchat_icon.png?v=20260727-v136",
+      "src": "/gchat_icon_ios.png",
       "sizes": "1254x1254",
       "type": "image/png",
       "purpose": "any maskable"

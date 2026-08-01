@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_CACHE = 'gchat-pwa-v11';
+const APP_CACHE = 'gchat-pwa-v12';
 const APP_SHELL_ASSETS = [
   '/',
   '/index.html',
@@ -14,6 +14,7 @@ const APP_SHELL_ASSETS = [
   '/app.js',
   '/socket.io/socket.io.js',
   '/gchat_icon.png',
+  '/gchat_icon_ios.png',
   '/gchat_icon_light.png',
   '/favicon.png',
 ];
@@ -139,8 +140,8 @@ self.addEventListener('push', (event) => {
   const totalUnreadCount = Math.max(0, Number(payload.totalUnreadCount) || 0);
   const notificationPromise = self.registration.showNotification(payload.title || 'GChat', {
     body: typeof payload.body === 'string' && payload.body ? payload.body : getGenericNotificationBody(totalUnreadCount),
-    icon: '/gchat_icon.png',
-    badge: '/gchat_icon.png',
+    icon: '/gchat_icon_ios.png',
+    badge: '/gchat_icon_ios.png',
     tag: payload.tag || 'gchat-unread',
     renotify: true,
     data: {

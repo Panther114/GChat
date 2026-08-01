@@ -37,6 +37,15 @@
     return next;
   }
 
+  function syncThemeImages(root) {
+    const target = root || document.documentElement;
+    const isLight = target.dataset.theme === 'light';
+    document.querySelectorAll('[data-dark-src][data-light-src]').forEach((image) => {
+      const nextSrc = isLight ? image.dataset.lightSrc : image.dataset.darkSrc;
+      if (nextSrc && image.getAttribute('src') !== nextSrc) image.src = nextSrc;
+    });
+  }
+
   function applyTheme(preference, root) {
     const target = root || document.documentElement;
     const selected = ['system', 'dark', 'light'].includes(preference) ? preference : 'system';
@@ -47,6 +56,7 @@
     target.classList.add('theme-switching');
     target.dataset.theme = resolved;
     target.dataset.themePreference = selected;
+    syncThemeImages(target);
     const meta = document.querySelector('meta[name="theme-color"]');
     if (meta) meta.content = resolved === 'light' ? '#ffffff' : '#0a0a0a';
     try {
@@ -116,6 +126,7 @@
     }
   })();
   applyTheme(cachedTheme || initialSettings.theme || 'light');
+  document.addEventListener('DOMContentLoaded', () => syncThemeImages(), { once: true });
   matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
     if (document.documentElement.dataset.themePreference === 'system') applyTheme('system');
   });
