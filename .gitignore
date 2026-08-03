@@ -27,3 +27,6 @@ src-tauri/icons/*
 electron/*.bundle.cjs
 release/*
 !release/.gitkeep
+
+src-desktop-win/target/
+

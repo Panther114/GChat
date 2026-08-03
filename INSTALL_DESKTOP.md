@@ -1,35 +1,45 @@
 # Gchat Desktop for Windows and macOS
 
-Gchat Desktop is a **memory-optimized Tauri 2 / system-webview** shell for the hosted application at `https://gchat.up.railway.app`. Browser and desktop share the same HTML, CSS, JavaScript, APIs, encryption, and account data.
+## Windows production: thin WebView2 shell
 
-Windows uses Evergreen **WebView2** (not bundled Chromium). macOS uses system **WKWebView**. v1.3.7 adds low-end device mode, a capped V8 heap, and disabled unused browser features so steady desktop RSS stays below the unoptimized WebView2 baseline and far below a full Electron/Chromium shell.
+Windows packages use a **non-Tauri thin native host** (`src-desktop-win`, wry/tao) over the system **WebView2** runtime. It is not Electron/Chromium and not the full Tauri plugin stack.
+
+Key behaviors:
+
+- Loads only `https://gchat.up.railway.app`
+- Full `window.electronAPI` bridge (tray, notifications, badges, autostart, clipboard, offline retry, updates)
+- **Tray-hide unloads the SPA** into a tiny placeholder page to free WebView2/JS heap while the process stays in the tray
+- Restoring from tray reloads the hosted app (session cookies remain in the WebView2 profile)
+- Memory-oriented WebView2 flags (`max-old-space-size=192`, unused features disabled)
+- Installer ~1 MiB NSIS (`Gchat_1.3.7_x64-setup.exe`)
+
+## macOS: Tauri / WKWebView fallback
+
+macOS continues to use **Tauri 2 + WKWebView** (`npm run build:mac`). Same hosted UI and bridge contract.
 
 ## Install
 
-Download the newest stable package from the GitHub Release matching this repo version (for example **v1.3.7**):
+Download the GitHub Release for **v1.3.7**:
 
-- **Windows:** run the x64 `Gchat_*_x64-setup.exe` installer (branded Gchat icon).
-- **macOS:** open the universal `.dmg` and drag **Gchat** into Applications (Apple Silicon + Intel).
+- **Windows:** `Gchat_1.3.7_x64-setup.exe`
+- **macOS:** universal `.dmg` from the Tauri build path when published
 
-Users upgrading from an Electron package should install the newest Tauri package and sign in once; membership-scoped server escrow restores group encryption keys and history. Local-only preferences may reset when the shell profile path changes.
-
-### Code signing (current limitation)
-
-Packages are **not** OS code-signed or notarized yet (no Apple/Windows developer certificate in CI). First launch may require:
-
-- Windows SmartScreen → **More info → Run anyway**
-- macOS → **System Settings → Privacy & Security** → allow Gchat
-
-Updater artifacts are still **Tauri minisign-signed** via `TAURI_SIGNING_PRIVATE_KEY` so in-app updates verify integrity.
+First launch may require SmartScreen / Privacy approval (unsigned packages).
 
 ## Build
 
-Install Node.js 20+ and the stable Rust toolchain on the target OS:
+### Windows (production thin shell)
 
 ```bash
 npm ci --include=dev
 npm run build:win
 ```
+
+Requires Rust stable and NSIS (`makensis`). Output:
+
+`src-desktop-win/target/release/bundle/Gchat_1.3.7_x64-setup.exe`
+
+### macOS (Tauri fallback)
 
 ```bash
 npm ci --include=dev
@@ -37,33 +47,16 @@ rustup target add aarch64-apple-darwin x86_64-apple-darwin
 npm run build:mac
 ```
 
-Bundles land under `src-tauri/target/.../release/bundle/`. Pushing a git tag `v*` that matches `package.json` runs `.github/workflows/build-desktop.yml`: verify → Windows + macOS builds → publish GitHub Release with installers and `latest.json`.
+### Optional paths (not production Windows)
 
-### Optional Electron path (not production)
-
-An Electron packaging path remains available only for experiments (`npm run build:win:electron`). It is **not** the production Windows shell: Chromium RSS is substantially higher than WebView2.
+- `npm run build:win:tauri` — prior Tauri NSIS path
+- `npm run build:win:electron` — Chromium (higher RAM; experimental only)
 
 ## Desktop behavior
 
-- Loads only the production hosted service; no local chat server or Chromium is packaged.
-- Persists cookies, storage, cache, and IndexedDB in the system webview profile.
-- Tray: left-click restores/focuses (or hides when already frontmost); right-click menu (Open, Check for Updates, Quit).
-- Close and minimize both hide to tray (no taskbar entry while hidden).
-- Native notifications, unread badges, single-instance focus, external links, attachment clipboard, optional launch-at-sign-in.
-- Auto-update checks GitHub Releases after startup and every 30 minutes (not Railway).
-- **Settings → Updates:** in-app Check for updates, status UI, install/restart or open release page.
-- Native bridge IPC is ACL-limited to the official hosted origin plus the bundled offline page.
-- WebView2 memory flags: low-end device mode, `--max-old-space-size=256`, disabled unused features (WebGPU, TranslateUI, etc.).
-
-## Troubleshooting
-
-| Problem | Resolution |
-|---|---|
-| Windows blocks the installer | **More info → Run anyway** until an Authenticode certificate is configured. |
-| Installer/tray icon looks blank | Install **v1.3.6+** (navy branded icon). Uninstall older builds first. |
-| Tray click does nothing | Use **v1.3.6+**. Left-click should restore; right-click opens the menu with **Open Gchat**. |
-| macOS blocks first launch | Approve Gchat in **System Settings → Privacy & Security**. |
-| Connection-recovery screen | Confirm network access to `gchat.up.railway.app`, then **Retry connection**. |
-| Notifications do not appear | Enable Gchat notifications in OS settings. |
-| Second launch focuses existing window | Intended single-instance behavior. |
-| Old Electron install remains | Uninstall Electron Gchat, install the newest Tauri GitHub Release. Hosted accounts stay intact. |
+- Hosted production service only
+- Tray: left-click restore/hide; menu Open / Check for Updates / Quit
+- Close hides to tray (Windows thin shell also suspends SPA HTML)
+- Settings → Updates in-app check UI
+- Single-instance lock
+- External links open in the default browser

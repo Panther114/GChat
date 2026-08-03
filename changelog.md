@@ -6,11 +6,12 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ## v1.3.7
 
-- Kept **Tauri 2 + system WebView2 / WKWebView** as the production desktop shell (no Chromium) and applied **memory-oriented WebView2 flags** (low-end device mode, V8 `--max-old-space-size=256`, disabled unused browser features) so steady desktop RSS is below the unoptimized WebView2 baseline and far below Electron.
-- Electron packaging remains optional only (`build:win:electron`); production `build:win` / `build:mac` use Tauri.
-- Added Settings → **Updates** in-app check-for-updates UI (status states, install/restart, open release page) wired through the Tauri bridge; browser sessions hide the control.
-- Removed the desktop mouse-follow **light sphere** / pointer glow and related CSS variable listeners.
-- Bumped product version to **1.3.7**, packaging tests/CI/docs, and asset cache-bust to v137.
+- **Windows production desktop** is a new **non-Tauri thin WebView2 host** (`src-desktop-win`, wry/tao): same hosted UI and `window.electronAPI` bridge, ~1 MiB NSIS installer, no Chromium, no Tauri plugin runtime.
+- **Tray-hide suspends the SPA** to a tiny placeholder page (frees WebView2/JS heap) and reloads the hosted app on restore; session cookies stay in the WebView2 profile.
+- **macOS** keeps Tauri 2 / WKWebView as the fallback packaging path (`npm run build:mac`).
+- Settings → **Updates** in-app check-for-updates UI; browser sessions hide the control.
+- Removed the desktop mouse-follow **light sphere** / pointer glow.
+- Bumped product version to **1.3.7** and asset cache-bust to v137.
 
 ## v1.3.6
 

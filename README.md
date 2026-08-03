@@ -4,7 +4,7 @@ Gchat is a client-side encrypted group chat application built with Node.js, Expr
 
 The hosted web app is the primary product. The desktop app is a native system-webview shell that loads the hosted Railway deployment.
 
-Current version: **v1.3.7**
+Current version: **v1.3.7** (Windows: thin WebView2 shell; macOS: Tauri/WKWebView)
 
 ---
 
@@ -39,13 +39,12 @@ Current version: **v1.3.7**
 
 ### Desktop Shell
 
-- Memory-optimized Tauri 2 shell (WebView2 on Windows, WKWebView on macOS)
+- **Windows:** thin non-Tauri WebView2 host (`src-desktop-win`) with tray SPA suspend for lower idle RAM
+- **macOS:** Tauri 2 / WKWebView fallback
 - Hosted UI shared exactly with the browser version
-- System tray support (hide on close/minimize)
-- Native OS notifications
-- Taskbar unread badge and taskbar flash
-- Optional launch-at-startup
-- In-app Settings update check + signed GitHub Releases auto-update
+- System tray support (hide on close/minimize; Windows unloads SPA while hidden)
+- Native OS notifications, badges, optional launch-at-startup
+- In-app Settings update check
 - No bundled Chromium in production packages
 
 ---
@@ -87,7 +86,7 @@ Most product updates are delivered through the hosted web app. Native desktop up
 | Email delivery | Logto Cloud M2M API |
 | Encryption | Web Crypto API, AES-256-GCM, HKDF-SHA-256 |
 | Frontend | HTML, CSS, vanilla JavaScript |
-| Desktop | Tauri 2, WebView2 (memory-optimized), WKWebView |
+| Desktop | Windows thin wry/WebView2; macOS Tauri/WKWebView |
 | Hosting | Railway |
 
 ---

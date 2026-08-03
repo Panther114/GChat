@@ -11,20 +11,21 @@
     "build:web": "node scripts/build-web.js",
     "migrate:group-invite-codes": "node scripts/migrate-group-invite-codes.js",
     "purge:pre-escrow-groups": "node scripts/purge-pre-escrow-groups.js",
-    "lint": "eslint server.js src/server src-tauri/src/bridge.js electron scripts test",
+    "lint": "eslint server.js src/server src-tauri/src/bridge.js src-desktop-win/src/bridge.js electron scripts test",
     "test": "node --test test/security.test.js test/web-crypto.test.js test/integration.test.js test/electron-runtime.test.js test/desktop-packaging.test.js",
     "test:unit": "node --test test/security.test.js test/web-crypto.test.js test/electron-runtime.test.js",
     "test:integration": "node --test test/integration.test.js",
     "test:e2e": "playwright test",
     "verify": "npm run lint && npm run build:web && npm test",
-    "desktop": "tauri dev",
-    "desktop:dev": "tauri dev",
-    "test:desktop": "cargo test --manifest-path src-tauri/Cargo.toml",
-    "build:win": "tauri build --bundles nsis",
+    "desktop": "cargo run --manifest-path src-desktop-win/Cargo.toml",
+    "desktop:dev": "cargo run --manifest-path src-desktop-win/Cargo.toml",
+    "desktop:mac": "tauri dev",
+    "test:desktop": "cargo test --manifest-path src-desktop-win/Cargo.toml && cargo test --manifest-path src-tauri/Cargo.toml",
+    "build:win": "node scripts/build-win-thin.js",
     "build:mac": "tauri build --target universal-apple-darwin --bundles app,dmg",
     "build:linux": "tauri build --bundles appimage,deb",
-    "build:win:electron": "node scripts/build-electron-main.js && node scripts/ensure-electron-builder.js && electron-builder --win --publish never",
-    "build:mac:electron": "node scripts/build-electron-main.js && node scripts/ensure-electron-builder.js && electron-builder --mac --publish never"
+    "build:win:tauri": "tauri build --bundles nsis",
+    "build:win:electron": "node scripts/build-electron-main.js && node scripts/ensure-electron-builder.js && electron-builder --win --publish never"
   },
   "engines": {
     "node": ">=18.0.0"

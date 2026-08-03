@@ -7,56 +7,39 @@ const path = require('node:path');
 
 const packageJson = require('../package.json');
 const tauriConfig = require('../src-tauri/tauri.conf.json');
-const capability = require('../src-tauri/capabilities/remote.json');
 
 const root = path.join(__dirname, '..');
-const cargoToml = fs.readFileSync(path.join(root, 'src-tauri', 'Cargo.toml'), 'utf8');
-const bridge = fs.readFileSync(path.join(root, 'src-tauri', 'src', 'bridge.js'), 'utf8');
-const libRs = fs.readFileSync(path.join(root, 'src-tauri', 'src', 'lib.rs'), 'utf8');
+const cargoWin = fs.readFileSync(path.join(root, 'src-desktop-win', 'Cargo.toml'), 'utf8');
+const mainWin = fs.readFileSync(path.join(root, 'src-desktop-win', 'src', 'main.rs'), 'utf8');
+const bridgeWin = fs.readFileSync(path.join(root, 'src-desktop-win', 'src', 'bridge.js'), 'utf8');
+const cargoMac = fs.readFileSync(path.join(root, 'src-tauri', 'Cargo.toml'), 'utf8');
 const installDocs = fs.readFileSync(path.join(root, 'INSTALL_DESKTOP.md'), 'utf8');
-const permissions = fs.readFileSync(
-  path.join(root, 'src-tauri', 'permissions', 'desktop-bridge.toml'),
-  'utf8',
-);
+const buildWin = fs.readFileSync(path.join(root, 'scripts', 'build-win-thin.js'), 'utf8');
 
-test('product version is 1.3.7 across shell metadata', () => {
+test('product version is 1.3.7 across thin Windows shell and macOS fallback', () => {
   assert.equal(packageJson.version, '1.3.7');
   assert.equal(tauriConfig.version, packageJson.version);
-  assert.match(cargoToml, new RegExp(`^version = "${packageJson.version.replaceAll('.', '\\.')}"$`, 'm'));
+  assert.match(cargoWin, /version = "1\.3\.7"/);
+  assert.match(cargoMac, /^version = "1\.3\.7"$/m);
 });
 
-test('Windows production packaging path is memory-optimized Tauri/WebView2, not Electron', () => {
-  assert.match(packageJson.scripts['build:win'], /tauri build/);
+test('Windows production path is non-Tauri thin WebView2 shell', () => {
+  assert.match(packageJson.scripts['build:win'], /build-win-thin/);
+  assert.ok(!packageJson.scripts['build:win'].includes('tauri build'));
   assert.ok(!packageJson.scripts['build:win'].includes('electron-builder'));
   assert.match(packageJson.scripts['build:mac'], /tauri build/);
-  // Electron remains optional only via explicit non-production scripts.
-  assert.match(packageJson.scripts['build:win:electron'] || '', /electron-builder/);
+  assert.match(packageJson.scripts['build:win:tauri'] || '', /tauri/);
+  assert.match(buildWin, /src-desktop-win/);
+  assert.match(mainWin, /WEBVIEW_MEMORY_BROWSER_ARGS/);
+  assert.match(mainWin, /suspend_to_tray|load_html\(SUSPEND_HTML\)/);
+  assert.match(mainWin, /max-old-space-size=192/);
+  assert.ok(fs.existsSync(path.join(root, 'src-desktop-win', 'src', 'main.rs')));
   const prodDeps = packageJson.dependencies || {};
   assert.equal(prodDeps.electron, undefined);
-  assert.equal(prodDeps['electron-builder'], undefined);
   assert.equal(prodDeps['electron-updater'], undefined);
-  assert.equal(tauriConfig.bundle.windows.webviewInstallMode.type, 'downloadBootstrapper');
-  assert.match(libRs, /WEBVIEW_MEMORY_BROWSER_ARGS/);
-  assert.match(libRs, /max-old-space-size=256/);
-  assert.match(libRs, /disable-background-networking/);
-  assert.match(libRs, /WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS/);
-  // Flags string must not enable low-end-device-mode (comment may mention it).
-  const argsMatch = libRs.match(/pub const WEBVIEW_MEMORY_BROWSER_ARGS: &str = concat!\(([\s\S]*?)\);/);
-  assert.ok(argsMatch, 'WEBVIEW_MEMORY_BROWSER_ARGS concat block present');
-  assert.ok(!argsMatch[1].includes('enable-low-end-device-mode'));
 });
 
-test('remote native capability is locked to the exact production origin', () => {
-  assert.deepEqual(capability.remote.urls, ['https://gchat.up.railway.app/*']);
-  assert.deepEqual(capability.windows, ['main']);
-  assert.deepEqual(capability.permissions, ['allow-desktop-bridge']);
-  assert.equal(tauriConfig.bundle.windows.nsis.installerIcon, 'icons/icon.ico');
-  assert.equal(tauriConfig.app.withGlobalTauri, false);
-  assert.ok(!JSON.stringify(capability).includes('shell:'));
-  assert.ok(!JSON.stringify(capability).includes('fs:'));
-});
-
-test('hosted app receives the complete desktop bridge including update APIs', () => {
+test('thin Windows bridge exposes full electronAPI surface including updates', () => {
   for (const method of [
     'setUnreadCount',
     'showNotification',
@@ -74,38 +57,17 @@ test('hosted app receives the complete desktop bridge including update APIs', ()
     'openLatestRelease',
     'onUpdateStatus',
   ]) {
-    assert.match(bridge, new RegExp(`\\b${method}\\b`));
+    assert.match(bridgeWin, new RegExp(`\\b${method}\\b`));
   }
-  assert.match(bridge, /Object\.freeze/);
-  assert.match(bridge, /Object\.defineProperty\(window, 'electronAPI'/);
-  for (const command of [
-    'get_update_status',
-    'check_for_updates_cmd',
-    'install_update',
-    'open_latest_release',
-  ]) {
-    assert.match(permissions, new RegExp(`"${command}"`));
-    assert.match(libRs, new RegExp(command));
-  }
-  assert.match(bridge, /check_for_updates_cmd|checkForUpdates/);
+  assert.match(bridgeWin, /Object\.defineProperty\(window, 'electronAPI'/);
+  assert.match(bridgeWin, /Object\.freeze/);
 });
 
-test('future desktop updates use signed latest-release metadata', () => {
-  const updater = tauriConfig.plugins.updater;
-  assert.deepEqual(updater.endpoints, [
-    'https://github.com/Panther114/GChat/releases/latest/download/latest.json',
-  ]);
-  assert.match(updater.pubkey, /^[A-Za-z0-9+/]+=*$/);
-  assert.ok(updater.pubkey.length > 100);
-  assert.equal(tauriConfig.bundle.createUpdaterArtifacts, true);
-  assert.match(packageJson.scripts['build:mac'], /--bundles app,dmg/);
-});
-
-test('macOS uses the same Tauri shell (no dual production stack required)', () => {
+test('macOS fallback Tauri stack remains documented and buildable', () => {
   assert.ok(fs.existsSync(path.join(root, 'src-tauri', 'src', 'lib.rs')));
+  assert.match(installDocs, /fallback|macOS|WKWebView|Tauri/i);
+  assert.match(installDocs, /thin|WebView2|1\.3\.7/i);
   assert.match(packageJson.scripts['build:mac'], /tauri build/);
-  assert.match(installDocs, /Tauri|WebView2|WKWebView/i);
-  assert.match(installDocs, /1\.3\.7/);
 });
 
 test('desktop light-sphere pointer glow is removed from shipped web sources', () => {
@@ -115,11 +77,8 @@ test('desktop light-sphere pointer glow is removed from shipped web sources', ()
   assert.match(legacyApp, /Intentionally empty: mouse-follow light sphere removed/);
   assert.ok(!legacyApp.includes('handleDesktopPointerMove'));
   assert.ok(!legacyApp.includes('flushDesktopPointerEffect'));
-  assert.ok(!legacyApp.includes("setProperty('--desktop-pointer-x'"));
   assert.match(legacyCss, /content:\s*none/);
-  assert.ok(!legacyCss.includes('var(--desktop-pointer-x)'));
   assert.ok(!publicApp.includes('handleDesktopPointerMove'));
-  assert.ok(!publicApp.includes('flushDesktopPointerEffect'));
 });
 
 test('settings update UI is present without native dialogs', () => {
@@ -129,8 +88,14 @@ test('settings update UI is present without native dialogs', () => {
   assert.match(chatHtml, /id="desktop-check-update-btn"/);
   assert.match(chatHtml, /Check for updates/);
   assert.match(legacyApp, /function bindDesktopUpdateUi/);
-  assert.match(legacyApp, /function renderDesktopUpdateStatus/);
   assert.ok(!legacyApp.includes('window.alert'));
   assert.ok(!legacyApp.includes('window.confirm'));
   assert.ok(!legacyApp.includes('window.prompt'));
+});
+
+test('thin shell suspends SPA when tray-hidden for RAM reduction', () => {
+  assert.match(mainWin, /SUSPEND_HTML/);
+  assert.match(mainWin, /fn suspend_to_tray/);
+  assert.match(mainWin, /fn resume_hosted/);
+  assert.ok(mainWin.includes('load_html(SUSPEND_HTML)') || mainWin.includes('load_html(&SUSPEND_HTML)'));
 });

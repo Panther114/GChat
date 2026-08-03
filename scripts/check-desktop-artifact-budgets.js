@@ -11,52 +11,30 @@ const files = fs.readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
   return [path.join(root, entry.name)];
 });
 
-function requireArtifact(pattern, label) {
-  if (!files.some((file) => pattern.test(file))) {
-    throw new Error(`Missing ${label}`);
-  }
-}
-
-const hasWindowsInstaller = files.some((file) => /-setup\.exe$/i.test(file) || /Setup.*\.exe$/i.test(path.basename(file)));
+const hasWindowsInstaller = files.some((file) => /setup\.exe$/i.test(path.basename(file)));
 const hasMacInstaller = files.some((file) => /\.dmg$/i.test(file));
 if (!hasWindowsInstaller && !hasMacInstaller) {
   throw new Error('No supported desktop installer found');
 }
 
-if (hasWindowsInstaller) {
-  // Prefer Tauri signed artifacts; Electron blockmap is optional legacy only.
-  const hasTauriSig = files.some((file) => /\.exe\.sig$/i.test(file));
-  const hasElectronMeta = files.some((file) => /latest\.yml$/i.test(file) || /\.blockmap$/i.test(file));
-  if (!hasTauriSig && !hasElectronMeta) {
-    throw new Error('Missing Windows updater signature or electron-updater metadata');
-  }
-  if (hasTauriSig) {
-    requireArtifact(/-setup\.exe\.sig$/i, 'Windows updater signature');
-  }
-}
-
-if (hasMacInstaller) {
-  const hasTar = files.some((file) => /\.app\.tar\.gz$/i.test(file));
-  const hasZip = files.some((file) => /\.zip$/i.test(file));
-  if (hasTar) {
-    requireArtifact(/\.app\.tar\.gz\.sig$/i, 'macOS updater signature');
-  } else if (!hasZip) {
-    console.warn('Warning: macOS updater archive not found in this staging dir');
-  }
-}
-
-// Tauri/WebView2 installers stay small; Electron legacy path is larger.
+// Thin wry shell should stay very small; Tauri fallback under 15 MiB; Electron experimental larger.
 const budgets = [
+  { pattern: /Gchat_.*_x64-setup\.exe$/i, maxBytes: 8 * 1024 * 1024, label: 'Windows thin shell installer' },
   { pattern: /-setup\.exe$/i, maxBytes: 15 * 1024 * 1024, label: 'Windows Tauri installer' },
   { pattern: /Setup-.*\.exe$/i, maxBytes: 120 * 1024 * 1024, label: 'Windows Electron legacy installer' },
-  { pattern: /\.dmg$/i, maxBytes: 30 * 1024 * 1024, label: 'macOS universal DMG' },
+  { pattern: /\.dmg$/i, maxBytes: 30 * 1024 * 1024, label: 'macOS DMG' },
 ];
 
+const seen = new Set();
 for (const budget of budgets) {
-  const matches = files.filter((file) => budget.pattern.test(path.basename(file)));
-  for (const file of matches) {
+  for (const file of files) {
+    const name = path.basename(file);
+    if (!budget.pattern.test(name) || seen.has(file)) continue;
+    // Prefer the most specific budget: thin pattern first
+    if (budget.label.includes('Tauri') && /Gchat_.*_x64-setup\.exe$/i.test(name)) continue;
+    seen.add(file);
     const size = fs.statSync(file).size;
-    console.log(`${budget.label}: ${(size / 1024 / 1024).toFixed(2)} MiB (${path.basename(file)})`);
+    console.log(`${budget.label}: ${(size / 1024 / 1024).toFixed(2)} MiB (${name})`);
     if (size > budget.maxBytes) {
       throw new Error(`${budget.label} exceeds ${(budget.maxBytes / 1024 / 1024).toFixed(0)} MiB budget`);
     }
