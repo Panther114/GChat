@@ -4229,44 +4229,35 @@ body.chat-body.mobile-layout .sidebar-overlay {
     -webkit-tap-highlight-color: rgba(108, 99, 255, 0.1);
   }
 }
-body.electron-desktop-effects {
-  --desktop-pointer-x: 50vw;
-  --desktop-pointer-y: 50vh;
-  --desktop-panel-shift-x: 0px;
-  --desktop-panel-shift-y: 0px;
-}
 body.electron-desktop-effects::before {
-  content: "";
-  position: fixed;
-  left: 0;
-  top: 0;
-  width: 280px;
-  height: 280px;
-  border-radius: 50%;
-  pointer-events: none;
-  background:
-    radial-gradient(
-      circle,
-      var(--desktop-pointer-glow) 0%,
-      transparent 72%);
-  opacity: .85;
-  z-index: 2;
-  transform: translate3d(calc(var(--desktop-pointer-x) - 140px), calc(var(--desktop-pointer-y) - 140px), 0);
-  will-change: transform;
-  transition: opacity .2s ease;
+  content: none;
+  display: none;
 }
-body.electron-desktop-effects .sidebar,
-body.electron-desktop-effects .chat-panel,
-body.electron-desktop-effects .right-panel {
-  transform: translate3d(var(--desktop-panel-shift-x), var(--desktop-panel-shift-y), 0);
-  transition: transform .18s ease-out;
-  will-change: transform;
+.profile-update-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+  width: 100%;
 }
-body.electron-desktop-effects .chat-panel {
-  transform: translate3d(calc(var(--desktop-panel-shift-x) * -1), calc(var(--desktop-panel-shift-y) * -1), 0);
+.profile-update-status {
+  font-size: 0.92rem;
+  line-height: 1.35;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.72));
+  max-width: 100%;
 }
-body.electron-desktop-effects .right-panel {
-  transform: translate3d(calc(var(--desktop-panel-shift-x) * .75), calc(var(--desktop-panel-shift-y) * .75), 0);
+.profile-update-status[data-state=error] {
+  color: var(--danger, #ff6b6b);
+}
+.profile-update-status[data-state=up-to-date],
+.profile-update-status[data-state=ready] {
+  color: var(--success, #5bd67a);
+}
+.profile-update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
 }
 @media (max-width: 480px) {
   .auth-card {
@@ -4516,7 +4507,6 @@ body.electron-desktop-effects .right-panel {
   --wallpaper-blur: 0px;
   --wallpaper-overlay-opacity: 0;
   --discord-scrollbar-thumb: #2a2a2a;
-  --desktop-pointer-glow: rgba(255, 255, 255, 0.16);
 }
 :root[data-theme=light] {
   color-scheme: light;
@@ -4584,7 +4574,6 @@ body.electron-desktop-effects .right-panel {
   --brand-gradient-start: #0a0a0a;
   --brand-gradient-end: #525252;
   --discord-scrollbar-thumb: #c4c4c4;
-  --desktop-pointer-glow: rgba(0, 0, 0, 0.12);
 }
 
 /* src/styles/themes.css */

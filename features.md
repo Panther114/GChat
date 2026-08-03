@@ -138,21 +138,24 @@ This document tracks all implemented features in the Gchat application. All feat
 - [x] Static file serving from /public directory
 - [x] Trust proxy configuration for Railway
 
-## Desktop App (Tauri 2)
-- [x] Tauri native shell (`src-tauri/src/lib.rs`) — WebView window, tray, IPC, updater
-- [x] Hosted UI bridge (`src-tauri/src/bridge.js`) — `window.electronAPI` compatibility surface
-- [x] Exact-origin ACL (`allow-desktop-bridge`) for remote Railway origin + offline recovery page
+## Desktop App (Electron primary, Tauri macOS fallback)
+- [x] Electron native shell (`electron/main.js`) — window, tray, IPC, updater
+- [x] Hosted UI bridge (`electron/preload.js`) — `window.electronAPI` surface
+- [x] Memory-oriented Chromium flags (WebGPU off, capped V8 heap, reduced background networking)
 - [x] System tray icon with left-click restore/focus and right-click menu
 - [x] Hide-to-tray on window close and minimize (app keeps running in background)
 - [x] Single-instance lock (second launch focuses existing window)
-- [x] Native OS notifications via the notification plugin
+- [x] Native OS notifications
 - [x] Notification focus routes to the relevant group
 - [x] Dock/taskbar unread badge via native shell
 - [x] Auto-launch at system startup (settings toggle)
-- [x] Signed auto-updater via GitHub Releases (`latest.json`)
+- [x] electron-updater via GitHub Releases (`latest.yml` / `latest-mac.yml`)
+- [x] Settings → Updates in-app check-for-updates UI (status + install/open release)
 - [x] Open external links in the default browser
 - [x] Windows NSIS installer with Gchat installer icon
 - [x] Universal macOS `.app` / `.dmg` builds (same hosted behavior as Windows)
+- [x] Optional Tauri 2 / WKWebView macOS fallback (`src-tauri/`, `build:mac:tauri`)
+- [x] Desktop light-sphere mouse hover effect removed (v1.3.7)
 
 ## Additional Features
 - [x] Audio notification sound (Web Audio API)

@@ -4,6 +4,14 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## v1.3.7
+
+- Migrated the **primary desktop shell** from Tauri 2 / WebView2 back to a memory-tuned **Electron** host (Windows + macOS production path) with the same hosted UI and `window.electronAPI` bridge parity (tray, hide-to-tray, notifications, badges, autostart, clipboard, offline retry, single-instance, GitHub updater).
+- Kept `src-tauri` as a documented **macOS Tauri fallback** (`npm run build:mac:tauri`) when Electron packaging is unavailable.
+- Added Settings → **Updates** in-app check-for-updates UI (status states, install/restart, open release page) with pure update status helpers and unit tests; browser sessions hide the control.
+- Removed the desktop mouse-follow **light sphere** / pointer glow and related CSS variables listeners.
+- Bumped product version to **1.3.7**, Electron packaging/CI, and asset cache-bust to v137.
+
 ## v1.3.6
 
 - Fixed Windows NSIS installer branding (`installerIcon`) and regenerated desktop icons as a navy square + white mark so tray, taskbar, and setup.exe stay visible.

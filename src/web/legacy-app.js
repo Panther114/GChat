@@ -2682,14 +2682,7 @@ let userManagementSummary = null;
 let aiMessageRequestInFlight = false;
 let whisperPickerMode = null;
 let pendingWhisperCommandStart = null;
-let desktopPointerEffectFrame = 0;
-let desktopPointerEffectBound = false;
-const desktopPointerEffectState = {
-  pointerX: window.innerWidth / 2,
-  pointerY: window.innerHeight / 2,
-  shiftX: 0,
-  shiftY: 0,
-};
+// Light-sphere / pointer-follow glow permanently removed in v1.3.7 (no mousemove CSS vars).
 const composerTokens = {
   whisper: null,
   hashtag: null,
@@ -2986,9 +2979,6 @@ const VIEWPORT_SYNC_DEBOUNCE_MS = 45;
 const MOBILE_KEYBOARD_FOCUS_DELAY_MS = 80;
 const WHISPER_COMMAND_PENDING_PATTERN = /(?:^|\s)(\/w\s)$/;
 const WHISPER_COMMAND_TARGET_PATTERN = /(?:^|\s)\/w\s+([^\s]+)\s$/;
-const DESKTOP_POINTER_CENTER_OFFSET = 0.5;
-const DESKTOP_POINTER_SHIFT_MULTIPLIER = 10;
-const DESKTOP_POINTER_SHIFT_PRECISION = 100;
 let mobileViewState = 'list';
 let viewportHeightSyncFrame = 0;
 let viewportHeightSyncTimer = 0;
@@ -3080,60 +3070,18 @@ function syncWhisperPickerStatus(recipientCount = getActiveWhisperRecipientIds()
   status.textContent = recipientCount === 1 ? '1 recipient selected' : `${recipientCount} recipients selected`;
 }
 
+/** Desktop chrome class only — no pointer light-sphere or parallax. */
 function setDesktopEffectsEnabled(enabled) {
   document.body.classList.toggle('electron-desktop-effects', !!enabled);
-  if (!enabled) {
-    document.body.style.setProperty('--desktop-panel-shift-x', '0px');
-    document.body.style.setProperty('--desktop-panel-shift-y', '0px');
-  }
-}
-
-function flushDesktopPointerEffect() {
-  desktopPointerEffectFrame = 0;
-  document.body.style.setProperty('--desktop-pointer-x', `${desktopPointerEffectState.pointerX}px`);
-  document.body.style.setProperty('--desktop-pointer-y', `${desktopPointerEffectState.pointerY}px`);
-  document.body.style.setProperty('--desktop-panel-shift-x', `${desktopPointerEffectState.shiftX}px`);
-  document.body.style.setProperty('--desktop-panel-shift-y', `${desktopPointerEffectState.shiftY}px`);
-}
-
-function scheduleDesktopPointerEffect() {
-  if (desktopPointerEffectFrame) return;
-  desktopPointerEffectFrame = requestAnimationFrame(flushDesktopPointerEffect);
-}
-
-function calculateDesktopPointerShift(pointerPosition, viewportSize) {
-  return Math.round((((pointerPosition / viewportSize) - DESKTOP_POINTER_CENTER_OFFSET) * DESKTOP_POINTER_SHIFT_MULTIPLIER) * DESKTOP_POINTER_SHIFT_PRECISION) / DESKTOP_POINTER_SHIFT_PRECISION;
-}
-
-function handleDesktopPointerMove(event) {
-  if (!document.body.classList.contains('electron-desktop-effects')) return;
-  // Use a 1px floor so the normalized cursor math never divides by zero during resize edge cases.
-  const width = Math.max(window.innerWidth, 1);
-  const height = Math.max(window.innerHeight, 1);
-  const pointerX = Math.max(0, Math.min(width, event.clientX));
-  const pointerY = Math.max(0, Math.min(height, event.clientY));
-  desktopPointerEffectState.pointerX = pointerX;
-  desktopPointerEffectState.pointerY = pointerY;
-  desktopPointerEffectState.shiftX = calculateDesktopPointerShift(pointerX, width);
-  desktopPointerEffectState.shiftY = calculateDesktopPointerShift(pointerY, height);
-  scheduleDesktopPointerEffect();
-}
-
-function handleDesktopPointerLeave() {
-  desktopPointerEffectState.pointerX = window.innerWidth / 2;
-  desktopPointerEffectState.pointerY = window.innerHeight / 2;
-  desktopPointerEffectState.shiftX = 0;
-  desktopPointerEffectState.shiftY = 0;
-  scheduleDesktopPointerEffect();
+  document.body.classList.remove('desktop-pointer-glow');
+  document.body.style.removeProperty('--desktop-pointer-x');
+  document.body.style.removeProperty('--desktop-pointer-y');
+  document.body.style.removeProperty('--desktop-panel-shift-x');
+  document.body.style.removeProperty('--desktop-panel-shift-y');
 }
 
 function bindDesktopPointerEffects() {
-  if (desktopPointerEffectBound || !window.electronAPI) return;
-  window.addEventListener('mousemove', handleDesktopPointerMove, { passive: true });
-  document.addEventListener('mouseleave', handleDesktopPointerLeave, { passive: true });
-  window.addEventListener('blur', handleDesktopPointerLeave, { passive: true });
-  desktopPointerEffectBound = true;
-  handleDesktopPointerLeave();
+  // Intentionally empty: mouse-follow light sphere removed in v1.3.7.
 }
 
 function setComposerShellDisabled(disabled) {
@@ -7528,6 +7476,129 @@ function openGrokModal(options = {}) {
   $('grok-prompt-input').focus();
 }
 
+function formatDesktopUpdateStatus(status) {
+  if (!status || typeof status !== 'object') {
+    return 'Check for desktop updates when connected.';
+  }
+  if (status.state === 'error') return status.error || 'Update check failed.';
+  if (status.message) return status.message;
+  switch (status.state) {
+    case 'checking':
+      return 'Checking for updates…';
+    case 'up-to-date':
+      return 'You are up to date.';
+    case 'available':
+      return status.availableVersion
+        ? `Update ${status.availableVersion} is available.`
+        : 'An update is available.';
+    case 'downloading':
+      return Number.isFinite(status.percent)
+        ? `Downloading… ${status.percent}%`
+        : 'Downloading update…';
+    case 'ready':
+      return 'Update ready to install.';
+    case 'idle':
+    default:
+      return status.currentVersion
+        ? `Version ${status.currentVersion}`
+        : 'Check for desktop updates when connected.';
+  }
+}
+
+function renderDesktopUpdateStatus(status) {
+  const row = $('desktop-update-row');
+  const statusEl = $('desktop-update-status');
+  const checkBtn = $('desktop-check-update-btn');
+  const installBtn = $('desktop-install-update-btn');
+  const releaseBtn = $('desktop-open-release-btn');
+  if (!row || !statusEl) return;
+
+  if (!window.electronAPI?.checkForUpdates) {
+    row.hidden = true;
+    return;
+  }
+
+  row.hidden = false;
+  statusEl.textContent = formatDesktopUpdateStatus(status);
+  statusEl.dataset.state = status?.state || 'idle';
+
+  if (checkBtn) {
+    checkBtn.disabled = status?.state === 'checking' || status?.state === 'downloading';
+  }
+  if (installBtn) {
+    const ready = status?.state === 'ready';
+    installBtn.hidden = !ready;
+    installBtn.disabled = !ready;
+  }
+  if (releaseBtn) {
+    const showRelease = status?.state === 'available'
+      || status?.state === 'ready'
+      || status?.state === 'error';
+    releaseBtn.hidden = !showRelease;
+  }
+}
+
+function bindDesktopUpdateUi() {
+  const row = $('desktop-update-row');
+  if (!row || !window.electronAPI?.checkForUpdates) {
+    if (row) row.hidden = true;
+    return;
+  }
+
+  row.hidden = false;
+  renderDesktopUpdateStatus({ state: 'idle' });
+
+  if (typeof window.electronAPI.getUpdateStatus === 'function') {
+    void window.electronAPI.getUpdateStatus().then((status) => {
+      renderDesktopUpdateStatus(status);
+    }).catch(() => {
+      renderDesktopUpdateStatus({ state: 'idle' });
+    });
+  }
+
+  if (typeof window.electronAPI.onUpdateStatus === 'function') {
+    window.electronAPI.onUpdateStatus((status) => {
+      renderDesktopUpdateStatus(status);
+    });
+  }
+
+  $('desktop-check-update-btn')?.addEventListener('click', async () => {
+    renderDesktopUpdateStatus({ state: 'checking', message: 'Checking for updates…' });
+    try {
+      const status = await window.electronAPI.checkForUpdates();
+      renderDesktopUpdateStatus(status || { state: 'error', error: 'No response from updater.' });
+      if (status?.state === 'up-to-date') {
+        showToast('You are up to date', 'success');
+      } else if (status?.state === 'available' || status?.state === 'ready') {
+        showToast(formatDesktopUpdateStatus(status), 'success');
+      } else if (status?.state === 'error') {
+        showToast(status.error || 'Update check failed', 'error');
+      }
+    } catch (error) {
+      const message = error?.message || 'Update check failed';
+      renderDesktopUpdateStatus({ state: 'error', error: message });
+      showToast(message, 'error');
+    }
+  });
+
+  $('desktop-install-update-btn')?.addEventListener('click', async () => {
+    try {
+      const ok = await window.electronAPI.installUpdate?.();
+      if (!ok) showToast('Install is not ready yet', 'error');
+    } catch (error) {
+      showToast(error?.message || 'Failed to install update', 'error');
+    }
+  });
+
+  $('desktop-open-release-btn')?.addEventListener('click', async () => {
+    try {
+      await window.electronAPI.openLatestRelease?.();
+    } catch (error) {
+      showToast(error?.message || 'Could not open release page', 'error');
+    }
+  });
+}
+
 function openProfileModal() {
   closeMobileActionMenu();
   void refreshAiUsageSummary();
@@ -7544,6 +7615,11 @@ function openProfileModal() {
   if (colorInput && swatch) swatch.style.background = colorInput.value;
   if (colorInput && value) value.textContent = String(colorInput.value || '').toUpperCase();
   renderProfileAiUsage();
+  if (window.electronAPI?.getUpdateStatus) {
+    void window.electronAPI.getUpdateStatus().then(renderDesktopUpdateStatus).catch(() => {});
+  } else {
+    renderDesktopUpdateStatus(null);
+  }
   $('profile-modal').hidden = false;
 }
 
@@ -7991,6 +8067,7 @@ function setupEventListeners() {
   // Profile modal
   $('sidebar-user-btn').addEventListener('click', openProfileModal);
   $('profile-close-btn').addEventListener('click', () => $('profile-modal').hidden = true);
+  bindDesktopUpdateUi();
 
   document.querySelectorAll('.modal-overlay').forEach((modal) => {
     modal.addEventListener('click', (event) => {

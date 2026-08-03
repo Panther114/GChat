@@ -1,6 +1,6 @@
 {
   "name": "Gchat",
-  "version": "1.3.6",
+  "version": "1.3.7",
   "description": "End-to-end encrypted group chat app",
   "author": "Gchat",
   "main": "server.js",
@@ -11,18 +11,25 @@
     "build:web": "node scripts/build-web.js",
     "migrate:group-invite-codes": "node scripts/migrate-group-invite-codes.js",
     "purge:pre-escrow-groups": "node scripts/purge-pre-escrow-groups.js",
-    "lint": "eslint server.js src/server src-tauri/src/bridge.js scripts test",
-    "test": "node --test test/security.test.js test/web-crypto.test.js test/integration.test.js test/desktop-packaging.test.js",
-    "test:unit": "node --test test/security.test.js test/web-crypto.test.js",
+    "lint": "eslint server.js src/server electron scripts test",
+    "test": "node --test test/security.test.js test/web-crypto.test.js test/integration.test.js test/electron-runtime.test.js test/electron-packaging.test.js test/desktop-packaging.test.js",
+    "test:unit": "node --test test/security.test.js test/web-crypto.test.js test/electron-runtime.test.js",
     "test:integration": "node --test test/integration.test.js",
     "test:e2e": "playwright test",
     "verify": "npm run lint && npm run build:web && npm test",
-    "desktop": "tauri dev",
-    "desktop:dev": "tauri dev",
-    "test:desktop": "cargo test --manifest-path src-tauri/Cargo.toml",
-    "build:win": "tauri build --bundles nsis",
-    "build:mac": "tauri build --target universal-apple-darwin --bundles app,dmg",
-    "build:linux": "tauri build --bundles appimage,deb"
+    "desktop": "electron electron/main.js",
+    "desktop:dev": "cross-env NODE_ENV=development electron electron/main.js",
+    "electron": "electron electron/main.js",
+    "electron:dev": "cross-env NODE_ENV=development electron electron/main.js",
+    "prebuild:win": "node scripts/build-electron-main.js && node scripts/ensure-electron-builder.js",
+    "prebuild:mac": "node scripts/build-electron-main.js && node scripts/ensure-electron-builder.js",
+    "prebuild:linux": "node scripts/build-electron-main.js && node scripts/ensure-electron-builder.js",
+    "build:win": "electron-builder --win",
+    "build:mac": "electron-builder --mac",
+    "build:linux": "electron-builder --linux",
+    "build:mac:tauri": "tauri build --target universal-apple-darwin --bundles app,dmg",
+    "test:desktop": "node --test test/electron-runtime.test.js test/electron-packaging.test.js test/desktop-packaging.test.js",
+    "test:desktop:tauri": "cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -30,6 +37,7 @@
   "dependencies": {
     "bcrypt": "^6.0.0",
     "better-sqlite3": "12.8.0",
+    "electron-updater": "^6.8.9",
     "express": "^4.22.2",
     "express-session": "^1.17.3",
     "socket.io": "^4.8.3",
@@ -39,9 +47,101 @@
     "@playwright/test": "^1.55.0",
     "@tauri-apps/cli": "^2.11.4",
     "cross-env": "^7.0.3",
+    "electron": "^41.0.0",
+    "electron-builder": "^25.0.0",
     "esbuild": "^0.25.0",
     "eslint": "^9.0.0",
     "socket.io-client": "^4.8.3",
     "supertest": "^7.1.4"
+  },
+  "build": {
+    "appId": "com.Gchat.app",
+    "productName": "Gchat",
+    "copyright": "Copyright © 2024-2026 Gchat",
+    "asar": true,
+    "compression": "maximum",
+    "afterPack": "scripts/after-pack.js",
+    "electronLanguages": [
+      "en-US"
+    ],
+    "extraMetadata": {
+      "main": "electron/main.bundle.cjs"
+    },
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/main.bundle.cjs",
+      "electron/updater.bundle.cjs",
+      "electron/preload.js",
+      "electron/offline.html",
+      "electron/offline.js",
+      "electron/desktop.css",
+      "public/gchat_icon.png",
+      "package.json",
+      "!**/node_modules/**/*"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "artifactName": "Gchat-Setup-${version}.${ext}",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "signAndEditExecutable": true
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Gchat",
+      "uninstallDisplayName": "Gchat ${version}",
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false
+    },
+    "mac": {
+      "artifactName": "Gchat-${version}-mac-${arch}.${ext}",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "universal"
+          ]
+        }
+      ],
+      "icon": "public/gchat_icon.png",
+      "category": "public.app-category.social-networking"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "icon": "public/gchat_icon.png",
+      "maintainer": "Gchat",
+      "category": "Network"
+    },
+    "publish": {
+      "provider": "github",
+      "releaseType": "release"
+    },
+    "npmRebuild": false
   }
 }
