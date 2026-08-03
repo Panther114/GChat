@@ -99,3 +99,23 @@ test('thin shell suspends SPA when tray-hidden for RAM reduction', () => {
   assert.match(mainWin, /fn resume_hosted/);
   assert.ok(mainWin.includes('load_html(SUSPEND_HTML)') || mainWin.includes('load_html(&SUSPEND_HTML)'));
 });
+
+test('thin shell matches tray parity: minimize-to-tray, offline recovery, safe updates', () => {
+  // Minimize and close both hide to tray
+  assert.match(mainWin, /WindowEvent::CloseRequested/);
+  assert.match(mainWin, /is_minimized/);
+  assert.match(mainWin, /suspend_to_tray/);
+  // Offline recovery page + connection timeout
+  assert.match(mainWin, /OFFLINE_HTML/);
+  assert.match(mainWin, /ShowOffline|show_offline_page/);
+  assert.match(mainWin, /schedule_connection_timeout/);
+  assert.match(mainWin, /LOAD_TIMEOUT/);
+  // Notifications must not force-focus / resume SPA
+  assert.match(mainWin, /Toast only/);
+  assert.ok(!/show-notification[\s\S]{0,400}ShowWindow/.test(mainWin));
+  // Tray check-for-updates must not auto-install
+  assert.match(mainWin, /check_updates_sync\(false\)/);
+  assert.match(mainWin, /never auto-downloads|Manual tray check only/i);
+  // install-update must report failure when status is error
+  assert.match(mainWin, /Update install failed|status\.state == "ready"/);
+});

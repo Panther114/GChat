@@ -40,12 +40,62 @@ const APP_ID: &str = "com.gchat.desktop.win";
 const MAX_UNREAD: u32 = 999;
 const MAX_CLIPBOARD_BYTES: usize = 16 * 1024 * 1024;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Suspended placeholder while tray-hidden — frees SPA heap in WebView2.
 const SUSPEND_HTML: &str = r#"<!doctype html><html><head><meta charset="utf-8">
 <title>Gchat</title>
 <style>html,body{margin:0;background:#0b1020;color:#9ab;font:14px system-ui;display:flex;align-items:center;justify-content:center;height:100%}</style>
 </head><body>Gchat is running in the tray…</body></html>"#;
+
+/// Offline recovery page (connection timeout / load failure). Bridge stays injected for retry.
+const OFFLINE_HTML: &str = r#"<!doctype html><html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Gchat Connection Required</title>
+<style>
+  html,body{margin:0;min-height:100%;background:#0b1020;color:#d7e0f2;font:15px/1.45 system-ui,sans-serif}
+  .wrap{max-width:520px;margin:0 auto;padding:48px 24px}
+  h1{font-size:1.35rem;margin:0 0 12px}
+  p{color:#9ab;margin:0 0 16px}
+  .box{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:14px 16px;margin:18px 0}
+  button{background:#4a90d9;color:#fff;border:0;border-radius:10px;padding:10px 16px;font-weight:600;cursor:pointer}
+  button:disabled{opacity:.6;cursor:default}
+  code{font-size:.9em}
+</style></head><body><div class="wrap">
+  <h1>Gchat couldn't reach the hosted server.</h1>
+  <p>This desktop build is online-only and stays locked to the official Railway deployment. Retry when your connection or the hosted service is available again.</p>
+  <div class="box">
+    <div><strong>Locked server:</strong> <code id="offline-server">https://gchat.up.railway.app</code></div>
+    <div style="margin-top:8px"><strong>Last error:</strong> <span id="offline-error">Unavailable</span></div>
+  </div>
+  <button type="button" id="retry-btn">Retry connection</button>
+</div>
+<script>
+(async function () {
+  const errEl = document.getElementById('offline-error');
+  const serverEl = document.getElementById('offline-server');
+  const btn = document.getElementById('retry-btn');
+  try {
+    const ctx = await window.electronAPI.getConnectionContext();
+    if (ctx && ctx.serverUrl) serverEl.textContent = ctx.serverUrl;
+    if (ctx && ctx.lastLoadError) {
+      const e = ctx.lastLoadError;
+      errEl.textContent = [e.errorDescription, e.errorCode].filter(Boolean).join(' · ') || 'LOAD_FAILED';
+    } else {
+      errEl.textContent = 'The hosted app did not become ready.';
+    }
+  } catch (e) {
+    errEl.textContent = (e && e.message) || 'Unavailable';
+  }
+  btn.addEventListener('click', async function () {
+    btn.disabled = true;
+    btn.textContent = 'Retrying…';
+    try { await window.electronAPI.retryConnection(); }
+    catch (_) { btn.disabled = false; btn.textContent = 'Retry connection'; }
+  });
+})();
+</script>
+</body></html>"#;
 
 const BRIDGE_JS: &str = include_str!("bridge.js");
 
@@ -69,7 +119,8 @@ enum UserEvent {
     TrayQuit,
     Ipc(String),
     UpdateStatus(UpdateStatus),
-    ShowWindow,
+    /// Navigate to offline recovery HTML (timeout / load failure).
+    ShowOffline,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -556,6 +607,9 @@ fn main() {
         }
     }));
 
+    // Connection timeout → offline recovery page if hosted app never signals ready.
+    schedule_connection_timeout(proxy.clone(), state.clone());
+
     // Background updater (check only; install on demand) after 15s then every 30m.
     {
         let proxy_up = proxy.clone();
@@ -583,8 +637,8 @@ fn main() {
                 quitting = true;
                 *control_flow = ControlFlow::Exit;
             }
-            Event::UserEvent(UserEvent::TrayOpen) | Event::UserEvent(UserEvent::ShowWindow) => {
-                resume_hosted(&window, &webview, &state);
+            Event::UserEvent(UserEvent::TrayOpen) => {
+                resume_hosted(&window, &webview, &state, &proxy);
                 let _ = window.set_skip_taskbar(false);
                 window.set_visible(true);
                 window.set_focus();
@@ -593,17 +647,18 @@ fn main() {
                 if window.is_visible() && window.is_focused() {
                     suspend_to_tray(&window, &webview, &state);
                 } else {
-                    resume_hosted(&window, &webview, &state);
+                    resume_hosted(&window, &webview, &state, &proxy);
                     let _ = window.set_skip_taskbar(false);
                     window.set_visible(true);
                     window.set_focus();
                 }
             }
             Event::UserEvent(UserEvent::TrayCheckUpdates) => {
+                // Manual tray check only reports status — never auto-downloads/spawns installer.
                 let proxy_bg = proxy.clone();
                 let state_bg = state.clone();
                 thread::spawn(move || {
-                    let status = check_updates_sync(true);
+                    let status = check_updates_sync(false);
                     if let Ok(mut slot) = state_bg.update_status.lock() {
                         *slot = status.clone();
                     }
@@ -615,6 +670,9 @@ fn main() {
                 if let Ok(mut slot) = state.update_status.lock() {
                     *slot = status;
                 }
+            }
+            Event::UserEvent(UserEvent::ShowOffline) => {
+                show_offline_page(&webview, &state);
             }
             Event::UserEvent(UserEvent::Ipc(raw)) => {
                 handle_ipc(
@@ -640,6 +698,15 @@ fn main() {
                             size.height,
                         )),
                     });
+                    // Minimize goes to tray (same as close), matching prior Tauri behavior.
+                    if !quitting && window.is_minimized() {
+                        suspend_to_tray(&window, &webview, &state);
+                    }
+                }
+                WindowEvent::Moved(_) => {
+                    if !quitting && window.is_minimized() {
+                        suspend_to_tray(&window, &webview, &state);
+                    }
                 }
                 WindowEvent::Focused(true) => {
                     if let Ok(mut pending) = state.pending_group_id.lock() {
@@ -675,6 +742,8 @@ fn suspend_to_tray(
     let _ = webview.borrow().load_html(SUSPEND_HTML);
     state.suspended.store(true, Ordering::Release);
     state.hosted_ready.store(false, Ordering::Release);
+    // Unminimize before hide so restore doesn't stay stuck minimized.
+    window.set_minimized(false);
     window.set_visible(false);
     let _ = window.set_skip_taskbar(true);
 }
@@ -683,12 +752,51 @@ fn resume_hosted(
     window: &tao::window::Window,
     webview: &Rc<RefCell<wry::WebView>>,
     state: &Arc<AppState>,
+    proxy: &EventLoopProxy<UserEvent>,
 ) {
     if state.suspended.swap(false, Ordering::AcqRel) || !state.hosted_ready.load(Ordering::Acquire)
     {
+        state.hosted_ready.store(false, Ordering::Release);
         let _ = webview.borrow().load_url(OFFICIAL_SERVER_URL);
+        schedule_connection_timeout(proxy.clone(), state.clone());
     }
     let _ = window.set_skip_taskbar(false);
+}
+
+fn show_offline_page(webview: &Rc<RefCell<wry::WebView>>, state: &Arc<AppState>) {
+    if state.suspended.load(Ordering::Acquire) {
+        return;
+    }
+    if state.hosted_ready.load(Ordering::Acquire) {
+        return;
+    }
+    if let Ok(mut err) = state.last_load_error.lock() {
+        if err.is_none() {
+            *err = Some(json!({
+                "errorCode": "LOAD_TIMEOUT",
+                "errorDescription": "The hosted Gchat application did not become ready.",
+                "url": OFFICIAL_SERVER_URL
+            }));
+        }
+    }
+    let _ = webview.borrow().load_html(OFFLINE_HTML);
+}
+
+fn schedule_connection_timeout(proxy: EventLoopProxy<UserEvent>, state: Arc<AppState>) {
+    thread::spawn(move || {
+        thread::sleep(CONNECTION_TIMEOUT);
+        if state.hosted_ready.load(Ordering::Acquire) || state.suspended.load(Ordering::Acquire) {
+            return;
+        }
+        if let Ok(mut err) = state.last_load_error.lock() {
+            *err = Some(json!({
+                "errorCode": "LOAD_TIMEOUT",
+                "errorDescription": "The hosted Gchat application did not become ready.",
+                "url": OFFICIAL_SERVER_URL
+            }));
+        }
+        let _ = proxy.send_event(UserEvent::ShowOffline);
+    });
 }
 
 fn push_update_status(webview: &Rc<RefCell<wry::WebView>>, status: &UpdateStatus) {
@@ -771,8 +879,10 @@ fn handle_ipc(
                     }
                 }
             }
+            // Toast only — do not steal focus or resume SPA (matches prior Tauri behavior).
+            // Restore from tray will surface pending group via Focused(true).
             show_native_notification(title, body);
-            let _ = proxy.send_event(UserEvent::ShowWindow);
+            let _ = (proxy, window);
         }
         "get-launch-at-startup" => {
             if !request_id.is_empty() {
@@ -792,7 +902,11 @@ fn handle_ipc(
         "retry-connection" => {
             state.hosted_ready.store(false, Ordering::Release);
             state.suspended.store(false, Ordering::Release);
+            if let Ok(mut err) = state.last_load_error.lock() {
+                *err = None;
+            }
             let _ = webview.borrow().load_url(OFFICIAL_SERVER_URL);
+            schedule_connection_timeout(proxy.clone(), state.clone());
             if !request_id.is_empty() {
                 reply(webview, &request_id, json!(true), None);
             }
@@ -871,8 +985,18 @@ fn handle_ipc(
             if let Ok(mut slot) = state.update_status.lock() {
                 *slot = status.clone();
             }
+            let ok = status.state == "ready" || status.state == "up-to-date";
             if !rid.is_empty() {
-                reply(webview, &rid, json!(true), None);
+                if ok {
+                    reply(webview, &rid, json!(true), None);
+                } else {
+                    let err = status
+                        .error
+                        .clone()
+                        .or_else(|| status.message.clone())
+                        .unwrap_or_else(|| "Update install failed.".into());
+                    reply(webview, &rid, json!(false), Some(err));
+                }
             }
             push_update_status(webview, &status);
         }
@@ -918,5 +1042,28 @@ mod tests {
     fn suspend_html_is_tiny() {
         assert!(SUSPEND_HTML.len() < 1024);
         assert!(SUSPEND_HTML.contains("tray"));
+    }
+
+    #[test]
+    fn offline_html_supports_retry_via_bridge() {
+        assert!(OFFLINE_HTML.contains("Retry connection"));
+        assert!(OFFLINE_HTML.contains("electronAPI.retryConnection"));
+        assert!(OFFLINE_HTML.contains("getConnectionContext"));
+    }
+
+    #[test]
+    fn install_status_failure_is_detectable() {
+        let failed = UpdateStatus {
+            state: "error".into(),
+            error: Some("network down".into()),
+            ..Default::default()
+        };
+        let ok_ready = UpdateStatus {
+            state: "ready".into(),
+            ..Default::default()
+        };
+        assert_ne!(failed.state, "ready");
+        assert!(failed.error.is_some());
+        assert_eq!(ok_ready.state, "ready");
     }
 }
