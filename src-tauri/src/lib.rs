@@ -29,6 +29,21 @@ const MAX_CLIPBOARD_BYTES: usize = 16 * 1024 * 1024;
 const UPDATE_START_DELAY: Duration = Duration::from_secs(15);
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
+const GITHUB_RELEASES_URL: &str = "https://github.com/Panther114/GChat/releases/latest";
+
+/// Memory-oriented WebView2 flags (also applied via WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS).
+/// Conservative set: disable unused browser features + cap V8 heap. Avoids low-end-device-mode
+/// which can increase process-tree WorkingSet for the hosted SPA.
+pub const WEBVIEW_MEMORY_BROWSER_ARGS: &str = concat!(
+    "--disable-features=WebGPU,TranslateUI,MediaRouter,CalculateNativeWinOcclusion,",
+    "InterestFeedContentSuggestions,AutofillServerCommunication,BackForwardCache,",
+    "msWebOOUI,msPdfOOUI,HardwareMediaKeyHandling ",
+    "--disable-background-networking ",
+    "--disable-component-update ",
+    "--disable-sync ",
+    "--disable-default-apps ",
+    "--js-flags=--max-old-space-size=256 --optimize-for-size"
+);
 
 #[derive(Default)]
 struct DesktopState {
@@ -37,6 +52,33 @@ struct DesktopState {
     last_load_error: Mutex<Option<serde_json::Value>>,
     pending_group_id: Mutex<Option<String>>,
     unread: Mutex<u32>,
+    update_status: Mutex<UpdateStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateStatus {
+    state: String,
+    current_version: Option<String>,
+    available_version: Option<String>,
+    percent: Option<u32>,
+    message: Option<String>,
+    error: Option<String>,
+    checked_at: Option<String>,
+}
+
+impl Default for UpdateStatus {
+    fn default() -> Self {
+        Self {
+            state: "idle".to_string(),
+            current_version: None,
+            available_version: None,
+            percent: None,
+            message: None,
+            error: None,
+            checked_at: None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -440,6 +482,122 @@ fn reload_hosted_app(app: AppHandle) -> Result<bool, String> {
     Ok(true)
 }
 
+
+fn now_iso() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("{secs}")
+}
+
+fn read_update_status(state: &DesktopState) -> UpdateStatus {
+    state
+        .update_status
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default()
+}
+
+fn publish_update_status<R: Runtime>(app: &AppHandle<R>, state: &DesktopState, status: UpdateStatus) {
+    if let Ok(mut slot) = state.update_status.lock() {
+        *slot = status.clone();
+    }
+    if let Some(window) = main_window(app) {
+        if let Ok(json) = serde_json::to_string(&status) {
+            let _ = window.eval(format!(
+                "window.__gchatDesktopUpdateStatus?.({json});"
+            ));
+        }
+    }
+}
+
+#[tauri::command]
+fn get_update_status(app: AppHandle, state: State<'_, Arc<DesktopState>>) -> UpdateStatus {
+    let mut status = read_update_status(state.inner());
+    if status.current_version.is_none() {
+        status.current_version = Some(app.package_info().version.to_string());
+    }
+    status
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn check_for_updates_cmd(
+    app: AppHandle,
+    state: State<'_, Arc<DesktopState>>,
+) -> Result<UpdateStatus, String> {
+    let current_version = app.package_info().version.to_string();
+    publish_update_status(
+        &app,
+        state.inner(),
+        UpdateStatus {
+            state: "checking".to_string(),
+            current_version: Some(current_version.clone()),
+            available_version: None,
+            percent: None,
+            message: Some("Checking for updates…".to_string()),
+            error: None,
+            checked_at: None,
+        },
+    );
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    match updater.check().await {
+        Ok(Some(update)) => {
+            let available_version = update.version.clone();
+            let status = UpdateStatus {
+                state: "available".to_string(),
+                current_version: Some(current_version),
+                available_version: Some(available_version.clone()),
+                percent: Some(0),
+                message: Some(format!("Update {available_version} is available.")),
+                error: None,
+                checked_at: Some(now_iso()),
+            };
+            publish_update_status(&app, state.inner(), status.clone());
+            Ok(status)
+        }
+        Ok(None) => {
+            let status = UpdateStatus {
+                state: "up-to-date".to_string(),
+                current_version: Some(current_version),
+                available_version: None,
+                percent: None,
+                message: Some("You are up to date.".to_string()),
+                error: None,
+                checked_at: Some(now_iso()),
+            };
+            publish_update_status(&app, state.inner(), status.clone());
+            Ok(status)
+        }
+        Err(error) => {
+            let status = UpdateStatus {
+                state: "error".to_string(),
+                current_version: Some(current_version),
+                available_version: None,
+                percent: None,
+                message: None,
+                error: Some(error.to_string()),
+                checked_at: Some(now_iso()),
+            };
+            publish_update_status(&app, state.inner(), status.clone());
+            Ok(status)
+        }
+    }
+}
+
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<bool, String> {
+    check_for_updates(app).await?;
+    Ok(true)
+}
+
+#[tauri::command]
+fn open_latest_release() -> Result<bool, String> {
+    open::that(GITHUB_RELEASES_URL).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
 fn create_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let url = Url::parse(OFFICIAL_SERVER_URL).expect("official server URL must be valid");
     WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
@@ -448,7 +606,7 @@ fn create_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .min_inner_size(880.0, 600.0)
         .background_color(tauri::webview::Color(11, 16, 32, 255))
         .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
-        .additional_browser_args("--disable-features=WebGPU")
+        .additional_browser_args(WEBVIEW_MEMORY_BROWSER_ARGS)
         .initialization_script(include_str!("bridge.js"))
         .on_navigation(|url| {
             if is_allowed_navigation(url) {
@@ -512,7 +670,15 @@ fn create_tray(app: &AppHandle) -> tauri::Result<()> {
     update_tray_menu(app, 0)
 }
 
+fn apply_webview_memory_env() {
+    std::env::set_var(
+        "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+        WEBVIEW_MEMORY_BROWSER_ARGS,
+    );
+}
+
 pub fn run() {
+    apply_webview_memory_env();
     let state = Arc::new(DesktopState::default());
     tauri::Builder::default()
         .manage(state.clone())
@@ -533,6 +699,10 @@ pub fn run() {
             copy_binary_to_clipboard,
             clear_cache_and_restart,
             reload_hosted_app,
+            get_update_status,
+            check_for_updates_cmd,
+            install_update,
+            open_latest_release,
         ])
         .setup(move |app| {
             cleanup_clipboard_cache(app.handle());
@@ -640,5 +810,14 @@ mod tests {
         assert_eq!(clipboard_filename(Some("report?.pdf")), "report.pdf");
         assert_eq!(clipboard_filename(Some("..")), "attachment.bin");
         assert_eq!(clipboard_filename(None), "attachment.bin");
+    }
+
+    #[test]
+    fn webview_memory_args_cap_v8_heap_and_disable_unused_features() {
+        assert!(WEBVIEW_MEMORY_BROWSER_ARGS.contains("max-old-space-size=256"));
+        assert!(WEBVIEW_MEMORY_BROWSER_ARGS.contains("disable-features=WebGPU"));
+        assert!(WEBVIEW_MEMORY_BROWSER_ARGS.contains("optimize-for-size"));
+        assert!(WEBVIEW_MEMORY_BROWSER_ARGS.contains("disable-background-networking"));
+        assert!(!WEBVIEW_MEMORY_BROWSER_ARGS.contains("enable-low-end-device-mode"));
     }
 }

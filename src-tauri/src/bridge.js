@@ -4,6 +4,23 @@
   const invoke = (command, args = {}) => window.__TAURI_INTERNALS__.invoke(command, args);
   const report = (label, error) => console.error(`[desktop:${label}]`, error);
 
+  const updateListeners = new Set();
+
+  function notifyUpdateStatus(status) {
+    updateListeners.forEach((callback) => {
+      try {
+        callback(status);
+      } catch (error) {
+        report('update-status-listener', error);
+      }
+    });
+  }
+
+  window.__gchatDesktopUpdateStatus = notifyUpdateStatus;
+  window.addEventListener('gchat-update-status', (event) => {
+    notifyUpdateStatus(event.detail);
+  });
+
   Object.defineProperty(window, 'electronAPI', {
     configurable: false,
     enumerable: false,
@@ -40,6 +57,25 @@
       reloadHostedApp() {
         return invoke('reload_hosted_app');
       },
+      checkForUpdates() {
+        return invoke('check_for_updates_cmd');
+      },
+      getUpdateStatus() {
+        return invoke('get_update_status');
+      },
+      installUpdate() {
+        return invoke('install_update');
+      },
+      openLatestRelease() {
+        return invoke('open_latest_release');
+      },
+      onUpdateStatus(callback) {
+        if (typeof callback !== 'function') return () => {};
+        updateListeners.add(callback);
+        return () => {
+          updateListeners.delete(callback);
+        };
+      },
     }),
   });
 
@@ -64,3 +100,4 @@
     window.addEventListener('load', ready, { once: true });
   }
 })();
+

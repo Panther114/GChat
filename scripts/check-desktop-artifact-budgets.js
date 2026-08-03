@@ -11,34 +11,45 @@ const files = fs.readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
   return [path.join(root, entry.name)];
 });
 
-const hasWindowsInstaller = files.some((file) => /Setup.*\.exe$/i.test(path.basename(file)) || /-setup\.exe$/i.test(file));
+function requireArtifact(pattern, label) {
+  if (!files.some((file) => pattern.test(file))) {
+    throw new Error(`Missing ${label}`);
+  }
+}
+
+const hasWindowsInstaller = files.some((file) => /-setup\.exe$/i.test(file) || /Setup.*\.exe$/i.test(path.basename(file)));
 const hasMacInstaller = files.some((file) => /\.dmg$/i.test(file));
 if (!hasWindowsInstaller && !hasMacInstaller) {
   throw new Error('No supported desktop installer found');
 }
 
 if (hasWindowsInstaller) {
-  // electron-updater publishes latest.yml + blockmap rather than Tauri .sig files
-  const hasUpdaterMeta = files.some((file) => /latest\.yml$/i.test(file))
-    || files.some((file) => /\.blockmap$/i.test(file))
-    || files.some((file) => /\.exe\.sig$/i.test(file));
-  if (!hasUpdaterMeta) {
-    console.warn('Warning: Windows updater metadata (latest.yml/blockmap) not found in this staging dir');
+  // Prefer Tauri signed artifacts; Electron blockmap is optional legacy only.
+  const hasTauriSig = files.some((file) => /\.exe\.sig$/i.test(file));
+  const hasElectronMeta = files.some((file) => /latest\.yml$/i.test(file) || /\.blockmap$/i.test(file));
+  if (!hasTauriSig && !hasElectronMeta) {
+    throw new Error('Missing Windows updater signature or electron-updater metadata');
+  }
+  if (hasTauriSig) {
+    requireArtifact(/-setup\.exe\.sig$/i, 'Windows updater signature');
   }
 }
 
 if (hasMacInstaller) {
+  const hasTar = files.some((file) => /\.app\.tar\.gz$/i.test(file));
   const hasZip = files.some((file) => /\.zip$/i.test(file));
-  if (!hasZip) {
-    console.warn('Warning: macOS zip updater payload not found in this staging dir');
+  if (hasTar) {
+    requireArtifact(/\.app\.tar\.gz\.sig$/i, 'macOS updater signature');
+  } else if (!hasZip) {
+    console.warn('Warning: macOS updater archive not found in this staging dir');
   }
 }
 
-// Electron NSIS includes Chromium (~70–100 MiB). Tauri fallback stays under 15 MiB.
+// Tauri/WebView2 installers stay small; Electron legacy path is larger.
 const budgets = [
-  { pattern: /Setup.*\.exe$/i, maxBytes: 120 * 1024 * 1024, label: 'Windows Electron installer' },
-  { pattern: /-setup\.exe$/i, maxBytes: 15 * 1024 * 1024, label: 'Windows Tauri fallback installer' },
-  { pattern: /\.dmg$/i, maxBytes: 150 * 1024 * 1024, label: 'macOS DMG' },
+  { pattern: /-setup\.exe$/i, maxBytes: 15 * 1024 * 1024, label: 'Windows Tauri installer' },
+  { pattern: /Setup-.*\.exe$/i, maxBytes: 120 * 1024 * 1024, label: 'Windows Electron legacy installer' },
+  { pattern: /\.dmg$/i, maxBytes: 30 * 1024 * 1024, label: 'macOS universal DMG' },
 ];
 
 for (const budget of budgets) {

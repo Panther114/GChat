@@ -1,8 +1,8 @@
 # Gchat
 
-Gchat is a client-side encrypted group chat application built with Node.js, Express, Socket.IO, SQLite, and vanilla web technologies. It supports real-time group messaging, automatic per-group encryption with server-managed key recovery, media/file messages, profile customization, group administration, and an optional Electron desktop shell.
+Gchat is a client-side encrypted group chat application built with Node.js, Express, Socket.IO, SQLite, and vanilla web technologies. It supports real-time group messaging, automatic per-group encryption with server-managed key recovery, media/file messages, profile customization, group administration, and an optional memory-optimized Tauri desktop shell.
 
-The hosted web app is the primary product. The desktop app is a native shell that loads the hosted Railway deployment.
+The hosted web app is the primary product. The desktop app is a native system-webview shell that loads the hosted Railway deployment.
 
 Current version: **v1.3.7**
 
@@ -39,21 +39,21 @@ Current version: **v1.3.7**
 
 ### Desktop Shell
 
-- Memory-tuned Electron shell for Windows and macOS (primary)
+- Memory-optimized Tauri 2 shell (WebView2 on Windows, WKWebView on macOS)
 - Hosted UI shared exactly with the browser version
 - System tray support (hide on close/minimize)
 - Native OS notifications
 - Taskbar unread badge and taskbar flash
 - Optional launch-at-startup
-- In-app Settings update check + GitHub Releases auto-update
-- Optional Tauri/WKWebView macOS fallback (`build:mac:tauri`)
+- In-app Settings update check + signed GitHub Releases auto-update
+- No bundled Chromium in production packages
 
 ---
 
 ## Architecture
 
 ```txt
-Browser / Electron shell
+Browser / Tauri shell
         |
         v
 Hosted Gchat web app
@@ -65,7 +65,7 @@ Express + Socket.IO server
 SQLite database
 ```
 
-The Electron desktop app does not run the chat server locally. It loads the hosted deployment:
+The Tauri desktop app does not run the chat server locally. It loads the hosted deployment:
 
 ```txt
 https://gchat.up.railway.app
@@ -87,7 +87,7 @@ Most product updates are delivered through the hosted web app. Native desktop up
 | Email delivery | Logto Cloud M2M API |
 | Encryption | Web Crypto API, AES-256-GCM, HKDF-SHA-256 |
 | Frontend | HTML, CSS, vanilla JavaScript |
-| Desktop | Electron (primary); Tauri 2 / WKWebView macOS fallback |
+| Desktop | Tauri 2, WebView2 (memory-optimized), WKWebView |
 | Hosting | Railway |
 
 ---
@@ -386,20 +386,20 @@ Password hashes are not returned.
 
 ## Desktop App
 
-The desktop app is a memory-tuned Electron shell around the hosted Gchat web app. It provides the same hosted interface and functions on Windows and macOS. A Tauri/WKWebView path remains available as a macOS fallback.
+The desktop app is a memory-optimized Tauri shell around the hosted Gchat web app. It provides the same hosted interface and functions on Windows and macOS without bundling Chromium.
 
 ### User Installation
 
 Windows users download and run:
 
 ```txt
-Gchat-Setup-<version>.exe
+Gchat_<version>_x64-setup.exe
 ```
 
 macOS users download:
 
 ```txt
-Gchat-<version>-mac-universal.dmg
+Gchat_<version>_*.dmg
 ```
 
 The macOS package runs on Apple Silicon and Intel Macs. Users do not need Node.js, npm, Git, PowerShell, or build tools.
@@ -418,11 +418,11 @@ A new desktop installer is only needed when native shell behavior changes, such 
 - application icon
 - packaged dependency changes
 
-Electron builds use **electron-updater** against GitHub Releases (`latest.yml` / `latest-mac.yml`). Settings → Updates provides a manual check-for-updates UI. Users moving from a Tauri release install the newest Electron package and sign in once.
+Tauri builds check the newest GitHub Release through signed `latest.json` metadata. Settings → Updates provides a manual check-for-updates UI. Users moving from an Electron release install the newest Tauri package and sign in once.
 
 ### Building the Desktop App
 
-Use Node 20+. Run each target build on its native operating system.
+Use Node 20+ and the stable Rust toolchain. Run each target build on its native operating system.
 
 ```bash
 npm install --include=dev
@@ -436,19 +436,13 @@ npm install --include=dev
 npm run build:mac
 ```
 
-macOS Tauri fallback (only if Electron packaging is blocked):
-
-```bash
-npm run build:mac:tauri
-```
-
 Pushing a version tag builds Windows and universal macOS packages in parallel and publishes all installers and updater metadata to the same GitHub Release.
 
 ---
 
 ## Desktop Build Notes
 
-The desktop package contains the Electron runtime plus small recovery assets (offline page, icons). Backend modules and the hosted frontend are not packaged. Railway continues to install production server dependencies and run `server.js`.
+The desktop package contains only a compiled native shell and small recovery assets. Windows uses the shared Evergreen WebView2 runtime with memory-oriented browser flags; macOS uses the system WKWebView. Backend modules and the hosted frontend are not packaged. Railway continues to install production server dependencies and run `server.js`.
 
 ---
 
@@ -461,11 +455,11 @@ The desktop package contains the Electron runtime plus small recovery assets (of
 ├── railway.json                 # Railway deployment configuration
 ├── README.md                    # Project documentation
 ├── INSTALL_DESKTOP.md           # Desktop installation notes
-├── electron/
-│   ├── main.js                  # Primary desktop shell
-│   ├── preload.js               # window.electronAPI bridge
-│   └── updater-controller.js    # GitHub Releases updater
-├── src-tauri/                   # Optional macOS Tauri fallback
+├── src-tauri/
+│   ├── src/lib.rs               # Native shell, memory flags, bounded command bridge
+│   ├── src/bridge.js            # Hosted UI compatibility bridge
+│   ├── capabilities/            # Exact-origin native permissions
+│   └── tauri.conf.json          # Packaging and signed updater configuration
 ├── scripts/
 │   └── regenerate-icons.py      # Navy desktop icon source for tray/installer
 └── public/

@@ -11,5 +11,9 @@ commands.allow = [
   "get_connection_context",
   "copy_binary_to_clipboard",
   "clear_cache_and_restart",
-  "reload_hosted_app"
+  "reload_hosted_app",
+  "get_update_status",
+  "check_for_updates_cmd",
+  "install_update",
+  "open_latest_release"
 ]
