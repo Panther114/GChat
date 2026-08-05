@@ -133,7 +133,9 @@ body.electron-desktop-effects .right-panel {
 }
 
 :root[data-theme='dark'] .right-panel .toggle-switch-row input:checked + .toggle-switch-ui {
-  background: #525252 !important;
+  /* v1.3.8: clearly visible ON state (brand indigo) — the old neutral gray
+     was visually identical to the unchecked track. */
+  background: #6c63ff !important;
 }
 
 /* Surfaces */

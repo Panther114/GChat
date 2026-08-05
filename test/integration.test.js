@@ -74,7 +74,12 @@ test('group API never returns the plaintext join code and stores only its HMAC',
 
 test('group key recovery is membership-scoped and escrow data is not stored in plaintext', async () => {
   const ownerKeys = await owner.get('/api/groups/keys').expect(200);
-  assert.deepEqual(ownerKeys.body, { keys: [{ groupId: group.id, secret: groupSecret, joinCode }] });
+  const keysByGroupId = Object.fromEntries(ownerKeys.body.keys.map((key) => [key.groupId, key]));
+  assert.deepEqual(keysByGroupId[group.id], { groupId: group.id, secret: groupSecret, joinCode });
+  // Every user also holds the GChat Global escrow key material.
+  assert.ok(keysByGroupId['gchat-global']);
+  assert.match(keysByGroupId['gchat-global'].secret, /^[A-Za-z0-9_-]{43}$/);
+  assert.match(keysByGroupId['gchat-global'].joinCode, /^[a-z0-9]{6}$/);
   assert.match(ownerKeys.headers['cache-control'], /no-store/);
 
   const freshDevice = request.agent(app);
@@ -100,7 +105,10 @@ test('joining by invite code grants membership and returns escrowed key material
     .expect(200);
   assert.equal(joined.body.secret, groupSecret);
   assert.ok(stmts.isMember.get(group.id, attackerResponse.body.id));
-  await attacker.get('/api/groups/keys').expect(200, { keys: [{ groupId: group.id, secret: groupSecret, joinCode }] });
+  const attackerKeys = await attacker.get('/api/groups/keys').expect(200);
+  const attackerKeysByGroupId = Object.fromEntries(attackerKeys.body.keys.map((key) => [key.groupId, key]));
+  assert.deepEqual(attackerKeysByGroupId[group.id], { groupId: group.id, secret: groupSecret, joinCode });
+  assert.ok(attackerKeysByGroupId['gchat-global']);
   const repeatedJoin = await attacker
     .post('/api/groups/join')
     .set('X-CSRF-Token', attackerCsrf)
@@ -239,4 +247,146 @@ test('message deletion is author-only and transactionally removes dependent stat
     .expect(200);
   assert.equal(stmts.findMessageById.get(messageId), undefined);
   assert.equal(stmts.getMessageReadCount.get(messageId).count, 0);
+});
+
+test('login issues a 30-day persistent session cookie so users are not logged out by inactivity', async () => {
+  const fresh = request.agent(app);
+  const registerResponse = await register(fresh, 'cookie-user-test');
+  const setCookie = registerResponse.headers['set-cookie'] || [];
+  const sessionCookie = setCookie.find((header) => header.includes('connect.sid'));
+  assert.ok(sessionCookie, `expected a session cookie, got: ${setCookie.join(' | ')}`);
+  const expiresMatch = /Expires=([^;]+)/.exec(sessionCookie);
+  assert.ok(expiresMatch, `expected an Expires attribute, got: ${sessionCookie}`);
+  const expiresAt = new Date(expiresMatch[1]).getTime();
+  assert.ok(
+    expiresAt > Date.now() + 25 * 24 * 60 * 60 * 1000,
+    `expected ~30-day cookie expiry, got: ${expiresMatch[1]}`
+  );
+});
+
+test('GChat Global auto-joins every user, has no owner, and cannot be left', async () => {
+  const globalGroup = stmts.findGroupById.get('gchat-global');
+  assert.ok(globalGroup);
+  assert.equal(globalGroup.created_by, '__gchat_global_owner__');
+
+  const fresh = request.agent(app);
+  const freshResponse = await register(fresh, 'global-fresh-user');
+  assert.ok(stmts.isMember.get('gchat-global', freshResponse.body.id));
+
+  const mine = await fresh.get('/api/groups/mine').expect(200);
+  const globalPayload = mine.body.find((g) => g.isGlobal === true);
+  assert.equal(globalPayload.name, 'GChat Global');
+  assert.equal(globalPayload.createdBy, '__gchat_global_owner__');
+  assert.equal(globalPayload.viewerIsAdmin, false);
+  assert.equal(globalPayload.allowMemberInvite, true);
+
+  const globalCsrf = await csrf(fresh);
+  await fresh
+    .delete('/api/groups/gchat-global/leave')
+    .set('X-CSRF-Token', globalCsrf)
+    .expect(400, { error: 'You cannot leave GChat Global' });
+  await fresh
+    .patch('/api/groups/gchat-global/settings')
+    .set('X-CSRF-Token', globalCsrf)
+    .send({ allowMemberExport: true })
+    .expect(403);
+  await fresh
+    .patch('/api/groups/gchat-global/name')
+    .set('X-CSRF-Token', globalCsrf)
+    .send({ name: 'Renamed' })
+    .expect(400);
+});
+
+test('any GChat Global member can delete any message and set memberships stay bounded', async () => {
+  const memberA = request.agent(app);
+  const memberAResponse = await register(memberA, 'global-member-a');
+  const memberB = request.agent(app);
+  await register(memberB, 'global-member-b');
+  const messageId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  stmts.insertV2Message.run(
+    messageId, 'gchat-global', memberAResponse.body.id, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null,
+    null, 0, null, 2, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null
+  );
+  const memberBCsrf = await csrf(memberB);
+  await memberB
+    .delete('/api/groups/gchat-global/messages/' + messageId)
+    .set('X-CSRF-Token', memberBCsrf)
+    .expect(200);
+  assert.equal(stmts.findMessageById.get(messageId), undefined);
+  // The phantom sentinel owner must never appear as a member.
+  const memberIds = stmts.getGroupMemberIds.all('gchat-global').map((row) => row.user_id);
+  assert.ok(!memberIds.includes('__gchat_global_owner__'));
+});
+
+test('invite permission defaults on, admin-only when disabled, and enforces caps', async () => {
+  const inviter = request.agent(app);
+  await register(inviter, 'inviter-test');
+  const target = request.agent(app);
+  const targetResponse = await register(target, 'invitee-test');
+
+  const inviterCsrf = await csrf(inviter);
+  const createResponse = await inviter
+    .post('/api/groups/create')
+    .set('X-CSRF-Token', inviterCsrf)
+    .send({ name: 'Invite room', code: 'invt01', secret: groupSecret, keyCommitment })
+    .expect(201);
+  const inviteRoomId = createResponse.body.id;
+
+  // "Invite members" defaults ON — any member can invite.
+  assert.equal(createResponse.body.allowMemberInvite, true);
+
+  const candidates = await inviter
+    .get(`/api/groups/invite-candidates/${targetResponse.body.id}`)
+    .expect(200);
+  assert.ok(candidates.body.some((group) => group.id === inviteRoomId));
+  assert.ok(!candidates.body.some((group) => group.id === 'gchat-global'));
+
+  await inviter
+    .post(`/api/groups/${inviteRoomId}/invite`)
+    .set('X-CSRF-Token', inviterCsrf)
+    .send({ userId: targetResponse.body.id })
+    .expect(200, { ok: true });
+  assert.ok(stmts.isMember.get(inviteRoomId, targetResponse.body.id));
+  await inviter
+    .post(`/api/groups/${inviteRoomId}/invite`)
+    .set('X-CSRF-Token', inviterCsrf)
+    .send({ userId: targetResponse.body.id })
+    .expect(409);
+
+  // After disabling the permission, a regular member cannot invite…
+  await inviter
+    .patch(`/api/groups/${inviteRoomId}/settings`)
+    .set('X-CSRF-Token', inviterCsrf)
+    .send({ allowMemberInvite: false })
+    .expect(200);
+  const bystander = request.agent(app);
+  await register(bystander, 'bystander-test');
+  const bystanderCsrf = await csrf(bystander);
+  await bystander
+    .post('/api/groups/join')
+    .set('X-CSRF-Token', bystanderCsrf)
+    .send({ code: 'invt01' })
+    .expect(200);
+  const secondTarget = request.agent(app);
+  const secondTargetResponse = await register(secondTarget, 'invitee-2-test');
+  await bystander
+    .post(`/api/groups/${inviteRoomId}/invite`)
+    .set('X-CSRF-Token', bystanderCsrf)
+    .send({ userId: secondTargetResponse.body.id })
+    .expect(403);
+
+  // …but the owner always can.
+  await inviter
+    .post(`/api/groups/${inviteRoomId}/invite`)
+    .set('X-CSRF-Token', inviterCsrf)
+    .send({ userId: secondTargetResponse.body.id })
+    .expect(200);
+  assert.ok(stmts.isMember.get(inviteRoomId, secondTargetResponse.body.id));
+
+  // Inviting into GChat Global is a no-op-by-design.
+  await inviter
+    .post('/api/groups/gchat-global/invite')
+    .set('X-CSRF-Token', inviterCsrf)
+    .send({ userId: targetResponse.body.id })
+    .expect(400);
 });

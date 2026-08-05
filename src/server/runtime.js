@@ -39,6 +39,11 @@ const MAX_SOCKET_PAYLOAD_BYTES = 256 * 1024;
 const MAX_GROUPS_PER_USER = 100;
 const MAX_GROUP_MEMBERS = 250;
 const MAX_PUSH_CONCURRENCY = 8;
+// GChat Global — the permanent, admin-less global channel every user auto-joins.
+const GLOBAL_GROUP_ID = 'gchat-global';
+const GLOBAL_GROUP_NAME = 'GChat Global';
+// Sentinel owner: never matches a real user id, so no one is ever the owner/admin.
+const GLOBAL_GROUP_OWNER_ID = '__gchat_global_owner__';
 const IV_BYTES = 12;
 const SAFE_IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const APP_VERSION = packageJson.version || '0.0.0';
@@ -960,6 +965,7 @@ const migrations = [
   "ALTER TABLE group_chats ADD COLUMN allow_member_clear_tag INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE group_chats ADD COLUMN allow_member_export INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE group_chats ADD COLUMN allow_member_kick INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE group_chats ADD COLUMN allow_member_invite INTEGER NOT NULL DEFAULT 1",
   "ALTER TABLE group_chats ADD COLUMN ai_enabled INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE group_chats ADD COLUMN group_color TEXT",
   "ALTER TABLE group_chats ADD COLUMN group_icon TEXT",
@@ -1088,6 +1094,7 @@ const stmts = {
   updateGroupAllowMemberClearTag: db.prepare('UPDATE group_chats SET allow_member_clear_tag = ? WHERE id = ?'),
   updateGroupAllowMemberExport: db.prepare('UPDATE group_chats SET allow_member_export = ? WHERE id = ?'),
   updateGroupAllowMemberKick: db.prepare('UPDATE group_chats SET allow_member_kick = ? WHERE id = ?'),
+  updateGroupAllowMemberInvite: db.prepare('UPDATE group_chats SET allow_member_invite = ? WHERE id = ?'),
   updateGroupAiEnabled: db.prepare('UPDATE group_chats SET ai_enabled = ? WHERE id = ?'),
   updateGroupColor: db.prepare('UPDATE group_chats SET group_color = ? WHERE id = ?'),
   updateGroupIcon: db.prepare('UPDATE group_chats SET group_icon = ? WHERE id = ?'),
@@ -1102,7 +1109,7 @@ const stmts = {
     'SELECT is_admin FROM group_members WHERE group_id = ? AND user_id = ?'
   ),
   getUserGroups: db.prepare(`
-    SELECT g.id, g.name, g.code, g.created_by, g.created_at, g.allow_member_clear, g.allow_member_clear_tag, g.allow_member_export, g.allow_member_kick, g.ai_enabled, g.group_color, g.group_icon, g.key_commitment, g.encryption_version, gm.is_admin,
+    SELECT g.id, g.name, g.code, g.created_by, g.created_at, g.allow_member_clear, g.allow_member_clear_tag, g.allow_member_export, g.allow_member_kick, g.allow_member_invite, g.ai_enabled, g.group_color, g.group_icon, g.key_commitment, g.encryption_version, gm.is_admin,
            (
              SELECT COUNT(*)
              FROM messages m
@@ -1127,7 +1134,7 @@ const stmts = {
     JOIN group_members gm ON g.id = gm.group_id
     WHERE gm.user_id = ?
     ORDER BY g.created_at DESC
-    LIMIT 100
+    LIMIT 101
   `),
   getEscrowedKeyMaterialForUser: db.prepare(`
     SELECT g.id, g.key_escrow_ciphertext, g.key_escrow_iv, g.key_escrow_version
@@ -1140,7 +1147,23 @@ const stmts = {
     ORDER BY g.created_at DESC
     LIMIT ?
   `),
-  countUserGroups: db.prepare('SELECT COUNT(*) AS count FROM group_members WHERE user_id = ?'),
+  countUserGroupsNonGlobal: db.prepare('SELECT COUNT(*) AS count FROM group_members WHERE user_id = ? AND group_id != ?'),
+  insertAllUsersToGlobal: db.prepare(`
+    INSERT OR IGNORE INTO group_members (group_id, user_id)
+    SELECT ? AS group_id, id AS user_id FROM users
+  `),
+  getInviteCandidateGroups: db.prepare(`
+    SELECT g.id, g.name, g.group_color, g.group_icon, g.created_by
+    FROM group_chats g
+    JOIN group_members gm ON gm.group_id = g.id
+    WHERE gm.user_id = ?
+      AND NOT EXISTS (
+        SELECT 1 FROM group_members other
+        WHERE other.group_id = g.id AND other.user_id = ?
+      )
+    ORDER BY g.created_at DESC
+    LIMIT 101
+  `),
   getGroupMembers: db.prepare(`
     SELECT u.id, u.username, u.icon_color, u.profile_picture, gm.is_admin
     FROM users u
@@ -1389,6 +1412,66 @@ const createEscrowedGroupTx = db.transaction((group, ownerId) => {
   stmts.insertMember.run(group.id, ownerId);
 });
 
+const GLOBAL_JOIN_CODE_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
+
+function generateGlobalJoinCode() {
+  let code = '';
+  for (let i = 0; i < 6; i += 1) {
+    code += GLOBAL_JOIN_CODE_ALPHABET[crypto.randomInt(GLOBAL_JOIN_CODE_ALPHABET.length)];
+  }
+  return code;
+}
+
+// GChat Global: permanent admin-less channel that every user auto-joins.
+// Created once (with a stable escrowed secret), then every current and future
+// user is pulled in. Idempotent — safe to run on every boot.
+function ensureGlobalGroup() {
+  const existing = stmts.findGroupById.get(GLOBAL_GROUP_ID);
+  if (!existing) {
+    try {
+      const storedSecret = stmts.getConfigValue.get('global_group_secret');
+      const secret = (storedSecret && isValidGroupSecret(storedSecret.value))
+        ? storedSecret.value
+        : crypto.randomBytes(32).toString('base64url');
+      const joinCode = generateGlobalJoinCode();
+      const codeHash = hashJoinCode(joinCode, APP_CONFIG.groupCodePepper);
+      if (!codeHash) {
+        console.error('Failed to hash GChat Global join code');
+        return;
+      }
+      const keyCommitment = keyCommitmentForSecret(secret);
+      const escrow = encryptEscrowPayload(APP_CONFIG.groupKeyEscrowMasterKey, GLOBAL_GROUP_ID, {
+        secret,
+        joinCode,
+      });
+      createEscrowedGroupTx({
+        id: GLOBAL_GROUP_ID,
+        name: GLOBAL_GROUP_NAME,
+        codeHash,
+        keyCommitment,
+        escrow,
+      }, GLOBAL_GROUP_OWNER_ID);
+      // The sentinel owner is not a real user — drop its phantom membership so
+      // member counts, delivery ticks, and push fan-out stay exact.
+      stmts.deleteMember.run(GLOBAL_GROUP_ID, GLOBAL_GROUP_OWNER_ID);
+      stmts.upsertConfigValue.run('global_group_secret', secret);
+      stmts.upsertConfigValue.run('global_group_join_code', joinCode);
+      console.log('Created GChat Global channel');
+    } catch (err) {
+      console.error('Failed to create GChat Global channel:', err.message);
+      return;
+    }
+  }
+  // Pull every existing user into the global channel (idempotent).
+  try {
+    stmts.insertAllUsersToGlobal.run(GLOBAL_GROUP_ID);
+  } catch (err) {
+    console.error('Failed to enroll users into GChat Global:', err.message);
+  }
+}
+
+ensureGlobalGroup();
+
 function encryptLocalFixtureJson(value, secret, groupId, purpose, aad) {
   const key = Buffer.from(crypto.hkdfSync('sha256', secret, Buffer.from(groupId), Buffer.from(`gchat-${purpose}-v2`), 32));
   const iv = crypto.randomBytes(IV_BYTES);
@@ -1545,6 +1628,10 @@ const sessionMiddleware = session({
     httpOnly: true,
     sameSite: 'lax',
     secure: process.env.NODE_ENV === 'production' || process.env.RAILWAY_ENVIRONMENT != null,
+    // v1.3.8: persistent login for everyone — a 30-day cookie (and matching
+    // store TTL) so returning users never hit the previous 24-hour fallback
+    // expiry that silently logged them out.
+    maxAge: REMEMBER_ME_MAX_AGE,
   },
 });
 
@@ -1707,6 +1794,29 @@ function formatUser(user) {
     iconColor: user.icon_color,
     profilePicture: user.profile_picture || null,
     clientSettings: normalizeClientSettings(clientSettings),
+  };
+}
+
+// Shared group payload shape returned by every group endpoint (mine / create /
+// join / preload / invite). `viewer` is the caller's group_members row (or null).
+function buildGroupPayload(group, viewer = null, unreadCount = 0) {
+  return {
+    id: group.id,
+    name: group.name,
+    keyCommitment: group.key_commitment,
+    encryptionVersion: group.encryption_version,
+    createdBy: group.created_by,
+    viewerIsAdmin: !!(viewer && viewer.is_admin),
+    unreadCount: Math.max(0, Number(unreadCount) || 0),
+    allowMemberClear: group.allow_member_clear || 0,
+    allowMemberClearTag: group.allow_member_clear_tag || 0,
+    allowMemberExport: group.allow_member_export || 0,
+    allowMemberKick: group.allow_member_kick || 0,
+    allowMemberInvite: group.allow_member_invite == null ? 1 : !!group.allow_member_invite,
+    aiEnabled: false,
+    groupColor: group.group_color || null,
+    groupIcon: group.group_icon || null,
+    isGlobal: String(group.id) === GLOBAL_GROUP_ID,
   };
 }
 
@@ -2055,6 +2165,8 @@ app.post('/api/auth/register', async (req, res) => {
     const color = iconColor || '#4A90D9';
 
     stmts.insertUser.run(id, username, passwordHash, color);
+    // Every user is permanently part of GChat Global from registration.
+    stmts.insertMember.run(GLOBAL_GROUP_ID, id);
     clearRegisterAttempts(clientIp);
 
     const user = stmts.findUserById.get(id);
@@ -2473,7 +2585,7 @@ app.post('/api/groups/create', (req, res) => {
   } catch (error) {
     return res.status(400).json({ error: error.message });
   }
-  if ((stmts.countUserGroups.get(userId)?.count || 0) >= MAX_GROUPS_PER_USER) {
+  if ((stmts.countUserGroupsNonGlobal.get(userId, GLOBAL_GROUP_ID)?.count || 0) >= MAX_GROUPS_PER_USER) {
     return res.status(409).json({ error: `You can belong to at most ${MAX_GROUPS_PER_USER} groups` });
   }
 
@@ -2492,22 +2604,7 @@ app.post('/api/groups/create', (req, res) => {
   }
 
   const group = stmts.findGroupById.get(groupId);
-  res.status(201).json({
-    id: group.id,
-    name: group.name,
-    keyCommitment: group.key_commitment,
-    encryptionVersion: group.encryption_version,
-    createdBy: group.created_by,
-    viewerIsAdmin: false,
-    unreadCount: 0,
-    allowMemberClear: group.allow_member_clear || 0,
-    allowMemberClearTag: group.allow_member_clear_tag || 0,
-    allowMemberExport: group.allow_member_export || 0,
-    allowMemberKick: group.allow_member_kick || 0,
-    aiEnabled: false,
-    groupColor: group.group_color || null,
-    groupIcon: group.group_icon || null,
-  });
+  res.status(201).json(buildGroupPayload(group));
 });
 
 app.post('/api/groups/join', (req, res) => {
@@ -2533,7 +2630,7 @@ app.post('/api/groups/join', (req, res) => {
     return res.status(410).json({ error: 'This legacy group has been reset' });
   }
   const existingMembership = stmts.isMember.get(group.id, userId);
-  if (!existingMembership && (stmts.countUserGroups.get(userId)?.count || 0) >= MAX_GROUPS_PER_USER) {
+  if (!existingMembership && (stmts.countUserGroupsNonGlobal.get(userId, GLOBAL_GROUP_ID)?.count || 0) >= MAX_GROUPS_PER_USER) {
     return res.status(409).json({ error: `You can belong to at most ${MAX_GROUPS_PER_USER} groups` });
   }
   if (!existingMembership && (stmts.countGroupMembers.get(group.id)?.count || 0) >= MAX_GROUP_MEMBERS) {
@@ -2568,21 +2665,8 @@ app.post('/api/groups/join', (req, res) => {
 
   res.setHeader('Cache-Control', 'no-store');
   res.json({
-    id: group.id,
-    name: group.name,
-    keyCommitment: group.key_commitment,
-    encryptionVersion: group.encryption_version,
-    createdBy: group.created_by,
-    viewerIsAdmin: !!existingMembership?.is_admin,
+    ...buildGroupPayload(group, existingMembership),
     alreadyJoined: joined.changes === 0,
-    unreadCount: 0,
-    allowMemberClear: group.allow_member_clear || 0,
-    allowMemberClearTag: group.allow_member_clear_tag || 0,
-    allowMemberExport: group.allow_member_export || 0,
-    allowMemberKick: group.allow_member_kick || 0,
-    aiEnabled: false,
-    groupColor: group.group_color || null,
-    groupIcon: group.group_icon || null,
     secret: escrowPayload.secret,
   });
 });
@@ -2590,7 +2674,7 @@ app.post('/api/groups/join', (req, res) => {
 // Returns one bounded batch of decryptable key material for the caller's current memberships.
 // The payload is intentionally no-store: it contains group secrets and join codes.
 app.get('/api/groups/keys', (req, res) => {
-  const rows = stmts.getEscrowedKeyMaterialForUser.all(req.session.userId, MAX_GROUPS_PER_USER);
+  const rows = stmts.getEscrowedKeyMaterialForUser.all(req.session.userId, MAX_GROUPS_PER_USER + 1);
   try {
     const keys = rows.map((row) => {
       const payload = decryptEscrowPayload(APP_CONFIG.groupKeyEscrowMasterKey, row.id, {
@@ -2612,22 +2696,7 @@ app.get('/api/groups/mine', (req, res) => {
   const userId = req.session.userId;
   const groups = stmts.getUserGroups.all(userId);
   res.json(
-    groups.map((g) => ({
-      id: g.id,
-      name: g.name,
-      keyCommitment: g.key_commitment,
-      encryptionVersion: g.encryption_version,
-      createdBy: g.created_by,
-      viewerIsAdmin: !!g.is_admin,
-      unreadCount: Math.max(0, Number(g.unread_count) || 0),
-      allowMemberClear: g.allow_member_clear || 0,
-      allowMemberClearTag: g.allow_member_clear_tag || 0,
-      allowMemberExport: g.allow_member_export || 0,
-      allowMemberKick: g.allow_member_kick || 0,
-      aiEnabled: false,
-      groupColor: g.group_color || null,
-      groupIcon: g.group_icon || null,
-    }))
+    groups.map((g) => buildGroupPayload(g, { is_admin: g.is_admin }, g.unread_count))
   );
 });
 
@@ -2652,20 +2721,7 @@ app.get('/api/groups/preload', (req, res) => {
         isAdministrator: !!u.is_admin,
       }));
       return {
-        id: g.id,
-        name: g.name,
-        keyCommitment: g.key_commitment,
-        encryptionVersion: g.encryption_version,
-        createdBy: g.created_by,
-        viewerIsAdmin: !!g.is_admin,
-        unreadCount: Math.max(0, Number(g.unread_count) || 0),
-        allowMemberClear: g.allow_member_clear || 0,
-        allowMemberClearTag: g.allow_member_clear_tag || 0,
-        allowMemberExport: g.allow_member_export || 0,
-        allowMemberKick: g.allow_member_kick || 0,
-        aiEnabled: false,
-        groupColor: g.group_color || null,
-        groupIcon: g.group_icon || null,
+        ...buildGroupPayload(g, { is_admin: g.is_admin }, g.unread_count),
         preloaded: {
           messages: rows,
           members,
@@ -2673,6 +2729,103 @@ app.get('/api/groups/preload', (req, res) => {
       };
     })
   );
+});
+
+// GET /api/groups/invite-candidates/:targetUserId — groups the viewer belongs to
+// that the target user is NOT a member of (bounded to MAX_GROUPS_PER_USER + 1).
+app.get('/api/groups/invite-candidates/:targetUserId', (req, res) => {
+  const { targetUserId } = req.params;
+  const userId = req.session.userId;
+  if (!targetUserId) return res.status(400).json({ error: 'Target user is required' });
+  const target = stmts.findUserById.get(targetUserId);
+  if (!target) return res.status(404).json({ error: 'User not found' });
+
+  const rows = stmts.getInviteCandidateGroups.all(userId, targetUserId);
+  res.json(
+    rows.map((group) => ({
+      id: group.id,
+      name: group.name,
+      groupColor: group.group_color || null,
+      groupIcon: group.group_icon || null,
+      isGlobal: String(group.id) === GLOBAL_GROUP_ID,
+      isOwnedByViewer: String(group.created_by) === String(userId),
+    }))
+  );
+});
+
+// POST /api/groups/:groupId/invite — add a user to a group (owner, administrator,
+// or any member while "Invite members" is enabled; always on for GChat Global).
+app.post('/api/groups/:groupId/invite', (req, res) => {
+  const { groupId } = req.params;
+  const userId = req.session.userId;
+  const targetUserId = typeof req.body?.userId === 'string' ? req.body.userId : '';
+
+  if (!targetUserId) {
+    return res.status(400).json({ error: 'User to invite is required' });
+  }
+
+  const group = stmts.findGroupById.get(groupId);
+  if (!group) return res.status(404).json({ error: 'Group not found' });
+  const member = stmts.isMember.get(groupId, userId);
+  if (!member) return res.status(403).json({ error: 'Not a member of this group' });
+
+  const isGlobalGroup = String(groupId) === GLOBAL_GROUP_ID;
+  if (isGlobalGroup) {
+    return res.status(400).json({ error: 'GChat Global already includes every user' });
+  }
+
+  const target = stmts.findUserById.get(targetUserId);
+  if (!target) return res.status(404).json({ error: 'User not found' });
+  if (String(targetUserId) === String(userId)) {
+    return res.status(400).json({ error: 'You cannot invite yourself' });
+  }
+
+  if (stmts.isMember.get(groupId, targetUserId)) {
+    return res.status(409).json({ error: `${target.username} is already a member of this chat` });
+  }
+
+  const isOwner = String(group.created_by) === String(userId);
+  const isAdministrator = !!member.is_admin;
+  const canMemberInvite = group.allow_member_invite == null ? true : !!group.allow_member_invite;
+  if (!isOwner && !isAdministrator && !canMemberInvite) {
+    return res.status(403).json({ error: 'Members cannot invite others while "Invite members" is disabled' });
+  }
+
+  if ((stmts.countUserGroupsNonGlobal.get(targetUserId, GLOBAL_GROUP_ID)?.count || 0) >= MAX_GROUPS_PER_USER) {
+    return res.status(409).json({ error: `${target.username} is already in the maximum number of groups` });
+  }
+  if ((stmts.countGroupMembers.get(groupId)?.count || 0) >= MAX_GROUP_MEMBERS) {
+    return res.status(409).json({ error: `This group has reached its ${MAX_GROUP_MEMBERS}-member limit` });
+  }
+
+  stmts.insertMember.run(groupId, targetUserId);
+  io.to(groupId).emit('member_joined', {
+    userId: targetUserId,
+    username: target.username,
+    iconColor: target.icon_color,
+    profilePicture: target.profile_picture || null,
+    groupId,
+  });
+
+  // Give the invitee everything needed to render the new chat immediately,
+  // including the escrowed group secret (same payload as join-by-code).
+  let secret = null;
+  try {
+    const escrowPayload = decryptEscrowPayload(APP_CONFIG.groupKeyEscrowMasterKey, group.id, {
+      ciphertext: group.key_escrow_ciphertext,
+      iv: group.key_escrow_iv,
+      version: group.key_escrow_version,
+    });
+    secret = escrowPayload.secret;
+  } catch (error) {
+    console.error('Group invite key recovery error:', error.message);
+  }
+  emitToUser(targetUserId, 'group_invited', {
+    ...buildGroupPayload(group),
+    secret,
+  });
+
+  res.json({ ok: true });
 });
 
 // PATCH /api/groups/:groupId/name — rename group (all members)
@@ -2683,6 +2836,10 @@ app.patch('/api/groups/:groupId/name', (req, res) => {
 
   const member = stmts.isMember.get(groupId, userId);
   if (!member) return res.status(403).json({ error: 'Not a member of this group' });
+
+  if (String(groupId) === GLOBAL_GROUP_ID) {
+    return res.status(400).json({ error: 'GChat Global cannot be renamed' });
+  }
 
   if (!name || name.length < 1 || name.length > 64) {
     return res.status(400).json({ error: 'Group name must be 1–64 characters' });
@@ -2697,10 +2854,13 @@ app.patch('/api/groups/:groupId/name', (req, res) => {
 app.patch('/api/groups/:groupId/settings', (req, res) => {
   const { groupId } = req.params;
   const userId = req.session.userId;
-  const { allowMemberClear, allowMemberClearTag, allowMemberExport, allowMemberKick, aiEnabled, groupColor, groupIcon } = req.body;
+  const { allowMemberClear, allowMemberClearTag, allowMemberExport, allowMemberKick, allowMemberInvite, aiEnabled, groupColor, groupIcon } = req.body;
 
   const group = stmts.findGroupById.get(groupId);
   if (!group) return res.status(404).json({ error: 'Group not found' });
+  if (String(groupId) === GLOBAL_GROUP_ID) {
+    return res.status(403).json({ error: 'GChat Global has no administrator and its permissions are fixed' });
+  }
   const membership = stmts.isMember.get(groupId, userId);
   const isOwner = String(group.created_by) === String(userId);
   if (!isOwner && !membership?.is_admin) {
@@ -2725,6 +2885,9 @@ app.patch('/api/groups/:groupId/settings', (req, res) => {
   if (allowMemberKick !== undefined) {
     stmts.updateGroupAllowMemberKick.run(allowMemberKick ? 1 : 0, groupId);
   }
+  if (allowMemberInvite !== undefined) {
+    stmts.updateGroupAllowMemberInvite.run(allowMemberInvite ? 1 : 0, groupId);
+  }
   if (APP_CONFIG.aiEnabled && aiEnabled !== undefined) {
     stmts.updateGroupAiEnabled.run(aiEnabled ? 1 : 0, groupId);
   }
@@ -2748,6 +2911,7 @@ app.patch('/api/groups/:groupId/settings', (req, res) => {
     allowMemberClearTag: !!updated.allow_member_clear_tag,
     allowMemberExport: !!updated.allow_member_export,
     allowMemberKick: !!updated.allow_member_kick,
+    allowMemberInvite: updated.allow_member_invite == null ? true : !!updated.allow_member_invite,
     aiEnabled: APP_CONFIG.aiEnabled && !!updated.ai_enabled,
     groupColor: updated.group_color || null,
     groupIcon: updated.group_icon || null,
@@ -2841,7 +3005,9 @@ app.delete('/api/groups/:groupId/messages/:messageId', (req, res) => {
   if (!message || message.group_id !== groupId) {
     return res.status(404).json({ error: 'Message not found' });
   }
-  if (message.sender_id !== userId) {
+  // In GChat Global any member may delete any message.
+  const isGlobalGroup = String(groupId) === GLOBAL_GROUP_ID;
+  if (message.sender_id !== userId && !isGlobalGroup) {
     return res.status(403).json({ error: 'Only the author can delete this message' });
   }
   if (message.is_disappearing) {
@@ -2919,6 +3085,10 @@ app.delete('/api/groups/:groupId/leave', (req, res) => {
 
   const member = stmts.isMember.get(groupId, userId);
   if (!member) return res.status(403).json({ error: 'Not a member of this group' });
+
+  if (String(groupId) === GLOBAL_GROUP_ID) {
+    return res.status(400).json({ error: 'You cannot leave GChat Global' });
+  }
 
   if (group.created_by === userId) {
     return res.status(400).json({ error: 'Group owner cannot leave. Disband the group instead.' });
@@ -4087,6 +4257,7 @@ const PORT = process.env.PORT || 3000;
 
 async function startServer() {
   await seedLocalDebugData();
+  ensureGlobalGroup();
   server.listen(PORT, () => {
     console.log(`Gchat server running on port ${PORT}`);
   });

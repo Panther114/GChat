@@ -1763,6 +1763,23 @@ const DEFAULT_TAG_TOPIC = 'main';
 const MAX_TAG_TOPIC_LENGTH = 12;
 const CHANNEL_PREF_KEY_PREFIX = 'gchat:active-channel:';
 
+// ── GChat Global (permanent, admin-less global channel) ───────────────────────
+const GLOBAL_GROUP_ID = 'gchat-global';
+const GLOBAL_GROUP_NAME = 'GChat Global';
+const GLOBAL_GROUP_ICON_SRC = '/gchat_icon.png';
+
+function isGlobalGroupId(groupId) {
+  return String(groupId || '') === GLOBAL_GROUP_ID;
+}
+
+function isGlobalGroup(group) {
+  return !!(group && (group.isGlobal === true || isGlobalGroupId(group.id)));
+}
+
+function isCurrentGroupGlobal() {
+  return isGlobalGroup(currentGroupData) || isGlobalGroupId(currentGroupId);
+}
+
 function normalizeHashtagTopic(value) {
   if (value == null || value === '') return null;
   const trimmed = String(value).trim().replace(/^#/, '').toLowerCase();
@@ -2282,8 +2299,7 @@ function completeViewportTrackingForRow(row) {
     pendingReadMessageIds.add(messageId);
     row.classList.remove('unseen');
     row.dataset.hasRead = '1';
-    setLocalMessageReadState(rowGroupId, messageId, true);
-    syncGroupUnreadCount(rowGroupId);
+    markMessageReadLocal(rowGroupId, messageId);
     socket.emit('mark_message_read', { groupId: rowGroupId, messageId });
   }
 
@@ -2487,9 +2503,29 @@ function clearPageTitleNotification() {
 // ── Image Viewer ──────────────────────────────────────────────────────────────
 let imageViewerData = null;
 
+// v1.3.8: message-image object URLs are revoked whenever their DOM node leaves
+// the transcript, so long sessions don't accumulate blob URLs.
+function revokeBlobUrlsIn(root) {
+  if (!root) return;
+  try {
+    if (root.tagName === 'IMG' && (root.src || '').startsWith('blob:')) {
+      URL.revokeObjectURL(root.src);
+      root.removeAttribute('src');
+    }
+    for (const img of root.querySelectorAll('img[src^="blob:"]')) {
+      URL.revokeObjectURL(img.src);
+      img.removeAttribute('src');
+    }
+  } catch { /* already-revoked or unusable URLs are harmless */ }
+}
+
 function showImageViewer(blob, filename = 'image') {
   const modal = $('image-viewer-modal');
   const img = $('image-viewer-img');
+  // Replace rather than leak: revoke the previously opened image's URL.
+  if (imageViewerData?.imageUrl) {
+    URL.revokeObjectURL(imageViewerData.imageUrl);
+  }
   const imageUrl = URL.createObjectURL(blob);
   imageViewerData = { blob, filename, imageUrl };
   img.src = imageUrl;
@@ -2926,11 +2962,99 @@ function renderGroupFromCache(groupId) {
   void renderActiveChannelStream();
 }
 
+// v1.3.8: background-group caches must stay bounded now that every group room
+// feeds realtime messages. The open group's transcript is never trimmed.
+const MAX_CACHED_MESSAGES_PER_GROUP = 500;
+
+function trimBackgroundGroupCache(cache) {
+  const messages = cache.messages;
+  if (!Array.isArray(messages) || messages.length <= MAX_CACHED_MESSAGES_PER_GROUP) return;
+  cache.messages = messages.slice(-MAX_CACHED_MESSAGES_PER_GROUP);
+  cache.messageRows = null;
+  cache.rowsDirty = true;
+  cache.oldestMessageId = cache.messages.length ? cache.messages[0].id : null;
+}
+
 function preloadAllGroups() {
   for (const group of groups) {
     void ensureGroupDataPreloaded(group.id).catch((err) => {
       console.error('Background preload failed:', group.id, err);
     });
+  }
+}
+
+// v1.3.8: join every group room so realtime delivery, unread badges, previews,
+// and notifications stay synchronized for background groups — not just the one
+// currently open. Bounded by the group cap (MAX_GROUPS_PER_USER + global) and
+// deduplicated so repeated loadGroups calls never re-broadcast join_room.
+let joinedRoomIds = new Set();
+
+function joinAllGroupRooms() {
+  if (!socket) return;
+  const next = new Set(joinedRoomIds);
+  for (const group of groups) {
+    const id = String(group.id || '');
+    if (!id || next.has(id)) continue;
+    next.add(id);
+    socket.emit('join_room', id);
+  }
+  joinedRoomIds = next;
+}
+
+function trackJoinedRoom(groupId) {
+  const id = String(groupId || '');
+  if (!id) return;
+  joinedRoomIds.add(id);
+}
+
+// v1.3.8: silently resync the open group from the server. Guards against stale
+// in-memory caches when messages were missed while the tab was backgrounded,
+// the device slept, or the socket was temporarily down.
+async function refreshCurrentGroupFromServer() {
+  const groupId = currentGroupId;
+  if (!groupId) return;
+  try {
+    const res = await fetch(`/api/groups/${groupId}/messages?limit=50`, { cache: 'no-store' });
+    if (!res.ok) return;
+    const rawMsgs = await res.json();
+    if (String(currentGroupId) !== groupId) return;
+    const msgs = filterMessagesVisibleToCurrentUser(rawMsgs);
+    const cache = ensureGroupCacheEntry(groupId);
+    // Merge instead of replace: preserve older paginated history the user has
+    // already loaded, while refreshing/inserting the newest server messages.
+    const existing = Array.isArray(cache.messages) ? cache.messages : [];
+    const byId = new Map(existing.map((m) => [String(m.id), m]));
+    for (const m of msgs) byId.set(String(m.id), m);
+    const merged = [...byId.values()].sort((a, b) =>
+      String(a.createdAt || '').localeCompare(String(b.createdAt || ''))
+    );
+    const knownIds = new Set(existing.map((m) => String(m.id)));
+    const fetchedIds = msgs.map((m) => String(m.id));
+    const changed = fetchedIds.some((id) => !knownIds.has(id));
+    if (!changed) return;
+    cache.messages = merged;
+    cache.messageRows = null;
+    cache.rowsDirty = true;
+    writeLocalGroupCache(groupId, cache);
+    if (String(currentGroupId) !== groupId) return;
+    allMessages = merged;
+    updateGroupUnseenCount(groupId, merged);
+    void updateGroupPreviewFromMessage(groupId, merged.length ? merged[merged.length - 1] : null);
+    // Re-render only when the user isn't mid-scroll through older history, and
+    // preserve their reading position (renderActiveChannelStream scrolls down).
+    const nearBottom = isNearBottom();
+    if (nearBottom || messagesArea().scrollTop <= 0) {
+      const area = messagesArea();
+      const prevScrollTop = area.scrollTop;
+      const prevScrollHeight = area.scrollHeight;
+      await renderActiveChannelStream();
+      if (!nearBottom && prevScrollTop > 0) {
+        area.scrollTop = prevScrollTop + (area.scrollHeight - prevScrollHeight);
+      }
+      observeCurrentGroupRowsForRead();
+    }
+  } catch (err) {
+    console.warn('refreshCurrentGroupFromServer failed:', err);
   }
 }
 
@@ -3329,6 +3453,21 @@ function applyActiveTagFilterToRenderedMessages() {
       } else {
         // Ensure header is visible again if series membership flipped off.
         if (header) header.hidden = false;
+        // Restore the avatar itself: a flipped-off continuation keeps the
+        // transparent style + clock child from its series state otherwise.
+        const clock = avatar.querySelector('.msg-continuation-time');
+        if (clock) {
+          const senderId = child.dataset.senderId;
+          const senderNameEl = child.querySelector('.msg-sender-name');
+          const memberProfile = getMemberProfile(currentGroupId, senderId);
+          renderAvatarElement(avatar, {
+            username: memberProfile?.username || (senderNameEl && senderNameEl.textContent) || '?',
+            iconColor: memberProfile?.iconColor || null,
+            profilePicture: memberProfile?.profilePicture || null,
+          });
+          avatar.style.background = '';
+          avatar.style.color = '';
+        }
       }
     }
     prevVisible = child;
@@ -3381,6 +3520,8 @@ async function renderActiveChannelStream() {
   }
 
   const channelMsgs = all.filter((msg) => resolveMessageTagTopic(msg) === channel);
+  // The whole stream is replaced below — release the outgoing images' URLs.
+  revokeBlobUrlsIn(area);
   area.replaceChildren(createLoadMoreIndicator());
 
   if (!channelMsgs.length) {
@@ -3955,6 +4096,12 @@ const ICON_SPECS = {
     ['path', { d: 'M23 21v-2a4 4 0 0 0-3-3.87' }],
     ['path', { d: 'M16 3.13a4 4 0 0 1 0 7.75' }],
   ],
+  'user-plus': [
+    ['path', { d: 'M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2' }],
+    ['circle', { cx: '8.5', cy: '7', r: '4' }],
+    ['line', { x1: '19', y1: '8', x2: '19', y2: '14' }],
+    ['line', { x1: '22', y1: '11', x2: '16', y2: '11' }],
+  ],
   'shield-plus': [
     ['path', { d: 'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z' }],
     ['path', { d: 'M12 8v8' }],
@@ -4401,6 +4548,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     clearPageTitleNotification();
     observeCurrentGroupRowsForRead();
     void checkForHostedAppUpdate();
+    syncStateOnFocus();
   });
   window.addEventListener('blur', () => {
     clearAllMessageVisibilityTimers();
@@ -4409,6 +4557,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (document.visibilityState === 'visible') {
       observeCurrentGroupRowsForRead();
       void checkForHostedAppUpdate();
+      syncStateOnFocus();
       return;
     }
     clearAllMessageVisibilityTimers();
@@ -4478,6 +4627,8 @@ async function loadGroups({ withBackendPreload = false } = {}) {
     await loadGroupKeyVaultEntries();
     pushStatus.totalUnreadCount = getTotalUnreadCount();
     renderGroupList();
+    // Stay subscribed to every group's room so background groups keep syncing.
+    joinAllGroupRooms();
     void refreshGroupPreviewsFromCache(groups.map((group) => group.id));
     syncUnreadIndicators();
     if (isMobileLayout() && !currentGroupId) setMobileView('list');
@@ -4569,6 +4720,11 @@ function groupAvatarColor(group) {
 function renderGroupAvatarElement(target, group = {}) {
   if (!target) return;
   target.replaceChildren();
+  if (isGlobalGroup(group)) {
+    target.style.background = 'none';
+    target.appendChild(createAvatarImage(GLOBAL_GROUP_ICON_SRC));
+    return;
+  }
   if (group.groupIcon) {
     target.style.background = 'none';
     target.appendChild(createAvatarImage(group.groupIcon));
@@ -4593,6 +4749,10 @@ function canCurrentUserManageGroup() {
 function updateGroupColorAction(canManage) {
   const button = $('set-group-color-btn');
   if (!button) return;
+  if (isCurrentGroupGlobal()) {
+    button.hidden = true;
+    return;
+  }
   button.hidden = false;
   button.disabled = !canManage;
   button.title = canManage ? 'Change group icon' : 'Only the group owner or an administrator can change the group icon';
@@ -4603,6 +4763,24 @@ function updateGroupActionButtons(isOwner) {
   const clearBtn = $('clear-history-btn');
   const leaveBtn = $('leave-group-btn');
   const disbandBtn = $('disband-btn');
+
+  const isGlobal = isCurrentGroupGlobal();
+
+  // In GChat Global there is no owner or administrator: everyone can export,
+  // nobody can clear the full history, and nobody can leave or disband.
+  if (isGlobal) {
+    updateQuickActionButtonState(exportBtn, { enabled: true, labelEnabled: 'Export chat as TXT' });
+    updateQuickActionButtonState(clearBtn, { enabled: false, labelEnabled: 'Clear chat history' });
+    if (leaveBtn) {
+      leaveBtn.hidden = true;
+      leaveBtn.dataset.label = 'Exit group';
+    }
+    if (disbandBtn) {
+      disbandBtn.hidden = true;
+      disbandBtn.dataset.label = 'Disband group';
+    }
+    return;
+  }
 
   const canMemberExport = !!(currentGroupData && currentGroupData.allowMemberExport);
   const canMemberClear = !!(currentGroupData && currentGroupData.allowMemberClear);
@@ -4700,13 +4878,22 @@ function canCurrentUserKickMember(targetUserId) {
   return !!currentGroupData.allowMemberKick;
 }
 
+function canCurrentUserInviteMembers() {
+  if (!currentGroupData || !currentUser) return false;
+  if (String(currentGroupData.createdBy) === String(currentUser.id)) return true;
+  if (currentGroupData.viewerIsAdmin) return true;
+  return currentGroupData.allowMemberInvite !== false;
+}
+
 function syncGroupPermissionControls() {
   if (!currentGroupData || !currentUser) return;
+  const isGlobal = isCurrentGroupGlobal();
   const canManage = canCurrentUserManageGroup();
   const ownerActions = $('owner-actions');
   const lock = $('owner-permissions-lock');
   if (ownerActions) {
-    ownerActions.hidden = false;
+    // GChat Global has no owner or administrator — hide the permissions panel.
+    ownerActions.hidden = isGlobal;
     ownerActions.classList.toggle('is-locked', !canManage);
   }
   if (lock) lock.hidden = canManage;
@@ -4715,6 +4902,7 @@ function syncGroupPermissionControls() {
     'allow-member-clear-tag-toggle',
     'allow-member-export-toggle',
     'allow-member-kick-toggle',
+    'allow-member-invite-toggle',
   ].forEach((id) => {
     const input = $(id);
     if (input) input.disabled = !canManage;
@@ -4788,21 +4976,53 @@ function applyCurrentUserReadState(msg) {
   }
 }
 
-function setLocalMessageReadState(groupId, messageId, hasRead = true) {
+// Mark-read state is batched: viewport flushes mark many rows at once, and a
+// full-cache localStorage write + unread recompute per row is O(n²). Instead,
+// accumulate per group and flush once per microtask.
+let pendingBatchReads = new Map(); // groupId -> Set<messageId>
+let batchReadFlushScheduled = false;
+
+function scheduleBatchReadFlush() {
+  if (batchReadFlushScheduled) return;
+  batchReadFlushScheduled = true;
+  queueMicrotask(() => {
+    batchReadFlushScheduled = false;
+    flushBatchReads();
+  });
+}
+
+function flushBatchReads() {
+  if (!pendingBatchReads.size) return;
+  const byGroup = pendingBatchReads;
+  pendingBatchReads = new Map();
+  for (const [groupId, messageIds] of byGroup) {
+    const cache = ensureGroupCacheEntry(groupId);
+    let changed = false;
+    for (const msg of cache.messages || []) {
+      if (!messageIds.has(String(msg.id))) continue;
+      if (msg.hasRead !== true) {
+        msg.hasRead = true;
+        changed = true;
+      }
+    }
+    if (changed) {
+      writeLocalGroupCache(groupId, cache);
+      syncGroupUnreadCount(groupId);
+    }
+  }
+}
+
+function markMessageReadLocal(groupId, messageId) {
   const normalizedGroupId = String(groupId || '');
   const normalizedMessageId = String(messageId || '');
   if (!normalizedGroupId || !normalizedMessageId) return;
-  const cache = ensureGroupCacheEntry(normalizedGroupId);
-  let changed = false;
-  for (const msg of cache.messages || []) {
-    if (String(msg.id) !== normalizedMessageId) continue;
-    if (msg.hasRead !== hasRead) {
-      msg.hasRead = hasRead;
-      changed = true;
-    }
-    break;
+  let ids = pendingBatchReads.get(normalizedGroupId);
+  if (!ids) {
+    ids = new Set();
+    pendingBatchReads.set(normalizedGroupId, ids);
   }
-  if (changed) writeLocalGroupCache(normalizedGroupId, cache);
+  ids.add(normalizedMessageId);
+  scheduleBatchReadFlush();
 }
 
 function updateUnreadBadge(groupId, count) {
@@ -4864,10 +5084,17 @@ async function selectGroup(groupId) {
   // Set header
   $('chat-group-name').textContent = currentGroupData ? currentGroupData.name : '';
   $('edit-group-name-input').value = currentGroupData ? currentGroupData.name : '';
+  // GChat Global cannot be renamed.
+  $('edit-group-name-input').readOnly = isCurrentGroupGlobal();
   syncRightPanelMobileTitle();
   $('right-panel-content').hidden = false;
   $('right-panel-empty').hidden = true;
   renderTagFilters();
+
+  // GChat Global has no invite code to share — every user is already in it.
+  const isGlobal = isCurrentGroupGlobal();
+  const copyCodeBtn = $('copy-code-btn');
+  if (copyCodeBtn) copyCodeBtn.hidden = isGlobal;
 
   // Owner controls
   const isOwner = currentGroupData && currentGroupData.createdBy === currentUser.id;
@@ -4879,6 +5106,7 @@ async function selectGroup(groupId) {
     $('allow-member-clear-tag-toggle').checked = !!currentGroupData.allowMemberClearTag;
     $('allow-member-export-toggle').checked = !!currentGroupData.allowMemberExport;
     $('allow-member-kick-toggle').checked = !!currentGroupData.allowMemberKick;
+    $('allow-member-invite-toggle').checked = currentGroupData.allowMemberInvite !== false;
     $('ai-mode-toggle').checked = !!currentGroupData.aiEnabled;
   }
   syncAllowMemberClearTagToggleState();
@@ -4890,9 +5118,13 @@ async function selectGroup(groupId) {
   updateKeyState();
 
   // Socket room
-  if (socket) socket.emit('join_room', normalizedGroupId);
+  if (socket) {
+    socket.emit('join_room', normalizedGroupId);
+    trackJoinedRoom(normalizedGroupId);
+  }
 
   const cache = ensureGroupCacheEntry(normalizedGroupId);
+  const hadCompleteCache = !!(cache.messages && cache.members && cache.messageRows);
   if (!cache.messages || !cache.members || !cache.messageRows) {
     messagesArea().replaceChildren(createLoadMoreIndicator());
     members = [];
@@ -4907,6 +5139,9 @@ async function selectGroup(groupId) {
   observeCurrentGroupRowsForRead();
   scrollToBottom(true);
   $('scroll-bottom-btn').hidden = true;
+  // v1.3.8: a fully-cached group may be stale (messages missed while the tab
+  // was backgrounded or the app tray-hidden) — silently resync from the server.
+  if (hadCompleteCache) void refreshCurrentGroupFromServer();
 
   closeMobileActionMenu();
   if (isMobileLayout()) setMobileView('chat');
@@ -5036,18 +5271,9 @@ function renderMembersList() {
 
     li.append(av, name);
 
-    if (currentGroupData && m.id === currentGroupData.createdBy) {
-      const tag = document.createElement('span');
-      tag.className = 'member-owner-tag';
-      tag.textContent = 'Owner';
-      li.appendChild(tag);
-    } else if (m.isAdministrator) {
-      const tag = document.createElement('span');
-      tag.className = 'member-owner-tag';
-      tag.textContent = 'Admin';
-      li.appendChild(tag);
-    }
-
+    // Role/kick actions are placed BEFORE the role tag so the tag stays flush
+    // right on every row — "Admin" must align with "Owner" even while the
+    // hover-reveal action buttons occupy space.
     const isOwner = String(currentGroupData?.createdBy) === String(currentUser?.id);
     if (isOwner && String(m.id) !== String(currentGroupData?.createdBy)) {
       const roleBtn = document.createElement('button');
@@ -5071,6 +5297,18 @@ function renderMembersList() {
       setElementIcon(kickBtn, 'x', { iconOnly: true });
       kickBtn.addEventListener('click', (e) => { e.stopPropagation(); kickMember(m.id, m.username); });
       li.appendChild(kickBtn);
+    }
+
+    if (currentGroupData && m.id === currentGroupData.createdBy) {
+      const tag = document.createElement('span');
+      tag.className = 'member-owner-tag';
+      tag.textContent = 'Owner';
+      li.appendChild(tag);
+    } else if (m.isAdministrator) {
+      const tag = document.createElement('span');
+      tag.className = 'member-owner-tag';
+      tag.textContent = 'Admin';
+      li.appendChild(tag);
     }
 
     list.appendChild(li);
@@ -5474,6 +5712,14 @@ async function appendMessageBubble(msg, scroll, groupId = currentGroupId) {
   await hydrateMessageChannel(msg, groupId);
   const channel = resolveMessageTagTopic(msg);
 
+  // During a group switch, `allMessages` may still reference the previous
+  // group's array — anchor it to THIS group's own cache before reading/writing
+  // so a realtime message can never corrupt the new group's transcript.
+  const cache = ensureGroupCacheEntry(groupId);
+  if (groupId === currentGroupId) {
+    allMessages = Array.isArray(cache.messages) ? cache.messages : [];
+  }
+
   // Series against last message *in this channel*, not the whole group timeline.
   let previousInChannel = null;
   for (let i = allMessages.length - 1; i >= 0; i -= 1) {
@@ -5487,7 +5733,6 @@ async function appendMessageBubble(msg, scroll, groupId = currentGroupId) {
   if (!row) return;
 
   const area = messagesArea();
-  const cache = ensureGroupCacheEntry(groupId);
   const wasNearBottom = area
     ? (area.scrollHeight - area.scrollTop - area.clientHeight < 150)
     : false;
@@ -5584,13 +5829,16 @@ let ctxTagTopic = null;
 function showContextMenu(e, msg, text) {
   ctxMsg = msg; ctxText = text;
   hideTagContextMenu();
+  hideAvatarContextMenu();
   const menu = $('ctx-menu');
   const isAuthor = msg.senderId === currentUser?.id;
   const isAttachment = msg.type === 'image' || msg.type === 'file';
   const isDisappearing = isDisappearingMessage(msg);
+  // In GChat Global every member may delete any message.
+  const isGlobalMessageGroup = isGlobalGroupId(msg.groupId || currentGroupId);
   $('ctx-reply').hidden = isDisappearing;
   $('ctx-edit').hidden = isDisappearing || !isAuthor || !['text', 'whisper'].includes(msg.type);
-  $('ctx-delete').hidden = isDisappearing || !isAuthor;
+  $('ctx-delete').hidden = isDisappearing || (!isAuthor && !isGlobalMessageGroup);
   $('ctx-download').hidden = true;
   $('ctx-copy').hidden = isAttachment || isDisappearing;
   setElementIcon($('ctx-copy'), 'copy', { label: 'Copy' });
@@ -5609,6 +5857,7 @@ function showTagContextMenu(e, topic) {
   ctxTagTopic = normalizeHashtagTopic(topic);
   if (!ctxTagTopic) return;
   hideContextMenu();
+  hideAvatarContextMenu();
   const menu = $('tag-ctx-menu');
   const deleteBtn = $('tag-ctx-delete');
   deleteBtn.textContent = `Delete ${formatHashtagLabel(ctxTagTopic)}`;
@@ -5621,6 +5870,136 @@ function showTagContextMenu(e, topic) {
 function hideTagContextMenu() {
   $('tag-ctx-menu').hidden = true;
   ctxTagTopic = null;
+}
+
+// ── Avatar actions (right-click a profile picture → invite to chat) ──────────
+let avatarCtxUserId = null;
+let avatarCtxUsername = '';
+
+function showAvatarContextMenu(e, userId, username) {
+  avatarCtxUserId = userId;
+  avatarCtxUsername = username || 'this user';
+  hideContextMenu();
+  hideTagContextMenu();
+  const menu = $('avatar-ctx-menu');
+  const inviteBtn = $('avatar-ctx-invite');
+  setElementIcon(inviteBtn, 'user-plus', { label: `Invite ${avatarCtxUsername} to chat` });
+  menu.hidden = false;
+  if (e) {
+    menu.style.left = Math.min(e.clientX, window.innerWidth - 180) + 'px';
+    menu.style.top = Math.min(e.clientY, window.innerHeight - 100) + 'px';
+  } else {
+    menu.style.left = '50%';
+    menu.style.top = '50%';
+  }
+}
+
+function hideAvatarContextMenu() {
+  const menu = $('avatar-ctx-menu');
+  if (menu) menu.hidden = true;
+  avatarCtxUserId = null;
+}
+
+async function openInviteModal() {
+  const targetUserId = avatarCtxUserId;
+  const targetName = avatarCtxUsername;
+  hideAvatarContextMenu();
+  if (!targetUserId || !currentUser) return;
+  const modal = $('invite-modal');
+  const list = $('invite-list');
+  const desc = $('invite-desc');
+  const errorEl = $('invite-error');
+  errorEl.textContent = '';
+  $('invite-target-name').textContent = targetName;
+  modal.hidden = false;
+  list.innerHTML = '<div class="invite-list-empty">Loading chats…</div>';
+  try {
+    const res = await fetch(`/api/groups/invite-candidates/${encodeURIComponent(targetUserId)}`, { cache: 'no-store' });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Failed to load chats');
+    }
+    const candidateGroups = await res.json();
+    if (!Array.isArray(candidateGroups) || !candidateGroups.length) {
+      list.innerHTML = `<div class="invite-list-empty">${escapeHtml(targetName)} is already in all of your chats.</div>`;
+      return;
+    }
+    renderInviteCandidateList(list, candidateGroups, targetUserId, targetName);
+  } catch (err) {
+    errorEl.textContent = err.message || 'Failed to load chats';
+    list.innerHTML = '';
+  }
+}
+
+function renderInviteCandidateList(list, candidateGroups, targetUserId, targetName) {
+  list.innerHTML = '';
+  for (const group of candidateGroups) {
+    const item = document.createElement('div');
+    item.className = 'invite-item';
+    item.dataset.groupId = group.id;
+
+    const av = document.createElement('div');
+    av.className = 'invite-item-avatar';
+    if (group.isGlobal || isGlobalGroupId(group.id)) {
+      av.style.background = 'none';
+      av.appendChild(createAvatarImage(GLOBAL_GROUP_ICON_SRC));
+    } else if (group.groupIcon) {
+      av.style.background = 'none';
+      av.appendChild(createAvatarImage(group.groupIcon));
+    } else {
+      av.style.background = groupAvatarColor(group);
+      av.textContent = String(group.name || '?')[0].toUpperCase();
+    }
+
+    const meta = document.createElement('div');
+    meta.className = 'invite-item-meta';
+    const nameEl = document.createElement('div');
+    nameEl.className = 'invite-item-name';
+    nameEl.textContent = group.name;
+    meta.appendChild(nameEl);
+    if (group.isGlobal) {
+      const hint = document.createElement('div');
+      hint.className = 'invite-item-hint';
+      hint.textContent = 'Global channel';
+      meta.appendChild(hint);
+    }
+
+    const button = document.createElement('button');
+    button.className = 'btn-primary btn-sm invite-item-btn';
+    button.type = 'button';
+    setElementIcon(button, 'user-plus', { label: 'Invite' });
+    button.addEventListener('click', () => {
+      confirmInviteMember(group, targetUserId, targetName, item);
+    });
+
+    item.append(av, meta, button);
+    list.appendChild(item);
+  }
+}
+
+function confirmInviteMember(group, targetUserId, targetName, item) {
+  showConfirm(
+    'Invite to Chat',
+    `Do you want to invite ${targetName} into ${group.name}?`,
+    async () => {
+      const res = await fetch(`/api/groups/${encodeURIComponent(group.id)}/invite`, {
+        method: 'POST',
+        headers: apiHeaders(),
+        body: JSON.stringify({ userId: targetUserId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showToast(data.error || 'Failed to invite member', 'error');
+        return;
+      }
+      showToast(`${targetName} joined ${group.name}`, 'success');
+      item.remove();
+      const list = $('invite-list');
+      if (list && !list.children.length) {
+        list.innerHTML = `<div class="invite-list-empty">${escapeHtml(targetName)} is now in all of your chats.</div>`;
+      }
+    }
+  );
 }
 
 async function getAttachmentData(msg) {
@@ -6448,9 +6827,14 @@ function closeDiagnosticsModal() {
   $('diagnostics-modal').hidden = true;
 }
 
-async function refreshCurrentGroupAfterReconnect() {
+let socketHasConnectedOnce = false;
+
+async function refreshCurrentGroupAfterReconnect({ fullSync = false } = {}) {
   try {
-    await loadGroups();
+    // A genuine reconnect resyncs every group in one bounded request (preload
+    // refreshes message tails, members, previews, and unread counts). The
+    // initial boot keeps the light path — no eager transcript hydration.
+    await loadGroups({ withBackendPreload: fullSync });
     if (!currentGroupId) return;
     await Promise.all([loadMessages(currentGroupId), loadMembers(currentGroupId)]);
     if (currentGroupId) {
@@ -6460,6 +6844,20 @@ async function refreshCurrentGroupAfterReconnect() {
     }
   } catch (err) {
     console.warn('Failed to refresh current group after reconnect:', err);
+  }
+}
+
+let lastFocusStateSyncAt = 0;
+
+// v1.3.8: when the tab regains focus after being backgrounded and the socket
+// is down, resync everything so nothing was missed. Throttled to bound load.
+function syncStateOnFocus() {
+  const now = Date.now();
+  if (now - lastFocusStateSyncAt < 30 * 1000) return;
+  lastFocusStateSyncAt = now;
+  if (!socket?.connected) {
+    void loadGroups({ withBackendPreload: true });
+    if (currentGroupId) void refreshCurrentGroupFromServer();
   }
 }
 
@@ -6519,13 +6917,22 @@ function initSocket() {
       transport: socketDiagnostics.socketTransport,
     });
     if (currentGroupId) socket.emit('join_room', currentGroupId);
-    void refreshCurrentGroupAfterReconnect();
+    joinAllGroupRooms();
+    if (socketHasConnectedOnce) {
+      // Real reconnect: full resync so messages missed while offline appear.
+      void refreshCurrentGroupAfterReconnect({ fullSync: true });
+    } else {
+      socketHasConnectedOnce = true;
+      void refreshCurrentGroupAfterReconnect();
+    }
     renderDiagnosticsPanel();
   });
 
   socket.on('disconnect', (reason) => {
     socketDiagnostics.lastDisconnectReason = reason || 'unknown';
     socketDiagnostics.lastDisconnectAt = new Date().toISOString();
+    // Server-side rooms die with the socket — re-join everything on reconnect.
+    joinedRoomIds = new Set();
     updateConnectionTransport();
     updateConnectionStatusUi(socketDiagnostics.isBrowserOnline ? 'disconnected' : 'offline', socketDiagnostics.isBrowserOnline ? 'Disconnected' : 'Offline');
     console.warn('[socket] disconnect', { reason });
@@ -6595,6 +7002,7 @@ function initSocket() {
       if (cache.messages) {
         cache.messages.push(msg);
         cache.oldestMessageId = cache.messages.length ? cache.messages[0].id : null;
+        trimBackgroundGroupCache(cache);
         writeLocalGroupCache(msg.groupId, cache);
       }
       if (cache.messageRows && !cache.rowsDirty) {
@@ -6665,6 +7073,7 @@ function initSocket() {
     const row = document.querySelector('[data-msg-id="' + messageId + '"]');
     if (row) {
       readObserver?.unobserve(row);
+      revokeBlobUrlsIn(row);
       row.remove();
     }
     pendingReadMessageIds.delete(messageId);
@@ -6728,8 +7137,13 @@ function initSocket() {
     for (const [groupId, cache] of groupDataCache.entries()) {
       const stored = cache.messages ? cache.messages.find((msg) => msg.id === messageId) : null;
       if (!stored) continue;
+      // Edits re-encrypt BOTH content and metadata with AAD revision N+1 —
+      // the stale metadata ciphertext would fail GCM auth on the next render.
       stored.encryptedContent = encryptedContent;
       stored.iv = iv;
+      stored.encryptedMetadata = updated.encryptedMetadata ?? stored.encryptedMetadata;
+      stored.metadataIv = updated.metadataIv ?? stored.metadataIv;
+      if (updated.tagIndex !== undefined) stored.tagIndex = updated.tagIndex;
       stored.editedAt = editedAt;
       stored.revision = revision;
       if (groupId !== currentGroupId) cache.rowsDirty = true;
@@ -6798,13 +7212,14 @@ function initSocket() {
     renderGroupList();
   });
 
-  socket.on('group_settings_updated', ({ groupId, allowMemberClear, allowMemberClearTag, allowMemberExport, allowMemberKick, aiEnabled, groupColor, groupIcon }) => {
+  socket.on('group_settings_updated', ({ groupId, allowMemberClear, allowMemberClearTag, allowMemberExport, allowMemberKick, allowMemberInvite, aiEnabled, groupColor, groupIcon }) => {
     const group = groups.find((g) => g.id === groupId);
     if (group) {
       if (allowMemberClear !== undefined) group.allowMemberClear = !!allowMemberClear;
       if (allowMemberClearTag !== undefined) group.allowMemberClearTag = !!allowMemberClearTag;
       if (allowMemberExport !== undefined) group.allowMemberExport = !!allowMemberExport;
       if (allowMemberKick !== undefined) group.allowMemberKick = !!allowMemberKick;
+      if (allowMemberInvite !== undefined) group.allowMemberInvite = !!allowMemberInvite;
       if (aiEnabled !== undefined) group.aiEnabled = !!aiEnabled;
       if (groupColor !== undefined) group.groupColor = groupColor || null;
       if (groupIcon !== undefined) group.groupIcon = groupIcon || null;
@@ -6820,6 +7235,7 @@ function initSocket() {
       if (allowMemberClearTag !== undefined) currentGroupData.allowMemberClearTag = !!allowMemberClearTag;
       if (allowMemberExport !== undefined) currentGroupData.allowMemberExport = !!allowMemberExport;
       if (allowMemberKick !== undefined) currentGroupData.allowMemberKick = !!allowMemberKick;
+      if (allowMemberInvite !== undefined) currentGroupData.allowMemberInvite = !!allowMemberInvite;
       if (aiEnabled !== undefined) currentGroupData.aiEnabled = !!aiEnabled;
       if (groupColor !== undefined) currentGroupData.groupColor = groupColor || null;
       if (groupIcon !== undefined) currentGroupData.groupIcon = groupIcon || null;
@@ -6830,6 +7246,7 @@ function initSocket() {
       $('allow-member-clear-tag-toggle').checked = !!currentGroupData.allowMemberClearTag;
       $('allow-member-export-toggle').checked = !!currentGroupData.allowMemberExport;
       $('allow-member-kick-toggle').checked = !!currentGroupData.allowMemberKick;
+      $('allow-member-invite-toggle').checked = currentGroupData.allowMemberInvite !== false;
       $('ai-mode-toggle').checked = !!currentGroupData.aiEnabled;
     }
     syncAllowMemberClearTagToggleState();
@@ -6867,6 +7284,33 @@ function initSocket() {
     renderMembersList();
     renderWhisperPicker();
     $('chat-member-count').textContent = members.length + ' member' + (members.length !== 1 ? 's' : '');
+  });
+
+  socket.on('group_invited', async (groupPayload) => {
+    if (!groupPayload || !groupPayload.id || !groupPayload.secret || !currentUser) return;
+    const normalizedGroupId = String(groupPayload.id);
+    if (groups.some((group) => String(group.id) === normalizedGroupId)) return;
+    groups.push({
+      ...groupPayload,
+      id: normalizedGroupId,
+      _lastPreviewText: GROUP_PREVIEW_EMPTY_TEXT,
+      _lastPreviewTime: '',
+    });
+    unreadCounts[normalizedGroupId] = 0;
+    const entry = { groupId: normalizedGroupId, secret: groupPayload.secret, joinCode: groupPayload.joinCode || null };
+    try {
+      await GChatCryptoV2.keyVault.put(entry);
+    } catch { /* vault failure falls back to /api/groups/keys recovery */ }
+    groupKeyVaultCache.set(normalizedGroupId, entry);
+    // Subscribe to the new group's room so its messages arrive in realtime.
+    if (socket) {
+      socket.emit('join_room', normalizedGroupId);
+      trackJoinedRoom(normalizedGroupId);
+    }
+    renderGroupList();
+    syncUnreadIndicators();
+    pushStatus.totalUnreadCount = getTotalUnreadCount();
+    showToast(`You were invited to ${groupPayload.name || 'a new chat'}`, 'success');
   });
 
   socket.on('member_role_updated', ({ userId, groupId, isAdministrator }) => {
@@ -8644,6 +9088,19 @@ function setupEventListeners() {
     }
   });
 
+  $('allow-member-invite-toggle').addEventListener('change', async (e) => {
+    const nextChecked = e.target.checked;
+    const result = await updateGroupSettingRequest({ allowMemberInvite: nextChecked });
+    if (!result.ok) {
+      e.target.checked = !nextChecked;
+      showToast(result.error || 'Failed to update group settings', 'error');
+      return;
+    }
+    if (currentGroupData) {
+      currentGroupData.allowMemberInvite = nextChecked;
+    }
+  });
+
   $('ai-mode-toggle').addEventListener('change', async (e) => {
     const nextChecked = e.target.checked;
     const result = await updateGroupSettingRequest({ aiEnabled: nextChecked });
@@ -8804,9 +9261,43 @@ function setupEventListeners() {
     );
   });
 
+  $('avatar-ctx-invite').addEventListener('click', () => {
+    openInviteModal();
+  });
+
+  $('invite-close-btn').addEventListener('click', () => {
+    $('invite-modal').hidden = true;
+  });
+  $('invite-modal').addEventListener('click', (e) => {
+    if (e.target === $('invite-modal')) $('invite-modal').hidden = true;
+  });
+
+  // Right-click a profile picture (members list or chat bubble) to invite the
+  // person into one of your other chats.
+  document.addEventListener('contextmenu', (event) => {
+    const avatar = event.target.closest('.msg-avatar, .member-avatar');
+    if (!avatar) return;
+    const row = avatar.closest('.msg-row, .member-item');
+    if (!row) return;
+    const userId = row.dataset.senderId || row.dataset.userId;
+    if (!userId || !currentUser || String(userId) === String(currentUser.id)) return;
+    if (String(userId) === AI_ASSISTANT_USER_ID) return;
+    event.preventDefault();
+    let username = '';
+    const member = members.find((m) => String(m.id) === String(userId));
+    if (member) {
+      username = member.username;
+    } else {
+      const nameEl = row.querySelector('.msg-sender-name');
+      if (nameEl) username = nameEl.textContent || '';
+    }
+    showAvatarContextMenu(event, userId, username || 'this user');
+  });
+
   document.addEventListener('click', (e) => {
     if (!$('ctx-menu').contains(e.target)) hideContextMenu();
     if (!$('tag-ctx-menu').contains(e.target)) hideTagContextMenu();
+    if (!$('avatar-ctx-menu').contains(e.target)) hideAvatarContextMenu();
     if (!$('emoji-picker').contains(e.target) && e.target !== $('emoji-btn')) {
       $('emoji-picker').hidden = true;
     }
@@ -8900,17 +9391,22 @@ function setupEventListeners() {
     if (file) { handleFileUpload(file); e.target.value = ''; }
   });
 
-  // Paste files from clipboard
+  // Paste files from clipboard — upload EVERY pasted file, one by one.
   msgInput.addEventListener('paste', async (e) => {
     const items = e.clipboardData && e.clipboardData.items;
     if (!items) return;
+    const files = [];
     for (const item of items) {
       if (item.kind === 'file') {
-        e.preventDefault();
         const file = item.getAsFile();
-        if (file) await handleFileUpload(file);
-        return;
+        if (file) files.push(file);
       }
+    }
+    if (!files.length) return;
+    e.preventDefault();
+    if (files.length > 1) showToast(`Sending ${files.length} files…`, 'info');
+    for (const file of files) {
+      await handleFileUpload(file);
     }
   });
 
@@ -9051,10 +9547,17 @@ async function loadOlderMessages() {
       return;
     }
 
+    // Channels are separate sub-chats: only the active channel's messages may
+    // enter the visible transcript — everything else stays in the group cache
+    // for its own channel stream.
+    for (const msg of msgs) await hydrateMessageChannel(msg, currentGroupId);
+    const channel = getActiveTagTopic();
+    const channelMsgs = msgs.filter((msg) => resolveMessageTagTopic(msg) === channel);
+
     const area = messagesArea();
     const prevScrollHeight = area.scrollHeight;
 
-    const rows = await buildMessageRows(msgs, currentGroupId);
+    const rows = await buildMessageRows(channelMsgs, currentGroupId);
 
     // Assemble into a fragment (single DOM mutation, no scroll drift)
     const fragment = document.createDocumentFragment();
@@ -9062,7 +9565,7 @@ async function loadOlderMessages() {
       if (!row) continue;
       if (row.classList && row.classList.contains('msg-row')) {
         const msgId = row.dataset.msgId;
-        const srcMsg = msgs.find((m) => String(m.id) === String(msgId));
+        const srcMsg = channelMsgs.find((m) => String(m.id) === String(msgId));
         if (srcMsg) observeMessageForRead(row, srcMsg);
       }
       fragment.appendChild(row);

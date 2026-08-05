@@ -42,12 +42,6 @@ const MAX_CLIPBOARD_BYTES: usize = 16 * 1024 * 1024;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Suspended placeholder while tray-hidden — frees SPA heap in WebView2.
-const SUSPEND_HTML: &str = r#"<!doctype html><html><head><meta charset="utf-8">
-<title>Gchat</title>
-<style>html,body{margin:0;background:#0b1020;color:#9ab;font:14px system-ui;display:flex;align-items:center;justify-content:center;height:100%}</style>
-</head><body>Gchat is running in the tray…</body></html>"#;
-
 /// Offline recovery page (connection timeout / load failure). Bridge stays injected for retry.
 const OFFLINE_HTML: &str = r#"<!doctype html><html lang="en"><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
@@ -121,6 +115,8 @@ enum UserEvent {
     UpdateStatus(UpdateStatus),
     /// Navigate to offline recovery HTML (timeout / load failure).
     ShowOffline,
+    /// Auto-retry the hosted load after a connection timeout.
+    ReloadHosted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,6 +154,7 @@ struct AppState {
     update_status: Mutex<UpdateStatus>,
     clipboard_file: Mutex<Option<PathBuf>>,
     suspended: AtomicBool,
+    timeout_active: AtomicBool,
 }
 
 fn now_iso() -> String {
@@ -639,6 +636,7 @@ fn main() {
             }
             Event::UserEvent(UserEvent::TrayOpen) => {
                 resume_hosted(&window, &webview, &state, &proxy);
+                deliver_pending_group(&webview, &state);
                 let _ = window.set_skip_taskbar(false);
                 window.set_visible(true);
                 window.set_focus();
@@ -648,9 +646,20 @@ fn main() {
                     suspend_to_tray(&window, &webview, &state);
                 } else {
                     resume_hosted(&window, &webview, &state, &proxy);
+                    deliver_pending_group(&webview, &state);
                     let _ = window.set_skip_taskbar(false);
                     window.set_visible(true);
                     window.set_focus();
+                }
+            }
+            Event::UserEvent(UserEvent::ReloadHosted) => {
+                if !state.hosted_ready.load(Ordering::Acquire)
+                    && !state.suspended.load(Ordering::Acquire)
+                {
+                    if let Ok(mut err) = state.last_load_error.lock() {
+                        *err = None;
+                    }
+                    let _ = webview.borrow().load_url(OFFICIAL_SERVER_URL);
                 }
             }
             Event::UserEvent(UserEvent::TrayCheckUpdates) => {
@@ -709,15 +718,7 @@ fn main() {
                     }
                 }
                 WindowEvent::Focused(true) => {
-                    if let Ok(mut pending) = state.pending_group_id.lock() {
-                        if let Some(group_id) = pending.take() {
-                            if let Ok(json) = serde_json::to_string(&group_id) {
-                                let _ = webview.borrow().evaluate_script(&format!(
-                                    "window.__gchatDesktopFocusGroup?.({json})"
-                                ));
-                            }
-                        }
-                    }
+                    deliver_pending_group(&webview, &state);
                 }
                 _ => {}
             },
@@ -735,17 +736,23 @@ fn main() {
 
 fn suspend_to_tray(
     window: &tao::window::Window,
-    webview: &Rc<RefCell<wry::WebView>>,
+    _webview: &Rc<RefCell<wry::WebView>>,
     state: &Arc<AppState>,
 ) {
-    // Drop SPA memory while remaining a single light process in the tray.
-    let _ = webview.borrow().load_html(SUSPEND_HTML);
+    // Keep the SPA fully alive while tray-hidden: hiding the window only (no
+    // page unload) means restore is instant — the socket stays connected,
+    // caches stay warm, and there is no cold start on every tray click.
     state.suspended.store(true, Ordering::Release);
-    state.hosted_ready.store(false, Ordering::Release);
     // Unminimize before hide so restore doesn't stay stuck minimized.
     window.set_minimized(false);
     window.set_visible(false);
     let _ = window.set_skip_taskbar(true);
+}
+
+/// A tray-restore of a live SPA must never reload it (instant show); only a
+/// genuine cold start (hosted app not ready) navigates back to the server.
+fn should_reload_on_resume(hosted_ready: bool) -> bool {
+    !hosted_ready
 }
 
 fn resume_hosted(
@@ -754,8 +761,10 @@ fn resume_hosted(
     state: &Arc<AppState>,
     proxy: &EventLoopProxy<UserEvent>,
 ) {
-    if state.suspended.swap(false, Ordering::AcqRel) || !state.hosted_ready.load(Ordering::Acquire)
-    {
+    state.suspended.swap(false, Ordering::AcqRel);
+    // A genuine cold start (first launch / failed load / retry) still reloads
+    // the hosted app; a plain tray-restore of a live SPA does nothing.
+    if should_reload_on_resume(state.hosted_ready.load(Ordering::Acquire)) {
         state.hosted_ready.store(false, Ordering::Release);
         let _ = webview.borrow().load_url(OFFICIAL_SERVER_URL);
         schedule_connection_timeout(proxy.clone(), state.clone());
@@ -782,20 +791,56 @@ fn show_offline_page(webview: &Rc<RefCell<wry::WebView>>, state: &Arc<AppState>)
     let _ = webview.borrow().load_html(OFFLINE_HTML);
 }
 
+/// Delivers a notification-click group id to the hosted SPA. Consumed when the
+/// window gains focus or the user opens the app from the tray, so clicking a
+/// message toast never dead-ends.
+fn deliver_pending_group(webview: &Rc<RefCell<wry::WebView>>, state: &Arc<AppState>) {
+    if let Ok(mut pending) = state.pending_group_id.lock() {
+        if let Some(group_id) = pending.take() {
+            if let Ok(json) = serde_json::to_string(&group_id) {
+                let _ = webview.borrow().evaluate_script(&format!(
+                    "window.__gchatDesktopFocusGroup?.({json})"
+                ));
+            }
+        }
+    }
+}
+
+/// Monitors hosted-app readiness with automatic retries. A single thread runs
+/// at a time (guarded by `timeout_active`); slow Railway cold starts trigger
+/// automatic reloads instead of a premature offline page, and only after all
+/// retries are exhausted is the offline recovery page shown.
 fn schedule_connection_timeout(proxy: EventLoopProxy<UserEvent>, state: Arc<AppState>) {
+    if state
+        .timeout_active
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
     thread::spawn(move || {
-        thread::sleep(CONNECTION_TIMEOUT);
-        if state.hosted_ready.load(Ordering::Acquire) || state.suspended.load(Ordering::Acquire) {
-            return;
+        const MAX_AUTO_RETRIES: u32 = 3;
+        for attempt in 0..=MAX_AUTO_RETRIES {
+            thread::sleep(CONNECTION_TIMEOUT);
+            if state.hosted_ready.load(Ordering::Acquire) || state.suspended.load(Ordering::Acquire)
+            {
+                state.timeout_active.store(false, Ordering::Release);
+                return;
+            }
+            if let Ok(mut err) = state.last_load_error.lock() {
+                *err = Some(json!({
+                    "errorCode": "LOAD_TIMEOUT",
+                    "errorDescription": "The hosted Gchat application did not become ready.",
+                    "url": OFFICIAL_SERVER_URL
+                }));
+            }
+            if attempt < MAX_AUTO_RETRIES {
+                let _ = proxy.send_event(UserEvent::ReloadHosted);
+            } else {
+                let _ = proxy.send_event(UserEvent::ShowOffline);
+            }
         }
-        if let Ok(mut err) = state.last_load_error.lock() {
-            *err = Some(json!({
-                "errorCode": "LOAD_TIMEOUT",
-                "errorDescription": "The hosted Gchat application did not become ready.",
-                "url": OFFICIAL_SERVER_URL
-            }));
-        }
-        let _ = proxy.send_event(UserEvent::ShowOffline);
+        state.timeout_active.store(false, Ordering::Release);
     });
 }
 
@@ -939,15 +984,26 @@ fn handle_ipc(
             if !request_id.is_empty() {
                 reply(webview, &request_id, json!(true), None);
             }
+            // ClearBrowsingDataAll completes asynchronously; exiting immediately
+            // cancels it and the cache clear silently no-ops. Give the profile
+            // clear time to finish before relaunching.
             let _ = webview.borrow().clear_all_browsing_data();
+            std::thread::sleep(std::time::Duration::from_millis(1500));
             if let Ok(exe) = std::env::current_exe() {
                 let _ = std::process::Command::new(exe).spawn();
             }
             std::process::exit(0);
         }
         "reload-hosted-app" => {
+            // Full reset: clear readiness + error so a failed reload is caught
+            // by the connection-timeout monitor again (offline recovery).
             state.suspended.store(false, Ordering::Release);
+            state.hosted_ready.store(false, Ordering::Release);
+            if let Ok(mut err) = state.last_load_error.lock() {
+                *err = None;
+            }
             let _ = webview.borrow().load_url(OFFICIAL_SERVER_URL);
+            schedule_connection_timeout(proxy.clone(), state.clone());
             if !request_id.is_empty() {
                 reply(webview, &request_id, json!(true), None);
             }
@@ -999,6 +1055,11 @@ fn handle_ipc(
                 }
             }
             push_update_status(webview, &status);
+            // The installer is running: quit now so the running exe doesn't
+            // file-lock the files the NSIS installer must overwrite.
+            if status.state == "ready" {
+                let _ = proxy.send_event(UserEvent::TrayQuit);
+            }
         }
         "open-latest-release" => {
             let _ = open::that(GITHUB_RELEASES_URL);
@@ -1039,9 +1100,11 @@ mod tests {
     }
 
     #[test]
-    fn suspend_html_is_tiny() {
-        assert!(SUSPEND_HTML.len() < 1024);
-        assert!(SUSPEND_HTML.contains("tray"));
+    fn tray_hide_keeps_spa_alive_for_instant_restore() {
+        // v1.3.8: a live SPA must never reload on tray restore — no cold start.
+        assert!(!should_reload_on_resume(true));
+        // Only a genuine cold start (hosted app never became ready) reloads.
+        assert!(should_reload_on_resume(false));
     }
 
     #[test]

@@ -53,6 +53,7 @@ struct DesktopState {
     pending_group_id: Mutex<Option<String>>,
     unread: Mutex<u32>,
     update_status: Mutex<UpdateStatus>,
+    timeout_active: AtomicBool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -198,6 +199,19 @@ fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+        // Deliver a notification-click group id whenever the window is shown —
+        // not only on focus changes, so toast clicks never dead-end.
+        let pending = app
+            .state::<Arc<DesktopState>>()
+            .pending_group_id
+            .lock()
+            .ok()
+            .and_then(|mut value| value.take());
+        if let Some(group_id) = pending {
+            if let Ok(group_json) = serde_json::to_string(&group_id) {
+                let _ = window.eval(format!("window.__gchatDesktopFocusGroup?.({group_json})"));
+            }
+        }
     }
 }
 
@@ -250,16 +264,15 @@ fn update_tray_menu<R: Runtime>(app: &AppHandle<R>, unread: u32) -> tauri::Resul
     Ok(())
 }
 
+/// Check-only update probe (parity with the Windows thin shell): never
+/// downloads, installs, or restarts — the app is only updated on an explicit
+/// user action through `install_update`.
 async fn check_for_updates(app: AppHandle) -> Result<bool, String> {
     let updater = app.updater().map_err(|error| error.to_string())?;
-    let Some(update) = updater.check().await.map_err(|error| error.to_string())? else {
+    let Some(_update) = updater.check().await.map_err(|error| error.to_string())? else {
         return Ok(false);
     };
-    update
-        .download_and_install(|_, _| {}, || {})
-        .await
-        .map_err(|error| error.to_string())?;
-    app.restart();
+    Ok(true)
 }
 
 fn schedule_updater(app: AppHandle) {
@@ -275,23 +288,43 @@ fn schedule_updater(app: AppHandle) {
 }
 
 fn schedule_connection_timeout(app: AppHandle, state: Arc<DesktopState>) {
+    if state
+        .timeout_active
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(CONNECTION_TIMEOUT).await;
-        if state.hosted_renderer_ready.load(Ordering::Acquire) {
-            return;
-        }
-        if let Ok(mut error) = state.last_load_error.lock() {
-            *error = Some(serde_json::json!({
-                "errorCode": "LOAD_TIMEOUT",
-                "errorDescription": "The hosted Gchat application did not become ready.",
-                "url": OFFICIAL_SERVER_URL
-            }));
-        }
-        if let Some(window) = main_window(&app) {
-            if let Ok(url) = Url::parse("tauri://localhost/offline.html") {
-                let _ = window.navigate(url);
+        const MAX_AUTO_RETRIES: u32 = 3;
+        for attempt in 0..=MAX_AUTO_RETRIES {
+            tokio::time::sleep(CONNECTION_TIMEOUT).await;
+            if state.hosted_renderer_ready.load(Ordering::Acquire) {
+                state.timeout_active.store(false, Ordering::Release);
+                return;
+            }
+            if let Ok(mut error) = state.last_load_error.lock() {
+                *error = Some(serde_json::json!({
+                    "errorCode": "LOAD_TIMEOUT",
+                    "errorDescription": "The hosted Gchat application did not become ready.",
+                    "url": OFFICIAL_SERVER_URL
+                }));
+            }
+            if attempt < MAX_AUTO_RETRIES {
+                // Slow cold starts exceed the timeout: retry automatically
+                // instead of stranding the user on the offline page.
+                if let Some(window) = main_window(&app) {
+                    if let Ok(url) = Url::parse(OFFICIAL_SERVER_URL) {
+                        let _ = window.navigate(url);
+                    }
+                }
+            } else if let Some(window) = main_window(&app) {
+                if let Ok(url) = Url::parse("tauri://localhost/offline.html") {
+                    let _ = window.navigate(url);
+                }
             }
         }
+        state.timeout_active.store(false, Ordering::Release);
     });
 }
 
@@ -470,15 +503,24 @@ fn clear_cache_and_restart(app: AppHandle) -> Result<bool, String> {
             .clear_all_browsing_data()
             .map_err(|error| error.to_string())?;
     }
+    // The WebView2 profile clear completes asynchronously — restarting
+    // immediately cancels it, so the cache clear would silently no-op.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
     app.restart();
 }
 
 #[tauri::command]
-fn reload_hosted_app(app: AppHandle) -> Result<bool, String> {
+fn reload_hosted_app(app: AppHandle, state: State<'_, Arc<DesktopState>>) -> Result<bool, String> {
+    // Full reset (same as retry_connection): clear readiness + error so a
+    // failed reload is caught by the connection-timeout monitor again.
+    state.hosted_renderer_ready.store(false, Ordering::Release);
+    if let Ok(mut error) = state.last_load_error.lock() {
+        *error = None;
+    }
     let window = main_window(&app).ok_or_else(|| "Main window unavailable".to_string())?;
-    window
-        .eval("window.location.reload()")
-        .map_err(|error| error.to_string())?;
+    let url = Url::parse(OFFICIAL_SERVER_URL).map_err(|error| error.to_string())?;
+    window.navigate(url).map_err(|error| error.to_string())?;
+    schedule_connection_timeout(app, state.inner().clone());
     Ok(true)
 }
 
@@ -588,7 +630,16 @@ async fn check_for_updates_cmd(
 
 #[tauri::command]
 async fn install_update(app: AppHandle) -> Result<bool, String> {
-    check_for_updates(app).await?;
+    // Explicit user consent path: download, install, and restart now.
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let Some(update) = updater.check().await.map_err(|e| e.to_string())? else {
+        return Ok(false);
+    };
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|e| e.to_string())?;
+    app.restart();
     Ok(true)
 }
 

@@ -10,8 +10,8 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="GChat" />
-  <link rel="manifest" href="/manifest.json?v=20260803-v137" />
-  <link rel="icon" href="/favicon.png?v=20260803-v137" type="image/png" />
+  <link rel="manifest" href="/manifest.json?v=20260805-v138" />
+  <link rel="icon" href="/favicon.png?v=20260805-v138" type="image/png" />
   <link rel="apple-touch-icon" href="/gchat_icon_ios.png" type="image/png" sizes="1254x1254" />
   <link rel="preload" href="/Roca-Regular.ttf?v=20260512" as="font" type="font/ttf" crossorigin="anonymous" />
   <link rel="preload" href="/Botanical.otf?v=20260512" as="font" type="font/otf" crossorigin="anonymous" />
@@ -23,7 +23,7 @@
 
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-brand">
-      <img class="brand-icon" src="/gchat_icon.png?v=20260803-v137" data-dark-src="/gchat_icon.png?v=20260803-v137" data-light-src="/gchat_icon_light.png" alt="GChat logo" />
+      <img class="brand-icon" src="/gchat_icon.png?v=20260805-v138" data-dark-src="/gchat_icon.png?v=20260805-v138" data-light-src="/gchat_icon_light.png" alt="GChat logo" />
       <span class="brand-name">GChat</span>
       <button class="btn-icon brand-cache-btn" id="clear-cache-btn" title="Clear cache and restart" aria-label="Clear cache and restart" data-icon="refresh-cw" data-icon-only="true"></button>
       <span class="brand-version" id="app-version-label">v—</span>
@@ -62,7 +62,7 @@
     <div class="chat-empty" id="chat-empty">
       <button class="btn-icon sidebar-toggle mobile-only-toggle" id="sidebar-toggle-empty" title="Menu" aria-label="Menu" data-icon="menu" data-icon-only="true"></button>
       <button class="btn-icon right-panel-toggle mobile-only-toggle" id="right-panel-toggle-empty" title="Group details" aria-label="Group details" data-icon="panel-right" data-icon-only="true"></button>
-      <img class="chat-empty-icon" src="/gchat_icon.png?v=20260803-v137" alt="GChat logo" />
+      <img class="chat-empty-icon" src="/gchat_icon.png?v=20260805-v138" alt="GChat logo" />
       <p class="chat-empty-title">Select a group to start chatting</p>
       <p class="chat-empty-sub">Only members of this group can see its messages</p>
     </div>
@@ -203,6 +203,11 @@
           <label class="toggle-label toggle-switch-row" for="allow-member-export-toggle">
             <span>Export chat</span>
             <input type="checkbox" id="allow-member-export-toggle" />
+            <span class="toggle-switch-ui" aria-hidden="true"></span>
+          </label>
+          <label class="toggle-label toggle-switch-row" for="allow-member-invite-toggle">
+            <span>Invite members</span>
+            <input type="checkbox" id="allow-member-invite-toggle" checked />
             <span class="toggle-switch-ui" aria-hidden="true"></span>
           </label>
           <label class="toggle-label toggle-switch-row" for="allow-member-kick-toggle">
@@ -406,6 +411,10 @@
     <button class="ctx-item" id="tag-ctx-delete" data-icon="trash-2">Delete #</button>
   </div>
 
+  <div class="ctx-menu" id="avatar-ctx-menu" hidden>
+    <button class="ctx-item" id="avatar-ctx-invite" data-icon="user-plus">Invite to chat</button>
+  </div>
+
   <div class="modal-overlay" id="group-color-modal" hidden>
     <div class="modal">
       <h2>Group Icon</h2>
@@ -433,6 +442,18 @@
         <button class="btn-secondary" id="group-color-cancel-btn">Cancel</button>
         <button class="btn-primary" id="group-color-save-btn">Confirm</button>
       </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="invite-modal" hidden>
+    <div class="modal modal-page invite-modal">
+      <div class="modal-title-row">
+        <h2 data-icon="user-plus">Invite to Chat</h2>
+        <button class="btn-icon profile-close-btn" id="invite-close-btn" title="Close" aria-label="Close" data-icon="x" data-icon-only="true"></button>
+      </div>
+      <p class="modal-desc" id="invite-desc">Choose a chat to invite <strong id="invite-target-name"></strong> into.</p>
+      <div class="invite-list" id="invite-list"></div>
+      <p class="form-error" id="invite-error"></p>
     </div>
   </div>
 
@@ -598,7 +619,7 @@
   <div class="sidebar-overlay" id="sidebar-overlay" hidden></div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/pwa.js?v=20260803-v137"></script>
-  <script src="app.js?v=20260803-v137"></script>
+  <script src="/pwa.js?v=20260805-v138"></script>
+  <script src="app.js?v=20260805-v138"></script>
 </body>
 </html>

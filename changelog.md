@@ -4,6 +4,29 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## v1.3.8
+
+- **GChat Global channel**: every user is automatically pulled into the permanent, admin-less `#GChat Global` chat on registration (and existing users on upgrade). There is no owner or administrator, the chat cannot be left or renamed, and its icon is the GChat logo. Any member can send messages, delete **any** message in it, export the chat, and create channels/sub-channels; the invite-code button, permission panel, and moderation controls are hidden.
+- **Invite to chat from profile pictures**: hovering a member's avatar (members list or message bubbles) smoothly scales it up, and right-clicking opens an **Invite to chat** action. Picking it lists every chat you are in that the person is not, with a themed confirmation before they join — a code-free way to add people to groups.
+- **New "Invite members" group permission** (below Export chat in *Group members can*, on by default): when off, only the owner and administrators can invite people; when on, any member can.
+- **Smooth hover transitions everywhere**: buttons, icons, list rows, tags, tool buttons, and text links now animate their hover highlight (220ms ease-out) instead of snapping instantly; avatar hovers scale gently on top of that.
+- **Instant tray restore (Windows)**: hiding to the tray no longer unloads the SPA — the app keeps running (socket, caches, session all stay warm), so clicking the tray icon shows the UI instantly with no cold start and no re-login flash.
+- **Persistent login**: sessions now last 30 days by default (cookie + server-side store) instead of expiring after ~24h of inactivity, so returning users stay signed in.
+- **Reliable cross-device message sync**: the app now subscribes to every group room in realtime (not just the open chat), silently resyncs a group from the server whenever it is opened or the tab regains focus after a disconnect, and refreshes all groups after a socket reconnect — messages sent from another device can no longer be missing when you switch chats.
+- **Pasting multiple copied files sends all of them**: copying several files and pasting them into the composer uploads every file one by one instead of silently dropping all but the first.
+- **Stability & correctness sweep** (16 fixes from a full bug investigation):
+  - Channels are isolated when scrolling up: loading older history no longer leaks other channels' messages into the visible transcript.
+  - Edited messages stay readable forever: the cache now keeps the re-encrypted metadata, so channel switches/reloads no longer show "Unable to decrypt this message".
+  - Group switching is race-safe: a realtime message arriving mid-switch can no longer contaminate the new chat's transcript cache.
+  - Opening a cached chat merges fresh server messages instead of truncating your paginated history to the latest 50.
+  - Mark-read handling is batched — viewport flushes no longer re-serialize the whole cache per row.
+  - macOS/Tauri no longer force-installs updates or restarts mid-session: background and tray checks report availability, and installing happens only on explicit user action (parity with Windows).
+  - Windows update install now quits the app first so the NSIS installer isn't blocked by the running exe; clear-cache-and-restart waits for the WebView2 clear to finish; reloading the hosted app recovers from offline errors; connection timeouts auto-retry 3× before showing the offline page; notification clicks deliver the group focus on tray restore (Windows + macOS).
+  - Light theme fixes: the AI modal, reconnect banner, and mobile modal bands are now readable; the dark-theme permission toggle has a clearly visible ON state.
+  - Deleted middle messages restore avatars correctly; message-image blob URLs are released when rows leave the transcript.
+- Fixed the members-list role badge alignment so **Admin** sits flush right, exactly like **Owner** (action buttons no longer push the label off the edge).
+- Bumped product version to **1.3.8** and asset cache-bust to v138.
+
 ## v1.3.7
 
 - **Windows production desktop** is a new **non-Tauri thin WebView2 host** (`src-desktop-win`, wry/tao): same hosted UI and `window.electronAPI` bridge, ~1 MiB NSIS installer, no Chromium, no Tauri plugin runtime.

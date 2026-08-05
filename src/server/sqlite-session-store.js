@@ -43,7 +43,9 @@ function createSqliteSessionStore(session, filename) {
     set(sid, value, callback = () => {}) {
       try {
         const cookieExpiry = value?.cookie?.expires ? new Date(value.cookie.expires).getTime() : 0;
-        const expiresAt = cookieExpiry || Date.now() + 24 * 60 * 60 * 1000;
+        // v1.3.8: 30-day persistence fallback (was 24h) — session cookies with
+        // no explicit expiry must not silently log users out after a day.
+        const expiresAt = cookieExpiry || Date.now() + 30 * 24 * 60 * 60 * 1000;
         this.setStmt.run(sid, JSON.stringify(value), expiresAt);
         this.writeCount += 1;
         if (this.writeCount % 100 === 0) this.cleanupStmt.run(Date.now());

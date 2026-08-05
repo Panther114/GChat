@@ -1480,6 +1480,17 @@
   var DEFAULT_TAG_TOPIC = "main";
   var MAX_TAG_TOPIC_LENGTH = 12;
   var CHANNEL_PREF_KEY_PREFIX = "gchat:active-channel:";
+  var GLOBAL_GROUP_ID = "gchat-global";
+  var GLOBAL_GROUP_ICON_SRC = "/gchat_icon.png";
+  function isGlobalGroupId(groupId) {
+    return String(groupId || "") === GLOBAL_GROUP_ID;
+  }
+  function isGlobalGroup(group) {
+    return !!(group && (group.isGlobal === true || isGlobalGroupId(group.id)));
+  }
+  function isCurrentGroupGlobal() {
+    return isGlobalGroup(currentGroupData) || isGlobalGroupId(currentGroupId);
+  }
   function normalizeHashtagTopic(value) {
     if (value == null || value === "") return null;
     const trimmed = String(value).trim().replace(/^#/, "").toLowerCase();
@@ -1905,8 +1916,7 @@
       pendingReadMessageIds.add(messageId);
       row.classList.remove("unseen");
       row.dataset.hasRead = "1";
-      setLocalMessageReadState(rowGroupId, messageId, true);
-      syncGroupUnreadCount(rowGroupId);
+      markMessageReadLocal(rowGroupId, messageId);
       socket.emit("mark_message_read", { groupId: rowGroupId, messageId });
     }
     if (row.dataset.disappearing === "1" && row.dataset.senderId !== String(currentUser?.id) && row.dataset.disappearingHidden !== "1" && row.dataset.disappearingStarted !== "1") {
@@ -2086,9 +2096,26 @@
     updatePageTitleNotification();
   }
   var imageViewerData = null;
+  function revokeBlobUrlsIn(root) {
+    if (!root) return;
+    try {
+      if (root.tagName === "IMG" && (root.src || "").startsWith("blob:")) {
+        URL.revokeObjectURL(root.src);
+        root.removeAttribute("src");
+      }
+      for (const img of root.querySelectorAll('img[src^="blob:"]')) {
+        URL.revokeObjectURL(img.src);
+        img.removeAttribute("src");
+      }
+    } catch {
+    }
+  }
   function showImageViewer(blob, filename = "image") {
     const modal = $("image-viewer-modal");
     const img = $("image-viewer-img");
+    if (imageViewerData?.imageUrl) {
+      URL.revokeObjectURL(imageViewerData.imageUrl);
+    }
     const imageUrl = URL.createObjectURL(blob);
     imageViewerData = { blob, filename, imageUrl };
     img.src = imageUrl;
@@ -2475,6 +2502,75 @@
     renderTagFilters();
     void renderActiveChannelStream();
   }
+  var MAX_CACHED_MESSAGES_PER_GROUP = 500;
+  function trimBackgroundGroupCache(cache) {
+    const messages = cache.messages;
+    if (!Array.isArray(messages) || messages.length <= MAX_CACHED_MESSAGES_PER_GROUP) return;
+    cache.messages = messages.slice(-MAX_CACHED_MESSAGES_PER_GROUP);
+    cache.messageRows = null;
+    cache.rowsDirty = true;
+    cache.oldestMessageId = cache.messages.length ? cache.messages[0].id : null;
+  }
+  var joinedRoomIds = /* @__PURE__ */ new Set();
+  function joinAllGroupRooms() {
+    if (!socket) return;
+    const next = new Set(joinedRoomIds);
+    for (const group of groups) {
+      const id = String(group.id || "");
+      if (!id || next.has(id)) continue;
+      next.add(id);
+      socket.emit("join_room", id);
+    }
+    joinedRoomIds = next;
+  }
+  function trackJoinedRoom(groupId) {
+    const id = String(groupId || "");
+    if (!id) return;
+    joinedRoomIds.add(id);
+  }
+  async function refreshCurrentGroupFromServer() {
+    const groupId = currentGroupId;
+    if (!groupId) return;
+    try {
+      const res = await fetch(`/api/groups/${groupId}/messages?limit=50`, { cache: "no-store" });
+      if (!res.ok) return;
+      const rawMsgs = await res.json();
+      if (String(currentGroupId) !== groupId) return;
+      const msgs = filterMessagesVisibleToCurrentUser(rawMsgs);
+      const cache = ensureGroupCacheEntry(groupId);
+      const existing = Array.isArray(cache.messages) ? cache.messages : [];
+      const byId = new Map(existing.map((m) => [String(m.id), m]));
+      for (const m of msgs) byId.set(String(m.id), m);
+      const merged = [...byId.values()].sort(
+        (a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || ""))
+      );
+      const knownIds = new Set(existing.map((m) => String(m.id)));
+      const fetchedIds = msgs.map((m) => String(m.id));
+      const changed = fetchedIds.some((id) => !knownIds.has(id));
+      if (!changed) return;
+      cache.messages = merged;
+      cache.messageRows = null;
+      cache.rowsDirty = true;
+      writeLocalGroupCache(groupId, cache);
+      if (String(currentGroupId) !== groupId) return;
+      allMessages = merged;
+      updateGroupUnseenCount(groupId, merged);
+      void updateGroupPreviewFromMessage(groupId, merged.length ? merged[merged.length - 1] : null);
+      const nearBottom = isNearBottom();
+      if (nearBottom || messagesArea().scrollTop <= 0) {
+        const area = messagesArea();
+        const prevScrollTop = area.scrollTop;
+        const prevScrollHeight = area.scrollHeight;
+        await renderActiveChannelStream();
+        if (!nearBottom && prevScrollTop > 0) {
+          area.scrollTop = prevScrollTop + (area.scrollHeight - prevScrollHeight);
+        }
+        observeCurrentGroupRowsForRead();
+      }
+    } catch (err) {
+      console.warn("refreshCurrentGroupFromServer failed:", err);
+    }
+  }
   async function ensureGroupDataPreloaded(groupId) {
     if (groupPreloadPromises.has(groupId)) return groupPreloadPromises.get(groupId);
     const cache = ensureGroupCacheEntry(groupId);
@@ -2785,6 +2881,19 @@
           avatar.style.color = "transparent";
         } else {
           if (header) header.hidden = false;
+          const clock = avatar.querySelector(".msg-continuation-time");
+          if (clock) {
+            const senderId = child.dataset.senderId;
+            const senderNameEl = child.querySelector(".msg-sender-name");
+            const memberProfile = getMemberProfile(currentGroupId, senderId);
+            renderAvatarElement(avatar, {
+              username: memberProfile?.username || senderNameEl && senderNameEl.textContent || "?",
+              iconColor: memberProfile?.iconColor || null,
+              profilePicture: memberProfile?.profilePicture || null
+            });
+            avatar.style.background = "";
+            avatar.style.color = "";
+          }
         }
       }
       prevVisible = child;
@@ -2827,6 +2936,7 @@
       await hydrateMessageChannel(msg, currentGroupId);
     }
     const channelMsgs = all.filter((msg) => resolveMessageTagTopic(msg) === channel);
+    revokeBlobUrlsIn(area);
     area.replaceChildren(createLoadMoreIndicator());
     if (!channelMsgs.length) {
       syncChannelEmptyState();
@@ -3347,6 +3457,12 @@
       ["path", { d: "M23 21v-2a4 4 0 0 0-3-3.87" }],
       ["path", { d: "M16 3.13a4 4 0 0 1 0 7.75" }]
     ],
+    "user-plus": [
+      ["path", { d: "M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" }],
+      ["circle", { cx: "8.5", cy: "7", r: "4" }],
+      ["line", { x1: "19", y1: "8", x2: "19", y2: "14" }],
+      ["line", { x1: "22", y1: "11", x2: "16", y2: "11" }]
+    ],
     "shield-plus": [
       ["path", { d: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z" }],
       ["path", { d: "M12 8v8" }],
@@ -3743,6 +3859,7 @@
       clearPageTitleNotification();
       observeCurrentGroupRowsForRead();
       void checkForHostedAppUpdate();
+      syncStateOnFocus();
     });
     window.addEventListener("blur", () => {
       clearAllMessageVisibilityTimers();
@@ -3751,6 +3868,7 @@
       if (document.visibilityState === "visible") {
         observeCurrentGroupRowsForRead();
         void checkForHostedAppUpdate();
+        syncStateOnFocus();
         return;
       }
       clearAllMessageVisibilityTimers();
@@ -3816,6 +3934,7 @@
       await loadGroupKeyVaultEntries();
       pushStatus.totalUnreadCount = getTotalUnreadCount();
       renderGroupList();
+      joinAllGroupRooms();
       void refreshGroupPreviewsFromCache(groups.map((group) => group.id));
       syncUnreadIndicators();
       if (isMobileLayout() && !currentGroupId) setMobileView("list");
@@ -3892,6 +4011,11 @@
   function renderGroupAvatarElement(target, group = {}) {
     if (!target) return;
     target.replaceChildren();
+    if (isGlobalGroup(group)) {
+      target.style.background = "none";
+      target.appendChild(createAvatarImage(GLOBAL_GROUP_ICON_SRC));
+      return;
+    }
     if (group.groupIcon) {
       target.style.background = "none";
       target.appendChild(createAvatarImage(group.groupIcon));
@@ -3913,6 +4037,10 @@
   function updateGroupColorAction(canManage) {
     const button = $("set-group-color-btn");
     if (!button) return;
+    if (isCurrentGroupGlobal()) {
+      button.hidden = true;
+      return;
+    }
     button.hidden = false;
     button.disabled = !canManage;
     button.title = canManage ? "Change group icon" : "Only the group owner or an administrator can change the group icon";
@@ -3922,6 +4050,20 @@
     const clearBtn = $("clear-history-btn");
     const leaveBtn = $("leave-group-btn");
     const disbandBtn = $("disband-btn");
+    const isGlobal = isCurrentGroupGlobal();
+    if (isGlobal) {
+      updateQuickActionButtonState(exportBtn, { enabled: true, labelEnabled: "Export chat as TXT" });
+      updateQuickActionButtonState(clearBtn, { enabled: false, labelEnabled: "Clear chat history" });
+      if (leaveBtn) {
+        leaveBtn.hidden = true;
+        leaveBtn.dataset.label = "Exit group";
+      }
+      if (disbandBtn) {
+        disbandBtn.hidden = true;
+        disbandBtn.dataset.label = "Disband group";
+      }
+      return;
+    }
     const canMemberExport = !!(currentGroupData && currentGroupData.allowMemberExport);
     const canMemberClear = !!(currentGroupData && currentGroupData.allowMemberClear);
     const isAdministrator = !!currentGroupData?.viewerIsAdmin;
@@ -4009,11 +4151,12 @@
   }
   function syncGroupPermissionControls() {
     if (!currentGroupData || !currentUser) return;
+    const isGlobal = isCurrentGroupGlobal();
     const canManage = canCurrentUserManageGroup();
     const ownerActions = $("owner-actions");
     const lock = $("owner-permissions-lock");
     if (ownerActions) {
-      ownerActions.hidden = false;
+      ownerActions.hidden = isGlobal;
       ownerActions.classList.toggle("is-locked", !canManage);
     }
     if (lock) lock.hidden = canManage;
@@ -4021,7 +4164,8 @@
       "allow-member-clear-toggle",
       "allow-member-clear-tag-toggle",
       "allow-member-export-toggle",
-      "allow-member-kick-toggle"
+      "allow-member-kick-toggle",
+      "allow-member-invite-toggle"
     ].forEach((id) => {
       const input = $(id);
       if (input) input.disabled = !canManage;
@@ -4088,21 +4232,47 @@
       msg.hasRead = false;
     }
   }
-  function setLocalMessageReadState(groupId, messageId, hasRead = true) {
+  var pendingBatchReads = /* @__PURE__ */ new Map();
+  var batchReadFlushScheduled = false;
+  function scheduleBatchReadFlush() {
+    if (batchReadFlushScheduled) return;
+    batchReadFlushScheduled = true;
+    queueMicrotask(() => {
+      batchReadFlushScheduled = false;
+      flushBatchReads();
+    });
+  }
+  function flushBatchReads() {
+    if (!pendingBatchReads.size) return;
+    const byGroup = pendingBatchReads;
+    pendingBatchReads = /* @__PURE__ */ new Map();
+    for (const [groupId, messageIds] of byGroup) {
+      const cache = ensureGroupCacheEntry(groupId);
+      let changed = false;
+      for (const msg of cache.messages || []) {
+        if (!messageIds.has(String(msg.id))) continue;
+        if (msg.hasRead !== true) {
+          msg.hasRead = true;
+          changed = true;
+        }
+      }
+      if (changed) {
+        writeLocalGroupCache(groupId, cache);
+        syncGroupUnreadCount(groupId);
+      }
+    }
+  }
+  function markMessageReadLocal(groupId, messageId) {
     const normalizedGroupId = String(groupId || "");
     const normalizedMessageId = String(messageId || "");
     if (!normalizedGroupId || !normalizedMessageId) return;
-    const cache = ensureGroupCacheEntry(normalizedGroupId);
-    let changed = false;
-    for (const msg of cache.messages || []) {
-      if (String(msg.id) !== normalizedMessageId) continue;
-      if (msg.hasRead !== hasRead) {
-        msg.hasRead = hasRead;
-        changed = true;
-      }
-      break;
+    let ids = pendingBatchReads.get(normalizedGroupId);
+    if (!ids) {
+      ids = /* @__PURE__ */ new Set();
+      pendingBatchReads.set(normalizedGroupId, ids);
     }
-    if (changed) writeLocalGroupCache(normalizedGroupId, cache);
+    ids.add(normalizedMessageId);
+    scheduleBatchReadFlush();
   }
   function updateUnreadBadge(groupId, count) {
     const badge = $("badge-" + groupId);
@@ -4151,10 +4321,14 @@
     $("reply-preview-bar").hidden = true;
     $("chat-group-name").textContent = currentGroupData ? currentGroupData.name : "";
     $("edit-group-name-input").value = currentGroupData ? currentGroupData.name : "";
+    $("edit-group-name-input").readOnly = isCurrentGroupGlobal();
     syncRightPanelMobileTitle();
     $("right-panel-content").hidden = false;
     $("right-panel-empty").hidden = true;
     renderTagFilters();
+    const isGlobal = isCurrentGroupGlobal();
+    const copyCodeBtn = $("copy-code-btn");
+    if (copyCodeBtn) copyCodeBtn.hidden = isGlobal;
     const isOwner = currentGroupData && currentGroupData.createdBy === currentUser.id;
     syncGroupPermissionControls();
     updateGroupColorAction(canCurrentUserManageGroup());
@@ -4164,6 +4338,7 @@
       $("allow-member-clear-tag-toggle").checked = !!currentGroupData.allowMemberClearTag;
       $("allow-member-export-toggle").checked = !!currentGroupData.allowMemberExport;
       $("allow-member-kick-toggle").checked = !!currentGroupData.allowMemberKick;
+      $("allow-member-invite-toggle").checked = currentGroupData.allowMemberInvite !== false;
       $("ai-mode-toggle").checked = !!currentGroupData.aiEnabled;
     }
     syncAllowMemberClearTagToggleState();
@@ -4171,8 +4346,12 @@
     updateAiControls();
     updateGroupActionButtons(isOwner);
     updateKeyState();
-    if (socket) socket.emit("join_room", normalizedGroupId);
+    if (socket) {
+      socket.emit("join_room", normalizedGroupId);
+      trackJoinedRoom(normalizedGroupId);
+    }
     const cache = ensureGroupCacheEntry(normalizedGroupId);
+    const hadCompleteCache = !!(cache.messages && cache.members && cache.messageRows);
     if (!cache.messages || !cache.members || !cache.messageRows) {
       messagesArea().replaceChildren(createLoadMoreIndicator());
       members = [];
@@ -4187,6 +4366,7 @@
     observeCurrentGroupRowsForRead();
     scrollToBottom(true);
     $("scroll-bottom-btn").hidden = true;
+    if (hadCompleteCache) void refreshCurrentGroupFromServer();
     closeMobileActionMenu();
     if (isMobileLayout()) setMobileView("chat");
   }
@@ -4308,17 +4488,6 @@
       name.className = "member-name";
       name.textContent = m.username;
       li.append(av, name);
-      if (currentGroupData && m.id === currentGroupData.createdBy) {
-        const tag = document.createElement("span");
-        tag.className = "member-owner-tag";
-        tag.textContent = "Owner";
-        li.appendChild(tag);
-      } else if (m.isAdministrator) {
-        const tag = document.createElement("span");
-        tag.className = "member-owner-tag";
-        tag.textContent = "Admin";
-        li.appendChild(tag);
-      }
       const isOwner = String(currentGroupData?.createdBy) === String(currentUser?.id);
       if (isOwner && String(m.id) !== String(currentGroupData?.createdBy)) {
         const roleBtn = document.createElement("button");
@@ -4344,6 +4513,17 @@
           kickMember(m.id, m.username);
         });
         li.appendChild(kickBtn);
+      }
+      if (currentGroupData && m.id === currentGroupData.createdBy) {
+        const tag = document.createElement("span");
+        tag.className = "member-owner-tag";
+        tag.textContent = "Owner";
+        li.appendChild(tag);
+      } else if (m.isAdministrator) {
+        const tag = document.createElement("span");
+        tag.className = "member-owner-tag";
+        tag.textContent = "Admin";
+        li.appendChild(tag);
       }
       list.appendChild(li);
     }
@@ -4697,6 +4877,10 @@
   async function appendMessageBubble(msg, scroll, groupId = currentGroupId) {
     await hydrateMessageChannel(msg, groupId);
     const channel = resolveMessageTagTopic(msg);
+    const cache = ensureGroupCacheEntry(groupId);
+    if (groupId === currentGroupId) {
+      allMessages = Array.isArray(cache.messages) ? cache.messages : [];
+    }
     let previousInChannel = null;
     for (let i = allMessages.length - 1; i >= 0; i -= 1) {
       if (resolveMessageTagTopic(allMessages[i]) === channel) {
@@ -4708,7 +4892,6 @@
     const row = await buildMessageRow(msg, groupId, { showSenderName });
     if (!row) return;
     const area = messagesArea();
-    const cache = ensureGroupCacheEntry(groupId);
     const wasNearBottom = area ? area.scrollHeight - area.scrollTop - area.clientHeight < 150 : false;
     allMessages.push(msg);
     cache.messages = allMessages;
@@ -4789,13 +4972,15 @@
     ctxMsg = msg;
     ctxText = text;
     hideTagContextMenu();
+    hideAvatarContextMenu();
     const menu = $("ctx-menu");
     const isAuthor = msg.senderId === currentUser?.id;
     const isAttachment = msg.type === "image" || msg.type === "file";
     const isDisappearing = isDisappearingMessage(msg);
+    const isGlobalMessageGroup = isGlobalGroupId(msg.groupId || currentGroupId);
     $("ctx-reply").hidden = isDisappearing;
     $("ctx-edit").hidden = isDisappearing || !isAuthor || !["text", "whisper"].includes(msg.type);
-    $("ctx-delete").hidden = isDisappearing || !isAuthor;
+    $("ctx-delete").hidden = isDisappearing || !isAuthor && !isGlobalMessageGroup;
     $("ctx-download").hidden = true;
     $("ctx-copy").hidden = isAttachment || isDisappearing;
     setElementIcon($("ctx-copy"), "copy", { label: "Copy" });
@@ -4816,6 +5001,7 @@
     ctxTagTopic = normalizeHashtagTopic(topic);
     if (!ctxTagTopic) return;
     hideContextMenu();
+    hideAvatarContextMenu();
     const menu = $("tag-ctx-menu");
     const deleteBtn = $("tag-ctx-delete");
     deleteBtn.textContent = `Delete ${formatHashtagLabel(ctxTagTopic)}`;
@@ -4827,6 +5013,125 @@
   function hideTagContextMenu() {
     $("tag-ctx-menu").hidden = true;
     ctxTagTopic = null;
+  }
+  var avatarCtxUserId = null;
+  var avatarCtxUsername = "";
+  function showAvatarContextMenu(e, userId, username) {
+    avatarCtxUserId = userId;
+    avatarCtxUsername = username || "this user";
+    hideContextMenu();
+    hideTagContextMenu();
+    const menu = $("avatar-ctx-menu");
+    const inviteBtn = $("avatar-ctx-invite");
+    setElementIcon(inviteBtn, "user-plus", { label: `Invite ${avatarCtxUsername} to chat` });
+    menu.hidden = false;
+    if (e) {
+      menu.style.left = Math.min(e.clientX, window.innerWidth - 180) + "px";
+      menu.style.top = Math.min(e.clientY, window.innerHeight - 100) + "px";
+    } else {
+      menu.style.left = "50%";
+      menu.style.top = "50%";
+    }
+  }
+  function hideAvatarContextMenu() {
+    const menu = $("avatar-ctx-menu");
+    if (menu) menu.hidden = true;
+    avatarCtxUserId = null;
+  }
+  async function openInviteModal() {
+    const targetUserId = avatarCtxUserId;
+    const targetName = avatarCtxUsername;
+    hideAvatarContextMenu();
+    if (!targetUserId || !currentUser) return;
+    const modal = $("invite-modal");
+    const list = $("invite-list");
+    const desc = $("invite-desc");
+    const errorEl = $("invite-error");
+    errorEl.textContent = "";
+    $("invite-target-name").textContent = targetName;
+    modal.hidden = false;
+    list.innerHTML = '<div class="invite-list-empty">Loading chats\u2026</div>';
+    try {
+      const res = await fetch(`/api/groups/invite-candidates/${encodeURIComponent(targetUserId)}`, { cache: "no-store" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "Failed to load chats");
+      }
+      const candidateGroups = await res.json();
+      if (!Array.isArray(candidateGroups) || !candidateGroups.length) {
+        list.innerHTML = `<div class="invite-list-empty">${escapeHtml(targetName)} is already in all of your chats.</div>`;
+        return;
+      }
+      renderInviteCandidateList(list, candidateGroups, targetUserId, targetName);
+    } catch (err) {
+      errorEl.textContent = err.message || "Failed to load chats";
+      list.innerHTML = "";
+    }
+  }
+  function renderInviteCandidateList(list, candidateGroups, targetUserId, targetName) {
+    list.innerHTML = "";
+    for (const group of candidateGroups) {
+      const item = document.createElement("div");
+      item.className = "invite-item";
+      item.dataset.groupId = group.id;
+      const av = document.createElement("div");
+      av.className = "invite-item-avatar";
+      if (group.isGlobal || isGlobalGroupId(group.id)) {
+        av.style.background = "none";
+        av.appendChild(createAvatarImage(GLOBAL_GROUP_ICON_SRC));
+      } else if (group.groupIcon) {
+        av.style.background = "none";
+        av.appendChild(createAvatarImage(group.groupIcon));
+      } else {
+        av.style.background = groupAvatarColor(group);
+        av.textContent = String(group.name || "?")[0].toUpperCase();
+      }
+      const meta = document.createElement("div");
+      meta.className = "invite-item-meta";
+      const nameEl = document.createElement("div");
+      nameEl.className = "invite-item-name";
+      nameEl.textContent = group.name;
+      meta.appendChild(nameEl);
+      if (group.isGlobal) {
+        const hint = document.createElement("div");
+        hint.className = "invite-item-hint";
+        hint.textContent = "Global channel";
+        meta.appendChild(hint);
+      }
+      const button = document.createElement("button");
+      button.className = "btn-primary btn-sm invite-item-btn";
+      button.type = "button";
+      setElementIcon(button, "user-plus", { label: "Invite" });
+      button.addEventListener("click", () => {
+        confirmInviteMember(group, targetUserId, targetName, item);
+      });
+      item.append(av, meta, button);
+      list.appendChild(item);
+    }
+  }
+  function confirmInviteMember(group, targetUserId, targetName, item) {
+    showConfirm(
+      "Invite to Chat",
+      `Do you want to invite ${targetName} into ${group.name}?`,
+      async () => {
+        const res = await fetch(`/api/groups/${encodeURIComponent(group.id)}/invite`, {
+          method: "POST",
+          headers: apiHeaders(),
+          body: JSON.stringify({ userId: targetUserId })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          showToast(data.error || "Failed to invite member", "error");
+          return;
+        }
+        showToast(`${targetName} joined ${group.name}`, "success");
+        item.remove();
+        const list = $("invite-list");
+        if (list && !list.children.length) {
+          list.innerHTML = `<div class="invite-list-empty">${escapeHtml(targetName)} is now in all of your chats.</div>`;
+        }
+      }
+    );
   }
   async function getAttachmentData(msg) {
     if (msg?._viewerData) {
@@ -5588,9 +5893,10 @@
   function closeDiagnosticsModal() {
     $("diagnostics-modal").hidden = true;
   }
-  async function refreshCurrentGroupAfterReconnect() {
+  var socketHasConnectedOnce = false;
+  async function refreshCurrentGroupAfterReconnect({ fullSync = false } = {}) {
     try {
-      await loadGroups();
+      await loadGroups({ withBackendPreload: fullSync });
       if (!currentGroupId) return;
       await Promise.all([loadMessages(currentGroupId), loadMembers(currentGroupId)]);
       if (currentGroupId) {
@@ -5600,6 +5906,16 @@
       }
     } catch (err) {
       console.warn("Failed to refresh current group after reconnect:", err);
+    }
+  }
+  var lastFocusStateSyncAt = 0;
+  function syncStateOnFocus() {
+    const now = Date.now();
+    if (now - lastFocusStateSyncAt < 30 * 1e3) return;
+    lastFocusStateSyncAt = now;
+    if (!socket?.connected) {
+      void loadGroups({ withBackendPreload: true });
+      if (currentGroupId) void refreshCurrentGroupFromServer();
     }
   }
   function manualReconnectSocket() {
@@ -5654,12 +5970,19 @@
         transport: socketDiagnostics.socketTransport
       });
       if (currentGroupId) socket.emit("join_room", currentGroupId);
-      void refreshCurrentGroupAfterReconnect();
+      joinAllGroupRooms();
+      if (socketHasConnectedOnce) {
+        void refreshCurrentGroupAfterReconnect({ fullSync: true });
+      } else {
+        socketHasConnectedOnce = true;
+        void refreshCurrentGroupAfterReconnect();
+      }
       renderDiagnosticsPanel();
     });
     socket.on("disconnect", (reason) => {
       socketDiagnostics.lastDisconnectReason = reason || "unknown";
       socketDiagnostics.lastDisconnectAt = (/* @__PURE__ */ new Date()).toISOString();
+      joinedRoomIds = /* @__PURE__ */ new Set();
       updateConnectionTransport();
       updateConnectionStatusUi(socketDiagnostics.isBrowserOnline ? "disconnected" : "offline", socketDiagnostics.isBrowserOnline ? "Disconnected" : "Offline");
       console.warn("[socket] disconnect", { reason });
@@ -5720,6 +6043,7 @@
         if (cache.messages) {
           cache.messages.push(msg);
           cache.oldestMessageId = cache.messages.length ? cache.messages[0].id : null;
+          trimBackgroundGroupCache(cache);
           writeLocalGroupCache(msg.groupId, cache);
         }
         if (cache.messageRows && !cache.rowsDirty) {
@@ -5782,6 +6106,7 @@
       const row = document.querySelector('[data-msg-id="' + messageId + '"]');
       if (row) {
         readObserver?.unobserve(row);
+        revokeBlobUrlsIn(row);
         row.remove();
       }
       pendingReadMessageIds.delete(messageId);
@@ -5839,6 +6164,9 @@
         if (!stored) continue;
         stored.encryptedContent = encryptedContent;
         stored.iv = iv;
+        stored.encryptedMetadata = updated.encryptedMetadata ?? stored.encryptedMetadata;
+        stored.metadataIv = updated.metadataIv ?? stored.metadataIv;
+        if (updated.tagIndex !== void 0) stored.tagIndex = updated.tagIndex;
         stored.editedAt = editedAt;
         stored.revision = revision;
         if (groupId !== currentGroupId) cache.rowsDirty = true;
@@ -5903,13 +6231,14 @@
       }
       renderGroupList();
     });
-    socket.on("group_settings_updated", ({ groupId, allowMemberClear, allowMemberClearTag, allowMemberExport, allowMemberKick, aiEnabled, groupColor, groupIcon }) => {
+    socket.on("group_settings_updated", ({ groupId, allowMemberClear, allowMemberClearTag, allowMemberExport, allowMemberKick, allowMemberInvite, aiEnabled, groupColor, groupIcon }) => {
       const group = groups.find((g) => g.id === groupId);
       if (group) {
         if (allowMemberClear !== void 0) group.allowMemberClear = !!allowMemberClear;
         if (allowMemberClearTag !== void 0) group.allowMemberClearTag = !!allowMemberClearTag;
         if (allowMemberExport !== void 0) group.allowMemberExport = !!allowMemberExport;
         if (allowMemberKick !== void 0) group.allowMemberKick = !!allowMemberKick;
+        if (allowMemberInvite !== void 0) group.allowMemberInvite = !!allowMemberInvite;
         if (aiEnabled !== void 0) group.aiEnabled = !!aiEnabled;
         if (groupColor !== void 0) group.groupColor = groupColor || null;
         if (groupIcon !== void 0) group.groupIcon = groupIcon || null;
@@ -5925,6 +6254,7 @@
         if (allowMemberClearTag !== void 0) currentGroupData.allowMemberClearTag = !!allowMemberClearTag;
         if (allowMemberExport !== void 0) currentGroupData.allowMemberExport = !!allowMemberExport;
         if (allowMemberKick !== void 0) currentGroupData.allowMemberKick = !!allowMemberKick;
+        if (allowMemberInvite !== void 0) currentGroupData.allowMemberInvite = !!allowMemberInvite;
         if (aiEnabled !== void 0) currentGroupData.aiEnabled = !!aiEnabled;
         if (groupColor !== void 0) currentGroupData.groupColor = groupColor || null;
         if (groupIcon !== void 0) currentGroupData.groupIcon = groupIcon || null;
@@ -5935,6 +6265,7 @@
         $("allow-member-clear-tag-toggle").checked = !!currentGroupData.allowMemberClearTag;
         $("allow-member-export-toggle").checked = !!currentGroupData.allowMemberExport;
         $("allow-member-kick-toggle").checked = !!currentGroupData.allowMemberKick;
+        $("allow-member-invite-toggle").checked = currentGroupData.allowMemberInvite !== false;
         $("ai-mode-toggle").checked = !!currentGroupData.aiEnabled;
       }
       syncAllowMemberClearTagToggleState();
@@ -5970,6 +6301,32 @@
       renderMembersList();
       renderWhisperPicker();
       $("chat-member-count").textContent = members.length + " member" + (members.length !== 1 ? "s" : "");
+    });
+    socket.on("group_invited", async (groupPayload) => {
+      if (!groupPayload || !groupPayload.id || !groupPayload.secret || !currentUser) return;
+      const normalizedGroupId = String(groupPayload.id);
+      if (groups.some((group) => String(group.id) === normalizedGroupId)) return;
+      groups.push({
+        ...groupPayload,
+        id: normalizedGroupId,
+        _lastPreviewText: GROUP_PREVIEW_EMPTY_TEXT,
+        _lastPreviewTime: ""
+      });
+      unreadCounts[normalizedGroupId] = 0;
+      const entry = { groupId: normalizedGroupId, secret: groupPayload.secret, joinCode: groupPayload.joinCode || null };
+      try {
+        await keyVault.put(entry);
+      } catch {
+      }
+      groupKeyVaultCache.set(normalizedGroupId, entry);
+      if (socket) {
+        socket.emit("join_room", normalizedGroupId);
+        trackJoinedRoom(normalizedGroupId);
+      }
+      renderGroupList();
+      syncUnreadIndicators();
+      pushStatus.totalUnreadCount = getTotalUnreadCount();
+      showToast(`You were invited to ${groupPayload.name || "a new chat"}`, "success");
     });
     socket.on("member_role_updated", ({ userId, groupId, isAdministrator }) => {
       const cache = ensureGroupCacheEntry(groupId);
@@ -7646,6 +8003,18 @@ ${grokResponseDraft}` : grokResponseDraft;
         currentGroupData.allowMemberKick = e.target.checked;
       }
     });
+    $("allow-member-invite-toggle").addEventListener("change", async (e) => {
+      const nextChecked = e.target.checked;
+      const result = await updateGroupSettingRequest({ allowMemberInvite: nextChecked });
+      if (!result.ok) {
+        e.target.checked = !nextChecked;
+        showToast(result.error || "Failed to update group settings", "error");
+        return;
+      }
+      if (currentGroupData) {
+        currentGroupData.allowMemberInvite = nextChecked;
+      }
+    });
     $("ai-mode-toggle").addEventListener("change", async (e) => {
       const nextChecked = e.target.checked;
       const result = await updateGroupSettingRequest({ aiEnabled: nextChecked });
@@ -7797,9 +8166,38 @@ ${grokResponseDraft}` : grokResponseDraft;
         }
       );
     });
+    $("avatar-ctx-invite").addEventListener("click", () => {
+      openInviteModal();
+    });
+    $("invite-close-btn").addEventListener("click", () => {
+      $("invite-modal").hidden = true;
+    });
+    $("invite-modal").addEventListener("click", (e) => {
+      if (e.target === $("invite-modal")) $("invite-modal").hidden = true;
+    });
+    document.addEventListener("contextmenu", (event) => {
+      const avatar = event.target.closest(".msg-avatar, .member-avatar");
+      if (!avatar) return;
+      const row = avatar.closest(".msg-row, .member-item");
+      if (!row) return;
+      const userId = row.dataset.senderId || row.dataset.userId;
+      if (!userId || !currentUser || String(userId) === String(currentUser.id)) return;
+      if (String(userId) === AI_ASSISTANT_USER_ID) return;
+      event.preventDefault();
+      let username = "";
+      const member = members.find((m) => String(m.id) === String(userId));
+      if (member) {
+        username = member.username;
+      } else {
+        const nameEl = row.querySelector(".msg-sender-name");
+        if (nameEl) username = nameEl.textContent || "";
+      }
+      showAvatarContextMenu(event, userId, username || "this user");
+    });
     document.addEventListener("click", (e) => {
       if (!$("ctx-menu").contains(e.target)) hideContextMenu();
       if (!$("tag-ctx-menu").contains(e.target)) hideTagContextMenu();
+      if (!$("avatar-ctx-menu").contains(e.target)) hideAvatarContextMenu();
       if (!$("emoji-picker").contains(e.target) && e.target !== $("emoji-btn")) {
         $("emoji-picker").hidden = true;
       }
@@ -7886,13 +8284,18 @@ ${grokResponseDraft}` : grokResponseDraft;
     msgInput.addEventListener("paste", async (e) => {
       const items = e.clipboardData && e.clipboardData.items;
       if (!items) return;
+      const files = [];
       for (const item of items) {
         if (item.kind === "file") {
-          e.preventDefault();
           const file = item.getAsFile();
-          if (file) await handleFileUpload(file);
-          return;
+          if (file) files.push(file);
         }
+      }
+      if (!files.length) return;
+      e.preventDefault();
+      if (files.length > 1) showToast(`Sending ${files.length} files\u2026`, "info");
+      for (const file of files) {
+        await handleFileUpload(file);
       }
     });
     $("emoji-btn").addEventListener("click", (e) => {
@@ -8011,15 +8414,18 @@ ${grokResponseDraft}` : grokResponseDraft;
         oldestMessageId = null;
         return;
       }
+      for (const msg of msgs) await hydrateMessageChannel(msg, currentGroupId);
+      const channel = getActiveTagTopic();
+      const channelMsgs = msgs.filter((msg) => resolveMessageTagTopic(msg) === channel);
       const area = messagesArea();
       const prevScrollHeight = area.scrollHeight;
-      const rows = await buildMessageRows(msgs, currentGroupId);
+      const rows = await buildMessageRows(channelMsgs, currentGroupId);
       const fragment = document.createDocumentFragment();
       for (const row of rows) {
         if (!row) continue;
         if (row.classList && row.classList.contains("msg-row")) {
           const msgId = row.dataset.msgId;
-          const srcMsg = msgs.find((m) => String(m.id) === String(msgId));
+          const srcMsg = channelMsgs.find((m) => String(m.id) === String(msgId));
           if (srcMsg) observeMessageForRead(row, srcMsg);
         }
         fragment.appendChild(row);

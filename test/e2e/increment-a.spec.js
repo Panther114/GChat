@@ -30,7 +30,7 @@ test('auth theme toggle swaps the GChat logo for the active theme', async ({ pag
 
   await toggle.click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
-  await expect(logo).toHaveAttribute('src', '/gchat_icon.png?v=20260716-v132');
+  await expect(logo).toHaveAttribute('src', /gchat_icon\.png\?v=20\d{6}-v\d+$/);
 });
 
 test('auth screen renders a theme-aware animated dot canvas behind the card', async ({ page }) => {
@@ -124,7 +124,7 @@ test('local root account loads v2 fixtures and switches themes', async ({ page }
   const afterFirst = await page.locator('html').getAttribute('data-theme');
   await expect(page.locator('.brand-icon')).toHaveAttribute(
     'src',
-    afterFirst === 'light' ? /gchat_icon_light\.png$/ : /gchat_icon\.png\?v=20260716-v132$/,
+    afterFirst === 'light' ? /gchat_icon_light\.png$/ : /gchat_icon\.png\?v=20\d{6}-v\d+$/,
   );
   await page.locator('#theme-toggle-btn').click();
   const afterSecond = await page.locator('html').getAttribute('data-theme');
@@ -132,7 +132,7 @@ test('local root account loads v2 fixtures and switches themes', async ({ page }
   expect(['light', 'dark']).toContain(afterSecond);
   await expect(page.locator('.brand-icon')).toHaveAttribute(
     'src',
-    afterSecond === 'light' ? /gchat_icon_light\.png$/ : /gchat_icon\.png\?v=20260716-v132$/,
+    afterSecond === 'light' ? /gchat_icon_light\.png$/ : /gchat_icon\.png\?v=20\d{6}-v\d+$/,
   );
   expect(errors).toEqual([]);
 });
@@ -305,6 +305,29 @@ test('image attachments reserve message-row space and open usable viewer actions
   await expect(fileDownload).resolves.toBeTruthy();
 });
 
+test('pasting multiple copied files sends all of them, one by one', async ({ page }) => {
+  await signInAsLocalRoot(page);
+  await page.getByText('Increment A Playground').click();
+  await page.locator('#messages-area .msg-row, #messages-area .channel-empty-state').first().waitFor();
+
+  const baselineFileCount = await page.locator('.msg-file-btn').count();
+  // Simulate a Ctrl+V with three files on the clipboard (multi-copy paste).
+  await page.locator('#message-input').evaluate((input) => {
+    const dataTransfer = new globalThis.DataTransfer();
+    dataTransfer.items.add(new globalThis.File(['alpha content'], 'alpha.txt', { type: 'text/plain' }));
+    dataTransfer.items.add(new globalThis.File(['beta content'], 'beta.txt', { type: 'text/plain' }));
+    dataTransfer.items.add(new globalThis.File(['gamma content'], 'gamma.txt', { type: 'text/plain' }));
+    const event = new globalThis.ClipboardEvent('paste', { clipboardData: dataTransfer, bubbles: true, cancelable: true });
+    input.dispatchEvent(event);
+  });
+
+  await expect(page.locator('.msg-file-btn')).toHaveCount(baselineFileCount + 3, { timeout: 15000 });
+  const names = await page.locator('.msg-file-btn strong').allTextContents();
+  for (const name of ['alpha.txt', 'beta.txt', 'gamma.txt']) {
+    expect(names).toContain(name);
+  }
+});
+
 test('startup fetches bounded group metadata without eager transcript hydration', async ({ page }) => {
   const apiPaths = [];
   page.on('request', (request) => {
@@ -348,4 +371,77 @@ test('group details keep Invite stable and render a bounded group-icon preview',
   await expect(preview).toHaveCSS('width', '96px');
   await expect(preview).toHaveCSS('height', '96px');
   await expect(preview).toHaveCSS('object-fit', 'cover');
+});
+
+test('edited messages stay decryptable after a channel re-render', async ({ page }) => {
+  // Regression: edits re-encrypt metadata with a new revision; the cache used
+  // to keep the stale metadata ciphertext, so any re-render from cache showed
+  // "Unable to decrypt this message" for every edited message.
+  await signInAsLocalRoot(page);
+  await page.getByText('Increment A Playground').click();
+  await page.locator('#messages-area .msg-row, #messages-area .channel-empty-state').first().waitFor();
+
+  const original = `edit-orig-${Date.now()}`;
+  const edited = `edit-done-${Date.now()}`;
+  await page.locator('#message-input').fill(original);
+  await page.locator('#message-input').press('Enter');
+  const sentRow = page.locator('#messages-area .msg-row', { hasText: original }).last();
+  await expect(sentRow.locator('.msg-text')).toHaveText(original, { timeout: 10000 });
+
+  // Right-click → Edit, replace the text, save. (Locate by the edited text
+  // afterwards — the original text no longer exists in the transcript.)
+  await sentRow.click({ button: 'right' });
+  await page.locator('#ctx-edit').click();
+  await page.locator('.msg-edit-input').fill(edited);
+  await page.locator('.msg-edit-save').click();
+  await expect(page.locator('#messages-area .msg-text', { hasText: edited }).last()).toHaveText(edited, { timeout: 10000 });
+
+  // Switch to a sub-channel and back — forces a full stream re-render from the
+  // message cache (the path that used to fail GCM auth on stale metadata).
+  await page.locator('.chat-tag-add-btn').click();
+  await page.locator('#channel-name-input').fill(`qa-${Date.now() % 100000}`);
+  await page.locator('#channel-confirm-btn').click();
+  await expect(page.locator('#messages-area .channel-empty-state')).toBeVisible();
+  await page.locator('.chat-tag-filter-btn', { hasText: '#main' }).first().click();
+  await expect(page.locator('#messages-area .msg-text', { hasText: edited }).last()).toBeVisible({ timeout: 10000 });
+  await expect(page.locator('#messages-area').getByText('Unable to decrypt this message', { exact: true })).toHaveCount(0);
+});
+
+test('messages sent from a second device appear in a background group without reload', async ({ browser }) => {  // Two devices, one account. Device A opens "GChat Global" (filling its cache),
+  // then switches to another group. Device B then sends a message into GChat
+  // Global. Device A must see it when switching back — no reload, no stale
+  // cache, and no reliance on reopening the tab.
+  const contextA = await browser.newContext();
+  const contextB = await browser.newContext();
+  const pageA = await contextA.newPage();
+  const pageB = await contextB.newPage();
+  const pageErrors = [];
+  pageA.on('pageerror', (error) => pageErrors.push('A: ' + error.message));
+  pageB.on('pageerror', (error) => pageErrors.push('B: ' + error.message));
+
+  await signInAsLocalRoot(pageA);
+  // Prime device A's cache for GChat Global first.
+  await pageA.getByText('GChat Global').click();
+  await expect(pageA.locator('.chat-topbar-name')).toHaveText('GChat Global');
+  await pageA.locator('#messages-area .msg-row, #messages-area .channel-empty-state').first().waitFor();
+  // Then move device A to a different group so Global runs in the background.
+  await pageA.getByText('Increment A Playground').click();
+  await expect(pageA.locator('.chat-topbar-name')).toHaveText('Increment A Playground');
+
+  // Device B (same account) sends a message into GChat Global.
+  await signInAsLocalRoot(pageB);
+  await pageB.getByText('GChat Global').click();
+  await expect(pageB.locator('.chat-topbar-name')).toHaveText('GChat Global');
+  const syncText = `sync-check-${Date.now()}`;
+  await pageB.locator('#message-input').fill(syncText);
+  await pageB.locator('#send-btn').click();
+  await expect(pageB.locator('.msg-text', { hasText: syncText }).last()).toBeVisible();
+
+  // Device A: switch back — the new message must already be there.
+  await pageA.getByText('GChat Global').click();
+  await expect(pageA.locator('.msg-text', { hasText: syncText }).last()).toBeVisible({ timeout: 10000 });
+  expect(pageErrors).toEqual([]);
+
+  await contextA.close();
+  await contextB.close();
 });
