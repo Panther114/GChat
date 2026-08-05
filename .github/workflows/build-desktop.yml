@@ -45,6 +45,9 @@ jobs:
           }
       - name: Test thin Windows shell
         run: cargo test --manifest-path src-desktop-win/Cargo.toml
+      - name: Install NSIS (makensis)
+        shell: pwsh
+        run: choco install nsis -y --no-progress
       - name: Build thin Windows installer
         run: npm run build:win
       - name: Stage artifacts
