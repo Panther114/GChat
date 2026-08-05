@@ -1,244 +1,365 @@
 'use strict';
 
-const readline = require('node:readline');
-const { parseCommand } = require('../commands/parser');
-const { handleCommand, createContext } = require('../commands/handlers');
-const { formatMessageLine } = require('../client/messages');
-const { loadPrefs } = require('../store/prefs');
-const { getActiveChannel } = require('../store/prefs');
-const { CLI_NAME, CLI_VERSION } = require('../version');
+/**
+ * GChat CLI TUI entry — currently the landing page with a live login form.
+ *
+ * Handles terminal lifecycle (alternate screen, raw mode, resize, exit),
+ * drives the pure frame builder in landing.js, and submits credentials to
+ * the GChat backend through the shared GChatClient. On success it prints
+ * basic account info (username, server, chats) and exits; on failure the
+ * backend's error message (or "Couldn't connect") is surfaced in the hint.
+ */
+
+const { stdin, stdout } = require('node:process');
+const ansi = require('./ansi');
+const {
+  buildLandingFrame,
+  DEFAULT_UI,
+  TRANSITION_FRAMES,
+  ERROR_HINT_MS,
+  USERNAME_FIELD_WIDTH,
+  PASSWORD_FIELD_WIDTH,
+  clampScroll,
+} = require('./landing');
+const { GChatClient } = require('../client/api');
+const { configPaths } = require('../store/paths');
+
+/** Milliseconds between animation frames (~20 fps). */
+const FRAME_MS = 50;
+
+/** How long a login failure message stays on the hint (ms). */
+const LOGIN_ERROR_MS = 3000;
+
+/** Field length caps (keeps typed input and drawn lines bounded). */
+const MAX_USERNAME = 64;
+const MAX_PASSWORD = 128;
+
+function terminalSize() {
+  return {
+    cols: stdout.columns || 80,
+    rows: stdout.rows || 24,
+  };
+}
 
 /**
- * Command-driven terminal UI.
- * Layout is redrawn text; all actions go through the shared command handlers.
+ * Pure: build the exact byte output for one frame at a given terminal size.
+ * Kept separate from draw() so the render pipeline is unit-testable and the
+ * erase-before-content invariant is enforced in one place.
+ *
+ * Invariant: each line is (eraseLine → content). Erase must come FIRST —
+ * eraseLine wipes the entire current line, so writing it after content would
+ * blank the frame.
+ */
+function composeFrame(cols, rows, frame, ui) {
+  const { lines, originX, originY } = buildLandingFrame(cols, rows, frame, ui);
+  let out = ansi.cursorHide();
+  for (let i = 0; i < lines.length; i += 1) {
+    out += ansi.cursorTo(originX, originY + i) + ansi.eraseLine() + ansi.truncate(lines[i], Math.max(0, cols - originX));
+  }
+  return out;
+}
+
+/**
+ * A geometry change means the terminal already re-wrapped the alternate
+ * screen; glyphs outside the new frame box (plus wrapped remnants from the
+ * resize itself) must be cleared before redrawing, or stale copies of the
+ * art/text accumulate on every resize.
+ */
+function redrawRequired(lastCols, lastRows, cols, rows) {
+  return lastCols !== null && (lastCols !== cols || lastRows !== rows);
+}
+
+/**
+ * Run the TUI.
+ * @param {{ paths?: object, server?: string }} [options] kept for future use (chat TUI wiring)
  */
 async function runTui(options = {}) {
-  const outputLines = [];
-  const maxLog = 200;
-  let status = 'starting';
-  let lastError = '';
-  let running = true;
-
-  const pushLog = (line) => {
-    const text = String(line);
-    for (const part of text.split('\n')) {
-      outputLines.push(part);
-    }
-    while (outputLines.length > maxLog) outputLines.shift();
-  };
-
-  const ctx = createContext({
-    ...options,
-    out: (text) => pushLog(text),
-    err: (text) => {
-      lastError = String(text);
-      pushLog(`! ${text}`);
-    },
-    onEvent: (event, payload) => {
-      if (event === 'new_message' && payload) {
-        handleIncoming(payload).catch(() => {});
-      } else if (event === 'connect') {
-        status = 'connected';
-        render();
-      } else if (event === 'disconnect') {
-        status = 'disconnected';
-        render();
-      } else if (event === 'typing' && payload) {
-        status = `typing…`;
-        render();
-      } else if (event === 'error') {
-        lastError = payload?.message || String(payload);
-        render();
-      }
-    },
-  });
-
-  // Wire socket events through client
-  ctx.client.onEvent = (event, payload) => {
-    if (event === 'new_message' && payload) {
-      handleIncoming(payload).catch(() => {});
-    } else if (event === 'connect') {
-      status = 'connected';
-      render();
-    } else if (event === 'disconnect') {
-      status = 'disconnected';
-      render();
-    }
-  };
-
-  async function handleIncoming(msg) {
-    try {
-      const secret = ctx.client.getSecret(msg.groupId);
-      if (!secret) return;
-      const [dec] = await ctx.client.decryptMessages(msg.groupId, [msg]);
-      const prefs = loadPrefs(ctx.paths);
-      if (prefs.muteAll || prefs.mutedGroups?.[msg.groupId]) return;
-      const active = prefs.activeGroupId;
-      if (active && String(msg.groupId) !== String(active)) {
-        pushLog(`* [${msg.senderName || '?'} in ${msg.groupId.slice(0, 8)}…] ${dec.text || '[msg]'}`);
-      } else {
-        pushLog(formatMessageLine(msg, dec));
-      }
-      const config = require('../store/config').loadConfig(ctx.paths);
-      if (config.bell && process.stdout.isTTY) {
-        process.stdout.write('\u0007');
-      }
-      render();
-    } catch {
-      /* ignore decrypt failures for noise */
-    }
-  }
-
-  function header() {
-    const prefs = loadPrefs(ctx.paths);
-    const user = ctx.client.user?.username || '(not logged in)';
-    const group = prefs.activeGroupId ? prefs.activeGroupId.slice(0, 8) : '-';
-    const channel = prefs.activeGroupId ? getActiveChannel(prefs.activeGroupId, ctx.paths) : 'main';
-    return [
-      `══ ${CLI_NAME} ${CLI_VERSION} ════════════════════════════════════════`,
-      `user=${user}  group=${group}  #${channel}  socket=${status}  server=${ctx.client.server}`,
-      lastError ? `error: ${lastError}` : 'commands: :help  :groups  :open <name>  :send …  :q',
-      '────────────────────────────────────────────────────────────────',
-    ].join('\n');
-  }
-
-  function render() {
-    if (!process.stdout.isTTY) return;
-    // Soft redraw: print header + last lines (avoid full clear flicker for basic terminals)
-    // Full clear when interactive
-    try {
-      readline.cursorTo(process.stdout, 0, 0);
-      readline.clearScreenDown(process.stdout);
-    } catch {
-      /* non-tty */
-    }
-    const visible = outputLines.slice(-Math.max(8, (process.stdout.rows || 24) - 8));
-    process.stdout.write(`${header()}\n${visible.join('\n')}\n`);
-  }
-
-  pushLog(`${CLI_NAME} TUI — type messages to send, or :command for actions. :q to quit.`);
-  pushLog('Try: :login  |  :groups  |  :open <name>  |  :channel list  |  :help');
-
-  // Session restore
-  try {
-    const me = await ctx.client.me();
-    pushLog(`Session restored: ${me.username}`);
-    await ctx.client.syncKeys().catch(() => {});
-    const prefs = loadPrefs(ctx.paths);
-    if (prefs.activeGroupId) {
-      try {
-        const opened = await ctx.client.openGroup(prefs.activeGroupId);
-        pushLog(`Reopened ${opened.group.name} #${opened.channel}`);
-        const decrypted = await ctx.client.decryptMessages(opened.group.id, opened.messages);
-        for (const d of decrypted.slice(-20)) {
-          pushLog(formatMessageLine(d.msg, d));
-        }
-        status = 'connected';
-      } catch (err) {
-        pushLog(`Could not reopen group: ${err.message}`);
-      }
-    }
-  } catch {
-    pushLog('Not logged in. Use :login');
-  }
-
-  render();
-
-  if (!process.stdin.isTTY) {
-    pushLog('No TTY — exiting TUI. Use subcommands instead.');
+  if (!stdout.isTTY || !stdin.isTTY) {
+    stdout.write('GChat CLI TUI requires an interactive terminal.\nRun "gchat --help" for commands.\n');
     return;
   }
 
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    prompt: 'gchat> ',
-    terminal: true,
-  });
+  let frame = 0;
+  let timer = null;
+  let done = false;
+  let lastCols = null;
+  let lastRows = null;
+  let pendingKeys = '';
+  let inputBuffer = '';
+  let lastBounds = null;
+  const ui = { ...DEFAULT_UI };
 
-  const runLine = async (line) => {
-    const trimmed = String(line || '').trim();
-    if (!trimmed) {
-      rl.prompt();
+  /** Apply one keystroke to the login form (inserts at the active caret). */
+  function handleKey(ch) {
+    if (ch === '\r' || ch === '\n') {
+      submit().catch(() => {});
       return;
     }
-
-    // Colon or slash command
-    if (trimmed.startsWith(':') || trimmed.startsWith('/')) {
-      const body = trimmed.slice(1).trim();
-      if (body === 'q' || body === 'quit' || body === 'exit') {
-        running = false;
-        rl.close();
-        return;
-      }
-      if (body === 'redraw' || body === 'clear') {
-        render();
-        rl.prompt();
-        return;
-      }
-      try {
-        const parsed = parseCommand(body);
-        if (parsed.name === 'tui') {
-          pushLog('Already in TUI');
-        } else if (parsed.name === 'quit') {
-          running = false;
-          rl.close();
-          return;
-        } else {
-          lastError = '';
-          await handleCommand(parsed, ctx);
+    if (ch === '\t') {
+      ui.activeField = ui.activeField === 'username' ? 'password' : 'username';
+      return;
+    }
+    if (ch === '\u007f' || ch === '\b') {
+      if (ui.activeField === 'username') {
+        const at = ui.usernameCaret;
+        if (at > 0) {
+          ui.username = ui.username.slice(0, at - 1) + ui.username.slice(at);
+          ui.usernameCaret = at - 1;
         }
-      } catch (err) {
-        lastError = err.message || String(err);
-        pushLog(`! ${lastError}`);
+      } else if (ui.passwordCaret > 0) {
+        ui.password.splice(ui.passwordCaret - 1, 1);
+        ui.passwordCaret -= 1;
       }
-      render();
-      if (running) rl.prompt();
       return;
     }
-
-    // Bare text = send to active group
-    try {
-      const prefs = loadPrefs(ctx.paths);
-      if (!prefs.activeGroupId) {
-        pushLog('! No active group. :open <name> or :groups create <name>');
-      } else {
-        const result = await ctx.client.sendText({
-          groupId: prefs.activeGroupId,
-          text: trimmed,
-        });
-        pushLog(`you: ${trimmed}  (${result.messageId.slice(0, 8)}…)`);
+    if (ch < ' ') return; // printable only
+    if (ui.activeField === 'username') {
+      if (ui.username.length < MAX_USERNAME) {
+        const at = ui.usernameCaret;
+        ui.username = ui.username.slice(0, at) + ch + ui.username.slice(at);
+        ui.usernameCaret = at + 1;
       }
-    } catch (err) {
-      lastError = err.message || String(err);
-      pushLog(`! ${lastError}`);
+    } else if (ui.password.length < MAX_PASSWORD) {
+      ui.password.splice(ui.passwordCaret, 0, { ch, at: Date.now() });
+      ui.passwordCaret += 1;
     }
-    render();
-    if (running) rl.prompt();
-  };
+  }
 
-  rl.on('line', (line) => {
-    runLine(line).catch((err) => {
-      pushLog(`! ${err.message}`);
-      render();
-      if (running) rl.prompt();
-    });
+  /** Move the active field's caret by `delta` (-1 / +1). */
+  function moveCaret(delta) {
+    const len = ui.activeField === 'username' ? ui.username.length : ui.password.length;
+    const at = ui.activeField === 'username' ? ui.usernameCaret : ui.passwordCaret;
+    const next = Math.max(0, Math.min(len, at + delta));
+    if (ui.activeField === 'username') ui.usernameCaret = next;
+    else ui.passwordCaret = next;
+  }
+
+  /** Set the active field's caret to `pos` (clamped). */
+  function setCaret(pos) {
+    const len = ui.activeField === 'username' ? ui.username.length : ui.password.length;
+    const next = Math.max(0, Math.min(len, pos));
+    if (ui.activeField === 'username') ui.usernameCaret = next;
+    else ui.passwordCaret = next;
+  }
+
+  /** Handle one escape sequence; returns the number of bytes consumed (0 = incomplete). */
+  function consumeEscape(sequence) {
+    const match = String(sequence).match(/^\u001b\[[0-9;<=>?]*[@-~]/);
+    if (!match) return 0;
+    const seq = match[0];
+    if (seq.startsWith('\u001b[<')) {
+      const mouse = ansi.parseSgrMouse(seq);
+      if (mouse && mouse.press && mouse.button === 0) applyMouse(mouse);
+    } else {
+      const motion = seq.match(/^\u001b\[(\d*)([DC])$/);
+      if (motion) {
+        const count = motion[1] ? Number(motion[1]) : 1;
+        moveCaret(motion[2] === 'D' ? -count : count);
+      } else if (seq === '\u001b[H') {
+        setCaret(0);
+      } else if (seq === '\u001b[F') {
+        setCaret(Number.MAX_SAFE_INTEGER);
+      }
+    }
+    return seq.length;
+  }
+
+  /** Process raw login-mode input: plain text → keys, escapes → caret/mouse. */
+  function processLoginInput(str) {
+    let rest = String(str);
+    while (rest.length > 0) {
+      const escAt = rest.indexOf('\u001b');
+      if (escAt === -1) {
+        for (const ch of rest) handleKey(ch);
+        return;
+      }
+      if (escAt > 0) {
+        for (const ch of rest.slice(0, escAt)) handleKey(ch);
+        rest = rest.slice(escAt);
+        continue;
+      }
+      const consumed = consumeEscape(rest);
+      if (consumed === 0) {
+        // Partial escape sequence — hold it until the rest arrives (bounded).
+        inputBuffer = rest.slice(0, 64);
+        return;
+      }
+      rest = rest.slice(consumed);
+    }
+  }
+
+  /** Map a left-click (1-based terminal coords) onto the form fields. */
+  function applyMouse(mouse) {
+    if (!lastBounds) return;
+    const cx = mouse.x - 1;
+    const cy = mouse.y - 1;
+    let field = null;
+    // Clicking anywhere on a field row focuses that field (caret clamped to the text).
+    if (cy === lastBounds.username.row) field = 'username';
+    else if (cy === lastBounds.password.row) field = 'password';
+    if (!field) return;
+    ui.activeField = field;
+    const len = field === 'username' ? ui.username.length : ui.password.length;
+    const caret = Math.max(0, Math.min(len, cx - lastBounds[field].x));
+    if (field === 'username') ui.usernameCaret = caret;
+    else ui.passwordCaret = caret;
+  }
+
+  function cleanup() {
+    if (done) return;
+    done = true;
+    if (timer) clearInterval(timer);
+    try {
+      stdin.setRawMode(false);
+    } catch {
+      /* not in raw mode */
+    }
+    stdin.pause();
+    stdout.write(ansi.cursorShow() + ansi.mouseDisable() + ansi.exitAltScreen() + ansi.clearScreen());
+  }
+
+  function exit(code = 0) {
+    cleanup();
+    process.exit(code);
+  }
+
+  function draw() {
+    const { cols, rows } = terminalSize();
+    if (redrawRequired(lastCols, lastRows, cols, rows)) {
+      stdout.write(ansi.clearScreen());
+    }
+    lastCols = cols;
+    lastRows = rows;
+    ui.now = Date.now();
+    // Lazy scroll: the window only moves when the caret leaves it.
+    ui.usernameScroll = clampScroll(ui.usernameScroll, ui.usernameCaret, ui.username.length, USERNAME_FIELD_WIDTH);
+    ui.passwordScroll = clampScroll(ui.passwordScroll, ui.passwordCaret, ui.password.length, PASSWORD_FIELD_WIDTH);
+    const built = buildLandingFrame(cols, rows, frame, ui);
+    lastBounds = built.fieldBounds;
+    stdout.write(composeFrame(cols, rows, frame, ui));
+  }
+
+  const paths = options.paths || configPaths(options.configDir);
+  const client = options.client || new GChatClient({ server: options.server, paths });
+
+  /** Map a login failure to a user-facing message (server errors pass through). */
+  function mapLoginError(err) {
+    if (err && err.status) return err.message || 'Login failed';
+    return "Couldn't connect";
+  }
+
+  /** Print basic account info after a successful login, then exit the TUI. */
+  function finishLogin(user, groups) {
+    cleanup();
+    stdout.write(`Logged in as ${user.username} (${user.id})\n`);
+    stdout.write(`Server: ${client.server}\n`);
+    const list = Array.isArray(groups) ? groups : [];
+    stdout.write(`Chats: ${list.length}\n`);
+    for (const group of list) {
+      stdout.write(`  - ${group.name || '?'}  ${group.id}\n`);
+    }
+    process.exit(0);
+  }
+
+  /** Submit the login form (Enter with both fields filled). */
+  async function submit() {
+    // Match the server spec: username 2-32 chars, password at least 6.
+    const invalid = [];
+    if (ui.username.trim().length < 2) invalid.push('username');
+    if (ui.password.length < 6) invalid.push('password');
+    if (invalid.length > 0) {
+      ui.error = { until: Date.now() + ERROR_HINT_MS, fields: invalid, message: null };
+      ui.activeField = invalid.includes('username') ? 'username' : 'password';
+      return;
+    }
+    ui.error = null;
+    const username = ui.username.trim();
+    const password = ui.password.map((entry) => entry.ch).join('');
+    if (options.onSubmit) {
+      options.onSubmit({ username, password });
+      return;
+    }
+    ui.loggingIn = true;
+    try {
+      const user = await client.login(username, password);
+      const groups = await client.listGroups();
+      finishLogin(user, groups);
+    } catch (err) {
+      ui.loggingIn = false;
+      ui.error = {
+        until: Date.now() + LOGIN_ERROR_MS,
+        fields: [],
+        message: mapLoginError(err),
+      };
+    }
+  }
+
+  // --- terminal setup ------------------------------------------------------
+  stdout.write(ansi.enterAltScreen() + ansi.clearScreen() + ansi.mouseEnable());
+  stdin.setRawMode(true);
+  stdin.resume();
+  stdin.setEncoding('utf8');
+
+  // --- input ---------------------------------------------------------------
+  stdin.on('data', (chunk) => {
+    const text = String(chunk);
+    if (text.includes('\u0003') || text.includes('\u0004')) {
+      exit(0);
+      return;
+    }
+    if (ui.loggingIn) return; // ignore input while the login request is in flight
+    const combined = inputBuffer + text;
+    inputBuffer = '';
+    if (ui.mode === 'idle') {
+      // Enter morphs the "[x] login via username" line into the login form.
+      if (combined.includes('\r') || combined.includes('\n')) {
+        ui.mode = 'transition';
+        ui.modeFrame = 0;
+      }
+      return;
+    }
+    if (ui.mode === 'transition') {
+      // Buffer keys typed during the morph; replayed once the form settles.
+      pendingKeys = (pendingKeys + combined).slice(0, 1024);
+      return;
+    }
+    processLoginInput(combined);
   });
 
-  rl.on('close', () => {
-    running = false;
-    ctx.client.disconnectSocket();
-    process.stdout.write('\nbye\n');
+  process.on('SIGINT', () => exit(0));
+  process.on('SIGTERM', () => exit(0));
+  process.on('exit', cleanup);
+  stdout.on('resize', () => {
+    draw();
   });
 
-  rl.prompt();
+  // --- animation loop --------------------------------------------------------
+  draw();
+  timer = setInterval(() => {
+    frame += 1;
+    if (ui.error && Date.now() >= ui.error.until) ui.error = null;
+    if (ui.mode === 'transition') {
+      ui.modeFrame += 1;
+      if (ui.modeFrame >= TRANSITION_FRAMES) {
+        ui.mode = 'login';
+        if (pendingKeys) {
+          const replay = pendingKeys;
+          pendingKeys = '';
+          processLoginInput(replay);
+        }
+      }
+    }
+    draw();
+  }, FRAME_MS);
 
-  // Keep process alive until readline closes
-  await new Promise((resolve) => {
-    rl.on('close', resolve);
-  });
+  // Keep alive until the process is told to exit.
+  await new Promise(() => {});
 }
 
 module.exports = {
   runTui,
+  FRAME_MS,
+  terminalSize,
+  composeFrame,
+  redrawRequired,
 };

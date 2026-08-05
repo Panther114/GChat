@@ -1,0 +1,294 @@
+'use strict';
+
+/**
+ * Minimal ANSI terminal primitives for the GChat TUI.
+ * Zero dependencies, CommonJS, Node 18+ and Bun compatible.
+ * Only what the TUI needs: cursor/screen control, 24-bit color,
+ * text attributes, and a display-width helper (CJK/wide aware).
+ */
+
+const ESC = '\u001b[';
+
+// ---------------------------------------------------------------------------
+// Cursor & screen
+// ---------------------------------------------------------------------------
+
+/** Move cursor to 0-based column x, row y. */
+function cursorTo(x = 0, y = 0) {
+  return `${ESC}${Math.max(0, Math.floor(y)) + 1};${Math.max(0, Math.floor(x)) + 1}H`;
+}
+
+function cursorHide() {
+  return `${ESC}?25l`;
+}
+
+function cursorShow() {
+  return `${ESC}?25h`;
+}
+
+/** Clear current line (cursor position unaffected). */
+function eraseLine() {
+  return `${ESC}2K`;
+}
+
+/** Clear screen and scrollback, home cursor. */
+function clearScreen() {
+  return `${ESC}2J${ESC}3J${ESC}H`;
+}
+
+/** Switch to the alternate screen buffer (full-screen apps). */
+function enterAltScreen() {
+  return `${ESC}?1049h`;
+}
+
+/** Leave the alternate screen buffer. */
+function exitAltScreen() {
+  return `${ESC}?1049l`;
+}
+
+/** Enable SGR mouse tracking (click events, extended coordinates). */
+function mouseEnable() {
+  return `${ESC}?1000h${ESC}?1006h`;
+}
+
+/** Disable SGR mouse tracking. */
+function mouseDisable() {
+  return `${ESC}?1000l${ESC}?1006l`;
+}
+
+/**
+ * Parse one SGR mouse event (`ESC[<b;x;yM` press / `...m` release) into
+ * 1-based terminal coordinates. Returns null for anything else.
+ */
+function parseSgrMouse(str) {
+  const match = String(str).match(/^\u001b\[<(\d+);(\d+);(\d+)([Mm])$/);
+  if (!match) return null;
+  return {
+    button: Number(match[1]),
+    x: Number(match[2]),
+    y: Number(match[3]),
+    press: match[4] === 'M',
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Text attributes & 24-bit color
+// ---------------------------------------------------------------------------
+
+function sgr(code) {
+  return `${ESC}${code}m`;
+}
+
+function bold(on = true) {
+  return sgr(on ? 1 : 22);
+}
+
+function dim(on = true) {
+  return sgr(on ? 2 : 22);
+}
+
+function italic(on = true) {
+  return sgr(on ? 3 : 23);
+}
+
+function underline(on = true) {
+  return sgr(on ? 4 : 24);
+}
+
+function blink(on = true) {
+  return sgr(on ? 5 : 25);
+}
+
+function reverse(on = true) {
+  return sgr(on ? 7 : 27);
+}
+
+function hidden(on = true) {
+  return sgr(on ? 8 : 28);
+}
+
+function strikethrough(on = true) {
+  return sgr(on ? 9 : 29);
+}
+
+function reset() {
+  return sgr(0);
+}
+
+/** Parse '#rrggbb' (also accepts 'rgb' shorthand) to [r, g, b]. */
+function hexToRgb(hex) {
+  const raw = String(hex || '').replace(/^#/, '').trim();
+  if (raw.length === 3) {
+    return [0, 1, 2].map((i) => parseInt(raw[i] + raw[i], 16));
+  }
+  if (raw.length !== 6) return null;
+  const value = parseInt(raw, 16);
+  if (Number.isNaN(value)) return null;
+  return [(value >> 16) & 0xff, (value >> 8) & 0xff, value & 0xff];
+}
+
+/**
+ * Truecolor capability: macOS Terminal.app misparses `38;2;r;g;b` as
+ * "unknown 38 → faint text" (every colored glyph renders dim). Only emit
+ * 24-bit color when the terminal advertises it; otherwise fall back to
+ * the xterm-256 palette, which Terminal.app renders correctly.
+ */
+function detectTruecolor() {
+  const colorterm = String(process.env.COLORTERM || '').toLowerCase();
+  if (colorterm.includes('truecolor') || colorterm.includes('24bit')) return true;
+  const term = String(process.env.TERM || '').toLowerCase();
+  if (term.includes('truecolor') || term.includes('24bit')) return true;
+  if (process.env.WT_SESSION) return true;
+  const program = String(process.env.TERM_PROGRAM || '').toLowerCase();
+  return [
+    'iterm.app', 'wezterm', 'vscode', 'ghostty', 'alacritty',
+    'kitty', 'hyper', 'warp', 'tabby', 'contour', 'mintty', 'konsole',
+  ].includes(program);
+}
+
+const TRUE_COLOR = detectTruecolor();
+
+/** Map an rgb triplet to the nearest xterm-256 color index (0-255). */
+function rgbTo256(r, g, b) {
+  if (r === g && g === b) {
+    if (r < 8) return 16;
+    if (r > 248) return 231;
+    return Math.round((r - 8) / 10) + 232;
+  }
+  const cube = (v) => Math.round((v / 255) * 5);
+  return 16 + 36 * cube(r) + 6 * cube(g) + cube(b);
+}
+
+function truecolor(prefix, hex) {
+  const rgb = hexToRgb(hex);
+  if (!rgb) return '';
+  return sgr(`${prefix};2;${rgb[0]};${rgb[1]};${rgb[2]}`);
+}
+
+function color256(prefix, hex) {
+  const rgb = hexToRgb(hex);
+  if (!rgb) return '';
+  return sgr(`${prefix};5;${rgbTo256(rgb[0], rgb[1], rgb[2])}`);
+}
+
+/** Foreground color from a hex string, e.g. fg('#3fb950'). */
+function fg(hex) {
+  return TRUE_COLOR ? truecolor(38, hex) : color256(38, hex);
+}
+
+/** Background color from a hex string. */
+function bg(hex) {
+  return TRUE_COLOR ? truecolor(48, hex) : color256(48, hex);
+}
+
+// ---------------------------------------------------------------------------
+// Display width (CJK / wide char aware)
+// ---------------------------------------------------------------------------
+
+const CONTROL_RE = /[\u0000-\u001f\u007f]/;
+const CSI_RE = /\u001b\[[0-9;?]*[a-zA-Z]/;
+
+/** Approximate wcwidth: 2 for common CJK/wide ranges, 1 otherwise. */
+function charWidth(char) {
+  const code = char.codePointAt(0);
+  if (code === 0) return 0;
+  if (CONTROL_RE.test(char)) return 0;
+  if (
+    (code >= 0x1100 && code <= 0x115f) || // Hangul Jamo
+    (code >= 0x2e80 && code <= 0x303e) || // CJK Radicals..CJK Symbols
+    (code >= 0x3041 && code <= 0x33ff) || // Hiragana..CJK Compat
+    (code >= 0x3400 && code <= 0x4dbf) || // CJK Ext A
+    (code >= 0x4e00 && code <= 0x9fff) || // CJK Unified
+    (code >= 0xa000 && code <= 0xa4cf) || // Yi
+    (code >= 0xac00 && code <= 0xd7a3) || // Hangul syllables
+    (code >= 0xf900 && code <= 0xfaff) || // CJK Compat Ideographs
+    (code >= 0xfe30 && code <= 0xfe4f) || // CJK Compat Forms
+    (code >= 0xff00 && code <= 0xff60) || // Fullwidth forms
+    (code >= 0xffe0 && code <= 0xffe6) || // Fullwidth signs
+    (code >= 0x1f300 && code <= 0x1f64f) || // Misc symbols & pictographs
+    (code >= 0x1f900 && code <= 0x1f9ff) || // Supplemental symbols
+    (code >= 0x20000 && code <= 0x2fffd) || // CJK Ext B+
+    (code >= 0x30000 && code <= 0x3fffd)
+  ) {
+    return 2;
+  }
+  return 1;
+}
+
+/** Strip ANSI SGR/CSI sequences (and OSC title/bel sequences) from a string. */
+function stripAnsi(str) {
+  return String(str)
+    .replace(/\u001b\[[0-9;?]*[a-zA-Z]/g, '')
+    .replace(/\u001b\][^\u0007]*(\u0007|\u001b\\)/g, '');
+}
+
+/** Visible display width of a (possibly ANSI-styled) string. */
+function width(str) {
+  const plain = stripAnsi(str);
+  let total = 0;
+  for (const char of plain) total += charWidth(char);
+  return total;
+}
+
+/** Pad a string with spaces so its visible width reaches `cols` (min 1 space gap if non-empty and short). */
+function padEnd(str, cols, gap = 1) {
+  const current = width(str);
+  const needed = Math.max(cols - current, str.length ? gap : 0);
+  return str + ' '.repeat(needed);
+}
+
+/** Truncate a (possibly styled) string to at most `maxWidth` visible columns, keeping SGR styling. */
+function truncate(str, maxWidth) {
+  if (maxWidth <= 0) return '';
+  if (width(str) <= maxWidth) return str;
+  const tokens = String(str).split(/(\u001b\[[0-9;?]*[a-zA-Z])/g);
+  let out = '';
+  let used = 0;
+  for (const token of tokens) {
+    if (token === '') continue;
+    if (CSI_RE.test(token)) {
+      out += token;
+      continue;
+    }
+    for (const char of token) {
+      const w = charWidth(char);
+      if (used + w > maxWidth) break;
+      out += char;
+      used += w;
+    }
+    if (used >= maxWidth) break;
+  }
+  return out + reset();
+}
+
+module.exports = {
+  cursorTo,
+  cursorHide,
+  cursorShow,
+  eraseLine,
+  clearScreen,
+  enterAltScreen,
+  exitAltScreen,
+  mouseEnable,
+  mouseDisable,
+  parseSgrMouse,
+  bold,
+  dim,
+  italic,
+  underline,
+  blink,
+  reverse,
+  hidden,
+  strikethrough,
+  reset,
+  detectTruecolor,
+  rgbTo256,
+  hexToRgb,
+  fg,
+  bg,
+  charWidth,
+  stripAnsi,
+  width,
+  padEnd,
+  truncate,
+};
