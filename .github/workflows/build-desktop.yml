@@ -118,7 +118,7 @@ jobs:
       - name: Generate Tauri updater manifest (latest.json)
         run: >-
           node scripts/generate-tauri-update-manifest.js
-          release "" ""
+          release "$GITHUB_REF_NAME" "$GITHUB_REPOSITORY"
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
