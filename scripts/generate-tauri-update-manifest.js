@@ -25,12 +25,13 @@ if (!/^\d+\.\d+\.\d+$/.test(version)) fail(`Invalid release tag: ${tag}`);
 const files = walk(releaseDir);
 const windowsArtifact = files.find((file) => /-setup\.exe$/i.test(file));
 const macArtifact = files.find((file) => /\.app\.tar\.gz$/i.test(file));
-if (!windowsArtifact) fail('Missing Windows updater installer');
-if (!macArtifact) fail('Missing macOS updater archive');
 
+// v1.3.9: tolerate a missing platform instead of failing the whole release —
+// the thin Windows shell does not use latest.json (it checks the GitHub API),
+// so a release without a Windows .sig can still publish macOS update metadata.
 function signedPlatform(artifact) {
   const signaturePath = `${artifact}.sig`;
-  if (!fs.existsSync(signaturePath)) fail(`Missing updater signature: ${signaturePath}`);
+  if (!fs.existsSync(signaturePath)) return null;
   const name = path.basename(artifact);
   return {
     signature: fs.readFileSync(signaturePath, 'utf8').trim(),
@@ -38,17 +39,25 @@ function signedPlatform(artifact) {
   };
 }
 
-const windows = signedPlatform(windowsArtifact);
-const mac = signedPlatform(macArtifact);
+const windows = windowsArtifact ? signedPlatform(windowsArtifact) : null;
+const mac = macArtifact ? signedPlatform(macArtifact) : null;
+if (!windows && !mac) {
+  fail('No signed updater artifacts found (need at least one of: -setup.exe.sig, .app.tar.gz.sig)');
+}
+
+const platforms = {};
+if (mac) {
+  platforms['darwin-aarch64'] = mac;
+  platforms['darwin-x86_64'] = mac;
+}
+if (windows) {
+  platforms['windows-x86_64'] = windows;
+}
 const manifest = {
   version,
   notes: `Gchat ${version}`,
   pub_date: new Date().toISOString(),
-  platforms: {
-    'darwin-aarch64': mac,
-    'darwin-x86_64': mac,
-    'windows-x86_64': windows,
-  },
+  platforms,
 };
 
 fs.writeFileSync(path.join(releaseDir, 'latest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
