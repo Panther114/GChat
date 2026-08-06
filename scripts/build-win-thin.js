@@ -45,10 +45,10 @@ if (result.status !== 0) {
   throw new Error(`makensis failed with code ${result.status}`);
 }
 
-const setup = path.join(bundleDir, 'Gchat_1.3.8_x64-setup.exe');
+const setup = path.join(bundleDir, 'Gchat_1.3.9_x64-setup.exe');
 if (!fs.existsSync(setup)) {
   // NSIS OutFile is relative to the nsi file location
-  const alt = path.join(root, 'src-desktop-win', 'target', 'release', 'bundle', 'Gchat_1.3.8_x64-setup.exe');
+  const alt = path.join(root, 'src-desktop-win', 'target', 'release', 'bundle', 'Gchat_1.3.9_x64-setup.exe');
   if (fs.existsSync(alt)) {
     console.log(`Installer: ${alt} (${(fs.statSync(alt).size / 1024 / 1024).toFixed(2)} MiB)`);
   } else {

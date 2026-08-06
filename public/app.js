@@ -564,13 +564,182 @@
   function writeLocalGroupCache(groupId, cache) {
     try {
       localStorage.setItem(LOCAL_CACHE_PREFIX + groupId, JSON.stringify({
-        messages: getCacheableMessages(cache.messages || []),
+        // Bound the localStorage mirror to the newest window; full history lives
+        // in the IndexedDB history store (historyStore* helpers below).
+        messages: getCacheableMessages(cache.messages || []).slice(-MAX_CACHED_MESSAGES_PER_GROUP),
         members: cache.members || [],
         oldestMessageId: cache.oldestMessageId || null,
         updatedAt: Date.now()
       }));
     } catch {
     }
+  }
+  var HISTORY_DB_NAME = "gchat-history-v1";
+  var HISTORY_DB_VERSION = 1;
+  var HISTORY_MESSAGES_STORE = "messages";
+  var HISTORY_META_STORE = "meta";
+  var HISTORY_MAX_MESSAGES_PER_GROUP = 2e3;
+  var historyDbPromise = null;
+  var historyDbSupported = typeof indexedDB !== "undefined";
+  function openHistoryDb() {
+    if (!historyDbSupported) return Promise.resolve(null);
+    if (historyDbPromise) return historyDbPromise;
+    historyDbPromise = new Promise((resolve) => {
+      let request;
+      try {
+        request = indexedDB.open(HISTORY_DB_NAME, HISTORY_DB_VERSION);
+      } catch {
+        historyDbSupported = false;
+        resolve(null);
+        return;
+      }
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(HISTORY_MESSAGES_STORE)) {
+          const store = db.createObjectStore(HISTORY_MESSAGES_STORE, { keyPath: "id" });
+          store.createIndex("groupId", "groupId", { unique: false });
+        }
+        if (!db.objectStoreNames.contains(HISTORY_META_STORE)) {
+          db.createObjectStore(HISTORY_META_STORE, { keyPath: "groupId" });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => {
+        historyDbSupported = false;
+        resolve(null);
+      };
+      request.onblocked = () => {
+        historyDbSupported = false;
+        resolve(null);
+      };
+    });
+    return historyDbPromise;
+  }
+  function runHistoryStore(storeName, mode, worker) {
+    return openHistoryDb().then((db) => {
+      if (!db) return Promise.resolve(null);
+      return new Promise((resolve, reject) => {
+        let transaction;
+        try {
+          transaction = db.transaction(storeName, mode);
+        } catch (error) {
+          reject(error);
+          return;
+        }
+        const store = transaction.objectStore(storeName);
+        let result;
+        try {
+          result = worker(store);
+        } catch (error) {
+          reject(error);
+          return;
+        }
+        transaction.oncomplete = () => resolve(result);
+        transaction.onerror = () => reject(transaction.error || new Error("history store error"));
+        transaction.onabort = () => reject(transaction.error || new Error("history store aborted"));
+      });
+    }).catch(() => null);
+  }
+  function persistHistoryMessages(groupId, messages) {
+    if (!messages || !messages.length) return Promise.resolve();
+    const cacheable = getCacheableMessages(messages);
+    return runHistoryStore(HISTORY_MESSAGES_STORE, "readwrite", (store) => {
+      for (const msg of cacheable) {
+        store.put({ id: String(msg.id), groupId: String(groupId), createdAt: msg.createdAt || "", msg });
+      }
+    });
+  }
+  function readHistoryMessages(groupId) {
+    return runHistoryStore(HISTORY_MESSAGES_STORE, "readonly", (store) => {
+      const request = store.index("groupId").getAll(String(groupId));
+      request.onsuccess = () => {
+        const rows = request.result || [];
+        const messages = rows.map((row) => row.msg).filter(Boolean).sort((a, b) => {
+          const timeDiff = String(a.createdAt || "").localeCompare(String(b.createdAt || ""));
+          return timeDiff !== 0 ? timeDiff : String(a.id).localeCompare(String(b.id));
+        });
+        if (messages.length > HISTORY_MAX_MESSAGES_PER_GROUP) {
+          messages.splice(0, messages.length - HISTORY_MAX_MESSAGES_PER_GROUP);
+        }
+        request._messages = messages;
+      };
+    }).then((request) => request && request._messages ? request._messages : []);
+  }
+  function readHistoryCursor(groupId) {
+    return runHistoryStore(HISTORY_META_STORE, "readonly", (store) => {
+      const request = store.get(String(groupId));
+      request.onsuccess = () => {
+        request._cursor = request.result?.lastSyncedAt || null;
+      };
+    }).then((request) => request && request._cursor ? request._cursor : null);
+  }
+  function writeHistoryCursor(groupId, createdAt) {
+    if (!createdAt) return Promise.resolve();
+    return runHistoryStore(HISTORY_META_STORE, "readwrite", (store) => {
+      store.put({ groupId: String(groupId), lastSyncedAt: String(createdAt), updatedAt: Date.now() });
+    });
+  }
+  function clearGroupHistoryStore(groupId) {
+    const messageClear = runHistoryStore(HISTORY_MESSAGES_STORE, "readwrite", (store) => {
+      const request = store.index("groupId").openKeyCursor(String(groupId));
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) return;
+        store.delete(cursor.primaryKey);
+        cursor.continue();
+      };
+    });
+    const metaClear = runHistoryStore(HISTORY_META_STORE, "readwrite", (store) => store.delete(String(groupId)));
+    return Promise.all([messageClear, metaClear]).then(() => null);
+  }
+  var historyMigrationStarted = false;
+  async function migrateLocalCachesToHistory() {
+    if (historyMigrationStarted || !historyDbSupported) return;
+    historyMigrationStarted = true;
+    const db = await openHistoryDb();
+    if (!db) return;
+    const tasks = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (!key || !key.startsWith(LOCAL_CACHE_PREFIX)) continue;
+      const groupId = key.slice(LOCAL_CACHE_PREFIX.length);
+      try {
+        const parsed = JSON.parse(localStorage.getItem(key) || "null");
+        if (parsed && Array.isArray(parsed.messages) && parsed.messages.length) {
+          tasks.push(persistHistoryMessages(groupId, parsed.messages));
+        }
+      } catch {
+      }
+    }
+    await Promise.allSettled(tasks);
+  }
+  function sortMessagesChronologically(messages) {
+    return [...messages].sort((a, b) => {
+      const timeDiff = String(a.createdAt || "").localeCompare(String(b.createdAt || ""));
+      return timeDiff !== 0 ? timeDiff : String(a.id).localeCompare(String(b.id));
+    });
+  }
+  function mergeMessagesIntoCache(groupId, incoming, { persist = true } = {}) {
+    const cache = ensureGroupCacheEntry(groupId);
+    const existing = Array.isArray(cache.messages) ? cache.messages : [];
+    const byId = new Map(existing.map((m) => [String(m.id), m]));
+    for (const m of incoming) byId.set(String(m.id), m);
+    const merged = sortMessagesChronologically([...byId.values()]);
+    for (const m of merged) {
+      if (m.hasRead === true && m.readConfirmed !== true) m.readConfirmed = true;
+    }
+    cache.messages = merged;
+    cache.oldestMessageId = merged.length ? merged[0].id : null;
+    cache.rowsDirty = true;
+    if (persist) {
+      writeLocalGroupCache(groupId, cache);
+      if (historyDbSupported) void persistHistoryMessages(groupId, merged);
+    }
+    return merged;
+  }
+  function cacheHasMessage(groupId, messageId) {
+    const cache = ensureGroupCacheEntry(groupId);
+    return Array.isArray(cache.messages) && cache.messages.some((m) => String(m.id) === String(messageId));
   }
   function readStoredJson(key) {
     try {
@@ -662,6 +831,14 @@
     }
     window.location.replace(buildReloadUrl());
   }
+  var sessionExpiredPending = false;
+  function handleSessionExpired() {
+    if (document.hidden) {
+      sessionExpiredPending = true;
+      return;
+    }
+    window.location.href = buildAuthRedirectUrl();
+  }
   async function clearCacheAndRestartApp() {
     await clearBrowserRuntimeCaches({ includeLocalData: true });
     if (window.electronAPI?.clearCacheAndRestart) {
@@ -689,13 +866,20 @@
     if (currentAppVersion === info.version || hostedAppReloadPending) return false;
     currentAppVersion = info.version;
     hostedAppReloadPending = true;
-    showToast("New version detected. Refreshing\u2026");
-    await reloadAppShell();
+    showUpdateAvailableBanner();
     return true;
+  }
+  function showUpdateAvailableBanner() {
+    const banner = $("update-available-banner");
+    if (!banner) return;
+    const text = $("update-available-text");
+    if (text) text.textContent = `GChat ${currentAppVersion} is available.`;
+    banner.hidden = false;
   }
   function startHostedAppUpdatePolling() {
     if (hostedAppUpdateTimer) clearInterval(hostedAppUpdateTimer);
     hostedAppUpdateTimer = setInterval(() => {
+      if (document.hidden) return;
       void checkForHostedAppUpdate();
     }, HOSTED_APP_UPDATE_CHECK_INTERVAL_MS);
   }
@@ -1912,12 +2096,16 @@
     const rowGroupId = String(row.dataset.groupId || currentGroupId || "");
     if (!rowGroupId) return;
     if (!messageId) return;
-    if (!pendingReadMessageIds.has(messageId) && row.dataset.hasRead !== "1") {
-      pendingReadMessageIds.add(messageId);
-      row.classList.remove("unseen");
-      row.dataset.hasRead = "1";
-      markMessageReadLocal(rowGroupId, messageId);
-      socket.emit("mark_message_read", { groupId: rowGroupId, messageId });
+    if (!pendingReadMessageIds.has(messageId)) {
+      const cache = ensureGroupCacheEntry(rowGroupId);
+      const cachedMsg = (cache.messages || []).find((m) => String(m.id) === messageId);
+      if (!cachedMsg || cachedMsg.readConfirmed !== true) {
+        pendingReadMessageIds.add(messageId);
+        row.classList.remove("unseen");
+        row.dataset.hasRead = "1";
+        markMessageReadLocal(rowGroupId, messageId);
+        queueMarkReadEmit(rowGroupId, messageId);
+      }
     }
     if (row.dataset.disappearing === "1" && row.dataset.senderId !== String(currentUser?.id) && row.dataset.disappearingHidden !== "1" && row.dataset.disappearingStarted !== "1") {
       requestDisappearingTimerStart(messageId, rowGroupId);
@@ -2014,6 +2202,13 @@
     }
     return GENERIC_NOTIFICATION_FALLBACK_BODY;
   }
+  function formatNotificationBody(unreadCount, notification) {
+    if (notification && notification.senderName) {
+      const preview = truncate(String(notification.preview || ""), 70);
+      return preview ? `${notification.senderName}: ${preview}` : `New message from ${notification.senderName}`;
+    }
+    return getGenericUnreadNotificationBody(unreadCount);
+  }
   function getTotalUnreadCount() {
     return Object.values(unreadCounts).reduce((sum, count) => sum + Math.max(0, Number(count) || 0), 0);
   }
@@ -2045,11 +2240,12 @@
     window.electronAPI?.setUnreadCount(totalUnread);
     return totalUnread;
   }
-  function sendNativeNotification(unreadCount, groupId) {
+  function sendNativeNotification(unreadCount, groupId, notification = null) {
+    const body = formatNotificationBody(unreadCount, notification);
     if (window.electronAPI) {
       window.electronAPI.showNotification({
         title: GENERIC_NOTIFICATION_TITLE,
-        body: getGenericUnreadNotificationBody(unreadCount),
+        body,
         groupId
       });
       return;
@@ -2058,7 +2254,7 @@
     if ("Notification" in window && Notification.permission === "granted") {
       try {
         const n = new Notification(GENERIC_NOTIFICATION_TITLE, {
-          body: getGenericUnreadNotificationBody(unreadCount),
+          body,
           icon: "/gchat_icon.png",
           badge: "/gchat_icon.png",
           tag: PUSH_NOTIFICATION_TAG
@@ -2532,26 +2728,39 @@
     const groupId = currentGroupId;
     if (!groupId) return;
     try {
-      const res = await fetch(`/api/groups/${groupId}/messages?limit=50`, { cache: "no-store" });
+      const cache = ensureGroupCacheEntry(groupId);
+      const hasCached = Array.isArray(cache.messages) && cache.messages.length > 0;
+      let url = `/api/groups/${groupId}/messages?limit=100`;
+      if (hasCached) {
+        const cursor = await readHistoryCursor(groupId);
+        const since = cursor || cache.messages[cache.messages.length - 1].createdAt;
+        if (since) url = `/api/groups/${groupId}/messages?since=${encodeURIComponent(since)}&limit=100`;
+      }
+      const res = await fetch(url, { cache: "no-store" });
       if (!res.ok) return;
       const rawMsgs = await res.json();
       if (String(currentGroupId) !== groupId) return;
       const msgs = filterMessagesVisibleToCurrentUser(rawMsgs);
-      const cache = ensureGroupCacheEntry(groupId);
-      const existing = Array.isArray(cache.messages) ? cache.messages : [];
+      const entry = ensureGroupCacheEntry(groupId);
+      const existing = Array.isArray(entry.messages) ? entry.messages : [];
       const byId = new Map(existing.map((m) => [String(m.id), m]));
       for (const m of msgs) byId.set(String(m.id), m);
-      const merged = [...byId.values()].sort(
-        (a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || ""))
-      );
+      const merged = sortMessagesChronologically([...byId.values()]);
       const knownIds = new Set(existing.map((m) => String(m.id)));
-      const fetchedIds = msgs.map((m) => String(m.id));
-      const changed = fetchedIds.some((id) => !knownIds.has(id));
+      const changed = msgs.some((fresh) => {
+        if (!knownIds.has(String(fresh.id))) return true;
+        const old = byId.get(String(fresh.id));
+        return (old.editedAt || null) !== (fresh.editedAt || null) || Number(old.revision || 0) !== Number(fresh.revision || 0);
+      });
       if (!changed) return;
-      cache.messages = merged;
-      cache.messageRows = null;
-      cache.rowsDirty = true;
-      writeLocalGroupCache(groupId, cache);
+      entry.messages = merged;
+      entry.messageRows = null;
+      entry.rowsDirty = true;
+      writeLocalGroupCache(groupId, entry);
+      if (historyDbSupported) {
+        void persistHistoryMessages(groupId, msgs);
+        if (msgs.length) void writeHistoryCursor(groupId, msgs[msgs.length - 1].createdAt);
+      }
       if (String(currentGroupId) !== groupId) return;
       allMessages = merged;
       updateGroupUnseenCount(groupId, merged);
@@ -2967,6 +3176,11 @@
     clearWhisperToken();
     whisperRecipients = [];
     messageMode = "normal";
+    if (replyingTo) {
+      replyingTo = null;
+      const replyBar = $("reply-preview-bar");
+      if (replyBar) replyBar.hidden = true;
+    }
     updateWhisperBtn();
     syncComposerTokens();
     renderTagFilters();
@@ -3866,6 +4080,11 @@
     });
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") {
+        if (sessionExpiredPending) {
+          sessionExpiredPending = false;
+          window.location.href = buildAuthRedirectUrl();
+          return;
+        }
         observeCurrentGroupRowsForRead();
         void checkForHostedAppUpdate();
         syncStateOnFocus();
@@ -3914,12 +4133,15 @@
         if (group.preloaded && typeof group.preloaded === "object") {
           const cache = ensureGroupCacheEntry(group.id);
           const preloadedMessages = Array.isArray(group.preloaded.messages) ? filterMessagesVisibleToCurrentUser(group.preloaded.messages) : [];
-          cache.messages = preloadedMessages;
+          mergeMessagesIntoCache(group.id, preloadedMessages, { persist: false });
           cache.members = Array.isArray(group.preloaded.members) ? group.preloaded.members : [];
           cache.messageRows = null;
-          cache.oldestMessageId = preloadedMessages.length ? preloadedMessages[0].id : null;
           cache.rowsDirty = true;
           writeLocalGroupCache(group.id, cache);
+          if (preloadedMessages.length) {
+            void persistHistoryMessages(group.id, preloadedMessages);
+            void writeHistoryCursor(group.id, preloadedMessages[preloadedMessages.length - 1].createdAt);
+          }
         }
         if (!group._lastPreviewText) {
           const cache = ensureGroupCacheEntry(group.id);
@@ -4274,6 +4496,38 @@
     ids.add(normalizedMessageId);
     scheduleBatchReadFlush();
   }
+  var pendingReadEmits = /* @__PURE__ */ new Map();
+  var readEmitTimer = null;
+  function queueMarkReadEmit(groupId, messageId) {
+    let ids = pendingReadEmits.get(groupId);
+    if (!ids) {
+      ids = /* @__PURE__ */ new Set();
+      pendingReadEmits.set(groupId, ids);
+    }
+    ids.add(messageId);
+    if (readEmitTimer) return;
+    readEmitTimer = setTimeout(() => {
+      readEmitTimer = null;
+      flushMarkReadEmits();
+    }, 250);
+  }
+  function flushMarkReadEmits() {
+    if (readEmitTimer) {
+      clearTimeout(readEmitTimer);
+      readEmitTimer = null;
+    }
+    if (!pendingReadEmits.size) return;
+    const byGroup = pendingReadEmits;
+    pendingReadEmits = /* @__PURE__ */ new Map();
+    for (const [groupId, messageIds] of byGroup) {
+      if (!socket || !socket.connected) continue;
+      socket.emit("mark_messages_read", { groupId, messageIds: [...messageIds] });
+    }
+  }
+  function markMessageReadConfirmed(messageId) {
+    const stored = allMessages.find((m) => String(m.id) === String(messageId));
+    if (stored) stored.readConfirmed = true;
+  }
   function updateUnreadBadge(groupId, count) {
     const badge = $("badge-" + groupId);
     if (badge) {
@@ -4351,6 +4605,13 @@
       trackJoinedRoom(normalizedGroupId);
     }
     const cache = ensureGroupCacheEntry(normalizedGroupId);
+    if (!cache.messages || cache.messages.length === 0) {
+      const history = await readHistoryMessages(normalizedGroupId);
+      if (history && history.length) {
+        cache.messages = mergeMessagesIntoCache(normalizedGroupId, history, { persist: false });
+        cache.rowsDirty = true;
+      }
+    }
     const hadCompleteCache = !!(cache.messages && cache.members && cache.messageRows);
     if (!cache.messages || !cache.members || !cache.messageRows) {
       messagesArea().replaceChildren(createLoadMoreIndicator());
@@ -4366,6 +4627,7 @@
     observeCurrentGroupRowsForRead();
     scrollToBottom(true);
     $("scroll-bottom-btn").hidden = true;
+    if (document.hasFocus()) clearPageTitleNotification();
     if (hadCompleteCache) void refreshCurrentGroupFromServer();
     closeMobileActionMenu();
     if (isMobileLayout()) setMobileView("chat");
@@ -4403,7 +4665,7 @@
       const res = await fetch(url);
       if (!res.ok) {
         if (res.status === 401) {
-          window.location.href = "index.html";
+          handleSessionExpired();
           return;
         }
         return;
@@ -4412,13 +4674,14 @@
       const msgs = filterMessagesVisibleToCurrentUser(rawMsgs);
       if (!before) {
         const cache = ensureGroupCacheEntry(groupId);
-        cache.messages = msgs;
-        cache.messageRows = await buildMessageRows(msgs, groupId);
-        cache.oldestMessageId = rawMsgs.length > 0 ? rawMsgs[0].id : null;
+        const merged = mergeMessagesIntoCache(groupId, msgs);
+        cache.messageRows = await buildMessageRows(merged, groupId);
+        cache.oldestMessageId = merged.length ? merged[0].id : null;
         cache.rowsDirty = false;
         writeLocalGroupCache(groupId, cache);
-        updateGroupUnseenCount(groupId, msgs);
-        await updateGroupPreviewFromMessage(groupId, msgs.length ? msgs[msgs.length - 1] : null);
+        updateGroupUnseenCount(groupId, merged);
+        await updateGroupPreviewFromMessage(groupId, merged.length ? merged[merged.length - 1] : null);
+        if (msgs.length) void writeHistoryCursor(groupId, msgs[msgs.length - 1].createdAt);
       } else {
         const area = messagesArea();
         const prevScrollHeight = area.scrollHeight;
@@ -4436,14 +4699,16 @@
         const oldFirst = area.querySelector(".msg-row, .msg-system");
         if (oldFirst) area.insertBefore(fragment, oldFirst);
         else area.appendChild(fragment);
-        allMessages = [...msgs, ...allMessages];
         const cache = ensureGroupCacheEntry(groupId);
-        cache.messages = allMessages;
+        cache.messages = mergeMessagesIntoCache(groupId, msgs, { persist: false });
         cache.messageRows = [...rows, ...cache.messageRows || []];
         cache.oldestMessageId = rawMsgs[0].id;
         cache.rowsDirty = false;
         writeLocalGroupCache(groupId, cache);
         area.scrollTop = area.scrollHeight - prevScrollHeight;
+      }
+      if (groupId === currentGroupId) {
+        allMessages = ensureGroupCacheEntry(groupId).messages || allMessages;
       }
       if (!before && groupId === currentGroupId && rawMsgs.length > 0) {
         oldestMessageId = rawMsgs[0].id;
@@ -4669,11 +4934,35 @@
       const replyPreview = msg.replyPreview;
       const rb = document.createElement("div");
       rb.className = "msg-reply-box";
-      if (!targetExists) {
-        rb.textContent = "Replying to, original message unavailable";
-      } else if (replyPreview) {
-        rb.innerHTML = '<span class="msg-reply-sender">Replying to ' + escapeHtml(replyPreview.senderName || "") + "</span> " + escapeHtml(truncate(replyPreview.preview || "", 60));
+      const renderReplyPreview = () => {
+        const senderName = replyPreview && replyPreview.senderName ? replyPreview.senderName : "a message";
+        const preview = replyPreview && replyPreview.preview ? truncate(replyPreview.preview, 60) : "";
+        rb.innerHTML = '<span class="msg-reply-sender">Replying to ' + escapeHtml(senderName) + "</span> " + escapeHtml(preview);
         rb.addEventListener("click", () => scrollToMessage(msg.replyToId));
+      };
+      if (!targetExists) {
+        if (replyPreview) {
+          rb.innerHTML = '<span class="msg-reply-sender">Replying to ' + escapeHtml(replyPreview.senderName || "") + "</span> " + escapeHtml(truncate(replyPreview.preview || "", 60));
+          rb.classList.add("msg-reply-unavailable");
+        } else if (msg.replyTargetMissing) {
+          rb.textContent = "Replying to a deleted message";
+        } else {
+          rb.textContent = "Replying to, original message unavailable";
+        }
+        if (!msg.replyTargetMissing) {
+          void hydrateMissingReplyTarget(groupId, msg.replyToId).then((target) => {
+            if (!target) return;
+            rb.classList.remove("msg-reply-unavailable");
+            if (replyPreview) renderReplyPreview();
+            else {
+              const fallbackPreview = target.type === "text" ? "" : "[attachment]";
+              rb.innerHTML = '<span class="msg-reply-sender">Replying to ' + escapeHtml(target.senderName || "") + "</span> " + escapeHtml(fallbackPreview);
+              rb.addEventListener("click", () => scrollToMessage(msg.replyToId));
+            }
+          });
+        }
+      } else if (replyPreview) {
+        renderReplyPreview();
       }
       bubble.appendChild(rb);
     } else if (msg.replyTo) {
@@ -4893,12 +5182,10 @@
     if (!row) return;
     const area = messagesArea();
     const wasNearBottom = area ? area.scrollHeight - area.scrollTop - area.clientHeight < 150 : false;
-    allMessages.push(msg);
-    cache.messages = allMessages;
-    cache.oldestMessageId = allMessages.length ? allMessages[0].id : null;
+    allMessages = mergeMessagesIntoCache(groupId, [msg]);
     cache.rowsDirty = true;
     cache.messageRows = null;
-    writeLocalGroupCache(groupId, cache);
+    if (historyDbSupported) void persistHistoryMessages(groupId, [msg]);
     rememberChannel(groupId, channel);
     renderTagFilters();
     if (groupId !== currentGroupId || !messageMatchesActiveTag(msg)) return row;
@@ -4964,6 +5251,26 @@
   function scrollToMessage(msgId) {
     const row = document.querySelector('[data-msg-id="' + msgId + '"]');
     if (row) row.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+  async function hydrateMissingReplyTarget(groupId, messageId) {
+    try {
+      const res = await fetch(`/api/groups/${groupId}/messages/${encodeURIComponent(messageId)}`);
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (!data || !data.id) return null;
+      const cache = ensureGroupCacheEntry(groupId);
+      if (cache.messages && !cache.messages.some((entry) => entry.id === data.id)) {
+        cache.messages.push(data);
+        cache.messages.sort((a, b) => {
+          const timeDiff = String(a.createdAt).localeCompare(String(b.createdAt));
+          return timeDiff !== 0 ? timeDiff : String(a.id).localeCompare(String(b.id));
+        });
+        writeLocalGroupCache(groupId, cache);
+      }
+      return data;
+    } catch {
+      return null;
+    }
   }
   var ctxMsg = null;
   var ctxText = "";
@@ -5971,6 +6278,7 @@
       });
       if (currentGroupId) socket.emit("join_room", currentGroupId);
       joinAllGroupRooms();
+      flushMarkReadEmits();
       if (socketHasConnectedOnce) {
         void refreshCurrentGroupAfterReconnect({ fullSync: true });
       } else {
@@ -5987,6 +6295,7 @@
       updateConnectionStatusUi(socketDiagnostics.isBrowserOnline ? "disconnected" : "offline", socketDiagnostics.isBrowserOnline ? "Disconnected" : "Offline");
       console.warn("[socket] disconnect", { reason });
       pendingDisappearingStartMessageIds = /* @__PURE__ */ new Set();
+      pendingReadMessageIds.clear();
       clearAllMessageVisibilityTimers();
       renderDiagnosticsPanel();
     });
@@ -6037,15 +6346,21 @@
         unreadNotificationCount++;
         updatePageTitleNotification();
       }
+      if (cacheHasMessage(msg.groupId, msg.id)) {
+        if (msg.clientUploadId) removePendingAttachment(msg.clientUploadId);
+        return;
+      }
       if (msg.groupId !== currentGroupId) {
         applyCurrentUserReadState(msg);
         const cache = ensureGroupCacheEntry(msg.groupId);
         if (cache.messages) {
-          cache.messages.push(msg);
-          cache.oldestMessageId = cache.messages.length ? cache.messages[0].id : null;
+          mergeMessagesIntoCache(msg.groupId, [msg]);
           trimBackgroundGroupCache(cache);
           writeLocalGroupCache(msg.groupId, cache);
+        } else {
+          mergeMessagesIntoCache(msg.groupId, [msg], { persist: false });
         }
+        if (historyDbSupported) void persistHistoryMessages(msg.groupId, [msg]);
         if (cache.messageRows && !cache.rowsDirty) {
           const prevMsg = cache.messages && cache.messages.length > 1 ? cache.messages[cache.messages.length - 2] : null;
           const row = await buildMessageRow(msg, msg.groupId, { showSenderName: !shouldContinueSeries(prevMsg, msg) });
@@ -6070,7 +6385,7 @@
         if (msg.senderId !== currentUser.id) {
           const totalUnread = getTotalUnreadCount();
           pushStatus.totalUnreadCount = totalUnread;
-          sendNativeNotification(totalUnread, msg.groupId);
+          sendNativeNotification(totalUnread, msg.groupId, { senderName: msg.senderName, preview });
         }
         if (msg.clientUploadId) removePendingAttachment(msg.clientUploadId);
         return;
@@ -6087,11 +6402,12 @@
       if (msg.senderId !== currentUser.id) {
         const totalUnread = getTotalUnreadCount();
         pushStatus.totalUnreadCount = totalUnread;
-        sendNativeNotification(totalUnread, msg.groupId);
+        sendNativeNotification(totalUnread, msg.groupId, { senderName: msg.senderName, preview: preview2 });
       }
     });
     socket.on("message_read_update", ({ messageId, readCount }) => {
       pendingReadMessageIds.delete(messageId);
+      markMessageReadConfirmed(messageId);
       updateDeliveryForMessage(messageId, readCount);
       const stored = allMessages.find((m) => m.id === messageId);
       if (stored) stored.readCount = Math.max(0, Number(readCount) || 0);
@@ -6190,6 +6506,7 @@
       cache.rowsDirty = false;
       updateGroupUnseenCount(groupId, cache.messages);
       writeLocalGroupCache(groupId, cache);
+      if (historyDbSupported) void clearGroupHistoryStore(groupId);
       if (groupId !== currentGroupId) return;
       renderGroupFromCache(groupId);
       renderTagFilters();
@@ -6402,6 +6719,7 @@
       const normalizedGroupId = String(groupId || "");
       if (!normalizedGroupId) return;
       await loadGroups();
+      void migrateLocalCachesToHistory();
       if (currentGroupId !== normalizedGroupId) return;
       if (groups.some((group) => String(group.id) === normalizedGroupId)) return;
       currentGroupId = null;
@@ -6488,12 +6806,12 @@
     });
     socket.on("user_typing", ({ username }) => {
       $("typing-user").textContent = username;
-      $("typing-indicator").hidden = false;
+      $("typing-indicator").classList.add("is-visible");
       clearTimeout(window._typingTimer);
-      window._typingTimer = setTimeout(() => $("typing-indicator").hidden = true, 3e3);
+      window._typingTimer = setTimeout(() => $("typing-indicator").classList.remove("is-visible"), 3e3);
     });
     socket.on("user_stop_typing", () => {
-      $("typing-indicator").hidden = true;
+      $("typing-indicator").classList.remove("is-visible");
     });
     socket.on("error", ({ message }) => {
       pendingDisappearingStartMessageIds = /* @__PURE__ */ new Set();
@@ -6551,7 +6869,8 @@
   function autoResizeTextarea(el) {
     const keepBottomPinned = isMessagesPinnedToBottom();
     el.style.height = "auto";
-    const maxH = Math.floor(window.innerHeight * 0.4);
+    const isMobileLayout2 = typeof window.matchMedia === "function" && window.matchMedia("(max-width: 768px)").matches;
+    const maxH = Math.min(Math.floor(window.innerHeight * 0.4), isMobileLayout2 ? 220 : 180);
     el.style.height = Math.min(el.scrollHeight, maxH) + "px";
     if (keepBottomPinned) pinMessagesToBottom();
   }
@@ -6907,6 +7226,7 @@
         return status.currentVersion ? `Version ${status.currentVersion}` : "Check for desktop updates when connected.";
     }
   }
+  var desktopUpdateCheckTimeout = null;
   function renderDesktopUpdateStatus(status) {
     const row = $("desktop-update-row");
     const statusEl = $("desktop-update-status");
@@ -6921,13 +7241,24 @@
     row.hidden = false;
     statusEl.textContent = formatDesktopUpdateStatus(status);
     statusEl.dataset.state = status?.state || "idle";
+    if (desktopUpdateCheckTimeout) {
+      clearTimeout(desktopUpdateCheckTimeout);
+      desktopUpdateCheckTimeout = null;
+    }
+    if (status?.state === "checking" || status?.state === "downloading") {
+      desktopUpdateCheckTimeout = setTimeout(() => {
+        desktopUpdateCheckTimeout = null;
+        if (document.visibilityState === "hidden") return;
+        renderDesktopUpdateStatus({ state: "error", error: "Update check timed out. Try again." });
+      }, 45e3);
+    }
     if (checkBtn) {
       checkBtn.disabled = status?.state === "checking" || status?.state === "downloading";
     }
     if (installBtn) {
-      const ready = status?.state === "ready";
-      installBtn.hidden = !ready;
-      installBtn.disabled = !ready;
+      const showInstall = status?.state === "available" || status?.state === "ready";
+      installBtn.hidden = !showInstall;
+      installBtn.disabled = status?.state === "downloading" || status?.state === "checking";
     }
     if (releaseBtn) {
       const showRelease = status?.state === "available" || status?.state === "ready" || status?.state === "error";
@@ -7160,16 +7491,33 @@
           preview: replyingTo.preview
         });
       }
-      const { encryptedContent: promptEncryptedContent, iv: promptIv } = await encryptMessage(prompt, key, groupId);
-      if (estimateBase64Bytes(promptEncryptedContent) > MAX_TEXT_MESSAGE_BYTES) {
+      const messageId = crypto.randomUUID();
+      const messageIdentity = {
+        id: messageId,
+        groupId,
+        senderId: currentUser.id,
+        type: "text",
+        encryptionVersion: 2,
+        keyVersion: 1,
+        revision: 1
+      };
+      const metadata = {
+        hashtag: tagFilter,
+        replyPreview: replyingTo ? { senderName: replyingTo.senderName, preview: replyingTo.preview } : null
+      };
+      const encryptedPrompt = await encryptV2Message(prompt, metadata, messageIdentity, key);
+      if (estimateBase64Bytes(encryptedPrompt.encryptedContent) > MAX_TEXT_MESSAGE_BYTES) {
         throw new Error("Message too large");
       }
+      const tagIndex = tagFilter ? await blindIndex(tagFilter, key, groupId, "tag-index") : null;
       await emitSocketWithAck("send_message", {
-        groupId,
-        encryptedContent: promptEncryptedContent,
-        iv: promptIv,
-        replyTo: replyToData,
-        hashtag: tagFilter,
+        ...messageIdentity,
+        encryptedContent: encryptedPrompt.encryptedContent,
+        iv: encryptedPrompt.iv,
+        encryptedMetadata: encryptedPrompt.encryptedMetadata,
+        metadataIv: encryptedPrompt.metadataIv,
+        replyToId: replyingTo?.id || null,
+        tagIndex,
         isDisappearing: false,
         disappearingDurationMs: 0,
         aiMention: true,
@@ -7339,6 +7687,12 @@
     $("reconnect-now-btn").addEventListener("click", () => {
       manualReconnectSocket();
       void refreshDiagnosticsHealth();
+    });
+    $("update-reload-btn").addEventListener("click", () => {
+      const banner = $("update-available-banner");
+      if (banner) banner.hidden = true;
+      hostedAppReloadPending = false;
+      void reloadAppShell();
     });
     $("diagnostics-refresh-btn").addEventListener("click", () => {
       updateConnectionTransport();
@@ -8118,7 +8472,10 @@ ${grokResponseDraft}` : grokResponseDraft;
       void startEditMessage(msg, text);
     });
     $("ctx-delete").addEventListener("click", () => {
-      if (!ctxMsg || ctxMsg.senderId !== currentUser?.id) return;
+      if (!ctxMsg) return;
+      const isAuthor = ctxMsg.senderId === currentUser?.id;
+      const isGlobal = isGlobalGroupId(ctxMsg.groupId || currentGroupId);
+      if (!isAuthor && !isGlobal) return;
       const msg = ctxMsg;
       hideContextMenu();
       showConfirm("Delete message", "Delete this message for everyone? This cannot be undone.", async () => {
@@ -8399,21 +8756,30 @@ ${grokResponseDraft}` : grokResponseDraft;
       });
     });
   }
-  async function loadOlderMessages() {
-    if (loadingOlder || !oldestMessageId || !currentGroupId) return;
+  async function loadOlderMessages(cursorOverride = null, retried = false) {
+    const cursor = cursorOverride || oldestMessageId;
+    if (loadingOlder || !cursor || !currentGroupId) return;
     loadingOlder = true;
     const indicator = $("load-more-indicator");
     if (indicator) indicator.hidden = false;
     try {
-      const url = `/api/groups/${currentGroupId}/messages?before=${oldestMessageId}&limit=50`;
+      const url = `/api/groups/${currentGroupId}/messages?before=${cursor}&limit=50`;
       const res = await fetch(url);
       if (!res.ok) return;
       const rawMsgs = await res.json();
-      const msgs = rawMsgs.filter((msg) => !isMessageHiddenForCurrentUser(msg));
       if (!rawMsgs.length) {
+        if (!retried) {
+          const cache2 = ensureGroupCacheEntry(currentGroupId);
+          const fallback = (cache2.messages || []).find((m) => String(m.id) !== String(cursor));
+          if (fallback) {
+            oldestMessageId = fallback.id;
+            return loadOlderMessages(fallback.id, true);
+          }
+        }
         oldestMessageId = null;
         return;
       }
+      const msgs = filterMessagesVisibleToCurrentUser(rawMsgs);
       for (const msg of msgs) await hydrateMessageChannel(msg, currentGroupId);
       const channel = getActiveTagTopic();
       const channelMsgs = msgs.filter((msg) => resolveMessageTagTopic(msg) === channel);
@@ -8436,7 +8802,7 @@ ${grokResponseDraft}` : grokResponseDraft;
       } else {
         area.appendChild(fragment);
       }
-      allMessages = msgs.concat(allMessages);
+      allMessages = mergeMessagesIntoCache(currentGroupId, msgs, { persist: false });
       oldestMessageId = rawMsgs[0].id;
       const cache = ensureGroupCacheEntry(currentGroupId);
       cache.messages = allMessages;

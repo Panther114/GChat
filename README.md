@@ -4,7 +4,7 @@ Gchat is a client-side encrypted group chat application built with Node.js, Expr
 
 The hosted web app is the primary product. The desktop app is a native system-webview shell that loads the hosted Railway deployment.
 
-Current version: **v1.3.8** (Windows: thin WebView2 shell; macOS: Tauri/WKWebView)
+Current version: **v1.3.9** (Windows: thin WebView2 shell; macOS: Tauri/WKWebView)
 
 ---
 
@@ -315,7 +315,7 @@ The hosted web app at `https://gchat.up.railway.app` can be installed as a free 
 - Android notification support depends on browser and installed PWA support.
 - Notification sound is controlled by the operating system, mute switch, Focus / Do Not Disturb, and notification settings.
 - App icon badge support varies by browser and platform. GChat still works when the Badging API is unavailable.
-- Notification payloads are privacy-preserving and generic. They do not contain decrypted message content, sender names, or group names.
+- Notification payloads: notifications shown while the app is open or backgrounded include the sender and a short preview of the (client-decrypted) message. Server-delivered web push (app fully closed) is privacy-preserving and includes only the sender and group name — never decrypted message content, because the server cannot decrypt E2E content.
 - GChat keeps form controls at 16px or larger on mobile to avoid iOS input auto-zoom and does not force `user-scalable=no` by default to preserve accessibility zoom.
 
 ### VAPID key generation

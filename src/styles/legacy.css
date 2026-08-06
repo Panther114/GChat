@@ -1102,7 +1102,7 @@ body.sidebar-resizing * {
 /* ── Scroll to bottom button ─────────────────────────────────────────── */
 .scroll-bottom-btn {
   position: absolute;
-  bottom: 120px;
+  bottom: 132px;
   right: 20px;
   width: 38px; height: 38px;
   border-radius: 50%;
@@ -1267,7 +1267,7 @@ body.sidebar-resizing * {
 }
 
 .message-input-bar textarea {
-  flex: 1;
+  flex: 0 1 auto;
   width: 100%;
   min-width: 0;
   background: transparent;
@@ -1278,7 +1278,7 @@ body.sidebar-resizing * {
   resize: none;
   outline: none;
   min-height: 26px;
-  max-height: 40vh;
+  max-height: min(40vh, 180px);
   overflow-y: auto;
   font-family: inherit;
   line-height: 1.4;
@@ -3246,7 +3246,7 @@ body.chat-body.mobile-layout .sidebar-overlay {
     padding-right: calc(12px + var(--safe-area-right));
   }
   .scroll-bottom-btn {
-    bottom: calc(92px + var(--safe-area-bottom));
+    bottom: calc(104px + var(--safe-area-bottom));
     right: calc(14px + var(--safe-area-right));
   }
   .unread-jump-btn {

@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -30,7 +30,7 @@ use tray_icon::{
     MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
 };
 use url::Url;
-use wry::{Rect, WebViewBuilder};
+use wry::WebViewBuilder;
 
 const OFFICIAL_SERVER_URL: &str = "https://gchat.up.railway.app";
 const GITHUB_RELEASES_URL: &str = "https://github.com/Panther114/GChat/releases/latest";
@@ -94,6 +94,8 @@ const OFFLINE_HTML: &str = r#"<!doctype html><html lang="en"><head><meta charset
 const BRIDGE_JS: &str = include_str!("bridge.js");
 
 /// Memory-oriented WebView2 browser arguments for the thin host.
+/// v1.3.9: raised the JS heap cap (192MB caused renderer OOM/blank windows in
+/// long sessions) and kept optimize-for-size.
 pub const WEBVIEW_MEMORY_BROWSER_ARGS: &str = concat!(
     "--disable-features=WebGPU,TranslateUI,MediaRouter,CalculateNativeWinOcclusion,",
     "InterestFeedContentSuggestions,AutofillServerCommunication,BackForwardCache,",
@@ -102,7 +104,7 @@ pub const WEBVIEW_MEMORY_BROWSER_ARGS: &str = concat!(
     "--disable-component-update ",
     "--disable-sync ",
     "--disable-default-apps ",
-    "--js-flags=--max-old-space-size=192 --optimize-for-size"
+    "--js-flags=--max-old-space-size=384 --optimize-for-size"
 );
 
 #[derive(Debug, Clone)]
@@ -113,6 +115,10 @@ enum UserEvent {
     TrayQuit,
     Ipc(String),
     UpdateStatus(UpdateStatus),
+    /// v1.3.9: background updater result delivered back to the UI thread
+    /// (request_id for the web reply) — update checks/installs never run on
+    /// the event-loop thread anymore.
+    UpdateResult(UpdateStatus, String),
     /// Navigate to offline recovery HTML (timeout / load failure).
     ShowOffline,
     /// Auto-retry the hosted load after a connection timeout.
@@ -155,6 +161,16 @@ struct AppState {
     clipboard_file: Mutex<Option<PathBuf>>,
     suspended: AtomicBool,
     timeout_active: AtomicBool,
+    /// v1.3.9: tray double-click delivers Click(Up)+DoubleClick+Click(Up) on
+    /// Windows — debounce so one double-click never fires three toggles.
+    last_toggle_at: AtomicU64,
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn now_iso() -> String {
@@ -364,9 +380,12 @@ fn check_updates_sync(install: bool) -> UpdateStatus {
         ..Default::default()
     };
     let agent = format!("GchatDesktop/{VERSION}");
+    // v1.3.9: hard timeouts — previously the timeout-less defaults let a
+    // stalled GitHub call freeze the whole window ("unclickable" update button).
     let response = match ureq::get(GITHUB_API_LATEST)
         .set("User-Agent", &agent)
         .set("Accept", "application/vnd.github+json")
+        .timeout(Duration::from_secs(60))
         .call()
     {
         Ok(r) => r,
@@ -457,7 +476,12 @@ fn check_updates_sync(install: bool) -> UpdateStatus {
         .and_then(|n| n.as_str())
         .unwrap_or("Gchat-setup.exe");
     let dest_file = dest.join(file_name);
-    match ureq::get(url).set("User-Agent", &agent).call() {
+    // v1.3.9: hard overall timeout so a stalled download can never hang the
+    // UI thread indefinitely.
+    match ureq::get(url)
+        .set("User-Agent", &agent)
+        .timeout(Duration::from_secs(120))
+        .call() {
         Ok(resp) => {
             let mut reader = resp.into_reader();
             match std::fs::File::create(&dest_file) {
@@ -496,7 +520,15 @@ fn apply_webview_env() {
 fn main() {
     apply_webview_env();
 
-    let instance = SingleInstance::new(APP_ID).expect("single instance");
+    // v1.3.9: graceful startup — no expect() panics (panic=abort would kill
+    // the process with no diagnostics).
+    let instance = match SingleInstance::new(APP_ID) {
+        Ok(inst) => inst,
+        Err(err) => {
+            eprintln!("Gchat: single instance init failed: {err}");
+            std::process::exit(1);
+        }
+    };
     if !instance.is_single() {
         // Best-effort: another instance owns the app.
         return;
@@ -504,7 +536,10 @@ fn main() {
 
     let state = Arc::new(AppState::default());
     {
-        let mut us = state.update_status.lock().unwrap();
+        let mut us = match state.update_status.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         *us = UpdateStatus::default();
     }
 
@@ -518,10 +553,16 @@ fn main() {
     if let Some(icon) = load_icon() {
         window_builder = window_builder.with_window_icon(Some(icon));
     }
-    let window = window_builder.build(&event_loop).expect("window");
+    let window = match window_builder.build(&event_loop) {
+        Ok(window) => window,
+        Err(err) => {
+            eprintln!("Gchat: window creation failed: {err}");
+            std::process::exit(1);
+        }
+    };
 
     let proxy_ipc = proxy.clone();
-    let webview = WebViewBuilder::new()
+    let built_webview = WebViewBuilder::new()
         .with_initialization_script(BRIDGE_JS)
         .with_url(OFFICIAL_SERVER_URL)
         .with_ipc_handler(move |message| {
@@ -550,14 +591,19 @@ fn main() {
             }
             false
         })
-        .build(&window)
-        .expect("webview");
+        .build(&window);
+    let webview = match built_webview {
+        Ok(webview) => webview,
+        Err(err) => {
+            eprintln!("Gchat: webview creation failed: {err}");
+            std::process::exit(1);
+        }
+    };
 
     let webview = Rc::new(RefCell::new(webview));
 
     // Tray
-    let open_item = TrayMenuItem::with_id("open", "Open Gchat", true, None);
-    let update_item = TrayMenuItem::with_id("check-updates", "Check for Updates", true, None);
+    let open_item = TrayMenuItem::with_id("open", "Open Gchat", true, None);    let update_item = TrayMenuItem::with_id("check-updates", "Check for Updates", true, None);
     let quit_item = TrayMenuItem::with_id("quit", "Quit", true, None);
     let tray_menu = TrayMenu::new();
     let _ = tray_menu.append(&TrayMenuItem::with_id("status", "Gchat", false, None));
@@ -570,7 +616,10 @@ fn main() {
     let mut tray_builder = TrayIconBuilder::new()
         .with_menu(Box::new(tray_menu))
         .with_tooltip("Gchat")
-        .with_title("Gchat");
+        .with_title("Gchat")
+        // v1.3.9: left-click must only toggle the window — never also pop the
+        // context menu (default), which made the app hide under a floating menu.
+        .with_menu_on_left_click(false);
     if let Some(icon) = load_tray_icon() {
         tray_builder = tray_builder.with_icon(icon);
     }
@@ -638,16 +687,29 @@ fn main() {
                 resume_hosted(&window, &webview, &state, &proxy);
                 deliver_pending_group(&webview, &state);
                 let _ = window.set_skip_taskbar(false);
+                // v1.3.9: unminimize explicitly — restore must never stay stuck
+                // minimized after a minimize→tray-hide.
+                window.set_minimized(false);
                 window.set_visible(true);
                 window.set_focus();
             }
             Event::UserEvent(UserEvent::TrayToggle) => {
+                // v1.3.9: debounce double-click (Windows fires two Click-Ups per
+                // double-click), which previously toggled hide→show→hide.
+                let now_ms = now_unix_ms();
+                let prev_ms = state.last_toggle_at.load(Ordering::Acquire);
+                state.last_toggle_at.store(now_ms, Ordering::Release);
+                if now_ms.saturating_sub(prev_ms) < 400 {
+                    // Double-click echo of the first toggle — ignore.
+                    return;
+                }
                 if window.is_visible() && window.is_focused() {
                     suspend_to_tray(&window, &webview, &state);
                 } else {
                     resume_hosted(&window, &webview, &state, &proxy);
                     deliver_pending_group(&webview, &state);
                     let _ = window.set_skip_taskbar(false);
+                    window.set_minimized(false);
                     window.set_visible(true);
                     window.set_focus();
                 }
@@ -680,6 +742,31 @@ fn main() {
                     *slot = status;
                 }
             }
+            Event::UserEvent(UserEvent::UpdateResult(status, request_id)) => {
+                // v1.3.9: background updater finished — reply to the web UI,
+                // push the status, and quit after an install download so the
+                // NSIS installer is not file-locked by the running exe.
+                if let Ok(mut slot) = state.update_status.lock() {
+                    *slot = status.clone();
+                }
+                if !request_id.is_empty() {
+                    let ok = status.state == "ready" || status.state == "up-to-date";
+                    if ok {
+                        reply(&webview, &request_id, json!(true), None);
+                    } else {
+                        let err = status
+                            .error
+                            .clone()
+                            .or_else(|| status.message.clone())
+                            .unwrap_or_else(|| "Update install failed.".into());
+                        reply(&webview, &request_id, json!(false), Some(err));
+                    }
+                }
+                push_update_status(&webview, &status);
+                if status.state == "ready" {
+                    let _ = proxy.send_event(UserEvent::TrayQuit);
+                }
+            }
             Event::UserEvent(UserEvent::ShowOffline) => {
                 show_offline_page(&webview, &state);
             }
@@ -700,13 +787,11 @@ fn main() {
                     }
                 }
                 WindowEvent::Resized(size) => {
-                    let _ = webview.borrow().set_bounds(Rect {
-                        position: wry::dpi::Position::Logical(wry::dpi::LogicalPosition::new(0.0, 0.0)),
-                        size: wry::dpi::Size::Physical(wry::dpi::PhysicalSize::new(
-                            size.width,
-                            size.height,
-                        )),
-                    });
+                    // v1.3.9: no manual set_bounds — wry's own resize handling
+                    // rebinds the WebView2 controller; our extra (physical-px)
+                    // set_bounds fought it and produced clipped content and
+                    // doubled rebind traffic on scaled displays.
+                    let _ = size;
                     // Minimize goes to tray (same as close), matching prior Tauri behavior.
                     if !quitting && window.is_minimized() {
                         suspend_to_tray(&window, &webview, &state);
@@ -762,6 +847,9 @@ fn resume_hosted(
     proxy: &EventLoopProxy<UserEvent>,
 ) {
     state.suspended.swap(false, Ordering::AcqRel);
+    // v1.3.9: never leave the window minimized on restore (a minimized window
+    // reports is_visible()=true, which previously broke the tray toggle).
+    window.set_minimized(false);
     // A genuine cold start (first launch / failed load / retry) still reloads
     // the hosted app; a plain tray-restore of a live SPA does nothing.
     if should_reload_on_resume(state.hosted_ready.load(Ordering::Acquire)) {
@@ -1009,18 +1097,19 @@ fn handle_ipc(
             }
         }
         "check-for-updates" => {
+            // v1.3.9: run on a worker thread — a stalled GitHub call must
+            // never freeze the window (previously the UI thread blocked with
+            // no HTTP timeout, making the update button "unclickable").
             let state = state.clone();
             let rid = request_id.clone();
-            let status = check_updates_sync(false);
-            if let Ok(mut slot) = state.update_status.lock() {
-                *slot = status.clone();
-            }
-            if !rid.is_empty() {
-                if let Ok(val) = serde_json::to_value(&status) {
-                    reply(webview, &rid, val, None);
+            let proxy_bg = proxy.clone();
+            thread::spawn(move || {
+                let status = check_updates_sync(false);
+                if let Ok(mut slot) = state.update_status.lock() {
+                    *slot = status.clone();
                 }
-            }
-            push_update_status(webview, &status);
+                let _ = proxy_bg.send_event(UserEvent::UpdateResult(status, rid));
+            });
         }
         "get-update-status" => {
             let status = state
@@ -1035,31 +1124,19 @@ fn handle_ipc(
             }
         }
         "install-update" => {
+            // v1.3.9: the installer download (up to ~60-120s) runs on a worker
+            // thread; the window stays responsive and reports progress via
+            // UpdateResult. Quit-on-ready is handled in the event loop.
             let state = state.clone();
             let rid = request_id.clone();
-            let status = check_updates_sync(true);
-            if let Ok(mut slot) = state.update_status.lock() {
-                *slot = status.clone();
-            }
-            let ok = status.state == "ready" || status.state == "up-to-date";
-            if !rid.is_empty() {
-                if ok {
-                    reply(webview, &rid, json!(true), None);
-                } else {
-                    let err = status
-                        .error
-                        .clone()
-                        .or_else(|| status.message.clone())
-                        .unwrap_or_else(|| "Update install failed.".into());
-                    reply(webview, &rid, json!(false), Some(err));
+            let proxy_bg = proxy.clone();
+            thread::spawn(move || {
+                let status = check_updates_sync(true);
+                if let Ok(mut slot) = state.update_status.lock() {
+                    *slot = status.clone();
                 }
-            }
-            push_update_status(webview, &status);
-            // The installer is running: quit now so the running exe doesn't
-            // file-lock the files the NSIS installer must overwrite.
-            if status.state == "ready" {
-                let _ = proxy.send_event(UserEvent::TrayQuit);
-            }
+                let _ = proxy_bg.send_event(UserEvent::UpdateResult(status, rid));
+            });
         }
         "open-latest-release" => {
             let _ = open::that(GITHUB_RELEASES_URL);
@@ -1094,7 +1171,7 @@ mod tests {
 
     #[test]
     fn memory_args_cap_v8() {
-        assert!(WEBVIEW_MEMORY_BROWSER_ARGS.contains("max-old-space-size=192"));
+        assert!(WEBVIEW_MEMORY_BROWSER_ARGS.contains("max-old-space-size=384"));
         assert!(WEBVIEW_MEMORY_BROWSER_ARGS.contains("disable-features=WebGPU"));
         assert!(WEBVIEW_MEMORY_BROWSER_ARGS.contains("optimize-for-size"));
     }

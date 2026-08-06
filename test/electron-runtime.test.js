@@ -57,16 +57,16 @@ test('update status state machine covers settings UI states', () => {
   status = reduceUpdateStatus(status, {
     type: 'available',
     currentVersion: '1.3.7',
-    availableVersion: '1.3.8',
+    availableVersion: '1.3.9',
   });
   assert.equal(status.state, 'available');
-  assert.equal(status.availableVersion, '1.3.8');
+  assert.equal(status.availableVersion, '1.3.9');
 
   status = reduceUpdateStatus(status, { type: 'download-progress', percent: 42.7 });
   assert.equal(status.state, 'downloading');
   assert.equal(status.percent, 42);
 
-  status = reduceUpdateStatus(status, { type: 'ready', availableVersion: '1.3.8' });
+  status = reduceUpdateStatus(status, { type: 'ready', availableVersion: '1.3.9' });
   assert.equal(status.state, 'ready');
   assert.equal(status.percent, 100);
 
@@ -122,7 +122,7 @@ test('desktop updater starts once, reports status, and disposes listeners', asyn
   assert.ok(statuses.includes('checking'));
   assert.ok(statuses.includes('up-to-date'));
 
-  updater.emit('update-downloaded', { version: '1.3.8' });
+  updater.emit('update-downloaded', { version: '1.3.9' });
   assert.equal(readyCount, 1);
   assert.equal(updater.installCount, 0);
   assert.equal(controller.getStatus().state, 'ready');

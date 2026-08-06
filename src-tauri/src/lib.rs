@@ -1,7 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -42,7 +42,7 @@ pub const WEBVIEW_MEMORY_BROWSER_ARGS: &str = concat!(
     "--disable-component-update ",
     "--disable-sync ",
     "--disable-default-apps ",
-    "--js-flags=--max-old-space-size=256 --optimize-for-size"
+    "--js-flags=--max-old-space-size=384 --optimize-for-size"
 );
 
 #[derive(Default)]
@@ -54,6 +54,15 @@ struct DesktopState {
     unread: Mutex<u32>,
     update_status: Mutex<UpdateStatus>,
     timeout_active: AtomicBool,
+    /// v1.3.9: debounce tray double-click (Windows fires Click+DoubleClick).
+    last_toggle_at: AtomicU64,
+}
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -220,6 +229,15 @@ fn toggle_or_show_main_window<R: Runtime>(app: &AppHandle<R>) {
     let Some(window) = main_window(app) else {
         return;
     };
+    // v1.3.9: debounce — Windows tray double-click delivers Click(Up) followed
+    // by DoubleClick, both handled here; one double-click must toggle once.
+    let state = app.state::<Arc<DesktopState>>();
+    let now_ms = now_unix_ms();
+    let prev_ms = state.last_toggle_at.load(Ordering::Acquire);
+    state.last_toggle_at.store(now_ms, Ordering::Release);
+    if now_ms.saturating_sub(prev_ms) < 400 {
+        return;
+    }
     let visible = window.is_visible().unwrap_or(false);
     let minimized = window.is_minimized().unwrap_or(false);
     let focused = window.is_focused().unwrap_or(false);
@@ -629,17 +647,75 @@ async fn check_for_updates_cmd(
 }
 
 #[tauri::command]
-async fn install_update(app: AppHandle) -> Result<bool, String> {
+async fn install_update(
+    app: AppHandle,
+    state: State<'_, Arc<DesktopState>>,
+) -> Result<bool, String> {
     // Explicit user consent path: download, install, and restart now.
+    // v1.3.9: publish progress so the Settings → Updates row shows a live
+    // download instead of appearing unresponsive.
+    let current_version = app.package_info().version.to_string();
     let updater = app.updater().map_err(|e| e.to_string())?;
     let Some(update) = updater.check().await.map_err(|e| e.to_string())? else {
         return Ok(false);
     };
+    publish_update_status(
+        &app,
+        state.inner(),
+        UpdateStatus {
+            state: "downloading".to_string(),
+            current_version: Some(current_version.clone()),
+            available_version: Some(update.version.clone()),
+            percent: Some(0),
+            message: Some("Downloading update…".to_string()),
+            error: None,
+            checked_at: Some(now_iso()),
+        },
+    );
+    let available_version = update.version.clone();
+    let on_progress = |received: usize, total: Option<u64>| {
+        let percent = total
+            .filter(|t| *t > 0)
+            .map(|t| ((received as f64 / t as f64) * 100.0).floor() as u32)
+            .unwrap_or(0)
+            .min(99);
+        publish_update_status(
+            &app,
+            state.inner(),
+            UpdateStatus {
+                state: "downloading".to_string(),
+                current_version: Some(current_version.clone()),
+                available_version: Some(available_version.clone()),
+                percent: Some(percent),
+                message: Some(format!("Downloading update… {percent}%")),
+                error: None,
+                checked_at: Some(now_iso()),
+            },
+        );
+    };
+    let on_download_finished = || {
+        publish_update_status(
+            &app,
+            state.inner(),
+            UpdateStatus {
+                state: "ready".to_string(),
+                current_version: Some(current_version.clone()),
+                available_version: Some(available_version.clone()),
+                percent: Some(100),
+                message: Some("Update ready to install.".to_string()),
+                error: None,
+                checked_at: Some(now_iso()),
+            },
+        );
+    };
     update
-        .download_and_install(|_, _| {}, || {})
+        .download_and_install(on_progress, on_download_finished)
         .await
         .map_err(|e| e.to_string())?;
     app.restart();
+    // restart() never returns; the Ok(true) below is unreachable but keeps the
+    // command's Result<bool, String> contract for the JS bridge.
+    #[allow(unreachable_code)]
     Ok(true)
 }
 
@@ -650,7 +726,9 @@ fn open_latest_release() -> Result<bool, String> {
 }
 
 fn create_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
-    let url = Url::parse(OFFICIAL_SERVER_URL).expect("official server URL must be valid");
+    let url = Url::parse(OFFICIAL_SERVER_URL).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "official server URL is invalid")
+    })?;
     WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
         .title("Gchat")
         .inner_size(1100.0, 700.0)
@@ -679,12 +757,19 @@ fn create_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
 }
 
 fn create_tray(app: &AppHandle) -> tauri::Result<()> {
+    // v1.3.9: no expect() panic if the bundled icon is missing — fail the
+    // build gracefully with a clear error instead of aborting the process.
+    let icon = match app.default_window_icon() {
+        Some(icon) => icon.clone(),
+        None => {
+            return Err(tauri::Error::InvalidIcon(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "application icon must be configured",
+            )));
+        }
+    };
     TrayIconBuilder::with_id("main")
-        .icon(
-            app.default_window_icon()
-                .expect("application icon must be configured")
-                .clone(),
-        )
+        .icon(icon)
         .tooltip("Gchat")
         // Left-click restores/toggles the window; right-click still opens the menu.
         .show_menu_on_left_click(false)
@@ -798,7 +883,10 @@ pub fn run() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("error while running Gchat");
+        .unwrap_or_else(|error| {
+            eprintln!("Gchat failed to start: {error}");
+            std::process::exit(1);
+        });
 }
 
 #[cfg(test)]
@@ -865,7 +953,7 @@ mod tests {
 
     #[test]
     fn webview_memory_args_cap_v8_heap_and_disable_unused_features() {
-        assert!(WEBVIEW_MEMORY_BROWSER_ARGS.contains("max-old-space-size=256"));
+        assert!(WEBVIEW_MEMORY_BROWSER_ARGS.contains("max-old-space-size=384"));
         assert!(WEBVIEW_MEMORY_BROWSER_ARGS.contains("disable-features=WebGPU"));
         assert!(WEBVIEW_MEMORY_BROWSER_ARGS.contains("optimize-for-size"));
         assert!(WEBVIEW_MEMORY_BROWSER_ARGS.contains("disable-background-networking"));

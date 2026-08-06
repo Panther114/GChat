@@ -47,6 +47,14 @@ let trayIconCache = null;
 let updaterController = null;
 let updaterStartTimer = null;
 let lastUnreadCount = null;
+// v1.3.9: connection monitor — mirrors the Rust shells' auto-retry so a
+// transient load failure retries instead of stranding the user on the offline
+// page with only a manual Retry button.
+let connectionMonitorTimer = null;
+let connectionMonitorAttempts = 0;
+let lastTrayToggleAt = 0;
+const CONNECTION_TIMEOUT_MS = 15 * 1000;
+const MAX_CONNECTION_RETRIES = 3;
 const badgeIconCache = new Map();
 
 function getIconPath() {
@@ -141,8 +149,43 @@ async function loadHostedApp() {
       url: OFFICIAL_SERVER_URL,
       failedAt: new Date().toISOString(),
     };
-    await showOfflineScreen();
+    // v1.3.9: no immediate offline screen — the monitor retries first.
+    scheduleConnectionMonitor();
   }
+}
+
+// v1.3.9: auto-retry a failed hosted load (3 attempts × 15s) before showing
+// the offline recovery page — a transient network blip must not strand the app.
+function scheduleConnectionMonitor() {
+  if (connectionMonitorTimer) {
+    clearTimeout(connectionMonitorTimer);
+    connectionMonitorTimer = null;
+  }
+  connectionMonitorTimer = setTimeout(() => {
+    connectionMonitorTimer = null;
+    if (!mainWindow || mainWindow.isDestroyed() || isQuitting) return;
+    const currentUrl = mainWindow.webContents.getURL() || '';
+    if (isHostedUrl(currentUrl)) {
+      connectionMonitorAttempts = 0;
+      return;
+    }
+    if (connectionMonitorAttempts < MAX_CONNECTION_RETRIES) {
+      connectionMonitorAttempts += 1;
+      void loadHostedApp();
+      scheduleConnectionMonitor();
+      return;
+    }
+    connectionMonitorAttempts = 0;
+    void showOfflineScreen();
+  }, CONNECTION_TIMEOUT_MS);
+}
+
+function cancelConnectionMonitor() {
+  if (connectionMonitorTimer) {
+    clearTimeout(connectionMonitorTimer);
+    connectionMonitorTimer = null;
+  }
+  connectionMonitorAttempts = 0;
 }
 
 async function createWindow() {
@@ -179,10 +222,14 @@ async function createWindow() {
   mainWindow.webContents.on('did-fail-load', async (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
     if (!isMainFrame || errorCode === ERR_ABORTED || !validatedURL || validatedURL.startsWith('file://')) return;
     lastLoadError = { errorCode, errorDescription, url: validatedURL, failedAt: new Date().toISOString() };
-    await showOfflineScreen();
+    // v1.3.9: retry automatically before showing the offline page.
+    scheduleConnectionMonitor();
   });
   mainWindow.webContents.on('did-finish-load', () => {
-    if (isHostedUrl(mainWindow?.webContents.getURL() || '')) lastLoadError = null;
+    if (isHostedUrl(mainWindow?.webContents.getURL() || '')) {
+      lastLoadError = null;
+      cancelConnectionMonitor();
+    }
     const status = getUpdaterController().getStatus();
     broadcastUpdateStatus(status);
   });
@@ -214,6 +261,10 @@ async function createWindow() {
 async function createTray() {
   tray = new Tray(getTrayIcon());
   tray.on('click', () => {
+    // v1.3.9: debounce — Windows tray double-click fires 'click' twice.
+    const now = Date.now();
+    if (now - lastTrayToggleAt < 400) return;
+    lastTrayToggleAt = now;
     toggleOrShowMainWindow();
   });
   updateTrayMenu(0, true);
@@ -289,8 +340,12 @@ ipcMain.handle('set-launch-at-startup', (_event, enabled) => {
   return openAtLogin;
 });
 ipcMain.handle('retry-connection', async () => {
-  await loadHostedApp();
-  return true;
+  try {
+    await loadHostedApp();
+    return true;
+  } catch {
+    return false;
+  }
 });
 ipcMain.handle('get-connection-context', () => ({
   serverUrl: OFFICIAL_SERVER_URL,
@@ -321,7 +376,12 @@ ipcMain.handle('clear-cache-and-restart', async () => {
 });
 ipcMain.handle('reload-hosted-app', async () => {
   if (!mainWindow || mainWindow.isDestroyed()) return false;
+  lastLoadError = null;
+  cancelConnectionMonitor();
   await mainWindow.webContents.reloadIgnoringCache();
+  // v1.3.9: arm the monitor so a failed reload auto-retries instead of leaving
+  // a blank window.
+  scheduleConnectionMonitor();
   return true;
 });
 ipcMain.handle('check-for-updates', async () => {
@@ -393,5 +453,6 @@ app.on('before-quit', () => {
   isQuitting = true;
   if (updaterStartTimer) clearTimeout(updaterStartTimer);
   updaterStartTimer = null;
+  cancelConnectionMonitor();
   updaterController?.dispose();
 });

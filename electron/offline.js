@@ -37,7 +37,10 @@ retryBtn.addEventListener('click', async () => {
   retryBtn.disabled = true;
   retryBtn.textContent = 'Retrying…';
   try {
-    await window.electronAPI.retryConnection();
+    // v1.3.9: retryConnection now reports success/failure — the button must
+    // re-enable when the retry didn't actually recover.
+    const ok = await window.electronAPI.retryConnection();
+    if (!ok) throw new Error('retry did not recover');
   } catch {
     retryBtn.disabled = false;
     retryBtn.textContent = 'Retry connection';

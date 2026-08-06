@@ -10,8 +10,8 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="GChat" />
-  <link rel="manifest" href="/manifest.json?v=20260805-v138" />
-  <link rel="icon" href="/favicon.png?v=20260805-v138" type="image/png" />
+  <link rel="manifest" href="/manifest.json?v=20260806-v139" />
+  <link rel="icon" href="/favicon.png?v=20260806-v139" type="image/png" />
   <link rel="apple-touch-icon" href="/gchat_icon_ios.png" type="image/png" sizes="1254x1254" />
   <link rel="preload" href="/Roca-Regular.ttf?v=20260512" as="font" type="font/ttf" crossorigin="anonymous" />
   <link rel="preload" href="/Botanical.otf?v=20260512" as="font" type="font/otf" crossorigin="anonymous" />
@@ -23,7 +23,7 @@
 
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-brand">
-      <img class="brand-icon" src="/gchat_icon.png?v=20260805-v138" data-dark-src="/gchat_icon.png?v=20260805-v138" data-light-src="/gchat_icon_light.png" alt="GChat logo" />
+      <img class="brand-icon" src="/gchat_icon.png?v=20260806-v139" data-dark-src="/gchat_icon.png?v=20260806-v139" data-light-src="/gchat_icon_light.png" alt="GChat logo" />
       <span class="brand-name">GChat</span>
       <button class="btn-icon brand-cache-btn" id="clear-cache-btn" title="Clear cache and restart" aria-label="Clear cache and restart" data-icon="refresh-cw" data-icon-only="true"></button>
       <span class="brand-version" id="app-version-label">v—</span>
@@ -62,7 +62,7 @@
     <div class="chat-empty" id="chat-empty">
       <button class="btn-icon sidebar-toggle mobile-only-toggle" id="sidebar-toggle-empty" title="Menu" aria-label="Menu" data-icon="menu" data-icon-only="true"></button>
       <button class="btn-icon right-panel-toggle mobile-only-toggle" id="right-panel-toggle-empty" title="Group details" aria-label="Group details" data-icon="panel-right" data-icon-only="true"></button>
-      <img class="chat-empty-icon" src="/gchat_icon.png?v=20260805-v138" alt="GChat logo" />
+      <img class="chat-empty-icon" src="/gchat_icon.png?v=20260806-v139" alt="GChat logo" />
       <p class="chat-empty-title">Select a group to start chatting</p>
       <p class="chat-empty-sub">Only members of this group can see its messages</p>
     </div>
@@ -88,6 +88,11 @@
         <button class="btn-secondary reconnect-action-btn" id="reconnect-diagnostics-btn" type="button">Connection diagnostics</button>
       </div>
 
+      <div class="update-available-banner" id="update-available-banner" hidden>
+        <span class="update-available-text" id="update-available-text">A new version of GChat is available.</span>
+        <button class="btn-secondary update-action-btn" id="update-reload-btn" type="button">Reload now</button>
+      </div>
+
       <div class="messages-area" id="messages-area">
         <div class="load-more-indicator" id="load-more-indicator" hidden>Loading older messages…</div>
       </div>
@@ -95,11 +100,6 @@
       <button class="scroll-bottom-btn" id="scroll-bottom-btn" hidden aria-label="Scroll to latest messages">
         <span class="scroll-bottom-icon" data-icon="chevrons-down" data-icon-only="true" aria-hidden="true"></span><span class="scroll-unread-badge" id="scroll-unread-badge" hidden>0</span>
       </button>
-
-      <div class="typing-indicator" id="typing-indicator" hidden>
-        <span class="typing-user" id="typing-user"></span>
-        <span class="typing-dots"><span></span><span></span><span></span></span>
-      </div>
 
       <div class="reply-preview-bar" id="reply-preview-bar" hidden>
         <div class="reply-preview-content">
@@ -111,6 +111,10 @@
 
       <div class="message-input-bar" id="message-input-bar">
         <p class="visually-hidden" id="composer-blocked-status" aria-live="polite"></p>
+        <div class="typing-indicator" id="typing-indicator" aria-live="polite">
+          <span class="typing-user" id="typing-user"></span>
+          <span class="typing-dots"><span></span><span></span><span></span></span>
+        </div>
         <div class="message-input-tools" id="message-input-tools">
           <button class="btn-icon btn-whisper-mode message-tool-btn" id="whisper-mode-btn" title="Message mode" aria-label="Message mode"></button>
           <button class="btn-icon btn-emoji message-tool-btn" id="emoji-btn" title="Emoji" aria-label="Emoji" data-icon="smile" data-icon-only="true"></button>
@@ -619,7 +623,7 @@
   <div class="sidebar-overlay" id="sidebar-overlay" hidden></div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/pwa.js?v=20260805-v138"></script>
-  <script src="app.js?v=20260805-v138"></script>
+  <script src="/pwa.js?v=20260806-v139"></script>
+  <script src="app.js?v=20260806-v139"></script>
 </body>
 </html>

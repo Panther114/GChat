@@ -548,7 +548,9 @@ function readLocalGroupCache(groupId) {
 function writeLocalGroupCache(groupId, cache) {
   try {
     localStorage.setItem(LOCAL_CACHE_PREFIX + groupId, JSON.stringify({
-      messages: getCacheableMessages(cache.messages || []),
+      // Bound the localStorage mirror to the newest window; full history lives
+      // in the IndexedDB history store (historyStore* helpers below).
+      messages: getCacheableMessages(cache.messages || []).slice(-MAX_CACHED_MESSAGES_PER_GROUP),
       members: cache.members || [],
       oldestMessageId: cache.oldestMessageId || null,
       updatedAt: Date.now(),
@@ -556,6 +558,195 @@ function writeLocalGroupCache(groupId, cache) {
   } catch {
     // best effort only
   }
+}
+
+// ── Durable history store (IndexedDB) ────────────────────────────────────────
+// Per-group encrypted message history plus a forward sync cursor. This is the
+// stable local history layer: it survives reloads, reconnects, and localStorage
+// pressure, and it enables cheap incremental (`since`) syncs from the server.
+const HISTORY_DB_NAME = 'gchat-history-v1';
+const HISTORY_DB_VERSION = 1;
+const HISTORY_MESSAGES_STORE = 'messages';
+const HISTORY_META_STORE = 'meta';
+const HISTORY_MAX_MESSAGES_PER_GROUP = 2000;
+let historyDbPromise = null;
+let historyDbSupported = typeof indexedDB !== 'undefined';
+
+function openHistoryDb() {
+  if (!historyDbSupported) return Promise.resolve(null);
+  if (historyDbPromise) return historyDbPromise;
+  historyDbPromise = new Promise((resolve) => {
+    let request;
+    try {
+      request = indexedDB.open(HISTORY_DB_NAME, HISTORY_DB_VERSION);
+    } catch {
+      historyDbSupported = false;
+      resolve(null);
+      return;
+    }
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(HISTORY_MESSAGES_STORE)) {
+        const store = db.createObjectStore(HISTORY_MESSAGES_STORE, { keyPath: 'id' });
+        store.createIndex('groupId', 'groupId', { unique: false });
+      }
+      if (!db.objectStoreNames.contains(HISTORY_META_STORE)) {
+        db.createObjectStore(HISTORY_META_STORE, { keyPath: 'groupId' });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => {
+      historyDbSupported = false;
+      resolve(null);
+    };
+    request.onblocked = () => {
+      historyDbSupported = false;
+      resolve(null);
+    };
+  });
+  return historyDbPromise;
+}
+
+function runHistoryStore(storeName, mode, worker) {
+  return openHistoryDb().then((db) => {
+    if (!db) return Promise.resolve(null);
+    return new Promise((resolve, reject) => {
+      let transaction;
+      try {
+        transaction = db.transaction(storeName, mode);
+      } catch (error) {
+        reject(error);
+        return;
+      }
+      const store = transaction.objectStore(storeName);
+      let result;
+      try {
+        result = worker(store);
+      } catch (error) {
+        reject(error);
+        return;
+      }
+      transaction.oncomplete = () => resolve(result);
+      transaction.onerror = () => reject(transaction.error || new Error('history store error'));
+      transaction.onabort = () => reject(transaction.error || new Error('history store aborted'));
+    });
+  }).catch(() => null);
+}
+
+function persistHistoryMessages(groupId, messages) {
+  if (!messages || !messages.length) return Promise.resolve();
+  const cacheable = getCacheableMessages(messages);
+  return runHistoryStore(HISTORY_MESSAGES_STORE, 'readwrite', (store) => {
+    for (const msg of cacheable) {
+      store.put({ id: String(msg.id), groupId: String(groupId), createdAt: msg.createdAt || '', msg });
+    }
+  });
+}
+
+function readHistoryMessages(groupId) {
+  return runHistoryStore(HISTORY_MESSAGES_STORE, 'readonly', (store) => {
+    const request = store.index('groupId').getAll(String(groupId));
+    request.onsuccess = () => {
+      const rows = request.result || [];
+      const messages = rows
+        .map((row) => row.msg)
+        .filter(Boolean)
+        .sort((a, b) => {
+          const timeDiff = String(a.createdAt || '').localeCompare(String(b.createdAt || ''));
+          return timeDiff !== 0 ? timeDiff : String(a.id).localeCompare(String(b.id));
+        });
+      if (messages.length > HISTORY_MAX_MESSAGES_PER_GROUP) {
+        messages.splice(0, messages.length - HISTORY_MAX_MESSAGES_PER_GROUP);
+      }
+      request._messages = messages;
+    };
+  }).then((request) => (request && request._messages ? request._messages : []));
+}
+
+function readHistoryCursor(groupId) {
+  return runHistoryStore(HISTORY_META_STORE, 'readonly', (store) => {
+    const request = store.get(String(groupId));
+    request.onsuccess = () => { request._cursor = request.result?.lastSyncedAt || null; };
+  }).then((request) => (request && request._cursor ? request._cursor : null));
+}
+
+function writeHistoryCursor(groupId, createdAt) {
+  if (!createdAt) return Promise.resolve();
+  return runHistoryStore(HISTORY_META_STORE, 'readwrite', (store) => {
+    store.put({ groupId: String(groupId), lastSyncedAt: String(createdAt), updatedAt: Date.now() });
+  });
+}
+
+function clearGroupHistoryStore(groupId) {
+  const messageClear = runHistoryStore(HISTORY_MESSAGES_STORE, 'readwrite', (store) => {
+    const request = store.index('groupId').openKeyCursor(String(groupId));
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return;
+      store.delete(cursor.primaryKey);
+      cursor.continue();
+    };
+  });
+  const metaClear = runHistoryStore(HISTORY_META_STORE, 'readwrite', (store) => store.delete(String(groupId)));
+  return Promise.all([messageClear, metaClear]).then(() => null);
+}
+
+// One-time migration: fold existing localStorage per-group caches into the
+// durable history store so no history is lost when caches are bounded.
+let historyMigrationStarted = false;
+async function migrateLocalCachesToHistory() {
+  if (historyMigrationStarted || !historyDbSupported) return;
+  historyMigrationStarted = true;
+  const db = await openHistoryDb();
+  if (!db) return;
+  const tasks = [];
+  for (let i = 0; i < localStorage.length; i += 1) {
+    const key = localStorage.key(i);
+    if (!key || !key.startsWith(LOCAL_CACHE_PREFIX)) continue;
+    const groupId = key.slice(LOCAL_CACHE_PREFIX.length);
+    try {
+      const parsed = JSON.parse(localStorage.getItem(key) || 'null');
+      if (parsed && Array.isArray(parsed.messages) && parsed.messages.length) {
+        tasks.push(persistHistoryMessages(groupId, parsed.messages));
+      }
+    } catch { /* best effort */ }
+  }
+  await Promise.allSettled(tasks);
+}
+
+// ── Merge helpers (dedup by message id, never replace) ───────────────────────
+// Every cache update goes through these so socket echoes, REST fetches, and
+// pagination can never duplicate or drop messages.
+function sortMessagesChronologically(messages) {
+  return [...messages].sort((a, b) => {
+    const timeDiff = String(a.createdAt || '').localeCompare(String(b.createdAt || ''));
+    return timeDiff !== 0 ? timeDiff : String(a.id).localeCompare(String(b.id));
+  });
+}
+
+function mergeMessagesIntoCache(groupId, incoming, { persist = true } = {}) {
+  const cache = ensureGroupCacheEntry(groupId);
+  const existing = Array.isArray(cache.messages) ? cache.messages : [];
+  const byId = new Map(existing.map((m) => [String(m.id), m]));
+  for (const m of incoming) byId.set(String(m.id), m);
+  const merged = sortMessagesChronologically([...byId.values()]);
+  // Server-provided rows with hasRead=true are confirmed read state.
+  for (const m of merged) {
+    if (m.hasRead === true && m.readConfirmed !== true) m.readConfirmed = true;
+  }
+  cache.messages = merged;
+  cache.oldestMessageId = merged.length ? merged[0].id : null;
+  cache.rowsDirty = true;
+  if (persist) {
+    writeLocalGroupCache(groupId, cache);
+    if (historyDbSupported) void persistHistoryMessages(groupId, merged);
+  }
+  return merged;
+}
+
+function cacheHasMessage(groupId, messageId) {
+  const cache = ensureGroupCacheEntry(groupId);
+  return Array.isArray(cache.messages) && cache.messages.some((m) => String(m.id) === String(messageId));
 }
 
 function readStoredJson(key) {
@@ -657,6 +848,18 @@ async function reloadAppShell() {
   window.location.replace(buildReloadUrl());
 }
 
+// v1.3.9: a session that expired while the app was backgrounded must not yank
+// the UI to the login page mid-background (that looked like a crash/refresh).
+// Defer the redirect until the user actually returns to the app.
+let sessionExpiredPending = false;
+function handleSessionExpired() {
+  if (document.hidden) {
+    sessionExpiredPending = true;
+    return;
+  }
+  window.location.href = buildAuthRedirectUrl();
+}
+
 async function clearCacheAndRestartApp() {
   await clearBrowserRuntimeCaches({ includeLocalData: true });
   if (window.electronAPI?.clearCacheAndRestart) {
@@ -686,14 +889,27 @@ async function checkForHostedAppUpdate() {
   if (currentAppVersion === info.version || hostedAppReloadPending) return false;
   currentAppVersion = info.version;
   hostedAppReloadPending = true;
-  showToast('New version detected. Refreshing…');
-  await reloadAppShell();
+  // v1.3.9: never auto-reload the shell (especially while hidden in the tray
+  // or backgrounded) — surface a user-confirmed in-app banner instead. This
+  // kills the "app refreshes and reloads all history by itself" behavior.
+  showUpdateAvailableBanner();
   return true;
+}
+
+function showUpdateAvailableBanner() {
+  const banner = $('update-available-banner');
+  if (!banner) return;
+  const text = $('update-available-text');
+  if (text) text.textContent = `GChat ${currentAppVersion} is available.`;
+  banner.hidden = false;
 }
 
 function startHostedAppUpdatePolling() {
   if (hostedAppUpdateTimer) clearInterval(hostedAppUpdateTimer);
   hostedAppUpdateTimer = setInterval(() => {
+    // Skip the version check entirely while hidden — nothing may reload in
+    // the background.
+    if (document.hidden) return;
     void checkForHostedAppUpdate();
   }, HOSTED_APP_UPDATE_CHECK_INTERVAL_MS);
 }
@@ -2295,12 +2511,19 @@ function completeViewportTrackingForRow(row) {
   if (!rowGroupId) return;
   if (!messageId) return;
 
-  if (!pendingReadMessageIds.has(messageId) && row.dataset.hasRead !== '1') {
-    pendingReadMessageIds.add(messageId);
-    row.classList.remove('unseen');
-    row.dataset.hasRead = '1';
-    markMessageReadLocal(rowGroupId, messageId);
-    socket.emit('mark_message_read', { groupId: rowGroupId, messageId });
+  // v1.3.9: decide on the server-confirmed state (readConfirmed), not the
+  // local dataset flag — a receipt emitted into a dying socket must be retried
+  // after the reconnect instead of being silently dropped.
+  if (!pendingReadMessageIds.has(messageId)) {
+    const cache = ensureGroupCacheEntry(rowGroupId);
+    const cachedMsg = (cache.messages || []).find((m) => String(m.id) === messageId);
+    if (!cachedMsg || cachedMsg.readConfirmed !== true) {
+      pendingReadMessageIds.add(messageId);
+      row.classList.remove('unseen');
+      row.dataset.hasRead = '1';
+      markMessageReadLocal(rowGroupId, messageId);
+      queueMarkReadEmit(rowGroupId, messageId);
+    }
   }
 
   if (
@@ -2413,6 +2636,17 @@ function getGenericUnreadNotificationBody(unreadCount) {
   return GENERIC_NOTIFICATION_FALLBACK_BODY;
 }
 
+// v1.3.9: notifications carry the sender and message content when the client
+// has already decrypted the message locally (never for server-side web push,
+// which cannot decrypt E2E content).
+function formatNotificationBody(unreadCount, notification) {
+  if (notification && notification.senderName) {
+    const preview = truncate(String(notification.preview || ''), 70);
+    return preview ? `${notification.senderName}: ${preview}` : `New message from ${notification.senderName}`;
+  }
+  return getGenericUnreadNotificationBody(unreadCount);
+}
+
 function getTotalUnreadCount() {
   return Object.values(unreadCounts).reduce((sum, count) => sum + Math.max(0, Number(count) || 0), 0);
 }
@@ -2449,11 +2683,12 @@ function syncUnreadIndicators(forcedTotal = null) {
   return totalUnread;
 }
 
-function sendNativeNotification(unreadCount, groupId) {
+function sendNativeNotification(unreadCount, groupId, notification = null) {
+  const body = formatNotificationBody(unreadCount, notification);
   if (window.electronAPI) {
     window.electronAPI.showNotification({
       title: GENERIC_NOTIFICATION_TITLE,
-      body: getGenericUnreadNotificationBody(unreadCount),
+      body,
       groupId,
     });
     return;
@@ -2462,7 +2697,7 @@ function sendNativeNotification(unreadCount, groupId) {
   if ('Notification' in window && Notification.permission === 'granted') {
     try {
       const n = new Notification(GENERIC_NOTIFICATION_TITLE, {
-        body: getGenericUnreadNotificationBody(unreadCount),
+        body,
         icon: '/gchat_icon.png',
         badge: '/gchat_icon.png',
         tag: PUSH_NOTIFICATION_TAG,
@@ -3014,28 +3249,44 @@ async function refreshCurrentGroupFromServer() {
   const groupId = currentGroupId;
   if (!groupId) return;
   try {
-    const res = await fetch(`/api/groups/${groupId}/messages?limit=50`, { cache: 'no-store' });
+    const cache = ensureGroupCacheEntry(groupId);
+    const hasCached = Array.isArray(cache.messages) && cache.messages.length > 0;
+    // v1.3.9: incremental sync — only fetch messages newer than the local
+    // cursor when we already have history, instead of re-fetching the window.
+    let url = `/api/groups/${groupId}/messages?limit=100`;
+    if (hasCached) {
+      const cursor = await readHistoryCursor(groupId);
+      const since = cursor || cache.messages[cache.messages.length - 1].createdAt;
+      if (since) url = `/api/groups/${groupId}/messages?since=${encodeURIComponent(since)}&limit=100`;
+    }
+    const res = await fetch(url, { cache: 'no-store' });
     if (!res.ok) return;
     const rawMsgs = await res.json();
     if (String(currentGroupId) !== groupId) return;
     const msgs = filterMessagesVisibleToCurrentUser(rawMsgs);
-    const cache = ensureGroupCacheEntry(groupId);
+    const entry = ensureGroupCacheEntry(groupId);
     // Merge instead of replace: preserve older paginated history the user has
     // already loaded, while refreshing/inserting the newest server messages.
-    const existing = Array.isArray(cache.messages) ? cache.messages : [];
+    const existing = Array.isArray(entry.messages) ? entry.messages : [];
     const byId = new Map(existing.map((m) => [String(m.id), m]));
     for (const m of msgs) byId.set(String(m.id), m);
-    const merged = [...byId.values()].sort((a, b) =>
-      String(a.createdAt || '').localeCompare(String(b.createdAt || ''))
-    );
+    const merged = sortMessagesChronologically([...byId.values()]);
     const knownIds = new Set(existing.map((m) => String(m.id)));
-    const fetchedIds = msgs.map((m) => String(m.id));
-    const changed = fetchedIds.some((id) => !knownIds.has(id));
+    const changed = msgs.some((fresh) => {
+      if (!knownIds.has(String(fresh.id))) return true;
+      const old = byId.get(String(fresh.id));
+      return (old.editedAt || null) !== (fresh.editedAt || null)
+        || Number(old.revision || 0) !== Number(fresh.revision || 0);
+    });
     if (!changed) return;
-    cache.messages = merged;
-    cache.messageRows = null;
-    cache.rowsDirty = true;
-    writeLocalGroupCache(groupId, cache);
+    entry.messages = merged;
+    entry.messageRows = null;
+    entry.rowsDirty = true;
+    writeLocalGroupCache(groupId, entry);
+    if (historyDbSupported) {
+      void persistHistoryMessages(groupId, msgs);
+      if (msgs.length) void writeHistoryCursor(groupId, msgs[msgs.length - 1].createdAt);
+    }
     if (String(currentGroupId) !== groupId) return;
     allMessages = merged;
     updateGroupUnseenCount(groupId, merged);
@@ -3558,6 +3809,13 @@ function selectTagChannel(topic, { focusComposer = true } = {}) {
   clearWhisperToken();
   whisperRecipients = [];
   messageMode = 'normal';
+  // Quotes are channel-scoped: a reply composed in one channel must not be
+  // sent against a message from another channel.
+  if (replyingTo) {
+    replyingTo = null;
+    const replyBar = $('reply-preview-bar');
+    if (replyBar) replyBar.hidden = true;
+  }
   updateWhisperBtn();
   syncComposerTokens();
   renderTagFilters();
@@ -4555,6 +4813,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
+      if (sessionExpiredPending) {
+        sessionExpiredPending = false;
+        window.location.href = buildAuthRedirectUrl();
+        return;
+      }
       observeCurrentGroupRowsForRead();
       void checkForHostedAppUpdate();
       syncStateOnFocus();
@@ -4603,16 +4866,21 @@ async function loadGroups({ withBackendPreload = false } = {}) {
         group._lastPreviewTime = previousPreview.time;
       }
       if (group.preloaded && typeof group.preloaded === 'object') {
-      const cache = ensureGroupCacheEntry(group.id);
-      const preloadedMessages = Array.isArray(group.preloaded.messages)
+        const cache = ensureGroupCacheEntry(group.id);
+        const preloadedMessages = Array.isArray(group.preloaded.messages)
           ? filterMessagesVisibleToCurrentUser(group.preloaded.messages)
           : [];
-        cache.messages = preloadedMessages;
+        // Merge instead of replace so paginated history survives reconnects
+        // and focus resyncs (dedup by message id).
+        mergeMessagesIntoCache(group.id, preloadedMessages, { persist: false });
         cache.members = Array.isArray(group.preloaded.members) ? group.preloaded.members : [];
         cache.messageRows = null;
-        cache.oldestMessageId = preloadedMessages.length ? preloadedMessages[0].id : null;
         cache.rowsDirty = true;
         writeLocalGroupCache(group.id, cache);
+        if (preloadedMessages.length) {
+          void persistHistoryMessages(group.id, preloadedMessages);
+          void writeHistoryCursor(group.id, preloadedMessages[preloadedMessages.length - 1].createdAt);
+        }
       }
       if (!group._lastPreviewText) {
         const cache = ensureGroupCacheEntry(group.id);
@@ -5025,6 +5293,43 @@ function markMessageReadLocal(groupId, messageId) {
   scheduleBatchReadFlush();
 }
 
+// v1.3.9: batched read-receipt emission — one packet per group per tick instead
+// of one socket emit per row. Buffered while disconnected; flushed on reconnect.
+let pendingReadEmits = new Map();
+let readEmitTimer = null;
+function queueMarkReadEmit(groupId, messageId) {
+  let ids = pendingReadEmits.get(groupId);
+  if (!ids) {
+    ids = new Set();
+    pendingReadEmits.set(groupId, ids);
+  }
+  ids.add(messageId);
+  if (readEmitTimer) return;
+  readEmitTimer = setTimeout(() => {
+    readEmitTimer = null;
+    flushMarkReadEmits();
+  }, 250);
+}
+
+function flushMarkReadEmits() {
+  if (readEmitTimer) {
+    clearTimeout(readEmitTimer);
+    readEmitTimer = null;
+  }
+  if (!pendingReadEmits.size) return;
+  const byGroup = pendingReadEmits;
+  pendingReadEmits = new Map();
+  for (const [groupId, messageIds] of byGroup) {
+    if (!socket || !socket.connected) continue;
+    socket.emit('mark_messages_read', { groupId, messageIds: [...messageIds] });
+  }
+}
+
+function markMessageReadConfirmed(messageId) {
+  const stored = allMessages.find((m) => String(m.id) === String(messageId));
+  if (stored) stored.readConfirmed = true;
+}
+
 function updateUnreadBadge(groupId, count) {
   const badge = $('badge-' + groupId);
   if (badge) {
@@ -5124,6 +5429,15 @@ async function selectGroup(groupId) {
   }
 
   const cache = ensureGroupCacheEntry(normalizedGroupId);
+  // v1.3.9: hydrate durable IndexedDB history before first render so the
+  // transcript is never blank while the server window loads.
+  if (!cache.messages || cache.messages.length === 0) {
+    const history = await readHistoryMessages(normalizedGroupId);
+    if (history && history.length) {
+      cache.messages = mergeMessagesIntoCache(normalizedGroupId, history, { persist: false });
+      cache.rowsDirty = true;
+    }
+  }
   const hadCompleteCache = !!(cache.messages && cache.members && cache.messageRows);
   if (!cache.messages || !cache.members || !cache.messageRows) {
     messagesArea().replaceChildren(createLoadMoreIndicator());
@@ -5139,6 +5453,9 @@ async function selectGroup(groupId) {
   observeCurrentGroupRowsForRead();
   scrollToBottom(true);
   $('scroll-bottom-btn').hidden = true;
+  // v1.3.9: reading the group counts as "seen" — stop the title blink even if
+  // the window itself isn't focused (e.g. multiple windows on one account).
+  if (document.hasFocus()) clearPageTitleNotification();
   // v1.3.8: a fully-cached group may be stale (messages missed while the tab
   // was backgrounded or the app tray-hidden) — silently resync from the server.
   if (hadCompleteCache) void refreshCurrentGroupFromServer();
@@ -5183,20 +5500,23 @@ async function loadMessages(groupId, before) {
     const url = `/api/groups/${groupId}/messages` + (before ? `?before=${before}&limit=50` : '?limit=50');
     const res = await fetch(url);
     if (!res.ok) {
-      if (res.status === 401) { window.location.href = 'index.html'; return; }
+      if (res.status === 401) { handleSessionExpired(); return; }
       return;
     }
     const rawMsgs = await res.json();
     const msgs = filterMessagesVisibleToCurrentUser(rawMsgs);
     if (!before) {
       const cache = ensureGroupCacheEntry(groupId);
-      cache.messages = msgs;
-      cache.messageRows = await buildMessageRows(msgs, groupId);
-      cache.oldestMessageId = rawMsgs.length > 0 ? rawMsgs[0].id : null;
+      // Merge instead of replace: preserve previously paginated history while
+      // refreshing the newest server window (dedup by message id).
+      const merged = mergeMessagesIntoCache(groupId, msgs);
+      cache.messageRows = await buildMessageRows(merged, groupId);
+      cache.oldestMessageId = merged.length ? merged[0].id : null;
       cache.rowsDirty = false;
       writeLocalGroupCache(groupId, cache);
-      updateGroupUnseenCount(groupId, msgs);
-      await updateGroupPreviewFromMessage(groupId, msgs.length ? msgs[msgs.length - 1] : null);
+      updateGroupUnseenCount(groupId, merged);
+      await updateGroupPreviewFromMessage(groupId, merged.length ? merged[merged.length - 1] : null);
+      if (msgs.length) void writeHistoryCursor(groupId, msgs[msgs.length - 1].createdAt);
     } else {
       // Prepend older messages
       const area = messagesArea();
@@ -5215,15 +5535,17 @@ async function loadMessages(groupId, before) {
       const oldFirst = area.querySelector('.msg-row, .msg-system');
       if (oldFirst) area.insertBefore(fragment, oldFirst);
       else area.appendChild(fragment);
-      allMessages = [...msgs, ...allMessages];
       const cache = ensureGroupCacheEntry(groupId);
-      cache.messages = allMessages;
+      cache.messages = mergeMessagesIntoCache(groupId, msgs, { persist: false });
       cache.messageRows = [...rows, ...(cache.messageRows || [])];
       cache.oldestMessageId = rawMsgs[0].id;
       cache.rowsDirty = false;
       writeLocalGroupCache(groupId, cache);
       // Restore scroll position
       area.scrollTop = area.scrollHeight - prevScrollHeight;
+    }
+    if (groupId === currentGroupId) {
+      allMessages = ensureGroupCacheEntry(groupId).messages || allMessages;
     }
     if (!before && groupId === currentGroupId && rawMsgs.length > 0) {
       oldestMessageId = rawMsgs[0].id;
@@ -5484,11 +5806,38 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
     const replyPreview = msg.replyPreview;
     const rb = document.createElement('div');
     rb.className = 'msg-reply-box';
-    if (!targetExists) {
-      rb.textContent = 'Replying to, original message unavailable';
-    } else if (replyPreview) {
-      rb.innerHTML = '<span class="msg-reply-sender">Replying to ' + escapeHtml(replyPreview.senderName || '') + '</span> ' + escapeHtml(truncate(replyPreview.preview || '', 60));
+    const renderReplyPreview = () => {
+      const senderName = replyPreview && replyPreview.senderName ? replyPreview.senderName : 'a message';
+      const preview = replyPreview && replyPreview.preview ? truncate(replyPreview.preview, 60) : '';
+      rb.innerHTML = '<span class="msg-reply-sender">Replying to ' + escapeHtml(senderName) + '</span> ' + escapeHtml(preview);
       rb.addEventListener('click', () => scrollToMessage(msg.replyToId));
+    };
+    if (!targetExists) {
+      // The target is outside the loaded window or was deleted. Render the
+      // self-contained preview from this message's metadata instead of an
+      // error, and hydrate the target in the background when it still exists.
+      if (replyPreview) {
+        rb.innerHTML = '<span class="msg-reply-sender">Replying to ' + escapeHtml(replyPreview.senderName || '') + '</span> ' + escapeHtml(truncate(replyPreview.preview || '', 60));
+        rb.classList.add('msg-reply-unavailable');
+      } else if (msg.replyTargetMissing) {
+        rb.textContent = 'Replying to a deleted message';
+      } else {
+        rb.textContent = 'Replying to, original message unavailable';
+      }
+      if (!msg.replyTargetMissing) {
+        void hydrateMissingReplyTarget(groupId, msg.replyToId).then((target) => {
+          if (!target) return;
+          rb.classList.remove('msg-reply-unavailable');
+          if (replyPreview) renderReplyPreview();
+          else {
+            const fallbackPreview = target.type === 'text' ? '' : '[attachment]';
+            rb.innerHTML = '<span class="msg-reply-sender">Replying to ' + escapeHtml(target.senderName || '') + '</span> ' + escapeHtml(fallbackPreview);
+            rb.addEventListener('click', () => scrollToMessage(msg.replyToId));
+          }
+        });
+      }
+    } else if (replyPreview) {
+      renderReplyPreview();
     }
     bubble.appendChild(rb);
   } else if (msg.replyTo) {
@@ -5737,12 +6086,12 @@ async function appendMessageBubble(msg, scroll, groupId = currentGroupId) {
     ? (area.scrollHeight - area.scrollTop - area.clientHeight < 150)
     : false;
 
-  allMessages.push(msg);
-  cache.messages = allMessages;
-  cache.oldestMessageId = allMessages.length ? allMessages[0].id : null;
+  // v1.3.9: merge (dedup by id) instead of append so a late socket echo can
+  // never produce a duplicate row; sorted insert keeps ordering stable.
+  allMessages = mergeMessagesIntoCache(groupId, [msg]);
   cache.rowsDirty = true;
   cache.messageRows = null;
-  writeLocalGroupCache(groupId, cache);
+  if (historyDbSupported) void persistHistoryMessages(groupId, [msg]);
   rememberChannel(groupId, channel);
   renderTagFilters();
 
@@ -5820,6 +6169,29 @@ function scrollToBottom(skipAnimation) {
 function scrollToMessage(msgId) {
   const row = document.querySelector('[data-msg-id="' + msgId + '"]');
   if (row) row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+// Fetches a single message that is referenced by a quote but missing from the
+// bounded local cache (e.g. older than the loaded window) and merges it in.
+async function hydrateMissingReplyTarget(groupId, messageId) {
+  try {
+    const res = await fetch(`/api/groups/${groupId}/messages/${encodeURIComponent(messageId)}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data || !data.id) return null;
+    const cache = ensureGroupCacheEntry(groupId);
+    if (cache.messages && !cache.messages.some((entry) => entry.id === data.id)) {
+      cache.messages.push(data);
+      cache.messages.sort((a, b) => {
+        const timeDiff = String(a.createdAt).localeCompare(String(b.createdAt));
+        return timeDiff !== 0 ? timeDiff : String(a.id).localeCompare(String(b.id));
+      });
+      writeLocalGroupCache(groupId, cache);
+    }
+    return data;
+  } catch {
+    return null;
+  }
 }
 
 // ── Context menu ──────────────────────────────────────────────────────────────
@@ -6918,6 +7290,8 @@ function initSocket() {
     });
     if (currentGroupId) socket.emit('join_room', currentGroupId);
     joinAllGroupRooms();
+    // v1.3.9: flush any read receipts that were queued while offline.
+    flushMarkReadEmits();
     if (socketHasConnectedOnce) {
       // Real reconnect: full resync so messages missed while offline appear.
       void refreshCurrentGroupAfterReconnect({ fullSync: true });
@@ -6937,6 +7311,9 @@ function initSocket() {
     updateConnectionStatusUi(socketDiagnostics.isBrowserOnline ? 'disconnected' : 'offline', socketDiagnostics.isBrowserOnline ? 'Disconnected' : 'Offline');
     console.warn('[socket] disconnect', { reason });
     pendingDisappearingStartMessageIds = new Set();
+    // v1.3.9: receipts emitted into a dying socket must be retried after the
+    // reconnect — clear the pending set so visible rows re-emit.
+    pendingReadMessageIds.clear();
     clearAllMessageVisibilityTimers();
     renderDiagnosticsPanel();
   });
@@ -6996,15 +7373,24 @@ function initSocket() {
       updatePageTitleNotification();
     }
 
+    // v1.3.9: dedup — a socket echo can overlap a REST fetch that already
+    // contains the same message id; never insert a duplicate.
+    if (cacheHasMessage(msg.groupId, msg.id)) {
+      if (msg.clientUploadId) removePendingAttachment(msg.clientUploadId);
+      return;
+    }
+
     if (msg.groupId !== currentGroupId) {
       applyCurrentUserReadState(msg);
       const cache = ensureGroupCacheEntry(msg.groupId);
       if (cache.messages) {
-        cache.messages.push(msg);
-        cache.oldestMessageId = cache.messages.length ? cache.messages[0].id : null;
+        mergeMessagesIntoCache(msg.groupId, [msg]);
         trimBackgroundGroupCache(cache);
         writeLocalGroupCache(msg.groupId, cache);
+      } else {
+        mergeMessagesIntoCache(msg.groupId, [msg], { persist: false });
       }
+      if (historyDbSupported) void persistHistoryMessages(msg.groupId, [msg]);
       if (cache.messageRows && !cache.rowsDirty) {
         const prevMsg = cache.messages && cache.messages.length > 1 ? cache.messages[cache.messages.length - 2] : null;
         const row = await buildMessageRow(msg, msg.groupId, { showSenderName: !shouldContinueSeries(prevMsg, msg) });
@@ -7031,7 +7417,7 @@ function initSocket() {
       if (msg.senderId !== currentUser.id) {
         const totalUnread = getTotalUnreadCount();
         pushStatus.totalUnreadCount = totalUnread;
-        sendNativeNotification(totalUnread, msg.groupId);
+        sendNativeNotification(totalUnread, msg.groupId, { senderName: msg.senderName, preview });
       }
       if (msg.clientUploadId) removePendingAttachment(msg.clientUploadId);
       return;
@@ -7051,12 +7437,13 @@ function initSocket() {
     if (msg.senderId !== currentUser.id) {
       const totalUnread = getTotalUnreadCount();
       pushStatus.totalUnreadCount = totalUnread;
-      sendNativeNotification(totalUnread, msg.groupId);
+      sendNativeNotification(totalUnread, msg.groupId, { senderName: msg.senderName, preview: preview2 });
     }
   });
 
   socket.on('message_read_update', ({ messageId, readCount }) => {
     pendingReadMessageIds.delete(messageId);
+    markMessageReadConfirmed(messageId);
     updateDeliveryForMessage(messageId, readCount);
     const stored = allMessages.find(m => m.id === messageId);
     if (stored) stored.readCount = Math.max(0, Number(readCount) || 0);
@@ -7168,6 +7555,7 @@ function initSocket() {
     cache.rowsDirty = false;
     updateGroupUnseenCount(groupId, cache.messages);
     writeLocalGroupCache(groupId, cache);
+    if (historyDbSupported) void clearGroupHistoryStore(groupId);
     if (groupId !== currentGroupId) return;
     renderGroupFromCache(groupId);
     renderTagFilters();
@@ -7389,7 +7777,10 @@ function initSocket() {
   socket.on('group_join_denied', async ({ groupId }) => {
     const normalizedGroupId = String(groupId || '');
     if (!normalizedGroupId) return;
-    await loadGroups();
+  await loadGroups();
+  // v1.3.9: fold existing localStorage caches into the durable IndexedDB
+  // history store (one-time, best-effort).
+  void migrateLocalCachesToHistory();
     if (currentGroupId !== normalizedGroupId) return;
     if (groups.some((group) => String(group.id) === normalizedGroupId)) return;
     currentGroupId = null;
@@ -7484,13 +7875,13 @@ function initSocket() {
 
   socket.on('user_typing', ({ username }) => {
     $('typing-user').textContent = username;
-    $('typing-indicator').hidden = false;
+    $('typing-indicator').classList.add('is-visible');
     clearTimeout(window._typingTimer);
-    window._typingTimer = setTimeout(() => $('typing-indicator').hidden = true, 3000);
+    window._typingTimer = setTimeout(() => $('typing-indicator').classList.remove('is-visible'), 3000);
   });
 
   socket.on('user_stop_typing', () => {
-    $('typing-indicator').hidden = true;
+    $('typing-indicator').classList.remove('is-visible');
   });
 
   socket.on('error', ({ message }) => {
@@ -7560,7 +7951,9 @@ function setupKeyboardShortcuts() {
 function autoResizeTextarea(el) {
   const keepBottomPinned = isMessagesPinnedToBottom();
   el.style.height = 'auto';
-  const maxH = Math.floor(window.innerHeight * 0.4);
+  const isMobileLayout = typeof window.matchMedia === 'function'
+    && window.matchMedia('(max-width: 768px)').matches;
+  const maxH = Math.min(Math.floor(window.innerHeight * 0.4), isMobileLayout ? 220 : 180);
   el.style.height = Math.min(el.scrollHeight, maxH) + 'px';
   if (keepBottomPinned) pinMessagesToBottom();
 }
@@ -7949,6 +8342,8 @@ function formatDesktopUpdateStatus(status) {
   }
 }
 
+let desktopUpdateCheckTimeout = null;
+
 function renderDesktopUpdateStatus(status) {
   const row = $('desktop-update-row');
   const statusEl = $('desktop-update-status');
@@ -7966,13 +8361,31 @@ function renderDesktopUpdateStatus(status) {
   statusEl.textContent = formatDesktopUpdateStatus(status);
   statusEl.dataset.state = status?.state || 'idle';
 
+  // v1.3.9: watchdog — a check stuck in 'checking' (e.g. no HTTP timeout on
+  // some shells) must not disable the button forever.
+  if (desktopUpdateCheckTimeout) {
+    clearTimeout(desktopUpdateCheckTimeout);
+    desktopUpdateCheckTimeout = null;
+  }
+  if (status?.state === 'checking' || status?.state === 'downloading') {
+    desktopUpdateCheckTimeout = setTimeout(() => {
+      desktopUpdateCheckTimeout = null;
+      if (document.visibilityState === 'hidden') return;
+      renderDesktopUpdateStatus({ state: 'error', error: 'Update check timed out. Try again.' });
+    }, 45_000);
+  }
+
   if (checkBtn) {
     checkBtn.disabled = status?.state === 'checking' || status?.state === 'downloading';
   }
   if (installBtn) {
-    const ready = status?.state === 'ready';
-    installBtn.hidden = !ready;
-    installBtn.disabled = !ready;
+    // v1.3.9: the install button is the primary action while an update is
+    // available (both shells download+install in one click). Previously it
+    // only appeared at state==='ready', which Tauri never published — so the
+    // button was unclickable/never shown even when an update was available.
+    const showInstall = status?.state === 'available' || status?.state === 'ready';
+    installBtn.hidden = !showInstall;
+    installBtn.disabled = status?.state === 'downloading' || status?.state === 'checking';
   }
   if (releaseBtn) {
     const showRelease = status?.state === 'available'
@@ -8239,17 +8652,37 @@ async function submitGrokPrompt() {
       });
     }
 
-    const { encryptedContent: promptEncryptedContent, iv: promptIv } = await encryptMessage(prompt, key, groupId);
-    if (estimateBase64Bytes(promptEncryptedContent) > MAX_TEXT_MESSAGE_BYTES) {
+    // v1.3.9: the Ask-AI prompt is a normal v2 message with AI markers — build
+    // the full v2 envelope (previously the send_message payload was missing
+    // id/encryptedMetadata/metadataIv/replyToId/tagIndex and always failed).
+    const messageId = crypto.randomUUID();
+    const messageIdentity = {
+      id: messageId,
+      groupId,
+      senderId: currentUser.id,
+      type: 'text',
+      encryptionVersion: 2,
+      keyVersion: 1,
+      revision: 1,
+    };
+    const metadata = {
+      hashtag: tagFilter,
+      replyPreview: replyingTo ? { senderName: replyingTo.senderName, preview: replyingTo.preview } : null,
+    };
+    const encryptedPrompt = await encryptV2Message(prompt, metadata, messageIdentity, key);
+    if (estimateBase64Bytes(encryptedPrompt.encryptedContent) > MAX_TEXT_MESSAGE_BYTES) {
       throw new Error('Message too large');
     }
+    const tagIndex = tagFilter ? await GChatCryptoV2.blindIndex(tagFilter, key, groupId, 'tag-index') : null;
 
     await emitSocketWithAck('send_message', {
-      groupId,
-      encryptedContent: promptEncryptedContent,
-      iv: promptIv,
-      replyTo: replyToData,
-      hashtag: tagFilter,
+      ...messageIdentity,
+      encryptedContent: encryptedPrompt.encryptedContent,
+      iv: encryptedPrompt.iv,
+      encryptedMetadata: encryptedPrompt.encryptedMetadata,
+      metadataIv: encryptedPrompt.metadataIv,
+      replyToId: replyingTo?.id || null,
+      tagIndex,
       isDisappearing: false,
       disappearingDurationMs: 0,
       aiMention: true,
@@ -8428,6 +8861,12 @@ function setupEventListeners() {
   $('reconnect-now-btn').addEventListener('click', () => {
     manualReconnectSocket();
     void refreshDiagnosticsHealth();
+  });
+  $('update-reload-btn').addEventListener('click', () => {
+    const banner = $('update-available-banner');
+    if (banner) banner.hidden = true;
+    hostedAppReloadPending = false;
+    void reloadAppShell();
   });
   $('diagnostics-refresh-btn').addEventListener('click', () => {
     updateConnectionTransport();
@@ -9207,7 +9646,12 @@ function setupEventListeners() {
   });
 
   $('ctx-delete').addEventListener('click', () => {
-    if (!ctxMsg || ctxMsg.senderId !== currentUser?.id) return;
+    // v1.3.9: GChat Global allows any member to delete any message — match the
+    // context-menu visibility rule instead of silently blocking non-authors.
+    if (!ctxMsg) return;
+    const isAuthor = ctxMsg.senderId === currentUser?.id;
+    const isGlobal = isGlobalGroupId(ctxMsg.groupId || currentGroupId);
+    if (!isAuthor && !isGlobal) return;
     const msg = ctxMsg;
     hideContextMenu();
     showConfirm('Delete message', 'Delete this message for everyone? This cannot be undone.', async () => {
@@ -9531,21 +9975,36 @@ function setupEventListeners() {
   });
 }
 
-async function loadOlderMessages() {
-  if (loadingOlder || !oldestMessageId || !currentGroupId) return;
+async function loadOlderMessages(cursorOverride = null, retried = false) {
+  const cursor = cursorOverride || oldestMessageId;
+  if (loadingOlder || !cursor || !currentGroupId) return;
   loadingOlder = true;
   const indicator = $('load-more-indicator');
   if (indicator) indicator.hidden = false;
   try {
-    const url = `/api/groups/${currentGroupId}/messages?before=${oldestMessageId}&limit=50`;
+    const url = `/api/groups/${currentGroupId}/messages?before=${cursor}&limit=50`;
     const res = await fetch(url);
     if (!res.ok) return;
     const rawMsgs = await res.json();
-    const msgs = rawMsgs.filter((msg) => !isMessageHiddenForCurrentUser(msg));
     if (!rawMsgs.length) {
+      // v1.3.9: the cursor message may have been hard-deleted on the server,
+      // which makes the `before` query return nothing even though older
+      // messages exist. Re-derive the cursor from the cache and retry once.
+      if (!retried) {
+        const cache = ensureGroupCacheEntry(currentGroupId);
+        const fallback = (cache.messages || []).find((m) => String(m.id) !== String(cursor));
+        if (fallback) {
+          oldestMessageId = fallback.id;
+          return loadOlderMessages(fallback.id, true);
+        }
+      }
       oldestMessageId = null; // no more older messages
       return;
     }
+
+    // v1.3.9: apply the full visibility filter (whisper scoping), matching the
+    // initial-load path.
+    const msgs = filterMessagesVisibleToCurrentUser(rawMsgs);
 
     // Channels are separate sub-chats: only the active channel's messages may
     // enter the visible transcript — everything else stays in the group cache
@@ -9579,7 +10038,8 @@ async function loadOlderMessages() {
       area.appendChild(fragment);
     }
 
-    allMessages = msgs.concat(allMessages);
+    // v1.3.9: dedup-merge (never concat) so pagination can't duplicate rows.
+    allMessages = mergeMessagesIntoCache(currentGroupId, msgs, { persist: false });
     oldestMessageId = rawMsgs[0].id;
     const cache = ensureGroupCacheEntry(currentGroupId);
     cache.messages = allMessages;

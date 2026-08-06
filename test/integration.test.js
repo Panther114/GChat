@@ -249,6 +249,91 @@ test('message deletion is author-only and transactionally removes dependent stat
   assert.equal(stmts.getMessageReadCount.get(messageId).count, 0);
 });
 
+test('incremental since-cursor sync returns only newer messages in ascending order', async () => {
+  const base = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb';
+  const ids = [1, 2, 3].map((n) => `${base}${n}`);
+  for (const id of ids) {
+    stmts.insertV2Message.run(
+      id, group.id, group.ownerId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null,
+      null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null
+    );
+  }
+  const setTime = db.prepare('UPDATE messages SET created_at = ? WHERE id = ?');
+  setTime.run('2030-01-01T10:00:00.000Z', ids[0]);
+  setTime.run('2030-01-01T10:01:00.000Z', ids[1]);
+  setTime.run('2030-01-01T10:02:00.000Z', ids[2]);
+
+  const afterSecond = await owner
+    .get(`/api/groups/${group.id}/messages?since=2030-01-01T10:01:00.000Z`)
+    .expect(200);
+  assert.deepEqual(afterSecond.body.map((m) => m.id), [ids[2]]);
+
+  const afterFirst = await owner
+    .get(`/api/groups/${group.id}/messages?since=2030-01-01T10:00:00.000Z`)
+    .expect(200);
+  assert.deepEqual(afterFirst.body.map((m) => m.id), [ids[1], ids[2]]);
+});
+
+test('quotes to deleted targets are accepted and marked replyTargetMissing', async () => {
+  const quotedId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const msgId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+  stmts.insertV2Message.run(
+    msgId, group.id, group.ownerId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', quotedId,
+    null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null
+  );
+  db.prepare('UPDATE messages SET created_at = ? WHERE id = ?').run('2030-01-01T11:00:00.000Z', msgId);
+
+  const res = await owner.get(`/api/groups/${group.id}/messages?limit=100`).expect(200);
+  const found = res.body.find((m) => m.id === msgId);
+  assert.ok(found, 'quoted message row should be present');
+  assert.equal(found.replyToId, quotedId);
+  assert.equal(found.replyTargetMissing, true);
+
+  // A quote of an existing message is NOT marked missing.
+  const existing = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+  stmts.insertV2Message.run(
+    existing, group.id, group.ownerId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', msgId,
+    null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null
+  );
+  db.prepare('UPDATE messages SET created_at = ? WHERE id = ?').run('2030-01-01T11:01:00.000Z', existing);
+  const res2 = await owner.get(`/api/groups/${group.id}/messages?limit=100`).expect(200);
+  const found2 = res2.body.find((m) => m.id === existing);
+  assert.equal(found2.replyTargetMissing, undefined);
+});
+
+test('single-message quote hydration enforces membership and whisper visibility', async () => {
+  const msgId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+  const asMember = await member.get(`/api/groups/${group.id}/messages/${msgId}`).expect(200);
+  assert.equal(asMember.body.id, msgId);
+
+  const outsider = request.agent(app);
+  await register(outsider, 'quote-outsider');
+  await outsider.get(`/api/groups/${group.id}/messages/${msgId}`).expect(403);
+
+  // Whisper visible only to the sender and listed recipients.
+  const whisperId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+  stmts.insertV2Message.run(
+    whisperId, group.id, group.ownerId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'whisper', null,
+    JSON.stringify([group.memberId]), 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null
+  );
+  const asOwner = await owner.get(`/api/groups/${group.id}/messages/${whisperId}`).expect(200);
+  assert.equal(asOwner.body.id, whisperId);
+  const asRecipient = await member.get(`/api/groups/${group.id}/messages/${whisperId}`).expect(200);
+  assert.equal(asRecipient.body.id, whisperId);
+
+  const otherMember = request.agent(app);
+  await register(otherMember, 'quote-other-member');
+  const otherCsrf = await csrf(otherMember);
+  // The invite-code migration test above rehashed this group's code to
+  // 'migr8a' — join with the current code.
+  await otherMember
+    .post('/api/groups/join')
+    .set('X-CSRF-Token', otherCsrf)
+    .send({ code: 'migr8a' })
+    .expect(200);
+  await otherMember.get(`/api/groups/${group.id}/messages/${whisperId}`).expect(404);
+});
+
 test('login issues a 30-day persistent session cookie so users are not logged out by inactivity', async () => {
   const fresh = request.agent(app);
   const registerResponse = await register(fresh, 'cookie-user-test');

@@ -874,13 +874,25 @@ function markExpiredDisappearingMessagesHidden(userId) {
 }
 
 // ── Database ──────────────────────────────────────────────────────────────────
-const DB_PATH = process.env.DB_PATH || './Gchat.db';
-const SESSIONS_DIR = process.env.DB_PATH ? path.dirname(process.env.DB_PATH) : '.';
+// v1.3.9: when DB_PATH is unset but a persistent volume is mounted at /data
+// (Railway), use it automatically so deployments without the env var stop
+// losing all history on every redeploy.
+const DEFAULT_DATA_DIR = '/data';
+const DB_PATH = process.env.DB_PATH
+  || (fs.existsSync(DEFAULT_DATA_DIR) ? path.join(DEFAULT_DATA_DIR, 'gchat.db') : './Gchat.db');
+const SESSIONS_DIR = process.env.DB_PATH
+  ? path.dirname(process.env.DB_PATH)
+  : (fs.existsSync(DEFAULT_DATA_DIR) ? DEFAULT_DATA_DIR : '.');
 
 fs.mkdirSync(path.resolve(path.dirname(DB_PATH)), { recursive: true });
 
 if (!process.env.DB_PATH) {
-  console.warn('⚠️  WARNING: DB_PATH not set. Database is stored at ./gchat.db on ephemeral filesystem. Data will be lost on redeploy. Set DB_PATH=/data/gchat.db and mount a Railway Volume to persist data.');
+  const usedVolume = fs.existsSync(DEFAULT_DATA_DIR);
+  if (usedVolume) {
+    console.warn(`⚠️  DB_PATH not set — using persistent volume at ${DB_PATH}. Set DB_PATH=${DB_PATH} explicitly for clarity.`);
+  } else {
+    console.warn('⚠️  WARNING: DB_PATH not set. Database is stored at ./gchat.db on ephemeral filesystem. Data will be lost on redeploy. Set DB_PATH=/data/gchat.db and mount a Railway Volume to persist data.');
+  }
 }
 
 const db = new Database(DB_PATH);
@@ -1329,6 +1341,81 @@ const stmts = {
     ORDER BY m.created_at DESC, m.id DESC
     LIMIT @limit
   `),
+  getMessagesAfter: db.prepare(`
+    SELECT m.id, m.group_id, m.sender_id, u.username AS sender_name,
+           u.icon_color AS sender_color, m.encrypted_content, m.iv,
+           m.encryption_version, m.key_version, m.revision,
+           m.encrypted_metadata, m.metadata_iv, m.tag_index, m.spam_signature,
+           m.type, m.reply_to, m.reply_to_id, m.filename, m.whisper_to, m.hashtag,
+           m.ai_meta, m.ai_mention,
+           m.is_disappearing, m.disappearing_duration_ms,
+           dms.started_at AS disappearing_started_at,
+          dms.expires_at AS disappearing_expires_at,
+          dms.hidden_at AS disappearing_hidden_at,
+          m.created_at, m.edited_at,
+            m.total_recipients,
+           (SELECT COUNT(*) FROM message_reads mr WHERE mr.message_id = m.id) AS read_count,
+           EXISTS(
+             SELECT 1
+             FROM message_reads mr2
+             WHERE mr2.message_id = m.id AND mr2.user_id = @viewerId
+           ) AS has_read
+     FROM messages m
+     LEFT JOIN users u ON m.sender_id = u.id
+     LEFT JOIN disappearing_message_states dms
+       ON dms.message_id = m.id AND dms.user_id = @viewerId
+     WHERE m.group_id = @groupId
+       AND m.created_at > @since
+       AND (
+         m.type != 'whisper'
+         OR m.sender_id = @viewerId
+         OR EXISTS(
+           SELECT 1
+           FROM json_each(COALESCE(m.whisper_to, '[]')) AS whisper_recipient
+           WHERE whisper_recipient.value = CAST(@viewerId AS TEXT)
+         )
+       )
+       AND (m.sender_id = @viewerId OR m.is_disappearing = 0 OR dms.hidden_at IS NULL)
+     ORDER BY m.created_at ASC, m.id ASC
+     LIMIT @limit
+  `),
+  getSingleMessage: db.prepare(`
+    SELECT m.id, m.group_id, m.sender_id, u.username AS sender_name,
+           u.icon_color AS sender_color, m.encrypted_content, m.iv,
+           m.encryption_version, m.key_version, m.revision,
+           m.encrypted_metadata, m.metadata_iv, m.tag_index, m.spam_signature,
+           m.type, m.reply_to, m.reply_to_id, m.filename, m.whisper_to, m.hashtag,
+           m.ai_meta, m.ai_mention,
+           m.is_disappearing, m.disappearing_duration_ms,
+           dms.started_at AS disappearing_started_at,
+          dms.expires_at AS disappearing_expires_at,
+          dms.hidden_at AS disappearing_hidden_at,
+          m.created_at, m.edited_at,
+            m.total_recipients,
+           (SELECT COUNT(*) FROM message_reads mr WHERE mr.message_id = m.id) AS read_count,
+           EXISTS(
+             SELECT 1
+             FROM message_reads mr2
+             WHERE mr2.message_id = m.id AND mr2.user_id = @viewerId
+           ) AS has_read
+    FROM messages m
+    LEFT JOIN users u ON m.sender_id = u.id
+    LEFT JOIN disappearing_message_states dms
+      ON dms.message_id = m.id AND dms.user_id = @viewerId
+    WHERE m.id = @messageId
+      AND m.group_id = @groupId
+      AND (
+        m.type != 'whisper'
+        OR m.sender_id = @viewerId
+        OR EXISTS(
+          SELECT 1
+          FROM json_each(COALESCE(m.whisper_to, '[]')) AS whisper_recipient
+          WHERE whisper_recipient.value = CAST(@viewerId AS TEXT)
+        )
+      )
+      AND (m.sender_id = @viewerId OR m.is_disappearing = 0 OR dms.hidden_at IS NULL)
+    LIMIT 1
+  `),
   insertMessage: db.prepare(
     'INSERT INTO messages (id, group_id, sender_id, encrypted_content, iv, type, reply_to, filename, whisper_to, hashtag, is_disappearing, disappearing_duration_ms, total_recipients, ai_meta, ai_mention) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
   ),
@@ -1340,6 +1427,7 @@ const stmts = {
       tag_index, spam_signature
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `),
+  setAiMessageMeta: db.prepare('UPDATE messages SET ai_meta = ?, ai_mention = ? WHERE id = ?'),
   findMessageById: db.prepare('SELECT * FROM messages WHERE id = ?'),
   markMessageRead: db.prepare('INSERT OR IGNORE INTO message_reads (message_id, user_id) VALUES (?, ?)'),
   getMessageReadCount: db.prepare('SELECT COUNT(*) AS count FROM message_reads WHERE message_id = ?'),
@@ -1820,6 +1908,26 @@ function buildGroupPayload(group, viewer = null, unreadCount = 0) {
   };
 }
 
+function findExistingMessageIds(ids) {
+  const uniqueIds = [...new Set(ids.map(String).filter(Boolean))];
+  if (!uniqueIds.length) return new Set();
+  const placeholders = uniqueIds.map(() => '?').join(',');
+  const rows = db.prepare(`SELECT id FROM messages WHERE id IN (${placeholders})`).all(...uniqueIds);
+  return new Set(rows.map((row) => row.id));
+}
+
+// Marks messages whose quote target was hard-deleted so clients can render a
+// "deleted message" placeholder instead of showing an error. One bounded IN
+// query per page — never N+1. Operates on formatMessage output (replyToId).
+function decorateReplyTargetState(rows) {
+  const referencedIds = rows.filter((m) => m.replyToId).map((m) => m.replyToId);
+  if (!referencedIds.length) return rows;
+  const existingIds = findExistingMessageIds(referencedIds);
+  return rows.map((m) => (m.replyToId && !existingIds.has(String(m.replyToId))
+    ? { ...m, replyTargetMissing: true }
+    : m));
+}
+
 function formatMessage(m) {
   const isAiAssistantMessage = m.sender_id === AI_ASSISTANT_USER_ID;
   const aiMeta = parseStoredAiMessageMeta(m.ai_meta);
@@ -1987,24 +2095,41 @@ function getTotalUnreadCountForUser(userId) {
   return Math.max(0, Number(stmts.getTotalUnreadCountForUser.get(userId)?.count) || 0);
 }
 
-function buildGenericPushPayload(totalUnreadCount) {
+function getGroupNameForPush(groupId) {
+  try {
+    const group = stmts.findGroupById.get(groupId);
+    return group ? String(group.name).slice(0, 40) : null;
+  } catch {
+    return null;
+  }
+}
+
+function buildGenericPushPayload(totalUnreadCount, context = null) {
   const normalizedCount = Math.max(0, Number(totalUnreadCount) || 0);
+  // v1.3.9: push payloads carry sender + group names (metadata only — the
+  // server cannot decrypt E2E message content) when a message triggered them.
+  let body;
+  if (context && context.senderName) {
+    body = `New message from ${context.senderName}${context.groupName ? ` in ${context.groupName}` : ''}`;
+  } else {
+    body = normalizedCount > 0
+      ? `You have ${normalizedCount} unread message${normalizedCount === 1 ? '' : 's'} in GChat.`
+      : 'You have unread messages in GChat.';
+  }
   return {
     title: 'GChat',
-    body: normalizedCount > 0
-      ? `You have ${normalizedCount} unread message${normalizedCount === 1 ? '' : 's'} in GChat.`
-      : 'You have unread messages in GChat.',
+    body,
     tag: 'gchat-unread',
     totalUnreadCount: normalizedCount,
     url: '/chat.html',
   };
 }
 
-async function sendPushToUser(userId, totalUnreadCount) {
+async function sendPushToUser(userId, totalUnreadCount, context = null) {
   if (!isPushConfigured() || !userId) return;
   const subscriptions = stmts.getPushSubscriptionsForUser.all(userId);
   if (!subscriptions.length) return;
-  const payload = JSON.stringify(buildGenericPushPayload(totalUnreadCount));
+  const payload = JSON.stringify(buildGenericPushPayload(totalUnreadCount, context));
   await Promise.allSettled(subscriptions.map(async (subscriptionRow) => {
     let parsedSubscription;
     try {
@@ -2038,14 +2163,14 @@ async function forEachWithConcurrency(items, limit, worker) {
   await Promise.allSettled(workers);
 }
 
-function queueUnreadPushNotifications(userIds = []) {
+function queueUnreadPushNotifications(userIds = [], context = null) {
   if (!isPushConfigured()) return;
   const uniqueUserIds = [...new Set(userIds.map(String).filter(Boolean))];
   if (!uniqueUserIds.length) return;
   void (async () => {
     await forEachWithConcurrency(uniqueUserIds.slice(0, MAX_GROUP_MEMBERS), MAX_PUSH_CONCURRENCY, async (userId) => {
       const totalUnreadCount = getTotalUnreadCountForUser(userId);
-      await sendPushToUser(userId, totalUnreadCount);
+      await sendPushToUser(userId, totalUnreadCount, context);
     });
   })();
 }
@@ -2713,6 +2838,7 @@ app.get('/api/groups/preload', (req, res) => {
         .all({ viewerId: userId, groupId: g.id, limit })
         .reverse()
         .map(formatMessage);
+      const decoratedRows = decorateReplyTargetState(rows);
       const members = stmts.getGroupMembers.all(g.id).map((u) => ({
         id: u.id,
         username: u.username,
@@ -2723,7 +2849,7 @@ app.get('/api/groups/preload', (req, res) => {
       return {
         ...buildGroupPayload(g, { is_admin: g.is_admin }, g.unread_count),
         preloaded: {
-          messages: rows,
+          messages: decoratedRows,
           members,
         },
       };
@@ -2941,6 +3067,14 @@ app.get('/api/groups/:groupId/messages', (req, res) => {
       groupId,
       limit,
     }).reverse();
+  } else if (req.query.since) {
+    const since = String(req.query.since).slice(0, 64);
+    rows = stmts.getMessagesAfter.all({
+      since,
+      viewerId: userId,
+      groupId,
+      limit,
+    });
   } else {
     rows = stmts.getLastMessages.all({
       viewerId: userId,
@@ -2949,7 +3083,24 @@ app.get('/api/groups/:groupId/messages', (req, res) => {
     }).reverse();
   }
 
-  res.json(rows.map(formatMessage));
+  res.json(decorateReplyTargetState(rows.map(formatMessage)));
+});
+
+// GET /api/groups/:groupId/messages/:messageId — single message for quote
+// hydration when the quoted message is outside the client's loaded window.
+app.get('/api/groups/:groupId/messages/:messageId', (req, res) => {
+  const { groupId, messageId } = req.params;
+  const userId = req.session.userId;
+
+  if (!stmts.isMember.get(groupId, userId)) {
+    return res.status(403).json({ error: 'Not a member of this group' });
+  }
+
+  markExpiredDisappearingMessagesHidden(userId);
+
+  const row = stmts.getSingleMessage.get({ messageId, viewerId: userId, groupId });
+  if (!row) return res.status(404).json({ error: 'Message not found' });
+  res.json(formatMessage(row));
 });
 
 // DELETE /api/groups/:groupId/messages — clear all messages (owner, or members if allowed)
@@ -3282,7 +3433,8 @@ app.post('/api/groups/:groupId/upload', uploadRawBodyParser, (req, res) => {
   io.to(groupId).emit('new_message', payload);
   queueUnreadPushNotifications(
     stmts.getOtherGroupMemberIds.all(groupId, userId)
-      .map((row) => row.user_id)
+      .map((row) => row.user_id),
+    { senderName: user.username, groupName: getGroupNameForPush(groupId) }
   );
   res.json({ messageId: msgId });
 });
@@ -3567,6 +3719,31 @@ function emitToUser(userId, event, payload) {
   }
 }
 
+// v1.3.9: single read-receipt path used by mark_message_read (per-message) and
+// mark_messages_read (batched). Fan-out is scoped to the author's per-user
+// room instead of the whole group room — read updates only matter to the
+// sender of the message.
+function recordMessageRead(socket, groupId, messageId) {
+  if (!groupId || !messageId) return;
+  const member = stmts.isMember.get(groupId, socket.userId);
+  if (!member) return;
+  const message = stmts.findMessageById.get(messageId);
+  if (!message || message.group_id !== groupId) return;
+  if (message.sender_id === socket.userId) return;
+  if (message.type === 'whisper') {
+    let recipients = [];
+    try {
+      recipients = JSON.parse(message.whisper_to || '[]');
+    } catch {
+      return;
+    }
+    if (!Array.isArray(recipients) || !recipients.map(String).includes(String(socket.userId))) return;
+  }
+  stmts.markMessageRead.run(messageId, socket.userId);
+  const readCount = Math.max(0, Number(stmts.getMessageReadCount.get(messageId)?.count) || 0);
+  io.to(`user:${message.sender_id}`).emit('message_read_update', { messageId, readCount });
+}
+
 function canUserAccessMessage(message, userId) {
   if (!message || !userId) return false;
   if (String(message.sender_id) === String(userId)) return true;
@@ -3609,6 +3786,9 @@ io.use((socket, next) => {
 
 io.on('connection', (socket) => {
   console.log(`Socket connected: ${socket.username} (${socket.userId})`);
+  // v1.3.9: per-user room so targeted events (read receipts, edit/delete
+  // confirmation) fan out to exactly one user's devices instead of a group.
+  socket.join(`user:${socket.userId}`);
   // ── join_room ──────────────────────────────────────────────────────────────
   socket.on('join_room', (groupId) => {
     if (!groupId) return;
@@ -3710,6 +3890,8 @@ io.on('connection', (socket) => {
       encryptionVersion,
       keyVersion,
       revision,
+      aiMention,
+      aiMeta,
     } = payload;
     const fail = (message) => {
       socket.emit('error', { message });
@@ -3764,7 +3946,10 @@ io.on('connection', (socket) => {
 
     if (replyToId) {
       const target = stmts.findMessageById.get(replyToId);
-      if (!target || target.group_id !== groupId) {
+      // A missing target means the quoted message was deleted; accept the
+      // reply anyway so quotes never hard-fail at send time. Only enforce
+      // the same-group rule when the target still exists.
+      if (target && target.group_id !== groupId) {
         fail('Reply target not found');
         return;
       }
@@ -3801,6 +3986,21 @@ io.on('connection', (socket) => {
       return;
     }
 
+    // v1.3.9: persist AI-prompt markers (Ask AI prompt messages) — previously
+    // aiMention/aiMeta were silently dropped and prompts lost their AI chips.
+    const normalizedAiMeta = sanitizeAiMessageMeta(aiMeta);
+    if (normalizedAiMeta || aiMention) {
+      try {
+        stmts.setAiMessageMeta.run(
+          normalizedAiMeta ? JSON.stringify(normalizedAiMeta) : null,
+          aiMention ? 1 : 0,
+          msgId
+        );
+      } catch (err) {
+        console.error('DB update AI meta error:', err);
+      }
+    }
+
     const messagePayload = {
       id: msgId,
       groupId,
@@ -3830,12 +4030,15 @@ io.on('connection', (socket) => {
       editedAt: null,
       totalRecipients,
       readCount: 0,
+      aiMention: !!aiMention,
+      aiMeta: normalizedAiMeta,
     };
 
     io.to(groupId).emit('new_message', messagePayload);
     queueUnreadPushNotifications(
       stmts.getOtherGroupMemberIds.all(groupId, socket.userId)
-        .map((row) => row.user_id)
+        .map((row) => row.user_id),
+      { senderName: socket.username, groupName: getGroupNameForPush(groupId) }
     );
     if (typeof ack === 'function') ack({ ok: true, messageId: msgId });
   });
@@ -3954,7 +4157,8 @@ io.on('connection', (socket) => {
       readCount: 0,
     });
     queueUnreadPushNotifications(
-      stmts.getGroupMemberIds.all(groupId).map((row) => row.user_id)
+      stmts.getGroupMemberIds.all(groupId).map((row) => row.user_id),
+      { senderName: socket.username, groupName: getGroupNameForPush(groupId) }
     );
     if (typeof ack === 'function') ack({ ok: true, messageId: msgId });
   });
@@ -3994,7 +4198,9 @@ io.on('connection', (socket) => {
     }
     if (replyToId) {
       const target = stmts.findMessageById.get(replyToId);
-      if (!target || target.group_id !== groupId) {
+      // Deleted quote targets no longer block the whisper at send time; only
+      // enforce the same-group rule when the target still exists.
+      if (target && target.group_id !== groupId) {
         socket.emit('error', { message: 'Reply target not found' });
         return;
       }
@@ -4052,7 +4258,10 @@ io.on('connection', (socket) => {
         revision,
         encryptedMetadata,
         metadataIv,
-        null,
+        // v1.3.9: persist the client-computed tag index for whispers so channel
+        // clears remove them from the DB too (previously always NULL → whispers
+        // survived tag clears and resurrected after a resync).
+        tagIndex || null,
         spamSignature || null
       );
     } catch (err) {
@@ -4103,32 +4312,22 @@ io.on('connection', (socket) => {
         s.emit('new_message', payload);
       }
     }
-    queueUnreadPushNotifications(recipientsExcludingSender);
+    queueUnreadPushNotifications(recipientsExcludingSender, {
+      senderName: socket.username,
+      groupName: getGroupNameForPush(groupId),
+    });
   });
 
   socket.on('mark_message_read', ({ groupId, messageId }) => {
-    if (!groupId || !messageId) return;
+    recordMessageRead(socket, groupId, messageId);
+  });
 
-    const member = stmts.isMember.get(groupId, socket.userId);
-    if (!member) return;
-
-    const message = stmts.findMessageById.get(messageId);
-    if (!message || message.group_id !== groupId) return;
-    if (message.sender_id === socket.userId) return;
-
-    if (message.type === 'whisper') {
-      let recipients = [];
-      try {
-        recipients = JSON.parse(message.whisper_to || '[]');
-      } catch {
-        return;
-      }
-      if (!Array.isArray(recipients) || !recipients.map(String).includes(String(socket.userId))) return;
-    }
-
-    stmts.markMessageRead.run(messageId, socket.userId);
-    const readCount = Math.max(0, Number(stmts.getMessageReadCount.get(messageId)?.count) || 0);
-    io.to(groupId).emit('message_read_update', { messageId, readCount });
+  // v1.3.9: batched variant — one emit covers a whole scroll viewport instead
+  // of one emit per row. Bounded to 100 message ids per packet.
+  socket.on('mark_messages_read', ({ groupId, messageIds = [] }) => {
+    if (!groupId || !Array.isArray(messageIds)) return;
+    const uniqueIds = [...new Set(messageIds.map(String).filter(Boolean))].slice(0, 100);
+    for (const messageId of uniqueIds) recordMessageRead(socket, groupId, messageId);
   });
 
   socket.on('start_disappearing_timer', ({ groupId, messageId }) => {
