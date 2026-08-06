@@ -4,6 +4,14 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## v1.3.11
+
+- **"Not a member of this group" on send is fixed (desktop + web)**: a send rejection now reconciles the client with the server — the group list is refreshed and a group the server no longer recognizes is dropped from the UI (with a clear message) instead of erroring forever. This covered the stale-group cases: kicked or disbanded while the socket was down, group recreated, or DB state changed under an open session.
+- **GChat tray icon fixed (Windows)**: the installed app now ships `icon.png` next to `Gchat.exe` and loads icons relative to the executable — previously icons resolved against the working directory, so installed users got a blank/default tray and taskbar icon.
+- **Server crash-guard**: batched read-receipt handling is wrapped per message so one malformed id can never throw an uncaught SQLite binding error inside a socket handler (which would take down the whole server for everyone).
+- **History migration runs at boot**: the one-time localStorage→IndexedDB history migration was accidentally placed inside a rarely-hit socket handler and never ran; it now runs after the initial group load.
+- Bumped product version to **1.3.11** and asset cache-bust to v141.
+
 ## v1.3.10
 
 - **Desktop Updates UI hidden on the web version**: the profile row's `display: grid` styling was overriding the `hidden` attribute (CSS specificity), so "Check for updates" / "Install and restart" appeared in every browser. Fixed with an explicit `[hidden]` rule — the same bug was also silently showing the AI usage row.

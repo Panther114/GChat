@@ -212,13 +212,31 @@ fn app_data_dir() -> PathBuf {
     base.join("Gchat")
 }
 
+// v1.3.11: installed apps must find their icons next to the exe (the NSIS
+// installer ships icon.png beside Gchat.exe); the old dev-only paths resolved
+// relative to the working directory and produced a blank tray/taskbar icon on
+// real installs.
+fn exe_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()))
+}
+
+fn icon_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(dir) = exe_dir() {
+        candidates.push(dir.join("icon.png"));
+        candidates.push(dir.join("assets/icon.png"));
+        candidates.push(dir.join("gchat_icon.png"));
+    }
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/icon.png"));
+    candidates.push(PathBuf::from("assets/icon.png"));
+    candidates.push(PathBuf::from("public/gchat_icon.png"));
+    candidates
+}
+
 fn load_icon() -> Option<Icon> {
-    let candidates = [
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/icon.png"),
-        PathBuf::from("assets/icon.png"),
-        PathBuf::from("public/gchat_icon.png"),
-    ];
-    for path in candidates {
+    for path in icon_candidates() {
         if let Ok(img) = image::open(&path) {
             let rgba = img.into_rgba8();
             let (w, h) = rgba.dimensions();
@@ -231,12 +249,7 @@ fn load_icon() -> Option<Icon> {
 }
 
 fn load_tray_icon() -> Option<tray_icon::Icon> {
-    let candidates = [
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/icon.png"),
-        PathBuf::from("assets/icon.png"),
-        PathBuf::from("public/gchat_icon.png"),
-    ];
-    for path in candidates {
+    for path in icon_candidates() {
         if let Ok(img) = image::open(&path) {
             let rgba = img.into_rgba8();
             let (w, h) = rgba.dimensions();

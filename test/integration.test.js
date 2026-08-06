@@ -475,3 +475,76 @@ test('invite permission defaults on, admin-only when disabled, and enforces caps
     .send({ userId: targetResponse.body.id })
     .expect(400);
 });
+
+test('socket sends: legit members send, non-members are rejected, and batched read receipts tolerate malformed payloads', async () => {
+  const { server } = require('../server');
+  const { io: socketClient } = require('socket.io-client');
+  await new Promise((resolve) => server.listen(0, resolve));
+  const url = `http://localhost:${server.address().port}`;
+
+  const memberAgent = request.agent(app);
+  const memberResponse = await register(memberAgent, 'socket-member-test');
+  const memberCsrf = await csrf(memberAgent);
+  const secret = Buffer.alloc(32, 6).toString('base64url');
+  const commitment = crypto.createHash('sha256').update(Buffer.from(secret, 'base64url')).digest('base64url');
+  const created = await memberAgent
+    .post('/api/groups/create')
+    .set('X-CSRF-Token', memberCsrf)
+    .send({ name: 'Socket room', code: 'sock01', secret, keyCommitment: commitment })
+    .expect(201);
+  const groupId = created.body.id;
+
+  const memberCookie = memberResponse.headers['set-cookie'][0].split(';')[0];
+  const memberSocket = socketClient(url, { transports: ['polling'], extraHeaders: { Cookie: memberCookie } });
+  await new Promise((resolve) => memberSocket.on('connect', resolve));
+
+  // A legit member can send — v1.3.11 regression guard for the desktop
+  // "not a member" report.
+  const msgId = crypto.randomUUID();
+  const sendAck = await new Promise((resolve) => {
+    memberSocket.emit('send_message', {
+      id: msgId, groupId, encryptedContent: 'AAAA', iv: 'AAAAAAAAAAAAAAAA',
+      encryptedMetadata: 'AAAA', metadataIv: 'AAAAAAAAAAAAAAAA',
+      replyToId: null, tagIndex: null, isDisappearing: false, disappearingDurationMs: 0,
+      encryptionVersion: 2, keyVersion: 1, revision: 1,
+    }, resolve);
+    setTimeout(() => resolve('NO_ACK'), 4000);
+  });
+  assert.deepEqual(sendAck, { ok: true, messageId: msgId });
+  assert.ok(stmts.findMessageById.get(msgId));
+
+  // Batched read receipts tolerate malformed/missing ids without throwing
+  // (an uncaught SQLite binding error here would crash the whole server).
+  const memberErrors = [];
+  memberSocket.on('error', (payload) => memberErrors.push(payload));
+  memberSocket.emit('mark_messages_read', { groupId, messageIds: [msgId, null, undefined, 'garbage-id'] });
+  memberSocket.emit('mark_messages_read', { groupId: null, messageIds: [msgId] });
+  memberSocket.emit('mark_messages_read', { groupId: 'not-a-group', messageIds: [msgId] });
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(memberErrors.length, 0);
+
+  // A non-member is rejected with 'Not a member of this group' (server-side
+  // truth — the client reconciles on this message in v1.3.11).
+  const outsider = request.agent(app);
+  const outsiderResponse = await register(outsider, 'socket-outsider-test');
+  const outsiderCookie = outsiderResponse.headers['set-cookie'][0].split(';')[0];
+  const outsiderSocket = socketClient(url, { transports: ['polling'], extraHeaders: { Cookie: outsiderCookie } });
+  await new Promise((resolve) => outsiderSocket.on('connect', resolve));
+  const outsiderErrors = [];
+  outsiderSocket.on('error', (payload) => outsiderErrors.push(payload));
+  const outsiderAck = await new Promise((resolve) => {
+    outsiderSocket.emit('send_message', {
+      id: crypto.randomUUID(), groupId, encryptedContent: 'AAAA', iv: 'AAAAAAAAAAAAAAAA',
+      encryptedMetadata: 'AAAA', metadataIv: 'AAAAAAAAAAAAAAAA',
+      replyToId: null, tagIndex: null, isDisappearing: false, disappearingDurationMs: 0,
+      encryptionVersion: 2, keyVersion: 1, revision: 1,
+    }, resolve);
+    setTimeout(() => resolve('NO_ACK'), 4000);
+  });
+  assert.equal(outsiderAck.ok, false);
+  assert.match(outsiderAck.error, /not a member/i);
+  assert.ok(outsiderErrors.some((e) => /not a member/i.test(e.message || '')));
+
+  memberSocket.close();
+  outsiderSocket.close();
+});

@@ -4775,6 +4775,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     void loadAndRenderAiTones();
   }
   await loadGroups();
+  // v1.3.9/1.3.11: fold existing localStorage caches into the durable
+  // IndexedDB history store (one-time, best-effort) at boot — previously the
+  // call only existed in a rarely-hit socket handler.
+  void migrateLocalCachesToHistory();
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.addEventListener('message', (event) => {
       if (event.data?.type !== 'push-unread-count') return;
@@ -7777,10 +7781,7 @@ function initSocket() {
   socket.on('group_join_denied', async ({ groupId }) => {
     const normalizedGroupId = String(groupId || '');
     if (!normalizedGroupId) return;
-  await loadGroups();
-  // v1.3.9: fold existing localStorage caches into the durable IndexedDB
-  // history store (one-time, best-effort).
-  void migrateLocalCachesToHistory();
+    await loadGroups();
     if (currentGroupId !== normalizedGroupId) return;
     if (groups.some((group) => String(group.id) === normalizedGroupId)) return;
     currentGroupId = null;
@@ -7886,8 +7887,43 @@ function initSocket() {
 
   socket.on('error', ({ message }) => {
     pendingDisappearingStartMessageIds = new Set();
-    showToast(message || 'An error occurred', 'error');
+    const msg = message || 'An error occurred';
+    // v1.3.11: a "Not a member" send rejection usually means the server no
+    // longer recognizes our membership (kicked/disbanded while the socket was
+    // down, group recreated, etc.) while this client still shows the group.
+    // Reconcile with the server instead of erroring forever.
+    if (/not a member of this group/i.test(msg)) {
+      void recoverFromMembershipLoss();
+      return;
+    }
+    showToast(msg, 'error');
   });
+}
+
+// v1.3.11: reconcile a stale membership after a rejected send — refresh the
+// group list from the server; if the group is gone, drop it from the UI
+// instead of leaving the user in a chat they can no longer write to.
+async function recoverFromMembershipLoss() {
+  const failedGroupId = currentGroupId;
+  await loadGroups();
+  if (!failedGroupId) return;
+  if (groups.some((group) => String(group.id) === String(failedGroupId))) {
+    showToast('Not a member of this group', 'error');
+    return;
+  }
+  if (String(currentGroupId) === String(failedGroupId)) {
+    currentGroupId = null;
+    currentGroupData = null;
+    members = [];
+    $('chat-active').hidden = true;
+    $('chat-empty').hidden = false;
+    $('right-panel-content').hidden = true;
+    $('right-panel-empty').hidden = false;
+    renderMembersList();
+    renderWhisperPicker();
+    setMobileView('list');
+  }
+  showToast('This chat is no longer available to you', 'info');
 }
 
 function addSystemMessage(text) {

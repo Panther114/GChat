@@ -4047,6 +4047,7 @@
       void loadAndRenderAiTones();
     }
     await loadGroups();
+    void migrateLocalCachesToHistory();
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.addEventListener("message", (event) => {
         if (event.data?.type !== "push-unread-count") return;
@@ -6719,7 +6720,6 @@
       const normalizedGroupId = String(groupId || "");
       if (!normalizedGroupId) return;
       await loadGroups();
-      void migrateLocalCachesToHistory();
       if (currentGroupId !== normalizedGroupId) return;
       if (groups.some((group) => String(group.id) === normalizedGroupId)) return;
       currentGroupId = null;
@@ -6815,8 +6815,35 @@
     });
     socket.on("error", ({ message }) => {
       pendingDisappearingStartMessageIds = /* @__PURE__ */ new Set();
-      showToast(message || "An error occurred", "error");
+      const msg = message || "An error occurred";
+      if (/not a member of this group/i.test(msg)) {
+        void recoverFromMembershipLoss();
+        return;
+      }
+      showToast(msg, "error");
     });
+  }
+  async function recoverFromMembershipLoss() {
+    const failedGroupId = currentGroupId;
+    await loadGroups();
+    if (!failedGroupId) return;
+    if (groups.some((group) => String(group.id) === String(failedGroupId))) {
+      showToast("Not a member of this group", "error");
+      return;
+    }
+    if (String(currentGroupId) === String(failedGroupId)) {
+      currentGroupId = null;
+      currentGroupData = null;
+      members = [];
+      $("chat-active").hidden = true;
+      $("chat-empty").hidden = false;
+      $("right-panel-content").hidden = true;
+      $("right-panel-empty").hidden = false;
+      renderMembersList();
+      renderWhisperPicker();
+      setMobileView("list");
+    }
+    showToast("This chat is no longer available to you", "info");
   }
   function addSystemMessage(text) {
     const div = document.createElement("div");

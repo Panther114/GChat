@@ -4319,15 +4319,28 @@ io.on('connection', (socket) => {
   });
 
   socket.on('mark_message_read', ({ groupId, messageId }) => {
-    recordMessageRead(socket, groupId, messageId);
+    try {
+      recordMessageRead(socket, groupId, messageId);
+    } catch (error) {
+      console.error('mark_message_read failed for message', messageId, error.message);
+    }
   });
 
   // v1.3.9: batched variant — one emit covers a whole scroll viewport instead
   // of one emit per row. Bounded to 100 message ids per packet.
+  // v1.3.11: per-message guard so a single malformed id can never throw an
+  // uncaught better-sqlite3 binding error inside a socket handler (which
+  // would crash the entire server).
   socket.on('mark_messages_read', ({ groupId, messageIds = [] }) => {
     if (!groupId || !Array.isArray(messageIds)) return;
     const uniqueIds = [...new Set(messageIds.map(String).filter(Boolean))].slice(0, 100);
-    for (const messageId of uniqueIds) recordMessageRead(socket, groupId, messageId);
+    for (const messageId of uniqueIds) {
+      try {
+        recordMessageRead(socket, groupId, messageId);
+      } catch (error) {
+        console.error('mark_messages_read failed for message', messageId, error.message);
+      }
+    }
   });
 
   socket.on('start_disappearing_timer', ({ groupId, messageId }) => {
