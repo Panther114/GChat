@@ -116,9 +116,9 @@ enum UserEvent {
     Ipc(String),
     UpdateStatus(UpdateStatus),
     /// v1.3.9: background updater result delivered back to the UI thread
-    /// (request_id for the web reply) — update checks/installs never run on
-    /// the event-loop thread anymore.
-    UpdateResult(UpdateStatus, String),
+    /// (request_id for the web reply, is_install distinguishes the reply
+    /// contract) — update checks/installs never run on the event-loop thread.
+    UpdateResult(UpdateStatus, String, bool),
     /// Navigate to offline recovery HTML (timeout / load failure).
     ShowOffline,
     /// Auto-retry the hosted load after a connection timeout.
@@ -382,10 +382,11 @@ fn check_updates_sync(install: bool) -> UpdateStatus {
     let agent = format!("GchatDesktop/{VERSION}");
     // v1.3.9: hard timeouts — previously the timeout-less defaults let a
     // stalled GitHub call freeze the whole window ("unclickable" update button).
+    // v1.3.10: 45s so a check never outlives the frontend's checking watchdog.
     let response = match ureq::get(GITHUB_API_LATEST)
         .set("User-Agent", &agent)
         .set("Accept", "application/vnd.github+json")
-        .timeout(Duration::from_secs(60))
+        .timeout(Duration::from_secs(45))
         .call()
     {
         Ok(r) => r,
@@ -742,28 +743,35 @@ fn main() {
                     *slot = status;
                 }
             }
-            Event::UserEvent(UserEvent::UpdateResult(status, request_id)) => {
+            Event::UserEvent(UserEvent::UpdateResult(status, request_id, is_install)) => {
                 // v1.3.9: background updater finished — reply to the web UI,
                 // push the status, and quit after an install download so the
                 // NSIS installer is not file-locked by the running exe.
+                // v1.3.10: a plain check replies the full UpdateStatus object
+                // (previously 'available' was wrongly reported as an error
+                // and the frontend promise rejected).
                 if let Ok(mut slot) = state.update_status.lock() {
                     *slot = status.clone();
                 }
                 if !request_id.is_empty() {
-                    let ok = status.state == "ready" || status.state == "up-to-date";
-                    if ok {
-                        reply(&webview, &request_id, json!(true), None);
-                    } else {
-                        let err = status
-                            .error
-                            .clone()
-                            .or_else(|| status.message.clone())
-                            .unwrap_or_else(|| "Update install failed.".into());
-                        reply(&webview, &request_id, json!(false), Some(err));
+                    if is_install {
+                        let ok = status.state == "ready" || status.state == "up-to-date";
+                        if ok {
+                            reply(&webview, &request_id, json!(true), None);
+                        } else {
+                            let err = status
+                                .error
+                                .clone()
+                                .or_else(|| status.message.clone())
+                                .unwrap_or_else(|| "Update install failed.".into());
+                            reply(&webview, &request_id, json!(false), Some(err));
+                        }
+                    } else if let Ok(val) = serde_json::to_value(&status) {
+                        reply(&webview, &request_id, val, None);
                     }
                 }
                 push_update_status(&webview, &status);
-                if status.state == "ready" {
+                if is_install && status.state == "ready" {
                     let _ = proxy.send_event(UserEvent::TrayQuit);
                 }
             }
@@ -1100,6 +1108,7 @@ fn handle_ipc(
             // v1.3.9: run on a worker thread — a stalled GitHub call must
             // never freeze the window (previously the UI thread blocked with
             // no HTTP timeout, making the update button "unclickable").
+            // v1.3.10: the result replies the full UpdateStatus object.
             let state = state.clone();
             let rid = request_id.clone();
             let proxy_bg = proxy.clone();
@@ -1108,7 +1117,7 @@ fn handle_ipc(
                 if let Ok(mut slot) = state.update_status.lock() {
                     *slot = status.clone();
                 }
-                let _ = proxy_bg.send_event(UserEvent::UpdateResult(status, rid));
+                let _ = proxy_bg.send_event(UserEvent::UpdateResult(status, rid, false));
             });
         }
         "get-update-status" => {
@@ -1135,7 +1144,7 @@ fn handle_ipc(
                 if let Ok(mut slot) = state.update_status.lock() {
                     *slot = status.clone();
                 }
-                let _ = proxy_bg.send_event(UserEvent::UpdateResult(status, rid));
+                let _ = proxy_bg.send_event(UserEvent::UpdateResult(status, rid, true));
             });
         }
         "open-latest-release" => {

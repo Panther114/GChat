@@ -27,7 +27,7 @@
     else entry.resolve(value);
   };
 
-  const invoke = (type, payload) => new Promise((resolve, reject) => {
+  const invoke = (type, payload, timeoutMs = 30000) => new Promise((resolve, reject) => {
     const id = requestId();
     pending.set(id, { resolve, reject });
     post(type, { ...(payload || {}), __requestId: id });
@@ -35,7 +35,7 @@
       if (!pending.has(id)) return;
       pending.delete(id);
       reject(new Error('Desktop bridge timeout: ' + type));
-    }, 30000);
+    }, timeoutMs);
   });
 
   const updateListeners = new Set();
@@ -82,13 +82,15 @@
         return invoke('reload-hosted-app');
       },
       checkForUpdates() {
-        return invoke('check-for-updates');
+        // v1.3.10: update checks/downloads can legitimately take minutes —
+        // don't let the 30s bridge timeout report them as broken.
+        return invoke('check-for-updates', null, 180000);
       },
       getUpdateStatus() {
         return invoke('get-update-status');
       },
       installUpdate() {
-        return invoke('install-update');
+        return invoke('install-update', null, 180000);
       },
       openLatestRelease() {
         return invoke('open-latest-release');

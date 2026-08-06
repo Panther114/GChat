@@ -11,7 +11,7 @@ Key behaviors:
 - **Tray-hide unloads the SPA** into a tiny placeholder page to free WebView2/JS heap while the process stays in the tray
 - Restoring from tray reloads the hosted app (session cookies remain in the WebView2 profile)
 - Memory-oriented WebView2 flags (`max-old-space-size=192`, unused features disabled)
-- Installer ~1 MiB NSIS (`Gchat_1.3.9_x64-setup.exe`)
+- Installer ~1 MiB NSIS (`Gchat_1.3.10_x64-setup.exe`)
 
 ## macOS: Tauri / WKWebView fallback
 
@@ -19,9 +19,9 @@ macOS continues to use **Tauri 2 + WKWebView** (`npm run build:mac`). Same hoste
 
 ## Install
 
-Download the GitHub Release for **v1.3.9**:
+Download the GitHub Release for **v1.3.10**:
 
-- **Windows:** `Gchat_1.3.9_x64-setup.exe`
+- **Windows:** `Gchat_1.3.10_x64-setup.exe`
 - **macOS:** universal `.dmg` from the Tauri build path when published
 
 First launch may require SmartScreen / Privacy approval (unsigned packages).
@@ -37,7 +37,7 @@ npm run build:win
 
 Requires Rust stable and NSIS (`makensis`). Output:
 
-`src-desktop-win/target/release/bundle/Gchat_1.3.9_x64-setup.exe`
+`src-desktop-win/target/release/bundle/Gchat_1.3.10_x64-setup.exe`
 
 ### macOS (Tauri fallback)
 

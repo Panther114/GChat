@@ -1323,6 +1323,14 @@ textarea::placeholder {
   border-bottom: 0 !important;
 }
 
+/* v1.3.10: the grid display above would otherwise override the `hidden`
+   attribute (ID+class beats the global [hidden] rule), making rows like the
+   desktop Updates row and the AI usage row visible everywhere — including the
+   web version where they must never appear. */
+#profile-modal .profile-row[hidden] {
+  display: none !important;
+}
+
 #profile-modal .profile-row-label {
   padding-top: 7px !important;
   font-size: 11px !important;

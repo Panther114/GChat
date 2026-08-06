@@ -42,7 +42,7 @@ test('macOS packaging produces universal installer and updater targets', () => {
 
 test('Windows installer artifact naming stays stable for updater clients', () => {
   assert.equal(packageJson.build.win.artifactName, 'Gchat-Setup-${version}.${ext}');
-  assert.equal(packageJson.version, '1.3.9');
+  assert.equal(packageJson.version, '1.3.10');
   assert.ok(packageJson.build.files.includes('electron/main.bundle.cjs'));
   assert.ok(packageJson.build.files.includes('electron/preload.js'));
 });

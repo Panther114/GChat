@@ -8362,7 +8362,8 @@ function renderDesktopUpdateStatus(status) {
   statusEl.dataset.state = status?.state || 'idle';
 
   // v1.3.9: watchdog — a check stuck in 'checking' (e.g. no HTTP timeout on
-  // some shells) must not disable the button forever.
+  // some shells) must not disable the button forever. v1.3.10: 60s — the
+  // shell's own check timeout is 45s, so this only fires on a stuck shell.
   if (desktopUpdateCheckTimeout) {
     clearTimeout(desktopUpdateCheckTimeout);
     desktopUpdateCheckTimeout = null;
@@ -8372,7 +8373,7 @@ function renderDesktopUpdateStatus(status) {
       desktopUpdateCheckTimeout = null;
       if (document.visibilityState === 'hidden') return;
       renderDesktopUpdateStatus({ state: 'error', error: 'Update check timed out. Try again.' });
-    }, 45_000);
+    }, 60_000);
   }
 
   if (checkBtn) {

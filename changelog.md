@@ -4,6 +4,12 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## v1.3.10
+
+- **Desktop Updates UI hidden on the web version**: the profile row's `display: grid` styling was overriding the `hidden` attribute (CSS specificity), so "Check for updates" / "Install and restart" appeared in every browser. Fixed with an explicit `[hidden]` rule — the same bug was also silently showing the AI usage row.
+- **Desktop update buttons actually work (Windows shell)**: a check that found an update was previously reported back as an error (the background reply treated "available" as a failure), making "Check for updates" look broken. Checks now reply the full status object; installs keep the true/false contract. Update-check/download commands also use a dedicated 180s bridge timeout (was 30s) so slow networks no longer produce false "Desktop bridge timeout" errors; the shell's check HTTP timeout is 45s and the frontend watchdog was aligned to 60s.
+- Bumped product version to **1.3.10** and asset cache-bust to v140.
+
 ## v1.3.9
 
 - **Typing indicator no longer shifts the chat**: the indicator now lives in a permanently reserved strip inside the composer bar (the bar is a bit taller). When someone starts typing, messages no longer jump; the indicator is compact, single-line, and fades in/out.

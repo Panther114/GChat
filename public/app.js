@@ -7250,7 +7250,7 @@
         desktopUpdateCheckTimeout = null;
         if (document.visibilityState === "hidden") return;
         renderDesktopUpdateStatus({ state: "error", error: "Update check timed out. Try again." });
-      }, 45e3);
+      }, 6e4);
     }
     if (checkBtn) {
       checkBtn.disabled = status?.state === "checking" || status?.state === "downloading";

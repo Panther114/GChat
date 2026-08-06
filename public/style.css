@@ -5725,6 +5725,9 @@ textarea::placeholder {
 #profile-modal .profile-row:last-child {
   border-bottom: 0 !important;
 }
+#profile-modal .profile-row[hidden] {
+  display: none !important;
+}
 #profile-modal .profile-row-label {
   padding-top: 7px !important;
   font-size: 11px !important;

@@ -3,7 +3,7 @@
 !include "FileFunc.nsh"
 
 Name "Gchat"
-OutFile "..\..\src-desktop-win\target\release\bundle\Gchat_1.3.9_x64-setup.exe"
+OutFile "..\..\src-desktop-win\target\release\bundle\Gchat_1.3.10_x64-setup.exe"
 Unicode True
 InstallDir "$LOCALAPPDATA\Programs\Gchat"
 InstallDirRegKey HKCU "Software\Gchat" "InstallDir"
@@ -29,10 +29,10 @@ Section "Install"
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   WriteRegStr HKCU "Software\Gchat" "InstallDir" "$INSTDIR"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Gchat" "DisplayName" "Gchat 1.3.9"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Gchat" "DisplayName" "Gchat 1.3.10"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Gchat" "UninstallString" "$\"$INSTDIR\Uninstall.exe$\""
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Gchat" "DisplayIcon" "$INSTDIR\Gchat.exe"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Gchat" "DisplayVersion" "1.3.9"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Gchat" "DisplayVersion" "1.3.10"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Gchat" "Publisher" "Gchat"
 
   CreateDirectory "$SMPROGRAMS\Gchat"
