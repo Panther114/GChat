@@ -3249,6 +3249,10 @@ body.chat-body.mobile-layout .sidebar-overlay {
     bottom: calc(104px + var(--safe-area-bottom));
     right: calc(14px + var(--safe-area-right));
   }
+  .scroll-first-unread-btn {
+    bottom: calc(144px + var(--safe-area-bottom));
+    right: calc(14px + var(--safe-area-right));
+  }
   .unread-jump-btn {
     top: calc(var(--mobile-topbar-height) + var(--safe-area-top) + 8px);
   }

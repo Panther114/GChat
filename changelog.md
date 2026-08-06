@@ -4,6 +4,17 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## Unreleased
+
+- **"Not a member of this group" on send — root cause fixed (server)**: Socket.IO connection-state recovery reconnected backgrounded/inactive sessions *without* re-running the auth middleware (`skipMiddlewares: true`), so a recovered socket kept its rooms (messages still arrived) but lost its identity — sends were then rejected with "Not a member of this group" until a page reload. Recovery now re-authenticates every reconnect; a connected socket without an identity is re-resolved from its handshake session or dropped, and all send handlers guard against missing identities.
+- **New-member delivery ticks**: when someone joins a group (join-by-code, invite, invite-to-chat, or GChat Global registration), every previous non-whisper message gains a delivery tick (the new member does *not* count as having read history — new ticks render unread). The client updates cached tick totals live on `member_joined`.
+- **"X joined the group chat" message**: broadcast for every join path, including new GChat Global registrations (which previously announced nothing).
+- **Message loading overhaul**: decryption is now bounded-parallel, the transcript renders progressively in chunks (no long blank), background syncs append new messages instead of rebuilding the whole channel, decrypted content is persisted so re-renders skip decryption, the transcript always hydrates the recent cached window from IndexedDB on open, deep history is served instantly on scroll-up from the durable store (no network round-trip), the per-group history bound rose to 5000, and deleted messages are removed from the durable store so they can never resurrect.
+- **Unread UX**: a new "jump to first unread" button (above the scroll-to-bottom button) smoothly scrolls to the earliest unread message of the active channel; channels containing unread messages get a thin red border on their chip.
+- **Delivery ticks**: pinned to the right side of the message column for ALL messages (not just your own), with a 6px margin from the panel edge; new ticks are added to the left (right-aligned cluster growth, never spilling across the screen).
+- **Edited marker**: "(edited)" now sits inline immediately after the message text for every message, instead of traveling with the right-pinned ticks.
+- No version bump — all changes ship via the hosted web app (server + client); no desktop reinstall needed.
+
 ## v1.3.11
 
 - **"Not a member of this group" on send is fixed (desktop + web)**: a send rejection now reconciles the client with the server — the group list is refreshed and a group the server no longer recognizes is dropped from the UI (with a clear message) instead of erroring forever. This covered the stale-group cases: kicked or disbanded while the socket was down, group recreated, or DB state changed under an open session.

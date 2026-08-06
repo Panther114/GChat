@@ -568,7 +568,11 @@ const HISTORY_DB_NAME = 'gchat-history-v1';
 const HISTORY_DB_VERSION = 1;
 const HISTORY_MESSAGES_STORE = 'messages';
 const HISTORY_META_STORE = 'meta';
-const HISTORY_MAX_MESSAGES_PER_GROUP = 2000;
+const HISTORY_MAX_MESSAGES_PER_GROUP = 5000;
+// v1.3.12: the transcript renders only the recent window of cached history —
+// deeper history is still served instantly on scroll-up via the IndexedDB
+// pagination path (prependHistoryMessagesOlderThan), without bloating the DOM.
+const HISTORY_RENDER_WINDOW = 800;
 let historyDbPromise = null;
 let historyDbSupported = typeof indexedDB !== 'undefined';
 
@@ -689,6 +693,13 @@ function clearGroupHistoryStore(groupId) {
   });
   const metaClear = runHistoryStore(HISTORY_META_STORE, 'readwrite', (store) => store.delete(String(groupId)));
   return Promise.all([messageClear, metaClear]).then(() => null);
+}
+
+// v1.3.12: remove a single message from the durable history store when it is
+// deleted server-side — otherwise it would resurrect on the next open.
+function deleteHistoryMessage(groupId, messageId) {
+  if (!groupId || !messageId) return Promise.resolve();
+  return runHistoryStore(HISTORY_MESSAGES_STORE, 'readwrite', (store) => store.delete(String(messageId)));
 }
 
 // One-time migration: fold existing localStorage per-group caches into the
@@ -3110,21 +3121,37 @@ function createLoadMoreIndicator() {
   return indicator;
 }
 
-async function buildMessageRows(messages, groupId) {
+// v1.3.12: bounded-parallel async map — decrypting hundreds of messages
+// sequentially was the main reason chat history took seconds to appear.
+async function mapWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(Math.max(1, limit), items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await worker(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+async function buildMessageRows(messages, groupId, { prevMessage = null } = {}) {
   const rows = [];
-  let prevMessage = null;
+  let prev = prevMessage;
   for (const msg of messages) {
     try {
       // Hydrate channel before series logic so sub-chats do not merge senders across channels.
       await hydrateMessageChannel(msg, groupId);
-      const showSenderName = !shouldContinueSeries(prevMessage, msg);
+      const showSenderName = !shouldContinueSeries(prev, msg);
       const row = await buildMessageRow(msg, groupId, { showSenderName });
       if (row) {
-        if (!prevMessage || !isSameMessageDay(prevMessage.createdAt, msg.createdAt)) {
+        if (!prev || !isSameMessageDay(prev.createdAt, msg.createdAt)) {
           rows.push(createDateDivider(msg.createdAt));
         }
         rows.push(row);
-        if (msg.type !== 'system') prevMessage = msg;
+        if (msg.type !== 'system') prev = msg;
       }
     } catch (err) {
       console.error('buildMessageRow failed:', msg?.id, err);
@@ -3279,6 +3306,8 @@ async function refreshCurrentGroupFromServer() {
         || Number(old.revision || 0) !== Number(fresh.revision || 0);
     });
     if (!changed) return;
+    const addedIds = msgs.filter((m) => !knownIds.has(String(m.id)));
+    const editedIds = msgs.filter((m) => knownIds.has(String(m.id)));
     entry.messages = merged;
     entry.messageRows = null;
     entry.rowsDirty = true;
@@ -3291,11 +3320,45 @@ async function refreshCurrentGroupFromServer() {
     allMessages = merged;
     updateGroupUnseenCount(groupId, merged);
     void updateGroupPreviewFromMessage(groupId, merged.length ? merged[merged.length - 1] : null);
+    // v1.3.12: when the merge only added NEW messages (no edits), append them
+    // to the live transcript instead of rebuilding the whole channel — the
+    // transcript never blanks or jumps during background syncs.
+    const nearBottom = isNearBottom();
+    const area = messagesArea();
+    if (addedIds.length && !editedIds.length && area) {
+      const channel = getActiveTagTopic();
+      const channelAdditions = [];
+      for (const msg of addedIds) {
+        await hydrateMessageChannel(msg, groupId);
+        if (resolveMessageTagTopic(msg) === channel) channelAdditions.push(msg);
+      }
+      if (channelAdditions.length) {
+        const lastVisible = getLastRenderedChannelMessage();
+        const rows = await buildMessageRows(channelAdditions, groupId, { prevMessage: lastVisible });
+        const fragment = document.createDocumentFragment();
+        for (const row of rows) {
+          if (!row) continue;
+          if (row.classList?.contains('msg-row')) {
+            const srcMsg = channelAdditions.find((m) => String(m.id) === String(row.dataset.msgId));
+            if (srcMsg) observeMessageForRead(row, srcMsg);
+          }
+          fragment.appendChild(row);
+        }
+        if (nearBottom) {
+          area.appendChild(fragment);
+          scrollToBottom(true);
+        } else {
+          area.appendChild(fragment);
+        }
+        updateFirstUnreadButton();
+        renderTagFilters();
+        observeCurrentGroupRowsForRead();
+        return;
+      }
+    }
     // Re-render only when the user isn't mid-scroll through older history, and
     // preserve their reading position (renderActiveChannelStream scrolls down).
-    const nearBottom = isNearBottom();
-    if (nearBottom || messagesArea().scrollTop <= 0) {
-      const area = messagesArea();
+    if (nearBottom || area.scrollTop <= 0) {
       const prevScrollTop = area.scrollTop;
       const prevScrollHeight = area.scrollHeight;
       await renderActiveChannelStream();
@@ -3307,6 +3370,20 @@ async function refreshCurrentGroupFromServer() {
   } catch (err) {
     console.warn('refreshCurrentGroupFromServer failed:', err);
   }
+}
+
+// v1.3.12: the last rendered message of the active channel (for append-only
+// merges) — finds the final .msg-row in the transcript.
+function getLastRenderedChannelMessage() {
+  const area = messagesArea();
+  if (!area) return null;
+  const rows = area.querySelectorAll('.msg-row');
+  if (!rows.length) return null;
+  const lastRow = rows[rows.length - 1];
+  const msgId = lastRow && lastRow.dataset.msgId;
+  if (!msgId) return null;
+  const cache = ensureGroupCacheEntry(currentGroupId);
+  return (cache.messages || []).find((m) => String(m.id) === String(msgId)) || null;
 }
 
 async function ensureGroupDataPreloaded(groupId) {
@@ -3766,39 +3843,67 @@ async function renderActiveChannelStream() {
   const channel = getActiveTagTopic();
   const all = cache.messages || [];
 
-  for (const msg of all) {
-    await hydrateMessageChannel(msg, currentGroupId);
-  }
+  // v1.3.12: decrypt in bounded-parallel batches instead of one-by-one —
+  // hundreds of messages used to decrypt sequentially (seconds of blank).
+  await mapWithConcurrency(all, 12, (msg) => hydrateMessageChannel(msg, currentGroupId));
+  // Persist the hydrated (decrypted metadata + plaintext) cache so the next
+  // open renders from cache without re-decrypting.
+  writeLocalGroupCache(currentGroupId, cache);
+  if (historyDbSupported && all.length) void persistHistoryMessages(currentGroupId, all);
 
   const channelMsgs = all.filter((msg) => resolveMessageTagTopic(msg) === channel);
   // The whole stream is replaced below — release the outgoing images' URLs.
   revokeBlobUrlsIn(area);
-  area.replaceChildren(createLoadMoreIndicator());
 
   if (!channelMsgs.length) {
+    area.replaceChildren(createLoadMoreIndicator());
     syncChannelEmptyState();
+    updateFirstUnreadButton();
     return;
   }
 
-  const rows = await buildMessageRows(channelMsgs, currentGroupId);
-  const fragment = document.createDocumentFragment();
-  for (const row of rows) {
-    if (!row) continue;
-    // Rows built for a single channel are all visible.
-    if (row.classList?.contains('msg-row')) {
-      row.hidden = false;
-      const msgId = row.dataset.msgId;
-      const srcMsg = channelMsgs.find((m) => String(m.id) === String(msgId));
-      if (srcMsg) observeMessageForRead(row, srcMsg);
+  // v1.3.12: progressive rendering — rows are built and appended in chunks so
+  // the transcript fills in instead of staying blank for the whole build.
+  const loadingIndicator = createLoadMoreIndicator();
+  loadingIndicator.hidden = true;
+  area.replaceChildren(loadingIndicator);
+
+  const CHUNK_SIZE = 15;
+  let prev = null;
+  for (let i = 0; i < channelMsgs.length; i += CHUNK_SIZE) {
+    const slice = channelMsgs.slice(i, i + CHUNK_SIZE);
+    const rows = await buildMessageRows(slice, currentGroupId, { prevMessage: prev });
+    if (!rows.length) continue;
+    for (const row of rows) {
+      if (row && row.classList?.contains('msg-row')) {
+        const msgId = row.dataset.msgId;
+        const srcMsg = slice.find((m) => String(m.id) === String(msgId));
+        if (srcMsg) observeMessageForRead(row, srcMsg);
+      }
     }
-    fragment.appendChild(row);
+    const fragment = document.createDocumentFragment();
+    for (const row of rows) fragment.appendChild(row);
+    area.insertBefore(fragment, area.lastChild);
+    // Track the last real message for cross-chunk day-divider/series logic
+    // (the last row may be a date divider).
+    for (let r = rows.length - 1; r >= 0; r -= 1) {
+      if (rows[r].classList?.contains('msg-row')) {
+        const srcMsg = slice.find((m) => String(m.id) === String(rows[r].dataset.msgId));
+        if (srcMsg) prev = srcMsg;
+        break;
+      }
+    }
+    // Yield so the browser paints each chunk (no frozen UI, no long blank).
+    await new Promise((resolve) => setTimeout(resolve, 0));
   }
-  area.appendChild(fragment);
+  area.lastChild?.remove();
+
   // Keep full-group cache rows dirty-safe; channel DOM is rebuilt on switch.
   cache.messageRows = null;
   cache.rowsDirty = true;
   syncChannelEmptyState();
   scrollToBottom(true);
+  updateFirstUnreadButton();
 }
 
 function selectTagChannel(topic, { focusComposer = true } = {}) {
@@ -3919,12 +4024,30 @@ function promptCreateTagChannel() {
   openChannelCreateModal();
 }
 
+// v1.3.12: per-channel unread counts for the CURRENT group (tag filters are
+// group-scoped). Messages are attributed via their (already hydrated) channel
+// topic — same rule the transcript uses.
+function computeChannelUnreadCounts() {
+  const counts = new Map();
+  if (!currentGroupId || !currentUser) return counts;
+  const cache = ensureGroupCacheEntry(currentGroupId);
+  for (const msg of cache.messages || []) {
+    if (String(msg.senderId) === String(currentUser.id)) continue;
+    if (msg.hasRead === true) continue;
+    if (isMessageHiddenForCurrentUser(msg)) continue;
+    const topic = resolveMessageTagTopic(msg);
+    counts.set(topic, (counts.get(topic) || 0) + 1);
+  }
+  return counts;
+}
+
 function renderTagFilters() {
   const wrap = $('chat-tag-filters');
   if (!wrap) return;
   ensureActiveTag(activeTagFilter || DEFAULT_TAG_TOPIC);
   const tags = getAvailableGroupTags();
   const active = getActiveTagTopic();
+  const unreadCounts = computeChannelUnreadCounts();
   wrap.replaceChildren();
   wrap.hidden = false;
   for (const tag of tags) {
@@ -3936,8 +4059,14 @@ function renderTagFilters() {
       btn.classList.add('active');
       btn.setAttribute('aria-current', 'true');
     }
+    // v1.3.12: thin red border on channels that contain unread messages.
+    if ((unreadCounts.get(tag.topic) || 0) > 0) {
+      btn.classList.add('has-unread');
+      btn.title = `${tag.label} — ${unreadCounts.get(tag.topic)} unread`;
+    } else {
+      btn.title = `Open ${tag.label} channel`;
+    }
     btn.textContent = tag.label;
-    btn.title = `Open ${tag.label} channel`;
     btn.addEventListener('click', () => {
       // Cannot untoggle — selecting the active channel is a no-op switch.
       if (tag.topic === getActiveTagTopic()) return;
@@ -4395,6 +4524,10 @@ const ICON_SPECS = {
   'chevrons-down': [
     ['polyline', { points: '7 6 12 11 17 6' }],
     ['polyline', { points: '7 13 12 18 17 13' }],
+  ],
+  'chevrons-up': [
+    ['polyline', { points: '7 13 12 8 17 13' }],
+    ['polyline', { points: '7 6 12 11 17 6' }],
   ],
   sun: [
     ['circle', { cx: '12', cy: '12', r: '4' }],
@@ -5280,6 +5413,10 @@ function flushBatchReads() {
     if (changed) {
       writeLocalGroupCache(groupId, cache);
       syncGroupUnreadCount(groupId);
+      if (groupId === currentGroupId) {
+        renderTagFilters();
+        updateFirstUnreadButton();
+      }
     }
   }
 }
@@ -5332,6 +5469,7 @@ function flushMarkReadEmits() {
 function markMessageReadConfirmed(messageId) {
   const stored = allMessages.find((m) => String(m.id) === String(messageId));
   if (stored) stored.readConfirmed = true;
+  updateFirstUnreadButton();
 }
 
 function updateUnreadBadge(groupId, count) {
@@ -5433,14 +5571,16 @@ async function selectGroup(groupId) {
   }
 
   const cache = ensureGroupCacheEntry(normalizedGroupId);
-  // v1.3.9: hydrate durable IndexedDB history before first render so the
-  // transcript is never blank while the server window loads.
-  if (!cache.messages || cache.messages.length === 0) {
-    const history = await readHistoryMessages(normalizedGroupId);
-    if (history && history.length) {
-      cache.messages = mergeMessagesIntoCache(normalizedGroupId, history, { persist: false });
-      cache.rowsDirty = true;
-    }
+  // v1.3.9/1.3.12: hydrate durable IndexedDB history before first render so
+  // the transcript is never blank while the server window loads — and ALWAYS
+  // merge the recent window (not only when the cache is empty), so cached
+  // history appears instantly instead of waiting on scroll-up fetches.
+  const history = await readHistoryMessages(normalizedGroupId);
+  if (history && history.length
+    && (!cache.messages || history.length > cache.messages.length)) {
+    const window = history.slice(-HISTORY_RENDER_WINDOW);
+    cache.messages = mergeMessagesIntoCache(normalizedGroupId, window, { persist: false });
+    cache.rowsDirty = true;
   }
   const hadCompleteCache = !!(cache.messages && cache.members && cache.messageRows);
   if (!cache.messages || !cache.members || !cache.messageRows) {
@@ -5702,7 +5842,9 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
   if (!canCurrentUserAccessMessage(msg, currentUser?.id)) return null;
   if (isMessageHiddenForCurrentUser(msg)) return null;
   const messageKey = groupId ? getGroupKey(groupId) : null;
-  if (Number(msg.encryptionVersion) === 2 && messageKey) {
+  // v1.3.12: keep decrypted text cached — re-renders (channel switches,
+  // merges, reloads) skip the AES-GCM round-trip entirely.
+  if (!msg._decryptedText && Number(msg.encryptionVersion) === 2 && messageKey) {
     msg._decryptedText = await decryptV2Message(msg, messageKey, groupId).catch(() => null);
   }
   // Channel is part of encrypted metadata for v2 — hydrate before filtering.
@@ -5860,16 +6002,10 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
   textEl.className = 'msg-text';
   await renderMsgContent(msg, textEl, bubble, groupId);
 
-  // Timestamp + delivery + edited badge
+  // Timestamp + delivery ticks (edited badge sits inline after the text)
   const meta = document.createElement('span');
   meta.className = 'msg-meta';
   meta.title = formatFullMessageTime(msg.createdAt);
-  if (msg.editedAt) {
-    const editedBadge = document.createElement('span');
-    editedBadge.className = 'msg-edited-badge';
-    editedBadge.textContent = ' (edited)';
-    meta.appendChild(editedBadge);
-  }
   const deliveryEl = document.createElement('span');
   deliveryEl.className = 'msg-delivery';
   deliveryEl.id = 'del-' + msg.id;
@@ -5878,6 +6014,12 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
   deliveryEl.dataset.readCount = String(read);
   renderDeliveryTicks(deliveryEl, total, read);
   meta.appendChild(deliveryEl);
+
+  // v1.3.12: the edited marker belongs right behind the actual message text,
+  // not at the far right with the delivery ticks.
+  const editedBadge = document.createElement('span');
+  editedBadge.className = 'msg-edited-badge';
+  editedBadge.textContent = ' (edited)';
 
   const inlineChipsForRow = isAiAssistant ? [] : inlinePrefixChips;
   if (isAiAssistant && inlinePrefixChips.length) {
@@ -5893,15 +6035,20 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
       const inlineRow = document.createElement('div');
       inlineRow.className = 'msg-inline-row';
       inlineRow.append(...inlineChipsForRow, textEl);
+      if (msg.editedAt) inlineRow.append(editedBadge);
       bodyRow.append(inlineRow, meta);
     } else {
-      bodyRow.append(textEl, meta);
+      bodyRow.append(textEl);
+      if (msg.editedAt) bodyRow.append(editedBadge);
+      bodyRow.append(meta);
     }
     bubble.appendChild(bodyRow);
   } else {
     const attachmentRow = document.createElement('div');
     attachmentRow.className = 'msg-attachment-row';
-    attachmentRow.append(textEl, meta);
+    attachmentRow.append(textEl);
+    if (msg.editedAt) attachmentRow.append(editedBadge);
+    attachmentRow.append(meta);
     bubble.appendChild(attachmentRow);
   }
 
@@ -6173,6 +6320,57 @@ function scrollToBottom(skipAnimation) {
 function scrollToMessage(msgId) {
   const row = document.querySelector('[data-msg-id="' + msgId + '"]');
   if (row) row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+// v1.3.12: jump-to-first-unread button — the earliest message of the active
+// channel that the current user has not read yet.
+function getFirstUnreadMessageInChannel() {
+  if (!currentGroupId || !currentUser) return null;
+  const cache = ensureGroupCacheEntry(currentGroupId);
+  const channel = getActiveTagTopic();
+  for (const msg of cache.messages || []) {
+    if (resolveMessageTagTopic(msg) !== channel) continue;
+    if (String(msg.senderId) === String(currentUser.id)) continue;
+    if (msg.hasRead === true) continue;
+    if (isMessageHiddenForCurrentUser(msg)) continue;
+    return msg;
+  }
+  return null;
+}
+
+function updateFirstUnreadButton() {
+  const btn = $('scroll-first-unread-btn');
+  if (!btn) return;
+  const first = getFirstUnreadMessageInChannel();
+  let show = false;
+  if (first) {
+    btn.dataset.msgId = first.id;
+    const area = messagesArea();
+    const row = document.querySelector('[data-msg-id="' + first.id + '"]');
+    if (row && area) {
+      const areaRect = area.getBoundingClientRect();
+      // Show only when the first unread row has been scrolled past (above the
+      // viewport) — clicking then scrolls smoothly up to it.
+      show = row.getBoundingClientRect().top < areaRect.top - 8;
+    }
+  } else {
+    delete btn.dataset.msgId;
+  }
+  btn.hidden = !show;
+}
+
+function jumpToFirstUnread() {
+  const btn = $('scroll-first-unread-btn');
+  const msgId = btn && btn.dataset.msgId;
+  if (!msgId) return;
+  const row = document.querySelector('[data-msg-id="' + msgId + '"]');
+  if (row) {
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    return;
+  }
+  // The unread message may live in older history — fetch it first, then jump.
+  const area = messagesArea();
+  if (area) area.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 // Fetches a single message that is referenced by a quote but missing from the
@@ -7472,6 +7670,8 @@ function initSocket() {
       const index = cache.messages ? cache.messages.findIndex((msg) => msg.id === messageId) : -1;
       if (index === -1) continue;
       cache.messages.splice(index, 1);
+      // v1.3.12: never let a deleted message resurrect from the durable store.
+      if (historyDbSupported) void deleteHistoryMessage(groupId, messageId);
       if (groupId === currentGroupId && cache.messageRows) {
         cache.messageRows = cache.messageRows.filter((msgRow) => msgRow?.dataset?.msgId !== messageId);
       } else {
@@ -7510,16 +7710,15 @@ function initSocket() {
         } else {
           textEl.textContent = MSG_CONTENT_UNAVAILABLE;
         }
-        // Add or update the "(edited)" badge in the meta line
-        const metaEl = bubble.querySelector('.msg-meta');
-        if (metaEl && !metaEl.querySelector('.msg-edited-badge')) {
+        // v1.3.12: the "(edited)" marker sits inline right behind the message
+        // text (not in the right-pinned tick meta).
+        if (!bubble.querySelector('.msg-edited-badge')) {
           const badge = document.createElement('span');
           badge.className = 'msg-edited-badge';
           badge.textContent = ' (edited)';
-          // Insert before delivery receipt if present
-          const delEl = metaEl.querySelector('.msg-delivery');
-          if (delEl) metaEl.insertBefore(badge, delEl);
-          else metaEl.appendChild(badge);
+          const textEl = bubble.querySelector('.msg-text');
+          if (textEl && textEl.parentNode) textEl.after(badge);
+          else bubble.appendChild(badge);
         }
       }
     }
@@ -7666,12 +7865,34 @@ function initSocket() {
 
   socket.on('member_joined', ({ userId, username, iconColor, profilePicture, groupId }) => {
     const cache = ensureGroupCacheEntry(groupId);
-    if (cache.members && !cache.members.find(m => m.id === userId)) {
+    const isNewMember = !!(cache.members && !cache.members.find(m => m.id === userId));
+    if (isNewMember) {
       cache.members.push({ id: userId, username, iconColor, profilePicture: profilePicture || null, isAdministrator: false });
       writeLocalGroupCache(groupId, cache);
     }
+    // v1.3.12: a new member raises the delivery-tick total for every previous
+    // non-whisper message (they do NOT count as having read them). Whisper
+    // totals are recipient-scoped and stay exact.
+    if (String(userId) !== String(currentUser?.id)) {
+      for (const msg of cache.messages || []) {
+        if (msg.type === 'whisper') continue;
+        msg.totalRecipients = Math.max(0, Number(msg.totalRecipients) || 0) + 1;
+      }
+      writeLocalGroupCache(groupId, cache);
+      if (groupId === currentGroupId) {
+        // Re-render the visible tick clusters with the new totals.
+        for (const msg of cache.messages || []) {
+          const delEl = $('del-' + msg.id);
+          if (!delEl) continue;
+          const total = Math.max(0, Number(msg.totalRecipients) || 0);
+          delEl.dataset.totalRecipients = String(total);
+          renderDeliveryTicks(delEl, total, Number(msg.readCount) || 0);
+        }
+        updateFirstUnreadButton();
+      }
+    }
     if (groupId !== currentGroupId) return;
-    addSystemMessage(username + ' joined the group');
+    addSystemMessage(username + ' joined the group chat');
     members = cache.members || members;
     renderMembersList();
     renderWhisperPicker();
@@ -9924,6 +10145,8 @@ function setupEventListeners() {
 
   // Scroll to bottom button
   $('scroll-bottom-btn').addEventListener('click', () => scrollToBottom());
+  // v1.3.12: jump to the first unread message of the active channel.
+  $('scroll-first-unread-btn').addEventListener('click', jumpToFirstUnread);
 
   // Scroll listener for pagination + scroll-to-bottom visibility (throttled via rAF)
   let scrollRafPending = false;
@@ -9939,6 +10162,7 @@ function setupEventListeners() {
         scrollUnreadCount = 0;
         $('scroll-unread-badge').hidden = true;
       }
+      updateFirstUnreadButton();
       // Infinite scroll up
       if (area.scrollTop <= SCROLL_LOAD_THRESHOLD && !loadingOlder && oldestMessageId) {
         loadOlderMessages();
@@ -10019,6 +10243,12 @@ async function loadOlderMessages(cursorOverride = null, retried = false) {
   const indicator = $('load-more-indicator');
   if (indicator) indicator.hidden = false;
   try {
+    // v1.3.12: IndexedDB-first — older history already cached locally is
+    // prepended instantly, with no network round-trip.
+    if (!retried) {
+      const served = await prependHistoryMessagesOlderThan(cursor);
+      if (served) return;
+    }
     const url = `/api/groups/${currentGroupId}/messages?before=${cursor}&limit=50`;
     const res = await fetch(url);
     if (!res.ok) return;
@@ -10093,6 +10323,61 @@ async function loadOlderMessages(cursorOverride = null, retried = false) {
     loadingOlder = false;
     if (indicator) indicator.hidden = true;
   }
+}
+
+// v1.3.12: serve scroll-up pagination from the durable IndexedDB history when
+// the requested older messages are already cached — instant, no network.
+async function prependHistoryMessagesOlderThan(cursorId) {
+  const groupId = currentGroupId;
+  if (!groupId || !cursorId) return false;
+  const history = await readHistoryMessages(groupId);
+  if (!history.length) return false;
+  const cursorIndex = history.findIndex((m) => String(m.id) === String(cursorId));
+  if (cursorIndex <= 0) return false;
+  const cache = ensureGroupCacheEntry(groupId);
+  const knownIds = new Set((cache.messages || []).map((m) => String(m.id)));
+  const older = history
+    .slice(0, cursorIndex)
+    .filter((m) => !knownIds.has(String(m.id)))
+    .filter((m) => !isMessageHiddenForCurrentUser(m));
+  if (!older.length) return false;
+  const take = older.slice(-50);
+  const channel = getActiveTagTopic();
+  for (const msg of take) await hydrateMessageChannel(msg, groupId);
+  const channelMsgs = take.filter((msg) => resolveMessageTagTopic(msg) === channel);
+  if (!channelMsgs.length) {
+    // Only non-active-channel messages were cached — merge them but don't
+    // prepend, so the network path can still advance the cursor.
+    mergeMessagesIntoCache(groupId, take, { persist: false });
+    oldestMessageId = take[0].id;
+    writeLocalGroupCache(groupId, cache);
+    return false;
+  }
+  const area = messagesArea();
+  const prevScrollHeight = area.scrollHeight;
+  const rows = await buildMessageRows(channelMsgs, groupId);
+  const fragment = document.createDocumentFragment();
+  for (const row of rows) {
+    if (!row) continue;
+    if (row.classList?.contains('msg-row')) {
+      const srcMsg = channelMsgs.find((m) => String(m.id) === String(row.dataset.msgId));
+      if (srcMsg) observeMessageForRead(row, srcMsg);
+    }
+    fragment.appendChild(row);
+  }
+  const oldFirst = area.querySelector('.msg-row, .msg-system');
+  if (oldFirst) area.insertBefore(fragment, oldFirst);
+  else area.appendChild(fragment);
+  allMessages = mergeMessagesIntoCache(groupId, take, { persist: false });
+  oldestMessageId = take[0].id;
+  const entry = ensureGroupCacheEntry(groupId);
+  entry.messages = allMessages;
+  entry.messageRows = rows.concat(entry.messageRows || []);
+  entry.oldestMessageId = oldestMessageId;
+  entry.rowsDirty = false;
+  writeLocalGroupCache(groupId, entry);
+  area.scrollTop = area.scrollHeight - prevScrollHeight;
+  return true;
 }
 function getViewportHeightForLayout({ visualViewport, fallbackHeight }) {
   const visualHeight = visualViewport ? Math.round(visualViewport.height) : 0;

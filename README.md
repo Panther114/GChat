@@ -115,6 +115,7 @@ Important limitations:
 - Metadata such as usernames, group membership, timestamps, and message ownership is still visible to the server.
 - Disappearing-message metadata, timers, and per-user hidden-state records are also visible to the server so the app can keep access state consistent across reloads.
 - Repetitive-message and hashtag equality within a group are visible through group-keyed blind indexes.
+- **Client-side caching**: to make history load instantly, the app caches *decrypted* message text and metadata in the browser's local storage (IndexedDB/localStorage) — the same trust domain as the group keys themselves. This data never leaves the device; the server still only ever receives ciphertext.
 - AI routes and active client controls are disabled by default in Increment A.
 - This is application-layer encryption, not a replacement for audited secure messaging infrastructure.
 

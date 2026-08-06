@@ -161,7 +161,12 @@ const io = new Server(server, {
   pingTimeout: 30000,
   connectionStateRecovery: {
     maxDisconnectionDuration: 2 * 60 * 1000,
-    skipMiddlewares: true,
+    // v1.3.12 (no version bump): recovery must RE-RUN the auth middleware.
+    // With skipMiddlewares: true, a recovered socket kept its rooms (so the
+    // user still received messages) but lost socket.userId, and sends were
+    // rejected with "Not a member of this group". Rooms and missed packets
+    // are still restored — only the middleware chain now re-validates.
+    skipMiddlewares: false,
   },
 });
 
@@ -1117,6 +1122,15 @@ const stmts = {
   insertMember: db.prepare(
     'INSERT OR IGNORE INTO group_members (group_id, user_id) VALUES (?, ?)'
   ),
+  // v1.3.12: a new member raises the delivery-tick total for every previous
+  // non-whisper message (they do NOT count as having read them). Whisper
+  // totals are recipient-scoped and must stay exact.
+  bumpMessageDeliveryTotals: db.prepare(`
+    UPDATE messages
+       SET total_recipients = total_recipients + 1
+     WHERE group_id = ?
+       AND (type IS NULL OR type != 'whisper')
+  `),
   isMember: db.prepare(
     'SELECT is_admin FROM group_members WHERE group_id = ? AND user_id = ?'
   ),
@@ -2104,6 +2118,17 @@ function getGroupNameForPush(groupId) {
   }
 }
 
+// v1.3.12: after a NEW membership is created, every previous non-whisper
+// message gains a delivery tick (the new member is a potential reader but has
+// NOT read the history). Bounded: one indexed UPDATE per join.
+function bumpGroupDeliveryTotals(groupId) {
+  try {
+    stmts.bumpMessageDeliveryTotals.run(groupId);
+  } catch (error) {
+    console.error('bump delivery totals failed:', groupId, error.message);
+  }
+}
+
 function buildGenericPushPayload(totalUnreadCount, context = null) {
   const normalizedCount = Math.max(0, Number(totalUnreadCount) || 0);
   // v1.3.9: push payloads carry sender + group names (metadata only — the
@@ -2292,6 +2317,15 @@ app.post('/api/auth/register', async (req, res) => {
     stmts.insertUser.run(id, username, passwordHash, color);
     // Every user is permanently part of GChat Global from registration.
     stmts.insertMember.run(GLOBAL_GROUP_ID, id);
+    // v1.3.12: announce new users in GChat Global ("X joined the group chat")
+    // so connected clients see the join without waiting for a refresh.
+    io.to(GLOBAL_GROUP_ID).emit('member_joined', {
+      userId: id,
+      username,
+      iconColor: color,
+      profilePicture: null,
+      groupId: GLOBAL_GROUP_ID,
+    });
     clearRegisterAttempts(clientIp);
 
     const user = stmts.findUserById.get(id);
@@ -2652,6 +2686,8 @@ app.delete('/api/users/:userId', (req, res) => {
   if (!deleted) return res.status(404).json({ error: 'User not found' });
 
   for (const groupId of deleted.ownerJoinedGroupIds) {
+    // v1.3.12: the viewer inherits these groups — previous messages gain ticks.
+    bumpGroupDeliveryTotals(groupId);
     io.to(groupId).emit('member_joined', {
       userId: viewer.id,
       username: viewer.username,
@@ -2766,6 +2802,8 @@ app.post('/api/groups/join', (req, res) => {
 
   // Emit member_joined to the group room
   if (joined.changes > 0) {
+    // v1.3.12: every previous message gains a delivery tick.
+    bumpGroupDeliveryTotals(group.id);
     const user = stmts.findUserById.get(userId);
     io.to(group.id).emit('member_joined', {
       userId,
@@ -2924,14 +2962,19 @@ app.post('/api/groups/:groupId/invite', (req, res) => {
     return res.status(409).json({ error: `This group has reached its ${MAX_GROUP_MEMBERS}-member limit` });
   }
 
-  stmts.insertMember.run(groupId, targetUserId);
-  io.to(groupId).emit('member_joined', {
-    userId: targetUserId,
-    username: target.username,
-    iconColor: target.icon_color,
-    profilePicture: target.profile_picture || null,
-    groupId,
-  });
+  const joined = stmts.insertMember.run(groupId, targetUserId);
+  if (joined.changes > 0) {
+    // v1.3.12: every previous message gains a delivery tick; "joined" is only
+    // announced for genuinely new memberships.
+    bumpGroupDeliveryTotals(groupId);
+    io.to(groupId).emit('member_joined', {
+      userId: targetUserId,
+      username: target.username,
+      iconColor: target.icon_color,
+      profilePicture: target.profile_picture || null,
+      groupId,
+    });
+  }
 
   // Give the invitee everything needed to render the new chat immediately,
   // including the escrowed group secret (same payload as join-by-code).
@@ -3785,6 +3828,23 @@ io.use((socket, next) => {
 });
 
 io.on('connection', (socket) => {
+  // v1.3.12: belt-and-braces — a connected socket must NEVER lack a userId
+  // (a recovered socket would otherwise act as a ghost member: rooms intact,
+  // sends rejected as "Not a member"). Re-resolve identity from the handshake
+  // session, or drop the connection.
+  if (!socket.userId) {
+    const sessionUserId = socket.request.session && socket.request.session.userId;
+    const sessionUser = sessionUserId ? stmts.findUserById.get(sessionUserId) : null;
+    if (!sessionUser) {
+      console.warn('[socket] dropping unauthenticated connection');
+      socket.disconnect(true);
+      return;
+    }
+    socket.userId = sessionUserId;
+    socket.username = sessionUser.username;
+    socket.iconColor = sessionUser.icon_color;
+    socket.profilePicture = sessionUser.profile_picture;
+  }
   console.log(`Socket connected: ${socket.username} (${socket.userId})`);
   // v1.3.9: per-user room so targeted events (read receipts, edit/delete
   // confirmation) fan out to exactly one user's devices instead of a group.
@@ -3897,6 +3957,12 @@ io.on('connection', (socket) => {
       socket.emit('error', { message });
       if (typeof ack === 'function') ack({ ok: false, error: message });
     };
+    // v1.3.12: defensive — a socket without identity must never reach the
+    // membership check (recovered sockets used to fail as "Not a member").
+    if (!socket.userId) {
+      fail('Not authenticated');
+      return;
+    }
     if (!groupId) {
       fail('Group ID is required');
       return;
@@ -4062,6 +4128,11 @@ io.on('connection', (socket) => {
       socket.emit('error', { message });
       if (typeof ack === 'function') ack({ ok: false, error: message });
     };
+    // v1.3.12: defensive identity guard (see send_message).
+    if (!socket.userId) {
+      fail('Not authenticated');
+      return;
+    }
     if (!groupId) {
       fail('Group ID is required');
       return;
@@ -4170,6 +4241,11 @@ io.on('connection', (socket) => {
       whisperTo, replyToId, tagIndex, isDisappearing, disappearingDurationMs,
       spamSignature, encryptionVersion, keyVersion, revision,
     } = whisperPayload;
+    // v1.3.12: defensive identity guard (see send_message).
+    if (!socket.userId) {
+      socket.emit('error', { message: 'Not authenticated' });
+      return;
+    }
     if (!groupId || !Array.isArray(whisperTo)) {
       socket.emit('error', { message: 'Invalid whisper payload' });
       return;

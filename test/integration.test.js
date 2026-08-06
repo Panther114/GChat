@@ -26,6 +26,14 @@ async function csrf(agent) {
   return response.body.csrfToken;
 }
 
+// The shared HTTP server may already be listening from an earlier socket test.
+async function ensureServerListening() {
+  const { server } = require('../server');
+  if (server.listening) return `http://localhost:${server.address().port}`;
+  await new Promise((resolve) => server.listen(0, resolve));
+  return `http://localhost:${server.address().port}`;
+}
+
 async function register(agent, username) {
   return agent.post('/api/auth/register').send({ username, password: 'secure-password-123' }).expect(201);
 }
@@ -477,10 +485,8 @@ test('invite permission defaults on, admin-only when disabled, and enforces caps
 });
 
 test('socket sends: legit members send, non-members are rejected, and batched read receipts tolerate malformed payloads', async () => {
-  const { server } = require('../server');
   const { io: socketClient } = require('socket.io-client');
-  await new Promise((resolve) => server.listen(0, resolve));
-  const url = `http://localhost:${server.address().port}`;
+  const url = await ensureServerListening();
 
   const memberAgent = request.agent(app);
   const memberResponse = await register(memberAgent, 'socket-member-test');
@@ -547,4 +553,130 @@ test('socket sends: legit members send, non-members are rejected, and batched re
 
   memberSocket.close();
   outsiderSocket.close();
+});
+
+test('socket connection-state recovery re-authenticates: a quick reconnect keeps sending working', async () => {
+  const { io: socketServer } = require('../server');
+  const { io: socketClient } = require('socket.io-client');
+  const url = await ensureServerListening();
+
+  const memberAgent = request.agent(app);
+  const memberResponse = await register(memberAgent, 'recovery-member-test');
+  const memberCsrf = await csrf(memberAgent);
+  const secret = Buffer.alloc(32, 7).toString('base64url');
+  const commitment = crypto.createHash('sha256').update(Buffer.from(secret, 'base64url')).digest('base64url');
+  const created = await memberAgent
+    .post('/api/groups/create')
+    .set('X-CSRF-Token', memberCsrf)
+    .send({ name: 'Recovery room', code: 'recov1', secret, keyCommitment: commitment })
+    .expect(201);
+  const groupId = created.body.id;
+
+  const cookie = memberResponse.headers['set-cookie'][0].split(';')[0];
+  const memberSocket = socketClient(url, {
+    transports: ['websocket'],
+    reconnection: true,
+    reconnectionDelay: 100,
+    extraHeaders: { Cookie: cookie },
+  });
+  await new Promise((resolve) => memberSocket.on('connect', resolve));
+  memberSocket.emit('join_room', groupId);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+
+  // Simulate the real-world trigger: a server ping-timeout closes the
+  // transport ABRUPTLY (no clean disconnect packet) — exactly what happens
+  // when a backgrounded app's throttled heartbeat stalls. The client then
+  // auto-reconnects inside the connectionStateRecovery window (2 min).
+  const serverSocket = socketServer.sockets.sockets.get(memberSocket.id);
+  assert.ok(serverSocket, 'server-side socket should exist before the drop');
+  serverSocket.conn.onClose('ping timeout');
+  const reconnected = await Promise.race([
+    new Promise((resolve) => memberSocket.on('connect', () => resolve(true))),
+    new Promise((resolve) => setTimeout(() => resolve(false), 10000)),
+  ]);
+  assert.ok(reconnected, 'client should auto-reconnect after the abrupt transport drop');
+  await new Promise((resolve) => setTimeout(resolve, 400));
+
+  const recovered = socketServer.sockets.sockets.get(memberSocket.id);
+  assert.ok(recovered, 'socket should be reconnected');
+  assert.equal(recovered.recovered, true, 'expected a connection-state-recovered socket');
+  assert.ok(recovered.userId, 'recovered socket must be re-authenticated (userId set)');
+  assert.equal(recovered.username, 'recovery-member-test');
+
+  const msgId = crypto.randomUUID();
+  const sendAck = await new Promise((resolve) => {
+    memberSocket.emit('send_message', {
+      id: msgId, groupId, encryptedContent: 'AAAA', iv: 'AAAAAAAAAAAAAAAA',
+      encryptedMetadata: 'AAAA', metadataIv: 'AAAAAAAAAAAAAAAA',
+      replyToId: null, tagIndex: null, isDisappearing: false, disappearingDurationMs: 0,
+      encryptionVersion: 2, keyVersion: 1, revision: 1,
+    }, resolve);
+    setTimeout(() => resolve('NO_ACK'), 4000);
+  });
+  assert.deepEqual(sendAck, { ok: true, messageId: msgId });
+  assert.ok(stmts.findMessageById.get(msgId));
+
+  memberSocket.close();
+});
+
+test('new GChat Global registrations announce a member_joined event to the global room', async () => {
+  const { io: socketClient } = require('socket.io-client');
+  const url = await ensureServerListening();
+
+  const watcher = request.agent(app);
+  const watcherResponse = await register(watcher, 'global-watcher-test');
+  const watcherCookie = watcherResponse.headers['set-cookie'][0].split(';')[0];
+  const watcherSocket = socketClient(url, { transports: ['polling'], extraHeaders: { Cookie: watcherCookie } });
+  await new Promise((resolve) => watcherSocket.on('connect', resolve));
+  watcherSocket.emit('join_room', 'gchat-global');
+  await new Promise((resolve) => setTimeout(resolve, 300));
+
+  const joins = [];
+  watcherSocket.on('member_joined', (payload) => joins.push(payload));
+  await register(request.agent(app), 'global-newcomer-test');
+
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const join = joins.find((j) => j.username === 'global-newcomer-test' && j.groupId === 'gchat-global');
+  assert.ok(join, 'global room must announce the new registration');
+  assert.equal(join.userId, stmts.findUserByUsername.get('global-newcomer-test').id);
+
+  watcherSocket.close();
+});
+
+test('joining a group bumps delivery totals of previous messages (whispers excluded)', async () => {
+  await ensureServerListening();
+
+  const ownerAgent = request.agent(app);
+  await register(ownerAgent, 'ticks-owner-test');
+  const ownerCsrf = await csrf(ownerAgent);
+  const secret = Buffer.alloc(32, 8).toString('base64url');
+  const commitment = crypto.createHash('sha256').update(Buffer.from(secret, 'base64url')).digest('base64url');
+  const created = await ownerAgent
+    .post('/api/groups/create')
+    .set('X-CSRF-Token', ownerCsrf)
+    .send({ name: 'Ticks room', code: 'ticks1', secret, keyCommitment: commitment })
+    .expect(201);
+  const groupId = created.body.id;
+  const ownerId = stmts.findUserByUsername.get('ticks-owner-test').id;
+
+  const textId = crypto.randomUUID();
+  const whisperId = crypto.randomUUID();
+  stmts.insertV2Message.run(textId, groupId, ownerId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null, null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null);
+  stmts.insertV2Message.run(whisperId, groupId, ownerId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'whisper', null, JSON.stringify([ownerId]), 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null);
+  const before = stmts.findMessageById.get(textId).total_recipients;
+  const whisperBefore = stmts.findMessageById.get(whisperId).total_recipients;
+  assert.equal(before, 1);
+  assert.equal(whisperBefore, 1);
+
+  const newcomer = request.agent(app);
+  await register(newcomer, 'ticks-newcomer-test');
+  const newcomerCsrf = await csrf(newcomer);
+  await newcomer
+    .post('/api/groups/join')
+    .set('X-CSRF-Token', newcomerCsrf)
+    .send({ code: 'ticks1' })
+    .expect(200);
+
+  assert.equal(stmts.findMessageById.get(textId).total_recipients, before + 1);
+  assert.equal(stmts.findMessageById.get(whisperId).total_recipients, whisperBefore, 'whisper totals must stay recipient-scoped');
 });
