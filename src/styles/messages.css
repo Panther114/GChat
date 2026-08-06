@@ -321,11 +321,22 @@
   width: 100%;
 }
 
-/* Own messages: push delivery/read ticks to the far right, aligned with the
-   first line of text (or the top of the file/image). */
+/* Own messages: delivery/read ticks pinned to the VERY right edge of the
+   message column — independent of message length. The bubble normally
+   shrink-wraps to the text width, which made ticks follow the message
+   length; forcing it to span the column gives the ticks a stable anchor.
+   The meta then escapes the row's 40px right padding + the 48px action-bar
+   zone inside .msg-content, so every own message's ticks sit at the same x
+   position, aligned with the first line of text (or the top of the
+   file/image). */
+.msg-row.own .msg-content > .msg-bubble {
+  width: 100% !important;
+}
+
 .msg-row.own .msg-body-row {
   display: flex !important;
   align-items: flex-start;
+  position: relative;
 }
 
 .msg-row.own .msg-body-row > .msg-text,
@@ -335,7 +346,10 @@
 }
 
 .msg-row.own .msg-body-row > .msg-meta {
-  margin-left: auto !important;
+  position: absolute;
+  top: 0;
+  right: calc(-40px - 48px);
+  margin: 0 !important;
 }
 
 .msg-row.own .msg-attachment-row {
@@ -345,7 +359,7 @@
 .msg-row.own .msg-attachment-row > .msg-meta {
   position: absolute;
   top: 4px;
-  right: 0;
+  right: calc(-40px - 48px);
   margin: 0 !important;
 }
 
@@ -1079,6 +1093,12 @@
     border-radius: var(--radius-sm);
     background: transparent;
     box-shadow: none;
+  }
+
+  /* Mobile rows use 10px right padding (not 40px) — keep ticks flush right. */
+  .msg-row.own .msg-body-row > .msg-meta,
+  .msg-row.own .msg-attachment-row > .msg-meta {
+    right: calc(-10px - 48px);
   }
 
   .msg-row .msg-bubble,
