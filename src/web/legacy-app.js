@@ -1456,7 +1456,7 @@ function renderUserManagementPanel() {
               return;
             }
             await Promise.all([loadUserManagementSummary(), refreshAiUsageSummary()]);
-          });
+          }, { destructive: true });
         });
         actions.appendChild(deleteBtn);
       }
@@ -2019,6 +2019,33 @@ function channelPrefKey(groupId, userId = currentUser && currentUser.id) {
   return `${CHANNEL_PREF_KEY_PREFIX}${userId}:${groupId}`;
 }
 
+// v1.3.12: channel order is a per-group user preference (#main is always first
+// and can never move).
+function readTagOrder(groupId) {
+  if (!groupId) return null;
+  try {
+    const raw = localStorage.getItem(`gchat:tag-order:${groupId}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    return parsed.filter((topic) => normalizeHashtagTopic(topic) !== null);
+  } catch {
+    return null;
+  }
+}
+
+function writeTagOrder(groupId, topics) {
+  if (!groupId) return;
+  const normalized = topics
+    .map(normalizeHashtagTopic)
+    .filter((topic) => topic !== null && topic !== DEFAULT_TAG_TOPIC);
+  try {
+    localStorage.setItem(`gchat:tag-order:${groupId}`, JSON.stringify([DEFAULT_TAG_TOPIC, ...normalized]));
+  } catch {
+    /* ignore */
+  }
+}
+
 function readStoredChannel(groupId) {
   const key = channelPrefKey(groupId);
   if (!key) return DEFAULT_TAG_TOPIC;
@@ -2482,6 +2509,21 @@ function updateDeliveryForMessage(messageId, readCount) {
   renderDeliveryTicks(del, totalRecipients, readCount);
 }
 
+// v1.3.12: re-render every visible delivery-tick cluster for the active group
+// (member joins/leaves change the live tick count = members - 1).
+function refreshVisibleDeliveryTicks(groupId = currentGroupId) {
+  if (!groupId) return;
+  const cache = ensureGroupCacheEntry(groupId);
+  for (const msg of cache.messages || []) {
+    const delEl = $('del-' + msg.id);
+    if (!delEl) continue;
+    const total = resolveDeliveryRecipientCount(msg, groupId);
+    delEl.dataset.totalRecipients = String(total);
+    renderDeliveryTicks(delEl, total, Number(msg.readCount) || 0);
+  }
+  updateFirstUnreadButton();
+}
+
 function canTrackMessageRead(msg) {
   return !!(
     msg &&
@@ -2695,6 +2737,9 @@ function syncUnreadIndicators(forcedTotal = null) {
 }
 
 function sendNativeNotification(unreadCount, groupId, notification = null) {
+  // v1.3.12: the Settings > Notifications toggle disables desktop notifications
+  // entirely (per device) without touching the browser permission.
+  if (!isNativeNotificationEnabled()) return;
   const body = formatNotificationBody(unreadCount, notification);
   if (window.electronAPI) {
     window.electronAPI.showNotification({
@@ -2718,9 +2763,42 @@ function sendNativeNotification(unreadCount, groupId, notification = null) {
   }
 }
 
+// ── Desktop notifications toggle (Settings) ─────────────────────────────────
+const NOTIFICATIONS_ENABLED_KEY = 'gchat:notifications-enabled';
+
+function isNativeNotificationEnabled() {
+  try {
+    return localStorage.getItem(NOTIFICATIONS_ENABLED_KEY) !== '0';
+  } catch {
+    return true;
+  }
+}
+
+function syncNotificationsToggle() {
+  const toggle = $('notifications-enabled-toggle');
+  if (!toggle) return;
+  toggle.checked = isNativeNotificationEnabled();
+}
+
+function bindNotificationsToggle() {
+  const toggle = $('notifications-enabled-toggle');
+  if (!toggle || toggle.dataset.bound === '1') return;
+  toggle.dataset.bound = '1';
+  toggle.addEventListener('change', async () => {
+    try {
+      localStorage.setItem(NOTIFICATIONS_ENABLED_KEY, toggle.checked ? '1' : '0');
+    } catch { /* storage unavailable */ }
+    if (toggle.checked && 'Notification' in window && Notification.permission !== 'granted' && Notification.permission !== 'denied') {
+      try {
+        await Notification.requestPermission();
+      } catch { /* permission request unsupported */ }
+    }
+    if (toggle.checked) showToast('Notifications enabled', 'success');
+  });
+}
+
 // ── Page title notification ──────────────────────────────────────────────────
-function updatePageTitleNotification() {
-  if (unreadNotificationCount > 0) {
+function updatePageTitleNotification() {  if (unreadNotificationCount > 0) {
     if (!titleBlinkInterval) {
       let showingNotif = true;
       titleBlinkInterval = setInterval(() => {
@@ -2818,6 +2896,11 @@ function pinMessagesToBottom(skipAnimation = true) {
 function createAvatarImage(src) {
   const img = document.createElement('img');
   img.src = src;
+  if (src === GLOBAL_GROUP_ICON_SRC) {
+    // v1.3.12: the global icon art is white — light mode inverts it (smoothly
+    // via the CSS filter transition) so it reads as a dark mark.
+    img.className = 'gchat-global-icon';
+  }
   img.style.width = '100%';
   img.style.height = '100%';
   img.style.objectFit = 'cover';
@@ -2920,6 +3003,10 @@ let onlineUsers = new Set();
 let allMessages = [];
 let oldestMessageId = null;
 let loadingOlder = false;
+let disconnectStatusTimer = 0;
+// v1.3.12: channel chip drag-reorder state (#main is locked to the far left).
+let tagDragState = null;
+let tagDragSuppressUntil = 0;
 let originalPageTitle = 'GChat ';
 let unreadNotificationCount = 0;
 let titleBlinkInterval = null;
@@ -3107,17 +3194,31 @@ function resolveDeliveryRecipientCount(msg, groupId = currentGroupId) {
   const total = Math.max(0, Number(msg?.totalRecipients) || 0);
   if (!msg || msg.type === 'whisper') return total;
   if (isAiAssistantMessage(msg)) return total;
+  // v1.3.12: ticks are live — every non-whisper message shows the current
+  // member count minus the sender (sender never sees their own tick). A member
+  // joining/leaving re-renders ticks on ALL messages, old and new.
   const memberCount = getGroupMemberCount(groupId);
-  if (memberCount > 0 && total >= memberCount) return Math.max(0, memberCount - 1);
-  return total;
+  if (memberCount > 0) return Math.max(0, memberCount - 1);
+  return Math.max(0, total - 1);
 }
 
-function createLoadMoreIndicator() {
+function createLoadMoreIndicator(text = 'Loading older messages…', { id = 'load-more-indicator', hidden = true } = {}) {
   const indicator = document.createElement('div');
   indicator.className = 'load-more-indicator';
-  indicator.id = 'load-more-indicator';
-  indicator.hidden = true;
-  indicator.textContent = 'Loading older messages…';
+  if (id) indicator.id = id;
+  indicator.hidden = hidden;
+  indicator.textContent = text;
+  return indicator;
+}
+
+// v1.3.12: neutral channel-transcript placeholder — never the pagination copy.
+// The transcript itself is painted progressively from cache in chunks, so this
+// only appears while a channel's FIRST-ever server window is still loading.
+function createChannelLoadingIndicator() {
+  const indicator = createLoadMoreIndicator('Loading messages…', { id: '', hidden: false });
+  indicator.className = 'load-more-indicator channel-loading-indicator';
+  indicator.setAttribute('role', 'status');
+  indicator.setAttribute('aria-live', 'polite');
   return indicator;
 }
 
@@ -3352,6 +3453,7 @@ async function refreshCurrentGroupFromServer() {
         }
         updateFirstUnreadButton();
         renderTagFilters();
+        syncChannelEmptyState();
         observeCurrentGroupRowsForRead();
         return;
       }
@@ -3392,9 +3494,6 @@ async function ensureGroupDataPreloaded(groupId) {
 
   const preload = (async () => {
     if (cache.messages && cache.members) {
-      if (cache.rowsDirty || !cache.messageRows) {
-        await rebuildGroupMessageRows(groupId);
-      }
       return ensureGroupCacheEntry(groupId);
     }
     const pending = [];
@@ -3403,10 +3502,6 @@ async function ensureGroupDataPreloaded(groupId) {
     const results = await Promise.allSettled(pending);
     for (const result of results) {
       if (result.status === 'rejected') console.error('Group preload failed:', groupId, result.reason);
-    }
-    const refreshed = ensureGroupCacheEntry(groupId);
-    if (refreshed.messages && refreshed.members && (refreshed.rowsDirty || !refreshed.messageRows)) {
-      await rebuildGroupMessageRows(groupId);
     }
     return ensureGroupCacheEntry(groupId);
   })();
@@ -3425,6 +3520,10 @@ const GROUP_PREVIEW_EMPTY_TEXT = 'No messages yet';
 
 // Scroll threshold (px from top) that triggers loading older messages
 const SCROLL_LOAD_THRESHOLD = 1;
+// v1.3.12: how long to keep the "disconnected" banner hidden while Socket.IO
+// attempts an automatic reconnect (backgrounded tabs drop the transport on
+// heartbeat stall and recover within ~1s — the banner should never flash).
+const DISCONNECT_STATUS_GRACE_MS = 4000;
 const MOBILE_BREAKPOINT = 768;
 const MOBILE_KEYBOARD_MIN_HEIGHT = 120;
 const VIEWPORT_SYNC_DEBOUNCE_MS = 45;
@@ -3817,15 +3916,24 @@ function getAvailableGroupTags(groupId = currentGroupId) {
   if (!groupId) {
     return [...tags.entries()].map(([topic, label]) => ({ topic, label }));
   }
-  for (const topic of getKnownChannels(groupId)) {
-    tags.set(topic, formatHashtagLabel(topic));
-  }
+  const knownTopics = new Set();
+  for (const topic of getKnownChannels(groupId)) knownTopics.add(topic);
   const cache = ensureGroupCacheEntry(groupId);
   for (const msg of cache.messages || []) {
     const topic = resolveMessageTagTopic(msg);
-    if (!topic || tags.has(topic)) continue;
-    tags.set(topic, formatHashtagLabel(topic));
+    if (!topic || knownTopics.has(topic)) continue;
+    knownTopics.add(topic);
     rememberChannel(groupId, topic);
+  }
+  const storedOrder = readTagOrder(groupId) || [];
+  for (const topic of storedOrder) {
+    // Only order channels that still exist — never resurrect a deleted one.
+    if (topic === DEFAULT_TAG_TOPIC || !knownTopics.has(topic)) continue;
+    tags.set(topic, formatHashtagLabel(topic));
+    knownTopics.delete(topic);
+  }
+  for (const topic of knownTopics) {
+    tags.set(topic, formatHashtagLabel(topic));
   }
   const active = getActiveTagTopic();
   if (active && !tags.has(active)) tags.set(active, formatHashtagLabel(active));
@@ -3840,6 +3948,11 @@ async function renderActiveChannelStream() {
   const area = messagesArea();
   if (!area || !currentGroupId) return;
   const cache = ensureGroupCacheEntry(currentGroupId);
+  // v1.3.12: the pagination cursor must always track the oldest CACHED message
+  // of the group — a stale cursor from a previous channel/group caused the
+  // server's `before` query to re-return already-rendered messages (duplicate
+  // rows + date dividers).
+  oldestMessageId = cache.messages && cache.messages.length ? cache.messages[0].id : null;
   const channel = getActiveTagTopic();
   const all = cache.messages || [];
 
@@ -3856,7 +3969,15 @@ async function renderActiveChannelStream() {
   revokeBlobUrlsIn(area);
 
   if (!channelMsgs.length) {
-    area.replaceChildren(createLoadMoreIndicator());
+    // v1.3.12: only show "Loading messages…" while the group itself is still
+    // fetching its first window — a channel with no cached messages in an
+    // otherwise-loaded group is genuinely empty (old un-cached messages still
+    // arrive via scroll-up pagination).
+    if (all.length === 0) {
+      area.replaceChildren(createChannelLoadingIndicator());
+    } else {
+      area.replaceChildren();
+    }
     syncChannelEmptyState();
     updateFirstUnreadButton();
     return;
@@ -3950,10 +4071,15 @@ function syncChannelEmptyState() {
   if (!area || !currentGroupId) return;
   let empty = area.querySelector('.channel-empty-state');
   const visible = countVisibleChannelMessages();
+  // v1.3.12: once the channel stream settles, drop the loading placeholder so
+  // a genuinely empty channel only shows the empty state.
+  const loading = area.querySelector('.channel-loading-indicator');
   if (visible > 0) {
     if (empty) empty.remove();
+    if (loading) loading.remove();
     return;
   }
+  if (loading) loading.remove();
   if (!empty) {
     empty = document.createElement('div');
     empty.className = 'channel-empty-state';
@@ -4041,6 +4167,71 @@ function computeChannelUnreadCounts() {
   return counts;
 }
 
+// v1.3.12: left-click + hold a channel chip to drag-reorder it. #main is pinned
+// to the far left and can neither be dragged nor have chips dropped before it.
+// Order persists per group in localStorage.
+function bindTagFilterDrag() {
+  const wrap = $('chat-tag-filters');
+  if (!wrap || wrap.dataset.dragBound === '1') return;
+  wrap.dataset.dragBound = '1';
+
+  wrap.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
+    const chip = event.target.closest('.chat-tag-filter-btn');
+    if (!chip || chip.dataset.tagTopic === DEFAULT_TAG_TOPIC || !currentGroupId) return;
+    tagDragState = {
+      chip,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      moved: false,
+      groupId: currentGroupId,
+    };
+    try { chip.setPointerCapture(event.pointerId); } catch { /* pointer capture unsupported */ }
+  });
+
+  wrap.addEventListener('pointermove', (event) => {
+    const drag = tagDragState;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 6) return;
+    if (!drag.moved) {
+      drag.moved = true;
+      drag.chip.classList.add('dragging');
+      drag.chip.style.touchAction = 'none';
+    }
+    // Auto-scroll the chip row when the pointer nears either edge.
+    const wrapRect = wrap.getBoundingClientRect();
+    if (event.clientX > wrapRect.right - 28) wrap.scrollLeft += 12;
+    else if (event.clientX < wrapRect.left + 28) wrap.scrollLeft -= 12;
+    const under = document.elementFromPoint(event.clientX, event.clientY);
+    const target = under ? under.closest('.chat-tag-filter-btn') : null;
+    if (!target || target === drag.chip || target.dataset.tagTopic === DEFAULT_TAG_TOPIC) return;
+    const rect = target.getBoundingClientRect();
+    const before = event.clientX < rect.left + rect.width / 2;
+    if (before) target.parentNode.insertBefore(drag.chip, target);
+    else target.parentNode.insertBefore(drag.chip, target.nextSibling);
+  });
+
+  const finishDrag = (event) => {
+    const drag = tagDragState;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    tagDragState = null;
+    drag.chip.classList.remove('dragging');
+    drag.chip.style.touchAction = '';
+    try { drag.chip.releasePointerCapture(event.pointerId); } catch { /* pointer capture unsupported */ }
+    if (drag.moved) {
+      // Swallow the click that fires after the drag (no accidental channel switch).
+      tagDragSuppressUntil = Date.now() + 400;
+      const topics = Array.from(wrap.querySelectorAll('.chat-tag-filter-btn'))
+        .map((btn) => btn.dataset.tagTopic)
+        .filter(Boolean);
+      writeTagOrder(drag.groupId, topics);
+    }
+  };
+  wrap.addEventListener('pointerup', finishDrag);
+  wrap.addEventListener('pointercancel', finishDrag);
+}
+
 function renderTagFilters() {
   const wrap = $('chat-tag-filters');
   if (!wrap) return;
@@ -4068,6 +4259,8 @@ function renderTagFilters() {
     }
     btn.textContent = tag.label;
     btn.addEventListener('click', () => {
+      // v1.3.12: suppress the click that fires right after a drag-reorder.
+      if (Date.now() < tagDragSuppressUntil) return;
       // Cannot untoggle — selecting the active channel is a no-op switch.
       if (tag.topic === getActiveTagTopic()) return;
       selectTagChannel(tag.topic);
@@ -4280,7 +4473,6 @@ async function hideDisappearingMessageLocally(messageId, groupId = currentGroupI
     writeLocalGroupCache(cacheGroupId, cache);
     if (cacheGroupId === currentGroupId) {
       allMessages = cache.messages;
-      await rebuildGroupMessageRows(cacheGroupId);
       renderGroupFromCache(cacheGroupId);
     }
     await refreshGroupPreviewAfterHide(cacheGroupId);
@@ -4958,6 +5150,13 @@ document.addEventListener('DOMContentLoaded', async () => {
       observeCurrentGroupRowsForRead();
       void checkForHostedAppUpdate();
       syncStateOnFocus();
+      // v1.3.12: the tab came back — if the transport dropped while hidden and
+      // the reconnect still hasn't landed, surface the real status now.
+      if (!socket?.connected) {
+        updateConnectionStatusUi(socketDiagnostics.isBrowserOnline ? 'disconnected' : 'offline', socketDiagnostics.isBrowserOnline ? 'Disconnected' : 'Offline');
+      } else {
+        updateConnectionStatusUi('connected', 'Connected');
+      }
       return;
     }
     clearAllMessageVisibilityTimers();
@@ -4974,7 +5173,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (cache.messages) cache.rowsDirty = true;
       }
       if (currentGroupId) {
-        void rebuildGroupMessageRows(currentGroupId).then(() => renderGroupFromCache(currentGroupId));
+        void renderGroupFromCache(currentGroupId);
       }
       return;
     }
@@ -5582,9 +5781,9 @@ async function selectGroup(groupId) {
     cache.messages = mergeMessagesIntoCache(normalizedGroupId, window, { persist: false });
     cache.rowsDirty = true;
   }
-  const hadCompleteCache = !!(cache.messages && cache.members && cache.messageRows);
-  if (!cache.messages || !cache.members || !cache.messageRows) {
-    messagesArea().replaceChildren(createLoadMoreIndicator());
+  const hadCompleteCache = !!(cache.messages && cache.members);
+  if (!cache.messages || !cache.members) {
+    messagesArea().replaceChildren(createChannelLoadingIndicator());
     members = [];
     renderMembersList();
     renderWhisperPicker();
@@ -5654,9 +5853,11 @@ async function loadMessages(groupId, before) {
       // Merge instead of replace: preserve previously paginated history while
       // refreshing the newest server window (dedup by message id).
       const merged = mergeMessagesIntoCache(groupId, msgs);
-      cache.messageRows = await buildMessageRows(merged, groupId);
+      // v1.3.12: channel streams always rebuild from cache.messages — building
+      // all rows here was dead work that stalled group switches.
+      cache.messageRows = null;
+      cache.rowsDirty = true;
       cache.oldestMessageId = merged.length ? merged[0].id : null;
-      cache.rowsDirty = false;
       writeLocalGroupCache(groupId, cache);
       updateGroupUnseenCount(groupId, merged);
       await updateGroupPreviewFromMessage(groupId, merged.length ? merged[merged.length - 1] : null);
@@ -6552,6 +6753,10 @@ function renderInviteCandidateList(list, candidateGroups, targetUserId, targetNa
 }
 
 function confirmInviteMember(group, targetUserId, targetName, item) {
+  // v1.3.12: close the invite picker before the confirm dialog opens — the
+  // confirm used to be hidden behind it, forcing a manual close first.
+  const inviteModal = $('invite-modal');
+  if (inviteModal) inviteModal.hidden = true;
   showConfirm(
     'Invite to Chat',
     `Do you want to invite ${targetName} into ${group.name}?`,
@@ -6850,7 +7055,6 @@ async function startEditMessage(msg, currentPlaintext) {
           const index = (cache.messages || []).findIndex((entry) => entry.id === msg.id);
           if (index >= 0) cache.messages[index] = d.latest;
           cache.rowsDirty = true;
-          await rebuildGroupMessageRows(currentGroupId);
           renderGroupFromCache(currentGroupId);
         }
         showToast(d.error || 'Edit failed', 'error');
@@ -7484,6 +7688,8 @@ function initSocket() {
     socketDiagnostics.lastConnectAt = new Date().toISOString();
     socketDiagnostics.reconnectAttempts = 0;
     socketDiagnostics.reconnectFailed = false;
+    clearTimeout(disconnectStatusTimer);
+    disconnectStatusTimer = 0;
     updateConnectionTransport();
     updateConnectionStatusUi('connected', 'Connected');
     console.info('[socket] connect', {
@@ -7510,7 +7716,16 @@ function initSocket() {
     // Server-side rooms die with the socket — re-join everything on reconnect.
     joinedRoomIds = new Set();
     updateConnectionTransport();
-    updateConnectionStatusUi(socketDiagnostics.isBrowserOnline ? 'disconnected' : 'offline', socketDiagnostics.isBrowserOnline ? 'Disconnected' : 'Offline');
+    // v1.3.12: backgrounded tabs stall the heartbeat (browser timer
+    // throttling), the server drops the transport, and Socket.IO reconnects
+    // within a second. Don't flash "Reconnecting, transport closed" at the
+    // user — defer the status/banner until the reconnect window has passed.
+    clearTimeout(disconnectStatusTimer);
+    disconnectStatusTimer = setTimeout(() => {
+      disconnectStatusTimer = 0;
+      if (document.visibilityState === 'hidden') return;
+      updateConnectionStatusUi(socketDiagnostics.isBrowserOnline ? 'disconnected' : 'offline', socketDiagnostics.isBrowserOnline ? 'Disconnected' : 'Offline');
+    }, DISCONNECT_STATUS_GRACE_MS);
     console.warn('[socket] disconnect', { reason });
     pendingDisappearingStartMessageIds = new Set();
     // v1.3.9: receipts emitted into a dying socket must be retried after the
@@ -7523,15 +7738,21 @@ function initSocket() {
   socket.on('connect_error', (error) => {
     socketDiagnostics.lastConnectError = error?.message || 'unknown';
     socketDiagnostics.lastConnectErrorAt = new Date().toISOString();
-    updateConnectionStatusUi(socketDiagnostics.isBrowserOnline ? 'error' : 'offline', socketDiagnostics.isBrowserOnline ? 'Connection error' : 'Offline');
+    // v1.3.12: no banner flashes while the tab is backgrounded — Socket.IO is
+    // still auto-retrying; the status syncs when the tab comes back.
+    if (document.visibilityState !== 'hidden') {
+      updateConnectionStatusUi(socketDiagnostics.isBrowserOnline ? 'error' : 'offline', socketDiagnostics.isBrowserOnline ? 'Connection error' : 'Offline');
+    }
     console.warn('[socket] connect_error', { message: socketDiagnostics.lastConnectError });
     renderDiagnosticsPanel();
   });
 
   socket.io.on('reconnect_attempt', (attempt) => {
     socketDiagnostics.reconnectAttempts = Number(attempt) || socketDiagnostics.reconnectAttempts + 1;
-    updateConnectionStatusUi('reconnecting');
-    updateReconnectBanner();
+    if (document.visibilityState !== 'hidden') {
+      updateConnectionStatusUi('reconnecting');
+      updateReconnectBanner();
+    }
     console.info('[socket] reconnect_attempt', { attempt: socketDiagnostics.reconnectAttempts });
     renderDiagnosticsPanel();
   });
@@ -7870,26 +8091,11 @@ function initSocket() {
       cache.members.push({ id: userId, username, iconColor, profilePicture: profilePicture || null, isAdministrator: false });
       writeLocalGroupCache(groupId, cache);
     }
-    // v1.3.12: a new member raises the delivery-tick total for every previous
-    // non-whisper message (they do NOT count as having read them). Whisper
-    // totals are recipient-scoped and stay exact.
-    if (String(userId) !== String(currentUser?.id)) {
-      for (const msg of cache.messages || []) {
-        if (msg.type === 'whisper') continue;
-        msg.totalRecipients = Math.max(0, Number(msg.totalRecipients) || 0) + 1;
-      }
-      writeLocalGroupCache(groupId, cache);
-      if (groupId === currentGroupId) {
-        // Re-render the visible tick clusters with the new totals.
-        for (const msg of cache.messages || []) {
-          const delEl = $('del-' + msg.id);
-          if (!delEl) continue;
-          const total = Math.max(0, Number(msg.totalRecipients) || 0);
-          delEl.dataset.totalRecipients = String(total);
-          renderDeliveryTicks(delEl, total, Number(msg.readCount) || 0);
-        }
-        updateFirstUnreadButton();
-      }
+    // v1.3.12: ticks are live member-count driven (members - 1) — joining
+    // members re-render every visible non-whisper tick cluster at the new count.
+    // (The server still bumps total_recipients so delivery data stays exact.)
+    if (groupId === currentGroupId) {
+      refreshVisibleDeliveryTicks();
     }
     if (groupId !== currentGroupId) return;
     addSystemMessage(username + ' joined the group chat');
@@ -7957,6 +8163,9 @@ function initSocket() {
     renderMembersList();
     renderWhisperPicker();
     $('chat-member-count').textContent = members.length + ' member' + (members.length !== 1 ? 's' : '');
+    // v1.3.12: ticks track the live member count — a leave drops every visible
+    // tick cluster by one.
+    refreshVisibleDeliveryTicks();
   });
 
   socket.on('member_kicked', ({ userId, groupId }) => {
@@ -7977,9 +8186,16 @@ function initSocket() {
     if (groupId !== currentGroupId) return;
     const m = members.find(x => x.id === userId);
     if (m) addSystemMessage('🚫 ' + m.username + ' was removed from the group');
-    members = members.filter(x => x.id !== userId);
+    const cache = ensureGroupCacheEntry(groupId);
+    if (cache.members) {
+      cache.members = cache.members.filter(x => x.id !== userId);
+      writeLocalGroupCache(groupId, cache);
+    }
+    members = cache.members || members.filter(x => x.id !== userId);
     renderMembersList();
     renderWhisperPicker();
+    // v1.3.12: live ticks track the member count.
+    refreshVisibleDeliveryTicks();
   });
 
   socket.on('group_disbanded', ({ groupId }) => {
@@ -8257,7 +8473,7 @@ async function kickMember(userId, username) {
       const d = await res.json().catch(() => ({}));
       showToast(d.error || 'Failed to kick member', 'error');
     }
-  });
+  }, { destructive: true });
 }
 
 async function updateMemberAdministrator(member, isAdministrator) {
@@ -8282,13 +8498,15 @@ async function updateMemberAdministrator(member, isAdministrator) {
       'success'
     );
   });
-}
-
-// ── Generic confirm modal ─────────────────────────────────────────────────────
+}// ── Generic confirm modal ─────────────────────────────────────────────────────
 let confirmCallback = null;
-function showConfirm(title, message, onConfirm) {
+// v1.3.12: red confirm buttons are reserved for destructive actions — invite,
+// promote, and other non-destructive confirms use the theme's primary button.
+function showConfirm(title, message, onConfirm, options = {}) {
   $('confirm-title').textContent = title;
   $('confirm-message').textContent = message;
+  const okBtn = $('confirm-ok-btn');
+  if (okBtn) okBtn.className = options.destructive ? 'btn-danger' : 'btn-primary';
   $('confirm-modal').hidden = false;
   confirmCallback = onConfirm;
 }
@@ -8730,6 +8948,7 @@ function openProfileModal() {
   if (colorInput && swatch) swatch.style.background = colorInput.value;
   if (colorInput && value) value.textContent = String(colorInput.value || '').toUpperCase();
   renderProfileAiUsage();
+  syncNotificationsToggle();
   if (window.electronAPI?.getUpdateStatus) {
     void window.electronAPI.getUpdateStatus().then(renderDesktopUpdateStatus).catch(() => {});
   } else {
@@ -9208,6 +9427,7 @@ function setupEventListeners() {
   // Profile modal
   $('sidebar-user-btn').addEventListener('click', openProfileModal);
   $('profile-close-btn').addEventListener('click', () => $('profile-modal').hidden = true);
+  bindNotificationsToggle();
   bindDesktopUpdateUi();
 
   document.querySelectorAll('.modal-overlay').forEach((modal) => {
@@ -9401,7 +9621,7 @@ function setupEventListeners() {
       $('profile-modal').hidden = true;
       const res = await fetch('/api/auth/account', { method: 'DELETE', headers: apiHeaders() });
       if (res.ok) window.location.href = 'index.html';
-    });
+    }, { destructive: true });
   });
 
   // Create group
@@ -9457,7 +9677,8 @@ function setupEventListeners() {
       'This will reset local GChat data and restart the app. Your login session and local user settings will be kept. Continue?',
       async () => {
         await clearCacheAndRestartApp();
-      }
+      },
+      { destructive: true }
     );
   });
   let joinGroupInFlight = false;
@@ -9720,7 +9941,8 @@ function setupEventListeners() {
           const d = await res.json().catch(() => ({}));
           showToast(d.error || 'Failed', 'error');
         }
-      }
+      },
+      { destructive: true }
     );
   });
 
@@ -9827,7 +10049,7 @@ function setupEventListeners() {
         const d = await res.json().catch(() => ({}));
         showToast(d.error || 'Failed', 'error');
       }
-    });
+    }, { destructive: true });
   });
 
   // Leave group
@@ -9853,7 +10075,7 @@ function setupEventListeners() {
         const d = await res.json().catch(() => ({}));
         showToast(d.error || 'Failed', 'error');
       }
-    });
+    }, { destructive: true });
   });
 
   // Confirm modal
@@ -9921,7 +10143,7 @@ function setupEventListeners() {
         const data = await res.json().catch(() => ({}));
         showToast(data.error || 'Delete failed', 'error');
       }
-    });
+    }, { destructive: true });
   });
 
   $('ctx-copy').addEventListener('click', () => {
@@ -9959,7 +10181,8 @@ function setupEventListeners() {
         : `Remove empty channel ${formatHashtagLabel(topic)}?`,
       async () => {
         await clearTagMessages(topic);
-      }
+      },
+      { destructive: true }
     );
   });
 
@@ -10145,6 +10368,8 @@ function setupEventListeners() {
 
   // Scroll to bottom button
   $('scroll-bottom-btn').addEventListener('click', () => scrollToBottom());
+  // v1.3.12: drag channels to reorder them (#main is pinned to the far left).
+  bindTagFilterDrag();
   // v1.3.12: jump to the first unread message of the active channel.
   $('scroll-first-unread-btn').addEventListener('click', jumpToFirstUnread);
 
@@ -10280,10 +10505,18 @@ async function loadOlderMessages(cursorOverride = null, retried = false) {
     const channel = getActiveTagTopic();
     const channelMsgs = msgs.filter((msg) => resolveMessageTagTopic(msg) === channel);
 
+    // v1.3.12: never prepend rows that are already rendered — a stale cursor
+    // (channel/group switches) can make the server re-return known messages.
+    // Merge them into the cache but skip the DOM insert entirely.
+    const knownIds = new Set((ensureGroupCacheEntry(currentGroupId).messages || []).map((m) => String(m.id)));
+    const freshChannelMsgs = channelMsgs.filter((m) => !knownIds.has(String(m.id)));
+
     const area = messagesArea();
     const prevScrollHeight = area.scrollHeight;
 
-    const rows = await buildMessageRows(channelMsgs, currentGroupId);
+    const rows = freshChannelMsgs.length
+      ? await buildMessageRows(freshChannelMsgs, currentGroupId)
+      : [];
 
     // Assemble into a fragment (single DOM mutation, no scroll drift)
     const fragment = document.createDocumentFragment();
@@ -10291,7 +10524,7 @@ async function loadOlderMessages(cursorOverride = null, retried = false) {
       if (!row) continue;
       if (row.classList && row.classList.contains('msg-row')) {
         const msgId = row.dataset.msgId;
-        const srcMsg = channelMsgs.find((m) => String(m.id) === String(msgId));
+        const srcMsg = freshChannelMsgs.find((m) => String(m.id) === String(msgId));
         if (srcMsg) observeMessageForRead(row, srcMsg);
       }
       fragment.appendChild(row);

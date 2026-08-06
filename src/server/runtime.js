@@ -158,7 +158,10 @@ const io = new Server(server, {
   maxHttpBufferSize: MAX_SOCKET_PAYLOAD_BYTES,
   transports: ['polling', 'websocket'],
   pingInterval: 25000,
-  pingTimeout: 30000,
+  // v1.3.12: 60s tolerance for throttled background tabs — browsers clamp
+  // timers while hidden, which used to kill the transport mid-heartbeat and
+  // trigger a visible "Reconnecting, transport closed" on every return.
+  pingTimeout: 60000,
   connectionStateRecovery: {
     maxDisconnectionDuration: 2 * 60 * 1000,
     // v1.3.12 (no version bump): recovery must RE-RUN the auth middleware.

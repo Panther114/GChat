@@ -470,6 +470,15 @@ body.sidebar-resizing * {
   display: block;
   object-fit: contain;
 }
+/* v1.3.12: the GChat Global channel mark is white artwork — invert it for
+   light mode with a smooth filter transition instead of a hard asset swap. */
+img.gchat-global-icon {
+  transition: filter 220ms ease-out;
+  filter: invert(0);
+}
+:root[data-theme='light'] img.gchat-global-icon {
+  filter: invert(1);
+}
 .brand-name {
   font-family: 'Botanical', "Roca Regular", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
   font-size: 19px;
@@ -803,6 +812,19 @@ body.sidebar-resizing * {
 .chat-tag-filter-btn:hover { filter: brightness(1.08); }
 .chat-tag-filter-btn:active { transform: scale(.97); }
 .chat-tag-filter-btn.active { background: var(--tag-filter-active); }
+/* v1.3.12: drag-reorder — #main stays pinned to the far left. */
+.chat-tag-filter-btn { cursor: grab; }
+.chat-tag-filter-btn:active { cursor: grabbing; }
+.chat-tag-filter-btn.dragging {
+  opacity: .55;
+  transform: scale(1.06);
+  box-shadow: 0 6px 14px rgba(0, 0, 0, .35);
+  transition: filter .15s, transform .15s, opacity .15s, box-shadow .15s;
+  z-index: 2;
+}
+.chat-tag-filter-btn[data-tag-topic='main'] {
+  cursor: default;
+}
 
 .reconnect-banner {
   display: flex;

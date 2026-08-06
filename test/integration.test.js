@@ -619,6 +619,20 @@ test('socket connection-state recovery re-authenticates: a quick reconnect keeps
   memberSocket.close();
 });
 
+test('heartbeat hardening: server pingTimeout tolerates throttled background tabs (no transport-drop flash)', async () => {
+  // v1.3.12: browser timer throttling while the tab/app is backgrounded stalls
+  // client heartbeats. A short pingTimeout killed the transport on every
+  // return-to-app, flashing "Reconnecting, transport closed". The timeout must
+  // stay generous (>= 60s) — the Socket.IO recovery window is 120s.
+  const { io: socketServer } = require('../server');
+  const engineOpts = socketServer?.engine?.opts || {};
+  assert.ok(
+    Number(engineOpts.pingTimeout) >= 60000,
+    `pingTimeout must tolerate backgrounded tabs (got ${engineOpts.pingTimeout})`
+  );
+  assert.ok(Number(engineOpts.pingInterval) > 0, 'pingInterval must stay configured');
+});
+
 test('new GChat Global registrations announce a member_joined event to the global room', async () => {
   const { io: socketClient } = require('socket.io-client');
   const url = await ensureServerListening();

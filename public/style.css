@@ -579,6 +579,13 @@ body.sidebar-resizing * {
   display: block;
   object-fit: contain;
 }
+img.gchat-global-icon {
+  transition: filter 220ms ease-out;
+  filter: invert(0);
+}
+:root[data-theme=light] img.gchat-global-icon {
+  filter: invert(1);
+}
 .brand-name {
   font-family:
     "Botanical",
@@ -1009,6 +1016,26 @@ body.sidebar-resizing * {
 }
 .chat-tag-filter-btn.active {
   background: var(--tag-filter-active);
+}
+.chat-tag-filter-btn {
+  cursor: grab;
+}
+.chat-tag-filter-btn:active {
+  cursor: grabbing;
+}
+.chat-tag-filter-btn.dragging {
+  opacity: .55;
+  transform: scale(1.06);
+  box-shadow: 0 6px 14px rgba(0, 0, 0, .35);
+  transition:
+    filter .15s,
+    transform .15s,
+    opacity .15s,
+    box-shadow .15s;
+  z-index: 2;
+}
+.chat-tag-filter-btn[data-tag-topic=main] {
+  cursor: default;
 }
 .reconnect-banner {
   display: flex;

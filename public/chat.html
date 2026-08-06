@@ -371,6 +371,17 @@
 
         <p class="form-error" id="profile-error"></p>
 
+        <div class="profile-row" id="profile-notifications-row">
+          <div class="profile-row-label">Notifications</div>
+          <div class="profile-row-main">
+            <label class="toggle-label toggle-switch-row notifications-toggle-row" for="notifications-enabled-toggle">
+              <span class="toggle-label-text">Windows / desktop notifications</span>
+              <input type="checkbox" id="notifications-enabled-toggle" checked />
+              <span class="toggle-switch-ui" aria-hidden="true"></span>
+            </label>
+          </div>
+        </div>
+
         <div class="profile-row" id="desktop-update-row" hidden>
           <div class="profile-row-label">Updates</div>
           <div class="profile-row-main profile-update-stack">
@@ -402,7 +413,7 @@
       <p id="confirm-message"></p>
       <div class="modal-actions">
         <button class="btn-secondary" id="confirm-cancel-btn">Cancel</button>
-        <button class="btn-danger" id="confirm-ok-btn">Confirm</button>
+        <button class="btn-primary" id="confirm-ok-btn">Confirm</button>
       </div>
     </div>
   </div>
