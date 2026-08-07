@@ -16,7 +16,9 @@ module.exports = defineConfig({
     trace: 'retain-on-failure',
   },
   webServer: {
-    command: 'npm run dev:web:e2e',
+    // v1.3.12: wipe the dev e2e DB first so read cursors / messages never
+    // leak across runs (deterministic unread-badge assertions).
+    command: 'node scripts/reset-e2e-db.js && npm run dev:web:e2e',
     env: {
       ...process.env,
       GROUP_KEY_ESCROW_MASTER_KEY: process.env.GROUP_KEY_ESCROW_MASTER_KEY || Buffer.alloc(32, 8).toString('base64url'),

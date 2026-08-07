@@ -969,6 +969,22 @@ db.exec(`
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+
+  -- v1.3.12: per-channel read cursors. Unread accounting moved from per-message
+  -- message_reads rows (device-local, never reconciled) to a monotonic cursor
+  -- per (group, user, channel): "everything up to (last_read_created_at,
+  -- last_read_id) in this channel is read". tag_index is the server-side
+  -- channel identity (blind index; NULL = #main for untagged/legacy traffic).
+  -- message_reads remains only for author-side delivery ticks.
+  CREATE TABLE IF NOT EXISTS channel_read_cursors (
+    group_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    tag_index TEXT,
+    last_read_created_at TEXT NOT NULL,
+    last_read_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (group_id, user_id, tag_index)
+  );
 `);
 
 // Safe migrations — each wrapped in try/catch so re-runs are harmless
@@ -1048,6 +1064,35 @@ try {
     .run('crypto_epoch', String(APP_CONFIG.cryptoEpoch));
 } catch (err) {
   console.error('Failed to initialize crypto epoch:', err);
+}
+
+// One-shot data migration: normalize legacy messages.created_at values to the
+// ISO-8601 format emitted by `new Date().toISOString()` (e.g.
+// "2026-08-06T15:05:08.233Z"). Real-time broadcasts always send ISO timestamps,
+// but inserts used to rely on SQLite's CURRENT_TIMESTAMP default which stores
+// "2026-08-06 15:05:08" (space separator, second precision, no zone). That
+// format mismatch silently broke the `?since=` incremental-sync cursor
+// (`WHERE created_at > @since`) — a space-format DB row sorts BEFORE any
+// T-format cursor, so resyncs returned zero rows and messages vanished from
+// clients. Inserts now persist ISO explicitly; this normalizes historical rows
+// so the pagination index and cursor comparisons stay consistent and indexed.
+try {
+  const normalizedFlag = db.prepare("SELECT value FROM _config WHERE key = 'messages_created_at_iso_normalized'").get();
+  if (!normalizedFlag) {
+    const normalizeTx = db.transaction(() => {
+      const result = db.prepare(`
+        UPDATE messages
+        SET created_at = REPLACE(created_at, ' ', 'T') || '.000Z'
+        WHERE created_at LIKE '% %'
+      `).run();
+      db.prepare("INSERT OR IGNORE INTO _config (key, value) VALUES ('messages_created_at_iso_normalized', ?)")
+        .run(String(result.changes));
+    });
+    normalizeTx();
+    console.log('[migrate] Normalized messages.created_at to ISO format (one-shot).');
+  }
+} catch (err) {
+  console.error('Failed to normalize messages.created_at timestamps:', err);
 }
 
 // Ensure a stable session secret persists across restarts even without SESSION_SECRET env var
@@ -1140,25 +1185,38 @@ const stmts = {
   getUserGroups: db.prepare(`
     SELECT g.id, g.name, g.code, g.created_by, g.created_at, g.allow_member_clear, g.allow_member_clear_tag, g.allow_member_export, g.allow_member_kick, g.allow_member_invite, g.ai_enabled, g.group_color, g.group_icon, g.key_commitment, g.encryption_version, gm.is_admin,
            (
+             -- v1.3.12: cursor-based unread (exact up to the 999 display cap;
+             -- scans newest-first and stops after 1000 unread rows per group).
              SELECT COUNT(*)
-             FROM messages m
-             LEFT JOIN message_reads mr
-               ON mr.message_id = m.id AND mr.user_id = gm.user_id
-             LEFT JOIN disappearing_message_states dms
-               ON dms.message_id = m.id AND dms.user_id = gm.user_id
-              WHERE m.group_id = g.id
-                AND m.sender_id != gm.user_id
-                AND mr.message_id IS NULL
-                AND (
-                  m.type != 'whisper'
-                  OR EXISTS(
-                    SELECT 1
-                    FROM json_each(COALESCE(m.whisper_to, '[]')) AS whisper_recipient
-                    WHERE whisper_recipient.value = CAST(gm.user_id AS TEXT)
-                  )
-                )
-                AND (m.is_disappearing = 0 OR dms.hidden_at IS NULL)
-            ) AS unread_count
+             FROM (
+               SELECT 1
+               FROM messages m
+               LEFT JOIN disappearing_message_states dms
+                 ON dms.message_id = m.id AND dms.user_id = gm.user_id
+               WHERE m.group_id = g.id
+                 AND m.sender_id != gm.user_id
+                 AND (
+                   m.type != 'whisper'
+                   OR EXISTS(
+                     SELECT 1
+                     FROM json_each(COALESCE(m.whisper_to, '[]')) AS whisper_recipient
+                     WHERE whisper_recipient.value = CAST(gm.user_id AS TEXT)
+                   )
+                 )
+                 AND (m.is_disappearing = 0 OR dms.hidden_at IS NULL)
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM channel_read_cursors crc
+                   WHERE crc.group_id = g.id
+                     AND crc.user_id = gm.user_id
+                     AND crc.tag_index IS m.tag_index
+                     AND (m.created_at < crc.last_read_created_at
+                          OR (m.created_at = crc.last_read_created_at AND m.id <= crc.last_read_id))
+                 )
+               ORDER BY m.created_at DESC, m.id DESC
+               LIMIT 1000
+             )
+           ) AS unread_count
     FROM group_chats g
     JOIN group_members gm ON g.id = gm.group_id
     WHERE gm.user_id = ?
@@ -1382,7 +1440,11 @@ const stmts = {
      LEFT JOIN disappearing_message_states dms
        ON dms.message_id = m.id AND dms.user_id = @viewerId
      WHERE m.group_id = @groupId
-       AND m.created_at > @since
+       -- v1.3.12: composite (created_at, id) cursor. A time-only cursor could
+       -- silently skip every message that shared a millisecond with the cursor
+       -- boundary (each device permanently missing different messages), because
+       -- the tie-break existed in ORDER BY but not in the WHERE clause.
+       AND (m.created_at > @since OR (m.created_at = @since AND m.id > @sinceId))
        AND (
          m.type != 'whisper'
          OR m.sender_id = @viewerId
@@ -1434,15 +1496,15 @@ const stmts = {
     LIMIT 1
   `),
   insertMessage: db.prepare(
-    'INSERT INTO messages (id, group_id, sender_id, encrypted_content, iv, type, reply_to, filename, whisper_to, hashtag, is_disappearing, disappearing_duration_ms, total_recipients, ai_meta, ai_mention) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    'INSERT INTO messages (id, group_id, sender_id, encrypted_content, iv, type, reply_to, filename, whisper_to, hashtag, is_disappearing, disappearing_duration_ms, total_recipients, ai_meta, ai_mention, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
   ),
   insertV2Message: db.prepare(`
     INSERT INTO messages (
       id, group_id, sender_id, encrypted_content, iv, type, reply_to_id,
       whisper_to, is_disappearing, disappearing_duration_ms, total_recipients,
       encryption_version, key_version, revision, encrypted_metadata, metadata_iv,
-      tag_index, spam_signature
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      tag_index, spam_signature, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `),
   setAiMessageMeta: db.prepare('UPDATE messages SET ai_meta = ?, ai_mention = ? WHERE id = ?'),
   findMessageById: db.prepare('SELECT * FROM messages WHERE id = ?'),
@@ -1465,6 +1527,97 @@ const stmts = {
   insertDisappearingState: db.prepare(`
     INSERT INTO disappearing_message_states (message_id, user_id, started_at, expires_at, hidden_at)
     VALUES (?, ?, ?, ?, ?)
+  `),
+  updateDisappearingStateStart: db.prepare(`
+    UPDATE disappearing_message_states
+    SET started_at = COALESCE(started_at, ?),
+        expires_at = COALESCE(expires_at, ?)
+    WHERE message_id = ? AND user_id = ?
+  `),
+  // v1.3.12: per-channel read cursors (unread accounting) + bounded counts.
+  // Counts scan newest-first and stop after 1000 unread rows, so a group badge
+  // is exact up to the 999 display cap and never scans a full group.
+  upsertChannelReadCursor: db.prepare(`
+    INSERT INTO channel_read_cursors (group_id, user_id, tag_index, last_read_created_at, last_read_id, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(group_id, user_id, tag_index)
+    DO UPDATE SET last_read_created_at = excluded.last_read_created_at,
+                  last_read_id = excluded.last_read_id,
+                  updated_at = excluded.updated_at
+  `),
+  getChannelReadCursor: db.prepare(`
+    SELECT last_read_created_at, last_read_id
+    FROM channel_read_cursors
+    WHERE group_id = ? AND user_id = ? AND tag_index IS ?
+  `),
+  deleteChannelReadCursorsForGroupUser: db.prepare(`
+    DELETE FROM channel_read_cursors WHERE group_id = ? AND user_id = ?
+  `),
+  deleteChannelReadCursorsByGroup: db.prepare(`
+    DELETE FROM channel_read_cursors WHERE group_id = ?
+  `),
+  getGroupUnreadCount: db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM (
+      SELECT 1
+      FROM messages m
+      LEFT JOIN disappearing_message_states dms
+        ON dms.message_id = m.id AND dms.user_id = @viewerId
+      WHERE m.group_id = @groupId
+        AND m.sender_id != @viewerId
+        AND (
+          m.type != 'whisper'
+          OR EXISTS(
+            SELECT 1
+            FROM json_each(COALESCE(m.whisper_to, '[]')) AS whisper_recipient
+            WHERE whisper_recipient.value = CAST(@viewerId AS TEXT)
+          )
+        )
+        AND (m.is_disappearing = 0 OR dms.hidden_at IS NULL)
+        AND NOT EXISTS (
+          SELECT 1
+          FROM channel_read_cursors crc
+          WHERE crc.group_id = m.group_id
+            AND crc.user_id = @viewerId
+            AND crc.tag_index IS m.tag_index
+            AND (m.created_at < crc.last_read_created_at
+                 OR (m.created_at = crc.last_read_created_at AND m.id <= crc.last_read_id))
+        )
+      ORDER BY m.created_at DESC, m.id DESC
+      LIMIT 1000
+    )
+  `),
+  getChannelUnreadCount: db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM (
+      SELECT 1
+      FROM messages m
+      LEFT JOIN disappearing_message_states dms
+        ON dms.message_id = m.id AND dms.user_id = @viewerId
+      WHERE m.group_id = @groupId
+        AND m.sender_id != @viewerId
+        AND m.tag_index IS @tagIndex
+        AND (
+          m.type != 'whisper'
+          OR EXISTS(
+            SELECT 1
+            FROM json_each(COALESCE(m.whisper_to, '[]')) AS whisper_recipient
+            WHERE whisper_recipient.value = CAST(@viewerId AS TEXT)
+          )
+        )
+        AND (m.is_disappearing = 0 OR dms.hidden_at IS NULL)
+        AND NOT EXISTS (
+          SELECT 1
+          FROM channel_read_cursors crc
+          WHERE crc.group_id = m.group_id
+            AND crc.user_id = @viewerId
+            AND crc.tag_index IS m.tag_index
+            AND (m.created_at < crc.last_read_created_at
+                 OR (m.created_at = crc.last_read_created_at AND m.id <= crc.last_read_id))
+        )
+      ORDER BY m.created_at DESC, m.id DESC
+      LIMIT 1000
+    )
   `),
   updateDisappearingStateStart: db.prepare(`
     UPDATE disappearing_message_states
@@ -1714,7 +1867,8 @@ const groupCode = 'inca01';
       metadata.encryptedContent,
       metadata.iv,
       tagIndex,
-      null
+      null,
+      fixture.createdAt
     );
     db.prepare('UPDATE messages SET created_at = ?, edited_at = ? WHERE id = ?').run(fixture.createdAt, fixture.editedAt || null, fixture.id);
   }
@@ -3114,9 +3268,19 @@ app.get('/api/groups/:groupId/messages', (req, res) => {
       limit,
     }).reverse();
   } else if (req.query.since) {
-    const since = String(req.query.since).slice(0, 64);
+    // Normalize a legacy space-separated cursor ("YYYY-MM-DD HH:MM:SS") to the
+    // ISO format now stored in the DB, so a stale client cursor can never
+    // silently exclude newer messages from the incremental sync.
+    let since = String(req.query.since).slice(0, 64);
+    if (since.length === 19 && since[10] === ' ') {
+      since = `${since.slice(0, 10)}T${since.slice(11)}.000Z`;
+    }
+    // v1.3.12: composite cursor — (created_at, id) so messages sharing the
+    // cursor's millisecond are included deterministically instead of skipped.
+    const sinceId = String(req.query.sinceId || '').slice(0, 64);
     rows = stmts.getMessagesAfter.all({
       since,
+      sinceId,
       viewerId: userId,
       groupId,
       limit,
@@ -3147,6 +3311,32 @@ app.get('/api/groups/:groupId/messages/:messageId', (req, res) => {
   const row = stmts.getSingleMessage.get({ messageId, viewerId: userId, groupId });
   if (!row) return res.status(404).json({ error: 'Message not found' });
   res.json(formatMessage(row));
+});
+
+// GET /api/groups/:groupId/unread — per-channel unread counts (capped at 999)
+// for the caller, keyed by blind tag_index ('' = #main). The caller supplies
+// the tag indexes of the channels it can display (the server cannot read the
+// encrypted channel topics); #main is always included. One indexed, bounded
+// query per tag — never a full-group scan.
+app.get('/api/groups/:groupId/unread', (req, res) => {
+  const { groupId } = req.params;
+  const userId = req.session.userId;
+  if (!stmts.isMember.get(groupId, userId)) {
+    return res.status(403).json({ error: 'Not a member of this group' });
+  }
+  markExpiredDisappearingMessagesHidden(userId);
+  const tags = String(req.query.tags || '')
+    .split(',')
+    .map((tag) => tag.trim().slice(0, 64))
+    .filter(Boolean)
+    .slice(0, 60);
+  const readChannelCount = (tagIndex) => {
+    const row = stmts.getChannelUnreadCount.get({ groupId, viewerId: userId, tagIndex });
+    return Math.min(999, Math.max(0, Number(row?.count) || 0));
+  };
+  const counts = { '': readChannelCount(null) };
+  for (const tag of tags) counts[tag] = readChannelCount(tag);
+  res.json({ counts });
 });
 
 // DELETE /api/groups/:groupId/messages — clear all messages (owner, or members if allowed)
@@ -3292,6 +3482,8 @@ app.delete('/api/groups/:groupId/leave', (req, res) => {
   }
 
   stmts.deleteMember.run(groupId, userId);
+  // v1.3.12: a departing member's per-channel read cursors are gone with them.
+  stmts.deleteChannelReadCursorsForGroupUser.run(groupId, userId);
 
   const user = stmts.findUserById.get(userId);
   io.to(groupId).emit('member_left', {
@@ -3436,7 +3628,8 @@ app.post('/api/groups/:groupId/upload', uploadRawBodyParser, (req, res) => {
       encryptedMetadata,
       metadataIv,
       tagIndex || null,
-      null
+      null,
+      createdAt
     );
   } catch (err) {
     console.error('DB insert file error:', err);
@@ -3528,6 +3721,8 @@ app.delete('/api/groups/:groupId/members/:userId', (req, res) => {
   }
 
   stmts.deleteMember.run(groupId, targetUserId);
+  // v1.3.12: a removed member's read cursors are gone with them.
+  stmts.deleteChannelReadCursorsForGroupUser.run(groupId, targetUserId);
   detachUserFromGroupRoom(groupId, targetUserId);
   io.to(groupId).emit('member_kicked', { userId: targetUserId, groupId });
   res.json({ ok: true });
@@ -3546,6 +3741,8 @@ app.delete('/api/groups/:groupId', (req, res) => {
 
   stmts.deleteGroupMessages.run(groupId);
   stmts.deleteGroupMembers.run(groupId);
+  // v1.3.12: read cursors belong to the group — wiped with it.
+  stmts.deleteChannelReadCursorsByGroup.run(groupId);
   stmts.deleteGroup.run(groupId);
 
   io.to(groupId).emit('group_disbanded', { groupId });
@@ -4047,7 +4244,8 @@ io.on('connection', (socket) => {
         encryptedMetadata,
         metadataIv,
         tagIndex || null,
-        spamSignature || null
+        spamSignature || null,
+        createdAt
       );
     } catch (err) {
       console.error('DB insert message error:', err);
@@ -4196,7 +4394,8 @@ io.on('connection', (socket) => {
         null,
         totalRecipients,
         normalizedAiMeta ? JSON.stringify(normalizedAiMeta) : null,
-        0
+        0,
+        createdAt
       );
     } catch (err) {
       console.error('DB insert AI message error:', err);
@@ -4341,7 +4540,8 @@ io.on('connection', (socket) => {
         // clears remove them from the DB too (previously always NULL → whispers
         // survived tag clears and resurrected after a resync).
         tagIndex || null,
-        spamSignature || null
+        spamSignature || null,
+        createdAt
       );
     } catch (err) {
       console.error('DB insert whisper error:', err);
@@ -4402,6 +4602,50 @@ io.on('connection', (socket) => {
       recordMessageRead(socket, groupId, messageId);
     } catch (error) {
       console.error('mark_message_read failed for message', messageId, error.message);
+    }
+  });
+
+  // v1.3.12: per-channel read cursor — "everything up to (createdAt, messageId)
+  // in this channel is read". Advances the caller's cursor, recomputes the
+  // bounded per-channel and per-group unread counts, and broadcasts them to
+  // every one of the user's devices (badges and channel chips stay in sync
+  // across devices without any local per-message read flags).
+  socket.on('mark_channel_read', ({ groupId, tagIndex, createdAt, messageId }) => {
+    try {
+      if (!groupId || !createdAt) return;
+      const normalizedGroupId = String(groupId).slice(0, 64);
+      const member = stmts.isMember.get(normalizedGroupId, socket.userId);
+      if (!member) return;
+      const normalizedTag = (tagIndex && typeof tagIndex === 'string') ? tagIndex.slice(0, 64) : null;
+      const normalizedAt = String(createdAt).slice(0, 64);
+      const normalizedId = String(messageId || '').slice(0, 64);
+      stmts.upsertChannelReadCursor.run(
+        normalizedGroupId,
+        socket.userId,
+        normalizedTag,
+        normalizedAt,
+        normalizedId,
+        new Date().toISOString()
+      );
+      const channelRow = stmts.getChannelUnreadCount.get({
+        groupId: normalizedGroupId,
+        viewerId: socket.userId,
+        tagIndex: normalizedTag,
+      });
+      const groupRow = stmts.getGroupUnreadCount.get({
+        groupId: normalizedGroupId,
+        viewerId: socket.userId,
+      });
+      io.to(`user:${socket.userId}`).emit('read_cursor_updated', {
+        groupId: normalizedGroupId,
+        tagIndex: normalizedTag,
+        createdAt: normalizedAt,
+        messageId: normalizedId,
+        channelUnreadCount: Math.min(999, Math.max(0, Number(channelRow?.count) || 0)),
+        groupUnreadCount: Math.min(999, Math.max(0, Number(groupRow?.count) || 0)),
+      });
+    } catch (error) {
+      console.error('mark_channel_read failed:', error.message);
     }
   });
 

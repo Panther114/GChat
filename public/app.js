@@ -569,9 +569,74 @@
         messages: getCacheableMessages(cache.messages || []).slice(-MAX_CACHED_MESSAGES_PER_GROUP),
         members: cache.members || [],
         oldestMessageId: cache.oldestMessageId || null,
+        channelAnchors: cache.channelAnchors || null,
         updatedAt: Date.now()
       }));
     } catch {
+    }
+  }
+  var localCacheWriteTimers = /* @__PURE__ */ new Map();
+  function scheduleLocalGroupCacheWrite(groupId, cache) {
+    if (localCacheWriteTimers.has(String(groupId))) return;
+    localCacheWriteTimers.set(String(groupId), setTimeout(() => {
+      localCacheWriteTimers.delete(String(groupId));
+      writeLocalGroupCache(groupId, cache);
+    }, 400));
+  }
+  function flushScheduledLocalCacheWrites() {
+    for (const [groupId, timer] of localCacheWriteTimers) {
+      clearTimeout(timer);
+      localCacheWriteTimers.delete(groupId);
+      writeLocalGroupCache(groupId, ensureGroupCacheEntry(groupId));
+    }
+  }
+  if (typeof window !== "undefined") {
+    window.addEventListener("pagehide", flushScheduledLocalCacheWrites);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") flushScheduledLocalCacheWrites();
+    });
+  }
+  var READ_CURSORS_STORAGE_KEY = "gchat-read-cursors-v1";
+  var readCursors = loadReadCursors();
+  function loadReadCursors() {
+    try {
+      return JSON.parse(localStorage.getItem(READ_CURSORS_STORAGE_KEY) || "{}");
+    } catch {
+      return {};
+    }
+  }
+  function persistReadCursors() {
+    try {
+      localStorage.setItem(READ_CURSORS_STORAGE_KEY, JSON.stringify(readCursors));
+    } catch {
+    }
+  }
+  function setLocalReadCursor(groupId, topic, cursor) {
+    const groupKey = String(groupId);
+    readCursors[groupKey] = readCursors[groupKey] || {};
+    readCursors[groupKey][topic || DEFAULT_TAG_TOPIC] = { at: cursor?.at || "", id: cursor?.id || "" };
+    persistReadCursors();
+  }
+  function getLocalReadCursor(groupId, topic) {
+    return readCursors[String(groupId)]?.[topic || DEFAULT_TAG_TOPIC] || null;
+  }
+  function isMessageReadByCursor(msg, groupId, channel) {
+    if (!msg) return false;
+    if (String(msg.senderId) === String(currentUser?.id)) return true;
+    const cursor = getLocalReadCursor(groupId, channel || resolveMessageTagTopic(msg));
+    if (!cursor || !cursor.at) return false;
+    const cmp = String(msg.createdAt || "").localeCompare(String(cursor.at));
+    if (cmp !== 0) return cmp < 0;
+    return String(msg.id) <= String(cursor.id);
+  }
+  async function channelTagIndex(topic, groupId) {
+    if (!topic || topic === DEFAULT_TAG_TOPIC) return null;
+    const key = getGroupKey(groupId);
+    if (!key) return null;
+    try {
+      return await blindIndex(topic, key, groupId, "tag-index");
+    } catch {
+      return null;
     }
   }
   var HISTORY_DB_NAME = "gchat-history-v1";
@@ -643,16 +708,39 @@
   }
   function persistHistoryMessages(groupId, messages) {
     if (!messages || !messages.length) return Promise.resolve();
+    if (!historyDbSupported) return Promise.resolve();
     const cacheable = getCacheableMessages(messages);
-    return runHistoryStore(HISTORY_MESSAGES_STORE, "readwrite", (store) => {
+    if (!cacheable.length) return Promise.resolve();
+    return (async () => {
+      const hydrated = [];
       for (const msg of cacheable) {
-        store.put({ id: String(msg.id), groupId: String(groupId), createdAt: msg.createdAt || "", msg });
+        if (!getMessageHashtagKey(msg) && Number(msg.encryptionVersion) === 2 && msg.encryptedMetadata && msg.metadataIv) {
+          try {
+            await hydrateMessageChannel(msg, groupId);
+          } catch {
+          }
+          if (!getMessageHashtagKey(msg)) msg._channelUnknown = true;
+        }
+        hydrated.push(msg);
       }
-    });
+      invalidateHistoryReadMemo(groupId);
+      await runHistoryStore(HISTORY_MESSAGES_STORE, "readwrite", (store) => {
+        for (const msg of hydrated) {
+          store.put({ id: String(msg.id), groupId: String(groupId), createdAt: msg.createdAt || "", msg });
+        }
+      });
+    })();
+  }
+  var historyReadMemo = /* @__PURE__ */ new Map();
+  function invalidateHistoryReadMemo(groupId) {
+    historyReadMemo.delete(String(groupId));
   }
   function readHistoryMessages(groupId) {
+    const key = String(groupId);
+    const memoized = historyReadMemo.get(key);
+    if (memoized) return Promise.resolve(memoized);
     return runHistoryStore(HISTORY_MESSAGES_STORE, "readonly", (store) => {
-      const request = store.index("groupId").getAll(String(groupId));
+      const request = store.index("groupId").getAll(key);
       request.onsuccess = () => {
         const rows = request.result || [];
         const messages = rows.map((row) => row.msg).filter(Boolean).sort((a, b) => {
@@ -664,23 +752,33 @@
         }
         request._messages = messages;
       };
-    }).then((request) => request && request._messages ? request._messages : []);
+    }).then((request) => {
+      if (request && request._messages) {
+        historyReadMemo.set(key, request._messages);
+        return request._messages;
+      }
+      return [];
+    });
   }
   function readHistoryCursor(groupId) {
     return runHistoryStore(HISTORY_META_STORE, "readonly", (store) => {
       const request = store.get(String(groupId));
       request.onsuccess = () => {
-        request._cursor = request.result?.lastSyncedAt || null;
+        const row = request.result;
+        request._cursor = row?.lastSyncedAt ? { at: String(row.lastSyncedAt), id: String(row.lastSyncedId || "") } : null;
       };
     }).then((request) => request && request._cursor ? request._cursor : null);
   }
-  function writeHistoryCursor(groupId, createdAt) {
-    if (!createdAt) return Promise.resolve();
+  function writeHistoryCursor(groupId, cursor) {
+    const at = cursor && (cursor.at || cursor);
+    const id = cursor && cursor.id || "";
+    if (!at) return Promise.resolve();
     return runHistoryStore(HISTORY_META_STORE, "readwrite", (store) => {
-      store.put({ groupId: String(groupId), lastSyncedAt: String(createdAt), updatedAt: Date.now() });
+      store.put({ groupId: String(groupId), lastSyncedAt: String(at), lastSyncedId: String(id), updatedAt: Date.now() });
     });
   }
   function clearGroupHistoryStore(groupId) {
+    invalidateHistoryReadMemo(groupId);
     const messageClear = runHistoryStore(HISTORY_MESSAGES_STORE, "readwrite", (store) => {
       const request = store.index("groupId").openKeyCursor(String(groupId));
       request.onsuccess = () => {
@@ -695,6 +793,7 @@
   }
   function deleteHistoryMessage(groupId, messageId) {
     if (!groupId || !messageId) return Promise.resolve();
+    invalidateHistoryReadMemo(groupId);
     return runHistoryStore(HISTORY_MESSAGES_STORE, "readwrite", (store) => store.delete(String(messageId)));
   }
   var historyMigrationStarted = false;
@@ -738,7 +837,7 @@
     cache.rowsDirty = true;
     if (persist) {
       writeLocalGroupCache(groupId, cache);
-      if (historyDbSupported) void persistHistoryMessages(groupId, merged);
+      if (historyDbSupported && incoming.length) void persistHistoryMessages(groupId, incoming);
     }
     return merged;
   }
@@ -1724,6 +1823,20 @@
     if (!key) return;
     try {
       localStorage.setItem(key, normalizeHashtagTopic(topic) || DEFAULT_TAG_TOPIC);
+    } catch {
+    }
+  }
+  var LAST_GROUP_STORAGE_KEY = "gchat:last-group";
+  function readStoredLastGroupId() {
+    try {
+      return localStorage.getItem(LAST_GROUP_STORAGE_KEY) || null;
+    } catch {
+      return null;
+    }
+  }
+  function writeStoredLastGroupId(groupId) {
+    try {
+      localStorage.setItem(LAST_GROUP_STORAGE_KEY, String(groupId));
     } catch {
     }
   }
@@ -2769,7 +2882,12 @@
     cache.oldestMessageId = cache.messages.length ? cache.messages[0].id : null;
     cache.rowsDirty = true;
     cache.messageRows = null;
-    syncGroupUnreadCount(groupId);
+    if (cache.channelRows) delete cache.channelRows[normalizedTag];
+    if (String(groupId) === String(currentGroupId) && channelUnreadLoadedForGroup === String(groupId)) {
+      const tagIndex = await channelTagIndex(normalizedTag, groupId);
+      if (tagIndex) channelUnreadCounts[String(tagIndex)] = 0;
+      renderTagFilters();
+    }
     writeLocalGroupCache(groupId, cache);
     await updateGroupPreviewFromMessage(groupId, cache.messages[cache.messages.length - 1] || null);
     return removedIds.length > 0;
@@ -2792,6 +2910,7 @@
     if (!Array.isArray(messages) || messages.length <= MAX_CACHED_MESSAGES_PER_GROUP) return;
     cache.messages = messages.slice(-MAX_CACHED_MESSAGES_PER_GROUP);
     cache.messageRows = null;
+    cache.channelRows = null;
     cache.rowsDirty = true;
     cache.oldestMessageId = cache.messages.length ? cache.messages[0].id : null;
   }
@@ -2812,75 +2931,124 @@
     if (!id) return;
     joinedRoomIds.add(id);
   }
+  var MAX_SYNC_PAGES_PER_EVENT = 5;
+  var SYNC_PAGE_LIMIT = 100;
   async function refreshCurrentGroupFromServer() {
     const groupId = currentGroupId;
     if (!groupId) return;
     try {
       const cache = ensureGroupCacheEntry(groupId);
       const hasCached = Array.isArray(cache.messages) && cache.messages.length > 0;
-      let url = `/api/groups/${groupId}/messages?limit=100`;
-      if (hasCached) {
-        const cursor = await readHistoryCursor(groupId);
-        const since = cursor || cache.messages[cache.messages.length - 1].createdAt;
-        if (since) url = `/api/groups/${groupId}/messages?since=${encodeURIComponent(since)}&limit=100`;
+      let cursor = await readHistoryCursor(groupId);
+      if (!cursor && hasCached) {
+        const last = cache.messages[cache.messages.length - 1];
+        cursor = { at: last.createdAt, id: last.id };
       }
-      const res = await fetch(url, { cache: "no-store" });
-      if (!res.ok) return;
-      const rawMsgs = await res.json();
-      if (String(currentGroupId) !== groupId) return;
-      const msgs = filterMessagesVisibleToCurrentUser(rawMsgs);
-      const entry = ensureGroupCacheEntry(groupId);
-      const existing = Array.isArray(entry.messages) ? entry.messages : [];
-      const byId = new Map(existing.map((m) => [String(m.id), m]));
-      for (const m of msgs) byId.set(String(m.id), m);
-      const merged = sortMessagesChronologically([...byId.values()]);
-      const knownIds = new Set(existing.map((m) => String(m.id)));
-      const changed = msgs.some((fresh) => {
-        if (!knownIds.has(String(fresh.id))) return true;
-        const old = byId.get(String(fresh.id));
-        return (old.editedAt || null) !== (fresh.editedAt || null) || Number(old.revision || 0) !== Number(fresh.revision || 0);
-      });
-      if (!changed) return;
-      const addedIds = msgs.filter((m) => !knownIds.has(String(m.id)));
-      const editedIds = msgs.filter((m) => knownIds.has(String(m.id)));
-      entry.messages = merged;
-      entry.messageRows = null;
-      entry.rowsDirty = true;
-      writeLocalGroupCache(groupId, entry);
-      if (historyDbSupported) {
-        void persistHistoryMessages(groupId, msgs);
-        if (msgs.length) void writeHistoryCursor(groupId, msgs[msgs.length - 1].createdAt);
+      if (!cursor) {
+        await loadMessages(groupId);
+        return;
       }
+      const byId = new Map(cache.messages.map((m) => [String(m.id), m]));
+      const additions = [];
+      const edits = [];
+      for (let page = 0; page < MAX_SYNC_PAGES_PER_EVENT; page += 1) {
+        const url = `/api/groups/${groupId}/messages?since=${encodeURIComponent(cursor.at)}&sinceId=${encodeURIComponent(cursor.id)}&limit=${SYNC_PAGE_LIMIT}`;
+        const res = await fetch(url, { cache: "no-store" });
+        if (!res.ok) break;
+        const rawMsgs = await res.json();
+        if (String(currentGroupId) !== groupId) return;
+        const msgs = filterMessagesVisibleToCurrentUser(rawMsgs);
+        if (!msgs.length) break;
+        for (const msg of msgs) {
+          const known = byId.get(String(msg.id));
+          if (!known) {
+            byId.set(String(msg.id), msg);
+            additions.push(msg);
+          } else if ((known.editedAt || null) !== (msg.editedAt || null) || Number(known.revision || 0) !== Number(msg.revision || 0)) {
+            byId.set(String(msg.id), msg);
+            edits.push(msg);
+          }
+        }
+        const lastFetched = msgs[msgs.length - 1];
+        cursor = { at: lastFetched.createdAt, id: lastFetched.id };
+        void writeHistoryCursor(groupId, cursor);
+        if (msgs.length < SYNC_PAGE_LIMIT) break;
+        if (page < MAX_SYNC_PAGES_PER_EVENT - 1) {
+          await new Promise((resolve) => setTimeout(resolve, 30));
+        }
+      }
+      if (!additions.length && !edits.length) return;
+      if (edits.length) {
+        mergeMessagesIntoCache(groupId, edits);
+        const entry = ensureGroupCacheEntry(groupId);
+        if (entry.channelRows) {
+          const editedIds = new Set(edits.map((m) => String(m.id)));
+          for (const memo of Object.values(entry.channelRows)) {
+            const kept = memo.rows.filter((row) => !editedIds.has(String(row?.dataset?.msgId)));
+            if (kept.length !== memo.rows.length) {
+              memo.rows = kept;
+              for (const id of editedIds) memo.byId.delete(id);
+              memo.firstMsgId = memo.rows.length ? memo.rows[0].dataset?.msgId || null : null;
+              memo.lastMsgId = memo.rows.length ? memo.rows[memo.rows.length - 1].dataset?.msgId || null : null;
+            }
+          }
+        }
+      }
+      if (!additions.length) return;
+      mergeMessagesIntoCache(groupId, additions);
       if (String(currentGroupId) !== groupId) return;
-      allMessages = merged;
-      updateGroupUnseenCount(groupId, merged);
-      void updateGroupPreviewFromMessage(groupId, merged.length ? merged[merged.length - 1] : null);
+      allMessages = ensureGroupCacheEntry(groupId).messages || [];
+      void updateGroupPreviewFromMessage(groupId, allMessages.length ? allMessages[allMessages.length - 1] : null);
+      renderTagFilters();
       const nearBottom = isNearBottom();
       const area = messagesArea();
-      if (addedIds.length && !editedIds.length && area) {
-        const channel = getActiveTagTopic();
-        const channelAdditions = [];
-        for (const msg of addedIds) {
-          await hydrateMessageChannel(msg, groupId);
-          if (resolveMessageTagTopic(msg) === channel) channelAdditions.push(msg);
-        }
-        if (channelAdditions.length) {
-          const lastVisible = getLastRenderedChannelMessage();
-          const rows = await buildMessageRows(channelAdditions, groupId, { prevMessage: lastVisible });
-          const fragment = document.createDocumentFragment();
-          for (const row of rows) {
-            if (!row) continue;
-            if (row.classList?.contains("msg-row")) {
-              const srcMsg = channelAdditions.find((m) => String(m.id) === String(row.dataset.msgId));
-              if (srcMsg) observeMessageForRead(row, srcMsg);
-            }
-            fragment.appendChild(row);
+      if (!area) return;
+      const channel = getActiveTagTopic();
+      const channelAdditions = [];
+      await mapWithConcurrency(additions, 12, async (msg) => {
+        await hydrateMessageChannel(msg, groupId);
+        if (resolveMessageTagTopic(msg) === channel) channelAdditions.push(msg);
+      });
+      if (channelAdditions.length && !edits.length) {
+        const lastVisible = getLastRenderedChannelMessage();
+        const additionsAreNewer = !lastVisible || channelAdditions.every((msg) => {
+          const cmp = String(msg.createdAt || "").localeCompare(String(lastVisible.createdAt || ""));
+          return cmp > 0 || cmp === 0 && String(msg.id) > String(lastVisible.id);
+        });
+        if (additionsAreNewer) {
+          const renderedIds = /* @__PURE__ */ new Set();
+          for (const existing of area.querySelectorAll(".msg-row[data-msg-id]")) {
+            renderedIds.add(String(existing.dataset.msgId));
           }
-          if (nearBottom) {
-            area.appendChild(fragment);
-            scrollToBottom(true);
-          } else {
-            area.appendChild(fragment);
+          const pendingAdditions = channelAdditions.filter((m) => !renderedIds.has(String(m.id)));
+          if (pendingAdditions.length) {
+            const rows = await buildMessageRows(pendingAdditions, groupId, { prevMessage: lastVisible });
+            const fragment = document.createDocumentFragment();
+            for (const row of rows) {
+              if (!row) continue;
+              if (row.classList?.contains("msg-row")) {
+                const srcMsg = pendingAdditions.find((m) => String(m.id) === String(row.dataset.msgId));
+                if (srcMsg) observeMessageForRead(row, srcMsg);
+              }
+              fragment.appendChild(row);
+            }
+            if (nearBottom) {
+              area.appendChild(fragment);
+              scrollToBottom(true);
+            } else {
+              area.appendChild(fragment);
+            }
+            const memo = getChannelRowMemo(ensureGroupCacheEntry(groupId), channel);
+            for (const row of rows) {
+              if (!row?.classList?.contains("msg-row")) continue;
+              memo.rows.push(row);
+              memo.byId.set(String(row.dataset.msgId), row);
+            }
+            memo.lastMsgId = memo.rows.length ? memo.rows[memo.rows.length - 1].dataset?.msgId || memo.lastMsgId : memo.lastMsgId;
+            evictChannelRowFront(memo);
+          }
+          if (nearBottom && pendingAdditions.length) {
+            markChannelReadAt(groupId, pendingAdditions[pendingAdditions.length - 1]);
           }
           updateFirstUnreadButton();
           renderTagFilters();
@@ -2889,7 +3057,7 @@
           return;
         }
       }
-      if (nearBottom || area.scrollTop <= 0) {
+      if (edits.length || nearBottom || area.scrollTop <= 0) {
         const prevScrollTop = area.scrollTop;
         const prevScrollHeight = area.scrollHeight;
         await renderActiveChannelStream();
@@ -2897,6 +3065,9 @@
           area.scrollTop = prevScrollTop + (area.scrollHeight - prevScrollHeight);
         }
         observeCurrentGroupRowsForRead();
+        if (nearBottom && channelAdditions.length) {
+          markChannelReadAt(groupId, channelAdditions[channelAdditions.length - 1]);
+        }
       }
     } catch (err) {
       console.warn("refreshCurrentGroupFromServer failed:", err);
@@ -3270,6 +3441,87 @@
     if (active && !tags.has(active)) tags.set(active, formatHashtagLabel(active));
     return [...tags.entries()].map(([topic, label]) => ({ topic, label }));
   }
+  var CHANNEL_RENDER_WINDOW = 300;
+  var transcriptRebuilding = false;
+  function getChannelRowMemo(cache, topic) {
+    if (!cache.channelRows) cache.channelRows = {};
+    let memo = cache.channelRows[topic];
+    if (!memo) {
+      memo = { rows: [], byId: /* @__PURE__ */ new Map(), firstMsgId: null, lastMsgId: null };
+      cache.channelRows[topic] = memo;
+    }
+    return memo;
+  }
+  function attachChannelRowsToArea(area, memo) {
+    area.replaceChildren();
+    const fragment = document.createDocumentFragment();
+    for (const row of memo.rows) {
+      if (!row) continue;
+      row.hidden = false;
+      fragment.appendChild(row);
+    }
+    area.replaceChildren(fragment);
+  }
+  function evictChannelRowFront(memo, keep = CHANNEL_RENDER_WINDOW, max = CHANNEL_RENDER_WINDOW * 2) {
+    if (memo.rows.length <= max) return;
+    const area = messagesArea();
+    while (memo.rows.length > keep) {
+      const first = memo.rows[0];
+      if (!first) break;
+      if (first.isConnected && area && area.scrollTop > 0) {
+        const firstRect = first.getBoundingClientRect();
+        const areaRect = area.getBoundingClientRect();
+        if (firstRect.bottom > areaRect.top) break;
+      }
+      const row = memo.rows.shift();
+      const msgId = row.dataset?.msgId;
+      if (msgId) memo.byId.delete(String(msgId));
+      readObserver?.unobserve(row);
+      revokeBlobUrlsIn(row);
+      row.remove();
+    }
+    memo.firstMsgId = memo.rows.length ? memo.rows[0].dataset?.msgId || null : null;
+    if (!memo.rows.length) memo.lastMsgId = null;
+  }
+  function evictChannelRowBack(memo, keep = CHANNEL_RENDER_WINDOW * 2) {
+    if (memo.rows.length <= keep) return;
+    const area = messagesArea();
+    while (memo.rows.length > keep) {
+      const last = memo.rows[memo.rows.length - 1];
+      if (!last) break;
+      if (last.isConnected && area) {
+        const lastRect = last.getBoundingClientRect();
+        const areaRect = area.getBoundingClientRect();
+        if (lastRect.top <= areaRect.bottom) break;
+      }
+      const row = memo.rows.pop();
+      const msgId = row.dataset?.msgId;
+      if (msgId) memo.byId.delete(String(msgId));
+      readObserver?.unobserve(row);
+      revokeBlobUrlsIn(row);
+      row.remove();
+    }
+    memo.lastMsgId = memo.rows.length ? memo.rows[memo.rows.length - 1].dataset?.msgId || null : null;
+    if (!memo.rows.length) memo.firstMsgId = null;
+  }
+  function restoreOrScrollToBottom() {
+    const area = messagesArea();
+    if (!area) return;
+    const cache = ensureGroupCacheEntry(currentGroupId);
+    const anchorId = cache.channelAnchors?.[getActiveTagTopic()] || null;
+    if (anchorId) {
+      const row = area.querySelector(`[data-msg-id="${CSS.escape(anchorId)}"]`);
+      if (row) {
+        area.scrollTop = row.getBoundingClientRect().top - area.getBoundingClientRect().top + area.scrollTop;
+        updateFirstUnreadButton();
+        return;
+      }
+    }
+    area.scrollTop = area.scrollHeight;
+    scrollUnreadCount = 0;
+    updateScrollBadge();
+    $("scroll-bottom-btn").hidden = true;
+  }
   async function renderActiveChannelStream() {
     const area = messagesArea();
     if (!area || !currentGroupId) return;
@@ -3279,10 +3531,14 @@
     const all = cache.messages || [];
     await mapWithConcurrency(all, 12, (msg) => hydrateMessageChannel(msg, currentGroupId));
     writeLocalGroupCache(currentGroupId, cache);
-    if (historyDbSupported && all.length) void persistHistoryMessages(currentGroupId, all);
     const channelMsgs = all.filter((msg) => resolveMessageTagTopic(msg) === channel);
-    revokeBlobUrlsIn(area);
-    if (!channelMsgs.length) {
+    const windowMsgs = channelMsgs.slice(-CHANNEL_RENDER_WINDOW);
+    if (!windowMsgs.length) {
+      const memo2 = getChannelRowMemo(cache, channel);
+      memo2.rows = [];
+      memo2.byId = /* @__PURE__ */ new Map();
+      memo2.firstMsgId = null;
+      memo2.lastMsgId = null;
       if (all.length === 0) {
         area.replaceChildren(createChannelLoadingIndicator());
       } else {
@@ -3292,39 +3548,65 @@
       updateFirstUnreadButton();
       return;
     }
-    const loadingIndicator = createLoadMoreIndicator();
-    loadingIndicator.hidden = true;
-    area.replaceChildren(loadingIndicator);
-    const CHUNK_SIZE = 15;
-    let prev = null;
-    for (let i = 0; i < channelMsgs.length; i += CHUNK_SIZE) {
-      const slice = channelMsgs.slice(i, i + CHUNK_SIZE);
-      const rows = await buildMessageRows(slice, currentGroupId, { prevMessage: prev });
-      if (!rows.length) continue;
-      for (const row of rows) {
-        if (row && row.classList?.contains("msg-row")) {
-          const msgId = row.dataset.msgId;
-          const srcMsg = slice.find((m) => String(m.id) === String(msgId));
-          if (srcMsg) observeMessageForRead(row, srcMsg);
-        }
+    const memo = getChannelRowMemo(cache, channel);
+    const lastWindowId = String(windowMsgs[windowMsgs.length - 1].id);
+    if (memo.rows.length > 0 && memo.lastMsgId === lastWindowId) {
+      const cacheIds = new Set(all.map((m) => String(m.id)));
+      const valid = memo.rows.filter((row) => row && row.dataset?.msgId && cacheIds.has(String(row.dataset.msgId)));
+      if (valid.length !== memo.rows.length) {
+        memo.rows = valid;
+        memo.byId = new Map(memo.rows.map((row) => [String(row.dataset.msgId), row]));
+        memo.firstMsgId = memo.rows.length ? memo.rows[0].dataset.msgId : null;
+        memo.lastMsgId = memo.rows.length ? memo.rows[memo.rows.length - 1].dataset.msgId : null;
       }
-      const fragment = document.createDocumentFragment();
-      for (const row of rows) fragment.appendChild(row);
-      area.insertBefore(fragment, area.lastChild);
-      for (let r = rows.length - 1; r >= 0; r -= 1) {
-        if (rows[r].classList?.contains("msg-row")) {
-          const srcMsg = slice.find((m) => String(m.id) === String(rows[r].dataset.msgId));
-          if (srcMsg) prev = srcMsg;
-          break;
-        }
-      }
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      evictChannelRowFront(memo);
+      attachChannelRowsToArea(area, memo);
+      restoreOrScrollToBottom();
+      observeCurrentGroupRowsForRead();
+      syncChannelEmptyState();
+      updateFirstUnreadButton();
+      return;
     }
-    area.lastChild?.remove();
-    cache.messageRows = null;
+    transcriptRebuilding = true;
+    try {
+      const CHUNK_SIZE = 15;
+      let prev = null;
+      const rows = [];
+      for (let i = 0; i < windowMsgs.length; i += CHUNK_SIZE) {
+        const slice = windowMsgs.slice(i, i + CHUNK_SIZE);
+        const built = await buildMessageRows(slice, currentGroupId, { prevMessage: prev });
+        if (!built.length) continue;
+        for (const row of built) {
+          if (!row) continue;
+          rows.push(row);
+          if (row.classList?.contains("msg-row")) {
+            const msgId = row.dataset.msgId;
+            const srcMsg = slice.find((m) => String(m.id) === String(msgId));
+            if (srcMsg) observeMessageForRead(row, srcMsg);
+          }
+        }
+        for (let r = built.length - 1; r >= 0; r -= 1) {
+          if (built[r].classList?.contains("msg-row")) {
+            const srcMsg = slice.find((m) => String(m.id) === String(built[r].dataset.msgId));
+            if (srcMsg) prev = srcMsg;
+            break;
+          }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      memo.rows = rows;
+      memo.byId = new Map(rows.filter((row) => row?.dataset?.msgId).map((row) => [String(row.dataset.msgId), row]));
+      memo.firstMsgId = rows.length ? rows[0].dataset?.msgId || null : null;
+      memo.lastMsgId = rows.length ? rows[rows.length - 1].dataset?.msgId || null : null;
+      evictChannelRowFront(memo);
+      attachChannelRowsToArea(area, memo);
+      restoreOrScrollToBottom();
+      observeCurrentGroupRowsForRead();
+    } finally {
+      transcriptRebuilding = false;
+    }
     cache.rowsDirty = true;
     syncChannelEmptyState();
-    scrollToBottom(true);
     updateFirstUnreadButton();
   }
   function selectTagChannel(topic, { focusComposer = true } = {}) {
@@ -3342,6 +3624,7 @@
     updateWhisperBtn();
     syncComposerTokens();
     renderTagFilters();
+    void markChannelReadOnOpen(currentGroupId);
     void renderActiveChannelStream().then(() => {
       updateKeyState();
       updateSlashCommandMenu();
@@ -3431,19 +3714,6 @@
     announceChannelChange(currentGroupId, topic, "add");
     selectTagChannel(topic);
   }
-  function computeChannelUnreadCounts() {
-    const counts = /* @__PURE__ */ new Map();
-    if (!currentGroupId || !currentUser) return counts;
-    const cache = ensureGroupCacheEntry(currentGroupId);
-    for (const msg of cache.messages || []) {
-      if (String(msg.senderId) === String(currentUser.id)) continue;
-      if (msg.hasRead === true) continue;
-      if (isMessageHiddenForCurrentUser(msg)) continue;
-      const topic = resolveMessageTagTopic(msg);
-      counts.set(topic, (counts.get(topic) || 0) + 1);
-    }
-    return counts;
-  }
   function bindTagFilterDrag() {
     const wrap = $("chat-tag-filters");
     if (!wrap || wrap.dataset.dragBound === "1") return;
@@ -3510,7 +3780,13 @@
     ensureActiveTag(activeTagFilter || DEFAULT_TAG_TOPIC);
     const tags = getAvailableGroupTags();
     const active = getActiveTagTopic();
-    const unreadCounts2 = computeChannelUnreadCounts();
+    const countForTopic = (topic) => {
+      if (channelUnreadLoadedForGroup !== String(currentGroupId || "")) return 0;
+      if (topic === DEFAULT_TAG_TOPIC) return Math.max(0, Number(channelUnreadCounts[""]) || 0);
+      const tagIndex = channelUnreadTagIndexByTopic.get(topic);
+      if (tagIndex == null) return 0;
+      return Math.max(0, Number(channelUnreadCounts[String(tagIndex)]) || 0);
+    };
     wrap.replaceChildren();
     wrap.hidden = false;
     for (const tag of tags) {
@@ -3522,9 +3798,10 @@
         btn.classList.add("active");
         btn.setAttribute("aria-current", "true");
       }
-      if ((unreadCounts2.get(tag.topic) || 0) > 0) {
+      const unread = countForTopic(tag.topic);
+      if (unread > 0) {
         btn.classList.add("has-unread");
-        btn.title = `${tag.label} \u2014 ${unreadCounts2.get(tag.topic)} unread`;
+        btn.title = `${tag.label} \u2014 ${unread} unread`;
       } else {
         btn.title = `Open ${tag.label} channel`;
       }
@@ -3708,9 +3985,19 @@
       if (cache.messageRows) {
         cache.messageRows = cache.messageRows.filter((entry) => String(entry?.dataset?.msgId || "") !== normalizedId);
       }
+      if (cache.channelRows) {
+        for (const memo of Object.values(cache.channelRows)) {
+          const kept = memo.rows.filter((row2) => row2?.dataset?.msgId !== normalizedId);
+          if (kept.length !== memo.rows.length) {
+            memo.rows = kept;
+            memo.byId.delete(normalizedId);
+            memo.firstMsgId = memo.rows.length ? memo.rows[0].dataset?.msgId || null : null;
+            memo.lastMsgId = memo.rows.length ? memo.rows[memo.rows.length - 1].dataset?.msgId || null : null;
+          }
+        }
+      }
       cache.rowsDirty = true;
       cache.oldestMessageId = cache.messages.length ? cache.messages[0].id : null;
-      syncGroupUnreadCount(cacheGroupId);
       writeLocalGroupCache(cacheGroupId, cache);
       if (cacheGroupId === currentGroupId) {
         allMessages = cache.messages;
@@ -4291,6 +4578,10 @@
       void loadAndRenderAiTones();
     }
     await loadGroups();
+    const lastGroupId = readStoredLastGroupId();
+    if (lastGroupId && groups.some((g) => String(g.id) === String(lastGroupId))) {
+      void selectGroup(lastGroupId);
+    }
     void migrateLocalCachesToHistory();
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.addEventListener("message", (event) => {
@@ -4390,7 +4681,8 @@
           writeLocalGroupCache(group.id, cache);
           if (preloadedMessages.length) {
             void persistHistoryMessages(group.id, preloadedMessages);
-            void writeHistoryCursor(group.id, preloadedMessages[preloadedMessages.length - 1].createdAt);
+            const last = preloadedMessages[preloadedMessages.length - 1];
+            void writeHistoryCursor(group.id, { at: last.createdAt, id: last.id });
           }
         }
         if (!group._lastPreviewText) {
@@ -4409,6 +4701,10 @@
       joinAllGroupRooms();
       void refreshGroupPreviewsFromCache(groups.map((group) => group.id));
       syncUnreadIndicators();
+      if (currentGroupId) {
+        void fetchChannelUnreadCounts(currentGroupId);
+        void markChannelReadOnOpen(currentGroupId);
+      }
       if (isMobileLayout() && !currentGroupId) setMobileView("list");
       return true;
     } catch (err) {
@@ -4729,8 +5025,7 @@
         }
       }
       if (changed) {
-        writeLocalGroupCache(groupId, cache);
-        syncGroupUnreadCount(groupId);
+        scheduleLocalGroupCacheWrite(groupId, cache);
         if (groupId === currentGroupId) {
           renderTagFilters();
           updateFirstUnreadButton();
@@ -4791,25 +5086,81 @@
     }
     pushStatus.totalUnreadCount = syncUnreadIndicators();
   }
-  function updateGroupUnseenCount(groupId, messages = []) {
-    const unseen = (messages || []).reduce((acc, msg) => {
-      if (!msg || !canCurrentUserAccessMessage(msg) || isMessageHiddenForCurrentUser(msg) || msg.senderId === currentUser?.id) return acc;
-      return acc + (msg.hasRead === true ? 0 : 1);
-    }, 0);
-    unreadCounts[groupId] = unseen;
-    updateUnreadBadge(groupId, unseen);
+  var channelUnreadCounts = {};
+  var channelUnreadLoadedForGroup = null;
+  var channelUnreadTagIndexByTopic = /* @__PURE__ */ new Map();
+  async function fetchChannelUnreadCounts(groupId) {
+    if (String(groupId) !== String(currentGroupId)) return;
+    try {
+      const cache = ensureGroupCacheEntry(groupId);
+      const topics = getAvailableGroupTags(groupId).map((tag) => tag.topic);
+      const key = getGroupKey(groupId);
+      const tagIndexes = [];
+      const topicByTagIndex = /* @__PURE__ */ new Map();
+      for (const topic of topics) {
+        if (topic === DEFAULT_TAG_TOPIC) continue;
+        if (!key) continue;
+        let tagIndex;
+        try {
+          tagIndex = await blindIndex(topic, key, groupId, "tag-index");
+        } catch {
+          continue;
+        }
+        tagIndexes.push(tagIndex);
+        topicByTagIndex.set(String(tagIndex), topic);
+      }
+      const res = await fetch(
+        `/api/groups/${groupId}/unread?tags=${encodeURIComponent(tagIndexes.join(","))}`,
+        { cache: "no-store" }
+      );
+      if (!res.ok) return;
+      const data = await res.json();
+      if (String(currentGroupId) !== String(groupId)) return;
+      channelUnreadCounts = data.counts || {};
+      channelUnreadTagIndexByTopic = topicByTagIndex;
+      channelUnreadLoadedForGroup = String(groupId);
+      renderTagFilters();
+      updateFirstUnreadButton();
+    } catch (err) {
+      console.warn("fetchChannelUnreadCounts failed:", err);
+    }
   }
-  function syncGroupUnreadCount(groupId) {
+  function markChannelReadAt(groupId, msg) {
+    if (!msg || !socket || !currentUser) return;
+    const topic = resolveMessageTagTopic(msg);
+    if (String(msg.senderId) === String(currentUser.id)) return;
+    setLocalReadCursor(groupId, topic, { at: msg.createdAt, id: msg.id });
+    void (async () => {
+      const tagIndex = await channelTagIndex(topic, groupId);
+      socket.emit("mark_channel_read", {
+        groupId: String(groupId),
+        tagIndex,
+        createdAt: msg.createdAt,
+        messageId: msg.id
+      });
+    })();
+  }
+  async function markChannelReadOnOpen(groupId) {
+    if (!groupId || !socket || !currentUser) return;
     const cache = ensureGroupCacheEntry(groupId);
-    const messages = cache.messages || (groupId === currentGroupId ? allMessages : null);
-    if (!messages) return;
-    updateGroupUnseenCount(groupId, messages);
+    const channel = getActiveTagTopic();
+    const all = cache.messages || [];
+    for (let i = all.length - 1; i >= 0; i -= 1) {
+      const msg = all[i];
+      await hydrateMessageChannel(msg, groupId);
+      if (resolveMessageTagTopic(msg) !== channel) continue;
+      if (String(msg.senderId) !== String(currentUser.id)) {
+        markChannelReadAt(groupId, msg);
+        return;
+      }
+    }
   }
   async function selectGroup(groupId) {
     const normalizedGroupId = String(groupId || "");
     if (!normalizedGroupId) return;
     currentGroupId = normalizedGroupId;
     currentGroupData = groups.find((g) => String(g.id) === normalizedGroupId) || null;
+    writeStoredLastGroupId(normalizedGroupId);
     replyingTo = null;
     pendingAttachmentRows.clear();
     whisperRecipients = [];
@@ -4877,10 +5228,8 @@
       if (currentGroupId !== normalizedGroupId) return;
     }
     renderGroupFromCache(normalizedGroupId);
-    updateGroupUnseenCount(normalizedGroupId, allMessages);
-    observeCurrentGroupRowsForRead();
-    scrollToBottom(true);
-    $("scroll-bottom-btn").hidden = true;
+    void markChannelReadOnOpen(normalizedGroupId);
+    void fetchChannelUnreadCounts(normalizedGroupId);
     if (document.hasFocus()) clearPageTitleNotification();
     if (hadCompleteCache) void refreshCurrentGroupFromServer();
     closeMobileActionMenu();
@@ -4933,9 +5282,11 @@
         cache.rowsDirty = true;
         cache.oldestMessageId = merged.length ? merged[0].id : null;
         writeLocalGroupCache(groupId, cache);
-        updateGroupUnseenCount(groupId, merged);
         await updateGroupPreviewFromMessage(groupId, merged.length ? merged[merged.length - 1] : null);
-        if (msgs.length) void writeHistoryCursor(groupId, msgs[msgs.length - 1].createdAt);
+        if (msgs.length) {
+          const last = msgs[msgs.length - 1];
+          void writeHistoryCursor(groupId, { at: last.createdAt, id: last.id });
+        }
       } else {
         const area = messagesArea();
         const prevScrollHeight = area.scrollHeight;
@@ -4954,11 +5305,19 @@
         if (oldFirst) area.insertBefore(fragment, oldFirst);
         else area.appendChild(fragment);
         const cache = ensureGroupCacheEntry(groupId);
-        cache.messages = mergeMessagesIntoCache(groupId, msgs, { persist: false });
+        cache.messages = mergeMessagesIntoCache(groupId, msgs, { persist: true });
         cache.messageRows = [...rows, ...cache.messageRows || []];
         cache.oldestMessageId = rawMsgs[0].id;
         cache.rowsDirty = false;
         writeLocalGroupCache(groupId, cache);
+        const memo = getChannelRowMemo(cache, getActiveTagTopic());
+        memo.rows = [...rows, ...memo.rows];
+        for (const row of rows) {
+          const msgId = row?.dataset?.msgId;
+          if (msgId) memo.byId.set(String(msgId), row);
+        }
+        memo.firstMsgId = rows.length ? rows[0].dataset?.msgId || memo.firstMsgId : memo.firstMsgId;
+        evictChannelRowBack(memo);
         area.scrollTop = area.scrollHeight - prevScrollHeight;
       }
       if (groupId === currentGroupId) {
@@ -5092,7 +5451,7 @@
     const isOwn = msg.senderId === currentUser.id;
     const isAiAssistant = isAiAssistantMessage(msg);
     const showSenderName = options.showSenderName !== false;
-    const isReadByMe = isOwn || msg.hasRead === true;
+    const isReadByMe = isOwn || isMessageReadByCursor(msg, groupId, resolveMessageTagTopic(msg));
     if (msg.type === "system") {
       const div = document.createElement("div");
       div.className = "msg-system";
@@ -5441,7 +5800,6 @@
     allMessages = mergeMessagesIntoCache(groupId, [msg]);
     cache.rowsDirty = true;
     cache.messageRows = null;
-    if (historyDbSupported) void persistHistoryMessages(groupId, [msg]);
     rememberChannel(groupId, channel);
     renderTagFilters();
     if (groupId !== currentGroupId || !messageMatchesActiveTag(msg)) return row;
@@ -5453,6 +5811,11 @@
     row.hidden = false;
     area.appendChild(row);
     observeMessageForRead(row, msg);
+    const memo = getChannelRowMemo(cache, channel);
+    memo.rows.push(row);
+    memo.byId.set(String(msg.id), row);
+    memo.lastMsgId = String(msg.id);
+    evictChannelRowFront(memo);
     if (scroll !== false) {
       if (msg.senderId === currentUser.id) {
         scrollToBottom(true);
@@ -5514,8 +5877,7 @@
     const channel = getActiveTagTopic();
     for (const msg of cache.messages || []) {
       if (resolveMessageTagTopic(msg) !== channel) continue;
-      if (String(msg.senderId) === String(currentUser.id)) continue;
-      if (msg.hasRead === true) continue;
+      if (isMessageReadByCursor(msg, currentGroupId, channel)) continue;
       if (isMessageHiddenForCurrentUser(msg)) continue;
       return msg;
     }
@@ -6505,15 +6867,25 @@
     try {
       await loadGroups({ withBackendPreload: fullSync });
       if (!currentGroupId) return;
+      const cacheBefore = ensureGroupCacheEntry(currentGroupId);
+      const fingerprintBefore = cacheFingerprint(cacheBefore.messages);
       await Promise.all([loadMessages(currentGroupId), loadMembers(currentGroupId)]);
-      if (currentGroupId) {
+      if (!currentGroupId) return;
+      const cacheAfter = ensureGroupCacheEntry(currentGroupId);
+      const fingerprintAfter = cacheFingerprint(cacheAfter.messages);
+      if (fingerprintBefore !== fingerprintAfter) {
         renderGroupFromCache(currentGroupId);
-        observeCurrentGroupRowsForRead();
-        if (composerNearBottomBeforeFocus || isNearBottom()) scrollToBottom(true);
       }
+      observeCurrentGroupRowsForRead();
+      if (composerNearBottomBeforeFocus || isNearBottom()) scrollToBottom(true);
     } catch (err) {
       console.warn("Failed to refresh current group after reconnect:", err);
     }
+  }
+  function cacheFingerprint(messages) {
+    if (!Array.isArray(messages) || !messages.length) return "0:";
+    const last = messages[messages.length - 1];
+    return `${messages.length}:${last.id}`;
   }
   var lastFocusStateSyncAt = 0;
   function syncStateOnFocus() {
@@ -6669,9 +7041,8 @@
           trimBackgroundGroupCache(cache);
           writeLocalGroupCache(msg.groupId, cache);
         } else {
-          mergeMessagesIntoCache(msg.groupId, [msg], { persist: false });
+          mergeMessagesIntoCache(msg.groupId, [msg]);
         }
-        if (historyDbSupported) void persistHistoryMessages(msg.groupId, [msg]);
         if (cache.messageRows && !cache.rowsDirty) {
           const prevMsg = cache.messages && cache.messages.length > 1 ? cache.messages[cache.messages.length - 2] : null;
           const row = await buildMessageRow(msg, msg.groupId, { showSenderName: !shouldContinueSeries(prevMsg, msg) });
@@ -6683,12 +7054,8 @@
           }
         }
         if (msg.senderId !== currentUser.id) {
-          if (cache.messages) {
-            syncGroupUnreadCount(msg.groupId);
-          } else {
-            unreadCounts[msg.groupId] = (unreadCounts[msg.groupId] || 0) + 1;
-            updateUnreadBadge(msg.groupId, unreadCounts[msg.groupId]);
-          }
+          unreadCounts[msg.groupId] = Math.max(0, (unreadCounts[msg.groupId] || 0) + 1);
+          updateUnreadBadge(msg.groupId, unreadCounts[msg.groupId]);
           playNotifSound();
         }
         const preview = await getMessagePreviewText(msg, msg.groupId);
@@ -6706,7 +7073,20 @@
       if (msg.clientUploadId) removePendingAttachment(msg.clientUploadId);
       if (msg.senderId !== currentUser.id) {
         observeCurrentGroupRowsForRead();
-        syncGroupUnreadCount(msg.groupId);
+        if (isNearBottom()) {
+          markChannelReadAt(msg.groupId, msg);
+        } else {
+          unreadCounts[msg.groupId] = Math.max(0, (unreadCounts[msg.groupId] || 0) + 1);
+          updateUnreadBadge(msg.groupId, unreadCounts[msg.groupId]);
+          if (channelUnreadLoadedForGroup === String(msg.groupId)) {
+            const topic = resolveMessageTagTopic(msg);
+            const tagIndex = topic === DEFAULT_TAG_TOPIC ? "" : channelUnreadTagIndexByTopic.get(topic);
+            if (tagIndex !== void 0 && tagIndex !== null) {
+              channelUnreadCounts[String(tagIndex)] = Math.max(0, (channelUnreadCounts[String(tagIndex)] || 0) + 1);
+              renderTagFilters();
+            }
+          }
+        }
       }
       const preview2 = await getMessagePreviewText(msg, msg.groupId);
       updateGroupPreview(msg.groupId, preview2, msg.createdAt);
@@ -6722,6 +7102,25 @@
       updateDeliveryForMessage(messageId, readCount);
       const stored = allMessages.find((m) => m.id === messageId);
       if (stored) stored.readCount = Math.max(0, Number(readCount) || 0);
+    });
+    socket.on("read_cursor_updated", (payload) => {
+      const { groupId, tagIndex, createdAt, messageId, channelUnreadCount, groupUnreadCount } = payload || {};
+      if (!groupId) return;
+      const groupKey = String(groupId);
+      const tagKey = tagIndex == null || tagIndex === "" ? "" : String(tagIndex);
+      if (createdAt) {
+        const topic = tagKey === "" ? DEFAULT_TAG_TOPIC : channelUnreadTagIndexByTopic.get(tagKey) || null;
+        if (topic) setLocalReadCursor(groupKey, topic, { at: createdAt, id: messageId || "" });
+      }
+      unreadCounts[groupKey] = Math.max(0, Number(groupUnreadCount) || 0);
+      updateUnreadBadge(groupKey, unreadCounts[groupKey]);
+      if (String(currentGroupId) === groupKey && channelUnreadLoadedForGroup === groupKey) {
+        channelUnreadCounts[tagKey] = Math.max(0, Number(channelUnreadCount) || 0);
+        renderTagFilters();
+      }
+      if (String(currentGroupId) === groupKey) {
+        updateFirstUnreadButton();
+      }
     });
     socket.on("disappearing_state_updated", (payload) => {
       applyDisappearingStateUpdate(payload || {});
@@ -6747,8 +7146,18 @@
         } else {
           cache.rowsDirty = true;
         }
+        if (cache.channelRows) {
+          for (const memo of Object.values(cache.channelRows)) {
+            const removed = memo.rows.filter((row2) => row2?.dataset?.msgId !== String(messageId));
+            if (removed.length !== memo.rows.length) {
+              memo.rows = removed;
+              memo.byId.delete(String(messageId));
+              memo.firstMsgId = memo.rows.length ? memo.rows[0].dataset?.msgId || null : null;
+              memo.lastMsgId = memo.rows.length ? memo.rows[memo.rows.length - 1].dataset?.msgId || null : null;
+            }
+          }
+        }
         cache.oldestMessageId = cache.messages.length ? cache.messages[0].id : null;
-        syncGroupUnreadCount(groupId);
         writeLocalGroupCache(groupId, cache);
         if (groupId === currentGroupId) {
           allMessages = cache.messages;
@@ -6812,10 +7221,18 @@
       persistHiddenDisappearingMessageIds();
       cache.messages = [];
       cache.messageRows = [];
+      cache.channelRows = null;
+      cache.channelAnchors = null;
       cache.members = cache.members || [];
       cache.oldestMessageId = null;
       cache.rowsDirty = false;
-      updateGroupUnseenCount(groupId, cache.messages);
+      unreadCounts[String(groupId)] = 0;
+      updateUnreadBadge(String(groupId), 0);
+      if (String(groupId) === String(currentGroupId)) {
+        channelUnreadCounts = {};
+        channelUnreadLoadedForGroup = null;
+        channelUnreadTagIndexByTopic = /* @__PURE__ */ new Map();
+      }
       writeLocalGroupCache(groupId, cache);
       if (historyDbSupported) void clearGroupHistoryStore(groupId);
       if (groupId !== currentGroupId) return;
@@ -6838,6 +7255,10 @@
       if (removedTopic) forgetChannel(groupId, removedTopic);
       cache.rowsDirty = true;
       cache.messageRows = null;
+      if (cache.channelRows && removedTopic) delete cache.channelRows[removedTopic];
+      if (String(groupId) === String(currentGroupId) && channelUnreadLoadedForGroup === String(groupId)) {
+        channelUnreadCounts[String(tagIndex || "")] = 0;
+      }
       writeLocalGroupCache(groupId, cache);
       if (groupId === currentGroupId) {
         allMessages = cache.messages;
@@ -9041,6 +9462,7 @@ ${grokResponseDraft}` : grokResponseDraft;
     bindTagFilterDrag();
     $("scroll-first-unread-btn").addEventListener("click", jumpToFirstUnread);
     let scrollRafPending = false;
+    let lastRecordedAnchor = "";
     messagesArea().addEventListener("scroll", () => {
       if (scrollRafPending) return;
       scrollRafPending = true;
@@ -9054,7 +9476,22 @@ ${grokResponseDraft}` : grokResponseDraft;
           $("scroll-unread-badge").hidden = true;
         }
         updateFirstUnreadButton();
-        if (area.scrollTop <= SCROLL_LOAD_THRESHOLD && !loadingOlder && oldestMessageId) {
+        const anchorRow = Array.from(area.querySelectorAll(".msg-row[data-msg-id]:not([hidden])")).find((row) => {
+          const rect = row.getBoundingClientRect();
+          const aRect = area.getBoundingClientRect();
+          return rect.bottom > aRect.top + 8 && rect.top < aRect.bottom;
+        });
+        if (anchorRow) {
+          const anchorId = String(anchorRow.dataset.msgId);
+          if (anchorId !== lastRecordedAnchor && currentGroupId) {
+            lastRecordedAnchor = anchorId;
+            const cache = ensureGroupCacheEntry(currentGroupId);
+            cache.channelAnchors = cache.channelAnchors || {};
+            cache.channelAnchors[getActiveTagTopic()] = anchorId;
+            scheduleLocalGroupCacheWrite(currentGroupId, cache);
+          }
+        }
+        if (area.scrollTop <= SCROLL_LOAD_THRESHOLD && !loadingOlder && !transcriptRebuilding && oldestMessageId) {
           loadOlderMessages();
         }
       });
@@ -9166,7 +9603,7 @@ ${grokResponseDraft}` : grokResponseDraft;
       } else {
         area.appendChild(fragment);
       }
-      allMessages = mergeMessagesIntoCache(currentGroupId, msgs, { persist: false });
+      allMessages = mergeMessagesIntoCache(currentGroupId, msgs, { persist: true });
       oldestMessageId = rawMsgs[0].id;
       const cache = ensureGroupCacheEntry(currentGroupId);
       cache.messages = allMessages;
@@ -9174,6 +9611,16 @@ ${grokResponseDraft}` : grokResponseDraft;
       cache.oldestMessageId = oldestMessageId;
       cache.rowsDirty = false;
       writeLocalGroupCache(currentGroupId, cache);
+      if (rows.length) {
+        const memo = getChannelRowMemo(cache, getActiveTagTopic());
+        memo.rows = [...rows, ...memo.rows];
+        for (const row of rows) {
+          const msgId = row?.dataset?.msgId;
+          if (msgId) memo.byId.set(String(msgId), row);
+        }
+        memo.firstMsgId = rows[0].dataset?.msgId || memo.firstMsgId;
+        evictChannelRowBack(memo);
+      }
       area.scrollTop = area.scrollHeight - prevScrollHeight;
     } catch (err) {
       console.error("loadOlderMessages error:", err);
@@ -9226,6 +9673,16 @@ ${grokResponseDraft}` : grokResponseDraft;
     entry.oldestMessageId = oldestMessageId;
     entry.rowsDirty = false;
     writeLocalGroupCache(groupId, entry);
+    if (rows.length) {
+      const memo = getChannelRowMemo(entry, channel);
+      memo.rows = [...rows, ...memo.rows];
+      for (const row of rows) {
+        const msgId = row?.dataset?.msgId;
+        if (msgId) memo.byId.set(String(msgId), row);
+      }
+      memo.firstMsgId = rows[0].dataset?.msgId || memo.firstMsgId;
+      evictChannelRowBack(memo);
+    }
     area.scrollTop = area.scrollHeight - prevScrollHeight;
     return true;
   }

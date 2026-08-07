@@ -4,7 +4,7 @@ Gchat is a client-side encrypted group chat application built with Node.js, Expr
 
 The hosted web app is the primary product. The desktop app is a native system-webview shell that loads the hosted Railway deployment.
 
-Current version: **v1.3.11** (Windows: thin WebView2 shell; macOS: Tauri/WKWebView)
+Current version: **v1.3.12** (Windows: thin WebView2 shell; macOS: Tauri/WKWebView)
 
 ---
 

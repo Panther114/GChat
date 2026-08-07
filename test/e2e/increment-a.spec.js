@@ -16,6 +16,20 @@ async function signInAsLocalRoot(page) {
   ]);
 }
 
+// v1.3.12: the app restores the last-open group on boot, so at a mobile
+// viewport the sidebar may be hidden behind the chat view. This helper opens
+// the sidebar when needed and clicks the requested group in the list (scoped
+// to #group-list so the topbar title can never collide).
+async function clickGroup(page, name) {
+  const toggle = page.locator('#sidebar-toggle, #sidebar-toggle-empty').first();
+  if (await toggle.isVisible()) {
+    await toggle.click();
+  }
+  const item = page.locator('#group-list .group-item', { hasText: name }).first();
+  await item.click();
+  await expect(page.locator('.chat-topbar-name')).toHaveText(name);
+}
+
 test('auth theme toggle swaps the GChat logo for the active theme', async ({ page }) => {
   await page.addInitScript(() => globalThis.localStorage.setItem('gchat:theme-preference', 'dark'));
   await page.goto('/index.html');
@@ -90,7 +104,7 @@ test('local root account loads v2 fixtures and switches themes', async ({ page }
   });
   await signInAsLocalRoot(page);
   await expect(page.getByText('Increment A Playground')).toBeVisible();
-  await page.getByText('Increment A Playground').click();
+  await clickGroup(page, 'Increment A Playground');
   await expect(page.getByText('Welcome to the local UI playground', { exact: false })).toBeVisible();
   const chatPanel = page.locator('#chat-panel');
   const rightPanel = page.locator('#right-panel');
@@ -140,7 +154,7 @@ test('local root account loads v2 fixtures and switches themes', async ({ page }
 test('message stream remains usable at a mobile viewport', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await signInAsLocalRoot(page);
-  await page.getByText('Increment A Playground').click();
+  await clickGroup(page, 'Increment A Playground');
   await expect(page.locator('.msg-row').first()).toBeVisible();
   const width = await page.locator('.chat-panel').evaluate((element) => element.getBoundingClientRect().width);
   expect(width).toBeLessThanOrEqual(390.1);
@@ -149,7 +163,7 @@ test('message stream remains usable at a mobile viewport', async ({ page }) => {
 test('mobile message actions and channel controls remain touch accessible', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await signInAsLocalRoot(page);
-  await page.getByText('Increment A Playground').click();
+  await clickGroup(page, 'Increment A Playground');
 
   const topbarLayout = await page.locator('.chat-topbar').evaluate((topbar) => {
     const filters = topbar.querySelector('#chat-tag-filters');
@@ -185,7 +199,7 @@ test('mobile message actions and channel controls remain touch accessible', asyn
 
 test('composer modes use the active channel without legacy tokens or slash commands', async ({ page }) => {
   await signInAsLocalRoot(page);
-  await page.getByText('Increment A Playground').click();
+  await clickGroup(page, 'Increment A Playground');
 
   await page.locator('#whisper-mode-btn').click();
   await expect(page.locator('#whisper-mode-btn')).toHaveCSS('color', 'rgb(124, 58, 237)');
@@ -227,7 +241,7 @@ test('composer modes use the active channel without legacy tokens or slash comma
 
 test('image attachments reserve message-row space and open usable viewer actions', async ({ page }) => {
   await signInAsLocalRoot(page);
-  await page.getByText('Increment A Playground').click();
+  await clickGroup(page, 'Increment A Playground');
 
   const baselineImageCount = await page.locator('.msg-image').count();
   await page.locator('#messages-area').evaluate((area) => {
@@ -307,7 +321,7 @@ test('image attachments reserve message-row space and open usable viewer actions
 
 test('pasting multiple copied files sends all of them, one by one', async ({ page }) => {
   await signInAsLocalRoot(page);
-  await page.getByText('Increment A Playground').click();
+  await clickGroup(page, 'Increment A Playground');
   await page.locator('#messages-area .msg-row, #messages-area .channel-empty-state').first().waitFor();
 
   const baselineFileCount = await page.locator('.msg-file-btn').count();
@@ -352,7 +366,7 @@ test('join flow accepts a six-character invite code', async ({ page }) => {
 
 test('group details keep Invite stable and render a bounded group-icon preview', async ({ page }) => {
   await signInAsLocalRoot(page);
-  await page.getByText('Increment A Playground').click();
+  await clickGroup(page, 'Increment A Playground');
 
   const invite = page.locator('#copy-code-btn');
   await expect(invite).toHaveText('Invite');
@@ -378,7 +392,7 @@ test('edited messages stay decryptable after a channel re-render', async ({ page
   // to keep the stale metadata ciphertext, so any re-render from cache showed
   // "Unable to decrypt this message" for every edited message.
   await signInAsLocalRoot(page);
-  await page.getByText('Increment A Playground').click();
+  await clickGroup(page, 'Increment A Playground');
   await page.locator('#messages-area .msg-row, #messages-area .channel-empty-state').first().waitFor();
 
   const original = `edit-orig-${Date.now()}`;
@@ -421,16 +435,16 @@ test('messages sent from a second device appear in a background group without re
 
   await signInAsLocalRoot(pageA);
   // Prime device A's cache for GChat Global first.
-  await pageA.getByText('GChat Global').click();
+  await clickGroup(pageA, 'GChat Global');
   await expect(pageA.locator('.chat-topbar-name')).toHaveText('GChat Global');
   await pageA.locator('#messages-area .msg-row, #messages-area .channel-empty-state').first().waitFor();
   // Then move device A to a different group so Global runs in the background.
-  await pageA.getByText('Increment A Playground').click();
+  await clickGroup(pageA, 'Increment A Playground');
   await expect(pageA.locator('.chat-topbar-name')).toHaveText('Increment A Playground');
 
   // Device B (same account) sends a message into GChat Global.
   await signInAsLocalRoot(pageB);
-  await pageB.getByText('GChat Global').click();
+  await clickGroup(pageB, 'GChat Global');
   await expect(pageB.locator('.chat-topbar-name')).toHaveText('GChat Global');
   const syncText = `sync-check-${Date.now()}`;
   await pageB.locator('#message-input').fill(syncText);
@@ -438,7 +452,7 @@ test('messages sent from a second device appear in a background group without re
   await expect(pageB.locator('.msg-text', { hasText: syncText }).last()).toBeVisible();
 
   // Device A: switch back — the new message must already be there.
-  await pageA.getByText('GChat Global').click();
+  await clickGroup(pageA, 'GChat Global');
   await expect(pageA.locator('.msg-text', { hasText: syncText }).last()).toBeVisible({ timeout: 10000 });
   expect(pageErrors).toEqual([]);
 

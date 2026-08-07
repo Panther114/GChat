@@ -238,7 +238,8 @@ test('message deletion is author-only and transactionally removes dependent stat
   const messageId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
   stmts.insertV2Message.run(
     messageId, group.id, group.ownerId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null,
-    null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null
+    null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null,
+    '2026-01-01T00:00:00.000Z'
   );
   stmts.markMessageRead.run(messageId, group.memberId);
 
@@ -263,7 +264,8 @@ test('incremental since-cursor sync returns only newer messages in ascending ord
   for (const id of ids) {
     stmts.insertV2Message.run(
       id, group.id, group.ownerId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null,
-      null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null
+      null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null,
+      '2030-01-01T00:00:00.000Z'
     );
   }
   const setTime = db.prepare('UPDATE messages SET created_at = ? WHERE id = ?');
@@ -272,14 +274,129 @@ test('incremental since-cursor sync returns only newer messages in ascending ord
   setTime.run('2030-01-01T10:02:00.000Z', ids[2]);
 
   const afterSecond = await owner
-    .get(`/api/groups/${group.id}/messages?since=2030-01-01T10:01:00.000Z`)
+    .get(`/api/groups/${group.id}/messages?since=2030-01-01T10:01:00.000Z&sinceId=${ids[1]}`)
     .expect(200);
   assert.deepEqual(afterSecond.body.map((m) => m.id), [ids[2]]);
 
   const afterFirst = await owner
-    .get(`/api/groups/${group.id}/messages?since=2030-01-01T10:00:00.000Z`)
+    .get(`/api/groups/${group.id}/messages?since=2030-01-01T10:00:00.000Z&sinceId=${ids[0]}`)
     .expect(200);
   assert.deepEqual(afterFirst.body.map((m) => m.id), [ids[1], ids[2]]);
+
+  // v1.3.12: a cursor WITHOUT the id tie-break must still include every
+  // message at the boundary timestamp (previously `created_at > since` skipped
+  // them forever — the "missing chunks" root cause).
+  const legacyCursor = await owner
+    .get(`/api/groups/${group.id}/messages?since=2030-01-01T10:01:00.000Z`)
+    .expect(200);
+  assert.deepEqual(legacyCursor.body.map((m) => m.id), [ids[1], ids[2]]);
+});
+
+test('composite since-cursor never skips messages sharing the boundary millisecond', async () => {
+  // H1 regression: two messages with the SAME created_at; the cursor points at
+  // the first one. A time-only cursor would skip the second FOREVER (and each
+  // device missed different messages). The composite (created_at, id) cursor
+  // includes it via the id tie-break.
+  const base = 'dddddddd-dddd-4ddd-8ddd-ddddddddddd';
+  const sameMs = '2031-05-05T05:05:05.000Z';
+  const idA = `${base}0`;
+  const idB = `${base}1`;
+  stmts.insertV2Message.run(
+    idA, group.id, group.ownerId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null,
+    null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null, sameMs
+  );
+  stmts.insertV2Message.run(
+    idB, group.id, group.ownerId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null,
+    null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null, sameMs
+  );
+
+  // Cursor at (sameMs, idA) → idB (same millisecond, larger id) must be returned.
+  const boundary = await owner
+    .get(`/api/groups/${group.id}/messages?since=${encodeURIComponent(sameMs)}&sinceId=${idA}`)
+    .expect(200);
+  assert.deepEqual(boundary.body.map((m) => m.id), [idB]);
+
+  // Cursor at (sameMs, idB) → nothing more at this boundary.
+  const pastBoundary = await owner
+    .get(`/api/groups/${group.id}/messages?since=${encodeURIComponent(sameMs)}&sinceId=${idB}`)
+    .expect(200);
+  assert.deepEqual(pastBoundary.body.map((m) => m.id), []);
+});
+
+test('real-send created_at is ISO and the broadcast cursor drives the since-sync (no format drift)', async () => {
+  // Regression guard for the root cause of "messages disappear on resync":
+  // inserts used to fall back to SQLite CURRENT_TIMESTAMP ("YYYY-MM-DD HH:MM:SS")
+  // while broadcasts sent new Date().toISOString() ("YYYY-MM-DDTHH:MM:SS.sssZ").
+  // A T-format cursor against space-format rows made `?since=` return nothing.
+  const { io: socketClient } = require('socket.io-client');
+  const url = await ensureServerListening();
+
+  const agent = request.agent(app);
+  const agentResponse = await register(agent, 'cursor-sync-test');
+  const agentCsrf = await csrf(agent);
+  const secret = Buffer.alloc(32, 7).toString('base64url');
+  const commitment = crypto.createHash('sha256').update(Buffer.from(secret, 'base64url')).digest('base64url');
+  const created = await agent
+    .post('/api/groups/create')
+    .set('X-CSRF-Token', agentCsrf)
+    .send({ name: 'Cursor room', code: 'curs01', secret, keyCommitment: commitment })
+    .expect(201);
+  const groupId = created.body.id;
+
+  const cookie = agentResponse.headers['set-cookie'][0].split(';')[0];
+  const sock = socketClient(url, { transports: ['polling'], extraHeaders: { Cookie: cookie } });
+  await new Promise((resolve) => sock.on('connect', resolve));
+  sock.emit('join_room', groupId);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+
+  const received = [];
+  sock.on('new_message', (msg) => received.push(msg));
+
+  const sendOne = (id) => new Promise((resolve) => {
+    sock.emit('send_message', {
+      id, groupId, encryptedContent: 'AAAA', iv: 'AAAAAAAAAAAAAAAA',
+      encryptedMetadata: 'AAAA', metadataIv: 'AAAAAAAAAAAAAAAA',
+      replyToId: null, tagIndex: null, isDisappearing: false, disappearingDurationMs: 0,
+      encryptionVersion: 2, keyVersion: 1, revision: 1,
+    }, resolve);
+    setTimeout(() => resolve('NO_ACK'), 4000);
+  });
+
+  const idA = crypto.randomUUID();
+  const ackA = await sendOne(idA);
+  assert.deepEqual(ackA, { ok: true, messageId: idA });
+  // Let the broadcast settle so the cursor message is captured before sending B.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const idB = crypto.randomUUID();
+  const ackB = await sendOne(idB);
+  assert.deepEqual(ackB, { ok: true, messageId: idB });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  // The broadcast createdAt must be ISO (T separator + Z suffix)…
+  const msgA = received.find((m) => m.id === idA);
+  const msgB = received.find((m) => m.id === idB);
+  assert.ok(msgA && msgB, 'both broadcasts should be received');
+  assert.ok(/T.*Z$/.test(msgA.createdAt), `broadcast createdAt must be ISO, got ${msgA.createdAt}`);
+  // …and the DB must store the SAME ISO format (no space-separated drift).
+  const dbRowA = stmts.findMessageById.get(idA);
+  assert.ok(/T.*Z$/.test(dbRowA.created_at), `DB created_at must be ISO, got ${dbRowA.created_at}`);
+
+  // The composite incremental cursor (created_at + id) keyed on the broadcast
+  // must return exactly B — the id tie-break makes the boundary deterministic.
+  const afterA = await agent
+    .get(`/api/groups/${groupId}/messages?since=${encodeURIComponent(msgA.createdAt)}&sinceId=${idA}`)
+    .expect(200);
+  assert.deepEqual(afterA.body.map((m) => m.id), [idB]);
+
+  // A legacy space-format cursor is normalized and still surfaces newer
+  // messages (defensive; without an id tie-break it also re-includes A).
+  const legacyCursor = dbRowA.created_at.replace('T', ' ').replace(/\.\d{3}Z$/, '');
+  const afterLegacy = await agent
+    .get(`/api/groups/${groupId}/messages?since=${encodeURIComponent(legacyCursor)}`)
+    .expect(200);
+  assert.ok(afterLegacy.body.some((m) => m.id === idB), 'legacy cursor must still surface newer messages');
+
+  sock.close();
 });
 
 test('quotes to deleted targets are accepted and marked replyTargetMissing', async () => {
@@ -287,7 +404,8 @@ test('quotes to deleted targets are accepted and marked replyTargetMissing', asy
   const msgId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
   stmts.insertV2Message.run(
     msgId, group.id, group.ownerId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', quotedId,
-    null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null
+    null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null,
+    '2030-01-01T11:00:00.000Z'
   );
   db.prepare('UPDATE messages SET created_at = ? WHERE id = ?').run('2030-01-01T11:00:00.000Z', msgId);
 
@@ -301,7 +419,8 @@ test('quotes to deleted targets are accepted and marked replyTargetMissing', asy
   const existing = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
   stmts.insertV2Message.run(
     existing, group.id, group.ownerId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', msgId,
-    null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null
+    null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null,
+    '2030-01-01T11:01:00.000Z'
   );
   db.prepare('UPDATE messages SET created_at = ? WHERE id = ?').run('2030-01-01T11:01:00.000Z', existing);
   const res2 = await owner.get(`/api/groups/${group.id}/messages?limit=100`).expect(200);
@@ -322,7 +441,8 @@ test('single-message quote hydration enforces membership and whisper visibility'
   const whisperId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
   stmts.insertV2Message.run(
     whisperId, group.id, group.ownerId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'whisper', null,
-    JSON.stringify([group.memberId]), 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null
+    JSON.stringify([group.memberId]), 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null,
+    '2026-01-01T00:00:00.000Z'
   );
   const asOwner = await owner.get(`/api/groups/${group.id}/messages/${whisperId}`).expect(200);
   assert.equal(asOwner.body.id, whisperId);
@@ -398,7 +518,8 @@ test('any GChat Global member can delete any message and set memberships stay bo
   const messageId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
   stmts.insertV2Message.run(
     messageId, 'gchat-global', memberAResponse.body.id, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null,
-    null, 0, null, 2, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null
+    null, 0, null, 2, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null,
+    '2026-01-01T00:00:00.000Z'
   );
   const memberBCsrf = await csrf(memberB);
   await memberB
@@ -675,8 +796,8 @@ test('joining a group bumps delivery totals of previous messages (whispers exclu
 
   const textId = crypto.randomUUID();
   const whisperId = crypto.randomUUID();
-  stmts.insertV2Message.run(textId, groupId, ownerId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null, null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null);
-  stmts.insertV2Message.run(whisperId, groupId, ownerId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'whisper', null, JSON.stringify([ownerId]), 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null);
+  stmts.insertV2Message.run(textId, groupId, ownerId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null, null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null, '2026-01-01T00:00:00.000Z');
+  stmts.insertV2Message.run(whisperId, groupId, ownerId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'whisper', null, JSON.stringify([ownerId]), 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null, '2026-01-01T00:00:01.000Z');
   const before = stmts.findMessageById.get(textId).total_recipients;
   const whisperBefore = stmts.findMessageById.get(whisperId).total_recipients;
   assert.equal(before, 1);
@@ -693,4 +814,123 @@ test('joining a group bumps delivery totals of previous messages (whispers exclu
 
   assert.equal(stmts.findMessageById.get(textId).total_recipients, before + 1);
   assert.equal(stmts.findMessageById.get(whisperId).total_recipients, whisperBefore, 'whisper totals must stay recipient-scoped');
+});
+
+test('per-channel read cursors drive unread counts and broadcast to every device', async () => {
+  const { io: socketClient } = require('socket.io-client');
+  const url = await ensureServerListening();
+
+  const memberAgent = request.agent(app);
+  const memberResponse = await register(memberAgent, 'cursor-unread-test');
+  const memberCsrf = await csrf(memberAgent);
+  const secret = Buffer.alloc(32, 9).toString('base64url');
+  const commitment = crypto.createHash('sha256').update(Buffer.from(secret, 'base64url')).digest('base64url');
+  const created = await memberAgent
+    .post('/api/groups/create')
+    .set('X-CSRF-Token', memberCsrf)
+    .send({ name: 'Unread room', code: 'unrd01', secret, keyCommitment: commitment })
+    .expect(201);
+  const groupId = created.body.id;
+  const memberId = memberResponse.body.id;
+  const otherId = stmts.findUserByUsername.get('owner-test').id;
+
+  // Two messages: one in #main (tag_index NULL), one in a channel (blind index).
+  const mainId = crypto.randomUUID();
+  const channelTag = Buffer.alloc(32, 3).toString('base64url');
+  const channelId = crypto.randomUUID();
+  stmts.insertV2Message.run(mainId, groupId, otherId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null, null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null, '2026-01-02T00:00:00.000Z');
+  stmts.insertV2Message.run(channelId, groupId, otherId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null, null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', channelTag, null, '2026-01-02T00:00:01.000Z');
+
+  // The group list reports 2 unread (no cursors yet — counts are capped/bounded).
+  const mine = await memberAgent.get('/api/groups/mine').expect(200);
+  const myGroup = mine.body.find((g) => g.id === groupId);
+  assert.equal(myGroup.unreadCount, 2);
+
+  // Per-channel counts are exact: #main = 1, the channel = 1.
+  const perChannel = await memberAgent
+    .get(`/api/groups/${groupId}/unread?tags=${encodeURIComponent(channelTag)}`)
+    .expect(200);
+  assert.deepEqual(perChannel.body.counts, { '': 1, [channelTag]: 1 });
+
+  // A non-member cannot read unread counts.
+  const outsider = request.agent(app);
+  await register(outsider, 'cursor-unread-outsider');
+  await outsider.get(`/api/groups/${groupId}/unread`).expect(403);
+
+  // Advance the #main cursor via socket and verify the broadcast + counts.
+  const cookie = memberResponse.headers['set-cookie'][0].split(';')[0];
+  const sock = socketClient(url, { transports: ['polling'], extraHeaders: { Cookie: cookie } });
+  await new Promise((resolve) => sock.on('connect', resolve));
+  const broadcasts = [];
+  sock.on('read_cursor_updated', (payload) => broadcasts.push(payload));
+
+  sock.emit('mark_channel_read', {
+    groupId,
+    tagIndex: null,
+    createdAt: '2026-01-02T00:00:00.000Z',
+    messageId: mainId,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 400));
+
+  // #main unread is now 0; the untouched channel stays 1; group total is 1.
+  const perChannelAfter = await memberAgent
+    .get(`/api/groups/${groupId}/unread?tags=${encodeURIComponent(channelTag)}`)
+    .expect(200);
+  assert.deepEqual(perChannelAfter.body.counts, { '': 0, [channelTag]: 1 });
+
+  const mineAfter = await memberAgent.get('/api/groups/mine').expect(200);
+  const myGroupAfter = mineAfter.body.find((g) => g.id === groupId);
+  assert.equal(myGroupAfter.unreadCount, 1);
+
+  // The broadcast reached this device with the fresh counts (cross-device sync).
+  const broadcast = broadcasts[broadcasts.length - 1];
+  assert.ok(broadcast, 'read_cursor_updated must be broadcast to the user room');
+  assert.equal(broadcast.groupId, groupId);
+  assert.equal(broadcast.tagIndex, null);
+  assert.equal(broadcast.channelUnreadCount, 0);
+  assert.equal(broadcast.groupUnreadCount, 1);
+
+  // Own messages never count as unread, and a cursor covering the channel's
+  // newest message zeroes the channel too.
+  stmts.upsertChannelReadCursor.run(groupId, memberId, channelTag, '2026-01-02T00:00:01.000Z', channelId, '2026-01-02T00:00:02.000Z');
+  const mineAfterAll = await memberAgent.get('/api/groups/mine').expect(200);
+  const myGroupAfterAll = mineAfterAll.body.find((g) => g.id === groupId);
+  assert.equal(myGroupAfterAll.unreadCount, 0);
+
+  sock.close();
+});
+
+test('leaving a group removes the member read cursors', async () => {
+  const ownerAgent = request.agent(app);
+  await register(ownerAgent, 'cursor-leave-owner');
+  const ownerCsrf = await csrf(ownerAgent);
+  const secret = Buffer.alloc(32, 10).toString('base64url');
+  const commitment = crypto.createHash('sha256').update(Buffer.from(secret, 'base64url')).digest('base64url');
+  const created = await ownerAgent
+    .post('/api/groups/create')
+    .set('X-CSRF-Token', ownerCsrf)
+    .send({ name: 'Leave room', code: 'leave1', secret, keyCommitment: commitment })
+    .expect(201);
+  const groupId = created.body.id;
+
+  const leaverAgent = request.agent(app);
+  const leaverResponse = await register(leaverAgent, 'cursor-leaver-test');
+  const leaverCsrf = await csrf(leaverAgent);
+  await leaverAgent
+    .post('/api/groups/join')
+    .set('X-CSRF-Token', leaverCsrf)
+    .send({ code: 'leave1' })
+    .expect(200);
+  const leaverId = leaverResponse.body.id;
+
+  stmts.upsertChannelReadCursor.run(groupId, leaverId, null, '2026-01-01T00:00:00.000Z', 'x', '2026-01-01T00:00:00.000Z');
+  assert.ok(stmts.getChannelReadCursor.get(groupId, leaverId, null));
+
+  await ownerAgent
+    .delete(`/api/groups/${groupId}/members/${leaverId}`)
+    .set('X-CSRF-Token', await csrf(ownerAgent))
+    .expect(200);
+
+  assert.equal(stmts.getChannelReadCursor.get(groupId, leaverId, null), undefined, 'kicked member cursors must be removed');
+  assert.equal(stmts.isMember.get(groupId, leaverId), undefined);
 });
