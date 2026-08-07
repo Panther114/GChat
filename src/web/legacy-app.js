@@ -3477,7 +3477,7 @@ async function removeTagMessagesFromCache(groupId, hashtag) {
   return removedIds.length > 0;
 }
 
-function renderGroupFromCache(groupId) {
+function renderGroupFromCache(groupId, { restoreScroll = true } = {}) {
   const cache = ensureGroupCacheEntry(groupId);
   allMessages = cache.messages || [];
   oldestMessageId = cache.oldestMessageId;
@@ -3488,7 +3488,7 @@ function renderGroupFromCache(groupId) {
   renderWhisperPicker();
   renderTagFilters();
   // Always paint only the active channel stream (independent history).
-  void renderActiveChannelStream();
+  void renderActiveChannelStream({ restoreScroll });
 }
 
 // v1.3.8: background-group caches must stay bounded now that every group room
@@ -3698,16 +3698,14 @@ async function refreshCurrentGroupFromServer() {
       }
     }
     // Re-render only when the user isn't mid-scroll through older history, and
-    // preserve their reading position (the memoized window re-attaches in
-    // place instead of scrolling down). Edits force a window refresh (the
-    // stale rows were dropped from the memo above).
+    // preserve their reading position — v1.3.13 uses viewport-anchor
+    // preservation (the old scrollHeight-delta math jumped when live messages
+    // or memo evictions changed the height during the render). Edits force a
+    // window refresh (the stale rows were dropped from the memo above).
     if (edits.length || nearBottom || area.scrollTop <= 0) {
-      const prevScrollTop = area.scrollTop;
-      const prevScrollHeight = area.scrollHeight;
-      await renderActiveChannelStream();
-      if (!nearBottom && prevScrollTop > 0) {
-        area.scrollTop = prevScrollTop + (area.scrollHeight - prevScrollHeight);
-      }
+      const anchor = captureViewportAnchor(area);
+      await renderActiveChannelStream({ restoreScroll: false });
+      restoreViewportAnchor(area, anchor);
       observeCurrentGroupRowsForRead();
       if (nearBottom && channelAdditions.length) {
         markChannelReadAt(groupId, channelAdditions[channelAdditions.length - 1]);
@@ -4224,12 +4222,44 @@ function attachChannelRowsToArea(area, memo) {
   area.replaceChildren(fragment);
 }
 
+// v1.3.13: viewport-anchor preservation for prepends/evictions. The old code
+// restored scroll with `scrollTop = scrollHeight - prevScrollHeight`, which
+// jumps whenever rows are added or removed concurrently (live messages,
+// memo evictions) while the async build is in flight. Anchoring to the first
+// VISIBLE message keeps the reading position stable no matter what happens
+// above or below the viewport.
+function captureViewportAnchor(area) {
+  if (!area) return null;
+  const row = Array.from(area.querySelectorAll('.msg-row[data-msg-id]:not([hidden])')).find((r) => {
+    const rect = r.getBoundingClientRect();
+    const aRect = area.getBoundingClientRect();
+    return rect.bottom > aRect.top + 2 && rect.top < aRect.bottom;
+  });
+  if (!row) return null;
+  const rect = row.getBoundingClientRect();
+  const aRect = area.getBoundingClientRect();
+  return { id: String(row.dataset.msgId), offsetFromTop: rect.top - aRect.top };
+}
+
+function restoreViewportAnchor(area, anchor) {
+  if (!area || !anchor) return;
+  const row = area.querySelector(`[data-msg-id="${CSS.escape(anchor.id)}"]`);
+  if (!row) return;
+  const rect = row.getBoundingClientRect();
+  const aRect = area.getBoundingClientRect();
+  const currentOffset = rect.top - aRect.top;
+  area.scrollTop += currentOffset - anchor.offsetFromTop;
+}
+
 // Drop the oldest rows once the window grows past its cap — but never rows the
 // user might be looking at while scrolled up (evicting visible rows would yank
-// the viewport). Evicted rows release their observers and blob URLs.
+// the viewport). Evicted rows release their observers and blob URLs. When rows
+// above the viewport are removed, the viewport anchor keeps the reading
+// position fixed.
 function evictChannelRowFront(memo, keep = CHANNEL_RENDER_WINDOW, max = CHANNEL_RENDER_WINDOW * 2) {
   if (memo.rows.length <= max) return;
   const area = messagesArea();
+  const anchor = captureViewportAnchor(area);
   while (memo.rows.length > keep) {
     const first = memo.rows[0];
     if (!first) break;
@@ -4250,6 +4280,7 @@ function evictChannelRowFront(memo, keep = CHANNEL_RENDER_WINDOW, max = CHANNEL_
   }
   memo.firstMsgId = memo.rows.length ? memo.rows[0].dataset?.msgId || null : null;
   if (!memo.rows.length) memo.lastMsgId = null;
+  restoreViewportAnchor(area, anchor);
 }
 
 // Prepend-pagination counterpart: trims rows from the BACK that are below the
@@ -4301,8 +4332,12 @@ function restoreOrScrollToBottom() {
 /**
  * Fully replace the rendered transcript with only the active channel's messages.
  * Does not hide rows in a shared history — channels are independent streams.
+ * @param {object} [options] restoreScroll — restore the per-channel anchor /
+ * bottom position after rendering. Background refreshes pass false: they
+ * preserve the scroll position themselves (anchor-based), and an unconditional
+ * restore is what made the transcript "jump" mid-scroll.
  */
-async function renderActiveChannelStream() {
+async function renderActiveChannelStream({ restoreScroll = true } = {}) {
   const area = messagesArea();
   if (!area || !currentGroupId) return;
   const cache = ensureGroupCacheEntry(currentGroupId);
@@ -4360,7 +4395,7 @@ async function renderActiveChannelStream() {
     }
     evictChannelRowFront(memo);
     attachChannelRowsToArea(area, memo);
-    restoreOrScrollToBottom();
+    if (restoreScroll) restoreOrScrollToBottom();
     observeCurrentGroupRowsForRead();
     syncChannelEmptyState();
     updateFirstUnreadButton();
@@ -4408,7 +4443,7 @@ async function renderActiveChannelStream() {
     memo.lastMsgId = rows.length ? rows[rows.length - 1].dataset?.msgId || null : null;
     evictChannelRowFront(memo);
     attachChannelRowsToArea(area, memo);
-    restoreOrScrollToBottom();
+    if (restoreScroll) restoreOrScrollToBottom();
     observeCurrentGroupRowsForRead();
   } finally {
     transcriptRebuilding = false;
@@ -5766,6 +5801,32 @@ function canCurrentUserManageGroup() {
   return String(currentGroupData.createdBy) === String(currentUser.id) || !!currentGroupData.viewerIsAdmin;
 }
 
+// v1.3.13: Furina is the app owner — in GChat Global (which has no owner) she
+// can clear the full history and delete channels, mirroring the server rule.
+function isFurinaOwner() {
+  return !!currentUser && currentUser.username === 'Furina';
+}
+
+function canCurrentUserClearGlobalHistory() {
+  return isCurrentGroupGlobal() && isFurinaOwner();
+}
+
+function canCurrentUserClearHistory() {
+  if (canCurrentUserClearGlobalHistory()) return true;
+  if (!currentGroupData) return false;
+  if (currentGroupData.createdBy === currentUser?.id) return true;
+  if (currentGroupData.viewerIsAdmin) return true;
+  return !!currentGroupData.allowMemberClear;
+}
+
+function canCurrentUserClearTag() {
+  if (canCurrentUserClearGlobalHistory()) return true;
+  if (!currentGroupData || !currentUser) return false;
+  if (currentGroupData.createdBy === currentUser.id) return true;
+  if (currentGroupData.viewerIsAdmin) return true;
+  return !!(currentGroupData.allowMemberClear || currentGroupData.allowMemberClearTag);
+}
+
 function updateGroupColorAction(canManage) {
   const button = $('set-group-color-btn');
   if (!button) return;
@@ -5787,10 +5848,14 @@ function updateGroupActionButtons(isOwner) {
   const isGlobal = isCurrentGroupGlobal();
 
   // In GChat Global there is no owner or administrator: everyone can export,
-  // nobody can clear the full history, and nobody can leave or disband.
+  // only Furina (the app owner) can clear the full history, and nobody can
+  // leave or disband.
   if (isGlobal) {
     updateQuickActionButtonState(exportBtn, { enabled: true, labelEnabled: 'Export chat as TXT' });
-    updateQuickActionButtonState(clearBtn, { enabled: false, labelEnabled: 'Clear chat history' });
+    updateQuickActionButtonState(clearBtn, {
+      enabled: canCurrentUserClearGlobalHistory(),
+      labelEnabled: 'Clear chat history',
+    });
     if (leaveBtn) {
       leaveBtn.hidden = true;
       leaveBtn.dataset.label = 'Exit group';
@@ -5822,13 +5887,6 @@ function updateGroupActionButtons(isOwner) {
     disbandBtn.hidden = !isOwner;
     disbandBtn.dataset.label = 'Disband group';
   }
-}
-
-function canCurrentUserClearTag() {
-  if (!currentGroupData || !currentUser) return false;
-  if (currentGroupData.createdBy === currentUser.id) return true;
-  if (currentGroupData.viewerIsAdmin) return true;
-  return !!(currentGroupData.allowMemberClear || currentGroupData.allowMemberClearTag);
 }
 
 function syncAllowMemberClearTagToggleState() {
@@ -6154,6 +6212,9 @@ function markChannelReadAt(groupId, msg) {
   const topic = resolveMessageTagTopic(msg);
   if (String(msg.senderId) === String(currentUser.id)) return;
   setLocalReadCursor(groupId, topic, { at: msg.createdAt, id: msg.id });
+  // v1.3.13: rows painted before this cursor advance must lose the unread
+  // highlight immediately (the accent bar used to linger on them).
+  if (String(groupId) === String(currentGroupId)) refreshUnseenRowClasses();
   void (async () => {
     const tagIndex = await channelTagIndex(topic, groupId);
     socket.emit('mark_channel_read', {
@@ -6358,7 +6419,10 @@ async function loadMessages(groupId, before) {
     } else {
       // Prepend older messages
       const area = messagesArea();
-      const prevScrollHeight = area.scrollHeight;
+      // v1.3.13: anchor to the first visible message BEFORE the async build —
+      // rows appended live while building (or memo evictions) would otherwise
+      // shift the content and make the scrollHeight-delta restore jump.
+      const viewportAnchor = captureViewportAnchor(area);
       const rows = await buildMessageRows(msgs, groupId);
       const fragment = document.createDocumentFragment();
       for (const row of rows) {
@@ -6391,8 +6455,8 @@ async function loadMessages(groupId, before) {
       }
       memo.firstMsgId = rows.length ? rows[0].dataset?.msgId || memo.firstMsgId : memo.firstMsgId;
       evictChannelRowBack(memo);
-      // Restore scroll position
-      area.scrollTop = area.scrollHeight - prevScrollHeight;
+      // Restore scroll position — anchored to the message, not scrollHeight.
+      restoreViewportAnchor(area, viewportAnchor);
     }
     if (groupId === currentGroupId) {
       allMessages = ensureGroupCacheEntry(groupId).messages || allMessages;
@@ -6534,10 +6598,10 @@ async function buildMessageRow(msg, groupId = msg.groupId || currentGroupId, opt
   const isOwn = msg.senderId === currentUser.id;
   const isAiAssistant = isAiAssistantMessage(msg);
   const showSenderName = options.showSenderName !== false;
-  // v1.3.12: "read by me" is cursor-based (per-channel read cursor), not the
-  // per-message hasRead flag — stale cached flags can no longer paint read
-  // messages as unread (or vice versa) across devices and reloads.
-  const isReadByMe = isOwn || isMessageReadByCursor(msg, groupId, resolveMessageTagTopic(msg));
+// v1.3.12: "read by me" is cursor-based (per-channel read cursor), not the
+// per-message hasRead flag — stale cached flags can no longer paint read
+// messages as unread (or vice versa) across devices and reloads.
+const isReadByMe = isOwn || isMessageReadByCursor(msg, groupId, resolveMessageTagTopic(msg));
 
   // System message
   if (msg.type === 'system') {
@@ -7051,6 +7115,25 @@ function getFirstUnreadMessageInChannel() {
     return msg;
   }
   return null;
+}
+
+// v1.3.13: re-evaluate the `.unseen` (unread) styling of every rendered row
+// against the CURRENT per-channel read cursor. Rows built before a cursor
+// advance (or on a device that just received a read-cursor broadcast) kept
+// the left accent highlight until the viewport tick path happened to remove
+// it — the "weird highlighted messages" glitch.
+function refreshUnseenRowClasses() {
+  const area = messagesArea();
+  if (!area || !currentGroupId) return;
+  const cache = ensureGroupCacheEntry(currentGroupId);
+  const all = cache.messages || [];
+  const rows = area.querySelectorAll('.msg-row[data-msg-id]');
+  for (const row of rows) {
+    const msg = all.find((m) => String(m.id) === String(row.dataset.msgId));
+    if (!msg) continue;
+    const read = isMessageReadByCursor(msg, currentGroupId, resolveMessageTagTopic(msg));
+    row.classList.toggle('unseen', !read);
+  }
 }
 
 function updateFirstUnreadButton() {
@@ -8139,7 +8222,10 @@ async function refreshCurrentGroupAfterReconnect({ fullSync = false } = {}) {
     const cacheAfter = ensureGroupCacheEntry(currentGroupId);
     const fingerprintAfter = cacheFingerprint(cacheAfter.messages);
     if (fingerprintBefore !== fingerprintAfter) {
-      renderGroupFromCache(currentGroupId);
+      // v1.3.13: never snap the scroll to the anchor during a background
+      // reconnect — the user's position is preserved by the anchor recorder
+      // and the near-bottom scroll below.
+      renderGroupFromCache(currentGroupId, { restoreScroll: false });
     }
     observeCurrentGroupRowsForRead();
     if (composerNearBottomBeforeFocus || isNearBottom()) scrollToBottom(true);
@@ -8438,6 +8524,9 @@ function initSocket() {
       renderTagFilters();
     }
     if (String(currentGroupId) === groupKey) {
+      // v1.3.13: a cursor broadcast from ANOTHER device must also clear the
+      // unread highlight on rows rendered before it arrived.
+      refreshUnseenRowClasses();
       updateFirstUnreadButton();
     }
   });
@@ -11129,7 +11218,10 @@ async function loadOlderMessages(cursorOverride = null, retried = false) {
     const freshChannelMsgs = channelMsgs.filter((m) => !knownIds.has(String(m.id)));
 
     const area = messagesArea();
-    const prevScrollHeight = area.scrollHeight;
+    // v1.3.13: anchor to the first visible message before the async build —
+    // live appends during the build would shift the content and make the
+    // scrollHeight-delta restore jump.
+    const viewportAnchor = captureViewportAnchor(area);
 
     const rows = freshChannelMsgs.length
       ? await buildMessageRows(freshChannelMsgs, currentGroupId)
@@ -11180,8 +11272,8 @@ async function loadOlderMessages(cursorOverride = null, retried = false) {
       evictChannelRowBack(memo);
     }
 
-    // Restore scroll position in one step
-    area.scrollTop = area.scrollHeight - prevScrollHeight;
+    // Restore scroll position — anchored to the message, not scrollHeight.
+    restoreViewportAnchor(area, viewportAnchor);
   } catch(err) {
     console.error('loadOlderMessages error:', err);
   } finally {
@@ -11219,7 +11311,8 @@ async function prependHistoryMessagesOlderThan(cursorId) {
     return false;
   }
   const area = messagesArea();
-  const prevScrollHeight = area.scrollHeight;
+  // v1.3.13: anchor-based scroll preservation (see loadOlderMessages).
+  const viewportAnchor = captureViewportAnchor(area);
   const rows = await buildMessageRows(channelMsgs, groupId);
   const fragment = document.createDocumentFragment();
   for (const row of rows) {
@@ -11253,7 +11346,7 @@ async function prependHistoryMessagesOlderThan(cursorId) {
     memo.firstMsgId = rows[0].dataset?.msgId || memo.firstMsgId;
     evictChannelRowBack(memo);
   }
-  area.scrollTop = area.scrollHeight - prevScrollHeight;
+  restoreViewportAnchor(area, viewportAnchor);
   return true;
 }
 function getViewportHeightForLayout({ visualViewport, fallbackHeight }) {

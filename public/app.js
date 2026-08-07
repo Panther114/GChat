@@ -2892,7 +2892,7 @@
     await updateGroupPreviewFromMessage(groupId, cache.messages[cache.messages.length - 1] || null);
     return removedIds.length > 0;
   }
-  function renderGroupFromCache(groupId) {
+  function renderGroupFromCache(groupId, { restoreScroll = true } = {}) {
     const cache = ensureGroupCacheEntry(groupId);
     allMessages = cache.messages || [];
     oldestMessageId = cache.oldestMessageId;
@@ -2902,7 +2902,7 @@
     renderMembersList();
     renderWhisperPicker();
     renderTagFilters();
-    void renderActiveChannelStream();
+    void renderActiveChannelStream({ restoreScroll });
   }
   var MAX_CACHED_MESSAGES_PER_GROUP = 500;
   function trimBackgroundGroupCache(cache) {
@@ -3058,12 +3058,9 @@
         }
       }
       if (edits.length || nearBottom || area.scrollTop <= 0) {
-        const prevScrollTop = area.scrollTop;
-        const prevScrollHeight = area.scrollHeight;
-        await renderActiveChannelStream();
-        if (!nearBottom && prevScrollTop > 0) {
-          area.scrollTop = prevScrollTop + (area.scrollHeight - prevScrollHeight);
-        }
+        const anchor = captureViewportAnchor(area);
+        await renderActiveChannelStream({ restoreScroll: false });
+        restoreViewportAnchor(area, anchor);
         observeCurrentGroupRowsForRead();
         if (nearBottom && channelAdditions.length) {
           markChannelReadAt(groupId, channelAdditions[channelAdditions.length - 1]);
@@ -3462,9 +3459,31 @@
     }
     area.replaceChildren(fragment);
   }
+  function captureViewportAnchor(area) {
+    if (!area) return null;
+    const row = Array.from(area.querySelectorAll(".msg-row[data-msg-id]:not([hidden])")).find((r) => {
+      const rect2 = r.getBoundingClientRect();
+      const aRect2 = area.getBoundingClientRect();
+      return rect2.bottom > aRect2.top + 2 && rect2.top < aRect2.bottom;
+    });
+    if (!row) return null;
+    const rect = row.getBoundingClientRect();
+    const aRect = area.getBoundingClientRect();
+    return { id: String(row.dataset.msgId), offsetFromTop: rect.top - aRect.top };
+  }
+  function restoreViewportAnchor(area, anchor) {
+    if (!area || !anchor) return;
+    const row = area.querySelector(`[data-msg-id="${CSS.escape(anchor.id)}"]`);
+    if (!row) return;
+    const rect = row.getBoundingClientRect();
+    const aRect = area.getBoundingClientRect();
+    const currentOffset = rect.top - aRect.top;
+    area.scrollTop += currentOffset - anchor.offsetFromTop;
+  }
   function evictChannelRowFront(memo, keep = CHANNEL_RENDER_WINDOW, max = CHANNEL_RENDER_WINDOW * 2) {
     if (memo.rows.length <= max) return;
     const area = messagesArea();
+    const anchor = captureViewportAnchor(area);
     while (memo.rows.length > keep) {
       const first = memo.rows[0];
       if (!first) break;
@@ -3482,6 +3501,7 @@
     }
     memo.firstMsgId = memo.rows.length ? memo.rows[0].dataset?.msgId || null : null;
     if (!memo.rows.length) memo.lastMsgId = null;
+    restoreViewportAnchor(area, anchor);
   }
   function evictChannelRowBack(memo, keep = CHANNEL_RENDER_WINDOW * 2) {
     if (memo.rows.length <= keep) return;
@@ -3522,7 +3542,7 @@
     updateScrollBadge();
     $("scroll-bottom-btn").hidden = true;
   }
-  async function renderActiveChannelStream() {
+  async function renderActiveChannelStream({ restoreScroll = true } = {}) {
     const area = messagesArea();
     if (!area || !currentGroupId) return;
     const cache = ensureGroupCacheEntry(currentGroupId);
@@ -3561,7 +3581,7 @@
       }
       evictChannelRowFront(memo);
       attachChannelRowsToArea(area, memo);
-      restoreOrScrollToBottom();
+      if (restoreScroll) restoreOrScrollToBottom();
       observeCurrentGroupRowsForRead();
       syncChannelEmptyState();
       updateFirstUnreadButton();
@@ -3600,7 +3620,7 @@
       memo.lastMsgId = rows.length ? rows[rows.length - 1].dataset?.msgId || null : null;
       evictChannelRowFront(memo);
       attachChannelRowsToArea(area, memo);
-      restoreOrScrollToBottom();
+      if (restoreScroll) restoreOrScrollToBottom();
       observeCurrentGroupRowsForRead();
     } finally {
       transcriptRebuilding = false;
@@ -4802,6 +4822,19 @@
     if (!currentGroupData || !currentUser) return false;
     return String(currentGroupData.createdBy) === String(currentUser.id) || !!currentGroupData.viewerIsAdmin;
   }
+  function isFurinaOwner() {
+    return !!currentUser && currentUser.username === "Furina";
+  }
+  function canCurrentUserClearGlobalHistory() {
+    return isCurrentGroupGlobal() && isFurinaOwner();
+  }
+  function canCurrentUserClearTag() {
+    if (canCurrentUserClearGlobalHistory()) return true;
+    if (!currentGroupData || !currentUser) return false;
+    if (currentGroupData.createdBy === currentUser.id) return true;
+    if (currentGroupData.viewerIsAdmin) return true;
+    return !!(currentGroupData.allowMemberClear || currentGroupData.allowMemberClearTag);
+  }
   function updateGroupColorAction(canManage) {
     const button = $("set-group-color-btn");
     if (!button) return;
@@ -4821,7 +4854,10 @@
     const isGlobal = isCurrentGroupGlobal();
     if (isGlobal) {
       updateQuickActionButtonState(exportBtn, { enabled: true, labelEnabled: "Export chat as TXT" });
-      updateQuickActionButtonState(clearBtn, { enabled: false, labelEnabled: "Clear chat history" });
+      updateQuickActionButtonState(clearBtn, {
+        enabled: canCurrentUserClearGlobalHistory(),
+        labelEnabled: "Clear chat history"
+      });
       if (leaveBtn) {
         leaveBtn.hidden = true;
         leaveBtn.dataset.label = "Exit group";
@@ -4850,12 +4886,6 @@
       disbandBtn.hidden = !isOwner;
       disbandBtn.dataset.label = "Disband group";
     }
-  }
-  function canCurrentUserClearTag() {
-    if (!currentGroupData || !currentUser) return false;
-    if (currentGroupData.createdBy === currentUser.id) return true;
-    if (currentGroupData.viewerIsAdmin) return true;
-    return !!(currentGroupData.allowMemberClear || currentGroupData.allowMemberClearTag);
   }
   function syncAllowMemberClearTagToggleState() {
     const clearToggle = $("allow-member-clear-toggle");
@@ -5130,6 +5160,7 @@
     const topic = resolveMessageTagTopic(msg);
     if (String(msg.senderId) === String(currentUser.id)) return;
     setLocalReadCursor(groupId, topic, { at: msg.createdAt, id: msg.id });
+    if (String(groupId) === String(currentGroupId)) refreshUnseenRowClasses();
     void (async () => {
       const tagIndex = await channelTagIndex(topic, groupId);
       socket.emit("mark_channel_read", {
@@ -5289,7 +5320,7 @@
         }
       } else {
         const area = messagesArea();
-        const prevScrollHeight = area.scrollHeight;
+        const viewportAnchor = captureViewportAnchor(area);
         const rows = await buildMessageRows(msgs, groupId);
         const fragment = document.createDocumentFragment();
         for (const row of rows) {
@@ -5318,7 +5349,7 @@
         }
         memo.firstMsgId = rows.length ? rows[0].dataset?.msgId || memo.firstMsgId : memo.firstMsgId;
         evictChannelRowBack(memo);
-        area.scrollTop = area.scrollHeight - prevScrollHeight;
+        restoreViewportAnchor(area, viewportAnchor);
       }
       if (groupId === currentGroupId) {
         allMessages = ensureGroupCacheEntry(groupId).messages || allMessages;
@@ -5882,6 +5913,19 @@
       return msg;
     }
     return null;
+  }
+  function refreshUnseenRowClasses() {
+    const area = messagesArea();
+    if (!area || !currentGroupId) return;
+    const cache = ensureGroupCacheEntry(currentGroupId);
+    const all = cache.messages || [];
+    const rows = area.querySelectorAll(".msg-row[data-msg-id]");
+    for (const row of rows) {
+      const msg = all.find((m) => String(m.id) === String(row.dataset.msgId));
+      if (!msg) continue;
+      const read = isMessageReadByCursor(msg, currentGroupId, resolveMessageTagTopic(msg));
+      row.classList.toggle("unseen", !read);
+    }
   }
   function updateFirstUnreadButton() {
     const btn = $("scroll-first-unread-btn");
@@ -6874,7 +6918,7 @@
       const cacheAfter = ensureGroupCacheEntry(currentGroupId);
       const fingerprintAfter = cacheFingerprint(cacheAfter.messages);
       if (fingerprintBefore !== fingerprintAfter) {
-        renderGroupFromCache(currentGroupId);
+        renderGroupFromCache(currentGroupId, { restoreScroll: false });
       }
       observeCurrentGroupRowsForRead();
       if (composerNearBottomBeforeFocus || isNearBottom()) scrollToBottom(true);
@@ -7119,6 +7163,7 @@
         renderTagFilters();
       }
       if (String(currentGroupId) === groupKey) {
+        refreshUnseenRowClasses();
         updateFirstUnreadButton();
       }
     });
@@ -9585,7 +9630,7 @@ ${grokResponseDraft}` : grokResponseDraft;
       const knownIds = new Set((ensureGroupCacheEntry(currentGroupId).messages || []).map((m) => String(m.id)));
       const freshChannelMsgs = channelMsgs.filter((m) => !knownIds.has(String(m.id)));
       const area = messagesArea();
-      const prevScrollHeight = area.scrollHeight;
+      const viewportAnchor = captureViewportAnchor(area);
       const rows = freshChannelMsgs.length ? await buildMessageRows(freshChannelMsgs, currentGroupId) : [];
       const fragment = document.createDocumentFragment();
       for (const row of rows) {
@@ -9621,7 +9666,7 @@ ${grokResponseDraft}` : grokResponseDraft;
         memo.firstMsgId = rows[0].dataset?.msgId || memo.firstMsgId;
         evictChannelRowBack(memo);
       }
-      area.scrollTop = area.scrollHeight - prevScrollHeight;
+      restoreViewportAnchor(area, viewportAnchor);
     } catch (err) {
       console.error("loadOlderMessages error:", err);
     } finally {
@@ -9651,7 +9696,7 @@ ${grokResponseDraft}` : grokResponseDraft;
       return false;
     }
     const area = messagesArea();
-    const prevScrollHeight = area.scrollHeight;
+    const viewportAnchor = captureViewportAnchor(area);
     const rows = await buildMessageRows(channelMsgs, groupId);
     const fragment = document.createDocumentFragment();
     for (const row of rows) {
@@ -9683,7 +9728,7 @@ ${grokResponseDraft}` : grokResponseDraft;
       memo.firstMsgId = rows[0].dataset?.msgId || memo.firstMsgId;
       evictChannelRowBack(memo);
     }
-    area.scrollTop = area.scrollHeight - prevScrollHeight;
+    restoreViewportAnchor(area, viewportAnchor);
     return true;
   }
   function getViewportHeightForLayout({ visualViewport, fallbackHeight }) {

@@ -4501,6 +4501,7 @@ body.electron-desktop-effects::before {
   --chat-warning: var(--sx-warning);
   --chat-focus: var(--sx-focus);
   --chat-scrim: var(--sx-scrim);
+  --chat-unread: #a78bfa;
   --bg: var(--chat-surface-deep);
   --sidebar-bg: var(--chat-surface);
   --chat-bg: var(--chat-canvas);
@@ -4592,6 +4593,7 @@ body.electron-desktop-effects::before {
   --chat-warning: var(--sx-warning);
   --chat-focus: var(--sx-focus);
   --chat-scrim: var(--sx-scrim);
+  --chat-unread: #7c3aed;
   --bg: var(--chat-surface-deep);
   --sidebar-bg: var(--chat-surface);
   --chat-bg: var(--chat-canvas);
@@ -7066,7 +7068,7 @@ button.is-loading {
   padding-left: 8px;
 }
 .msg-row.unseen {
-  box-shadow: inset 3px 0 0 var(--chat-accent), 0 0 0 1px color-mix(in srgb, var(--chat-accent) 32%, transparent);
+  box-shadow: inset 3px 0 0 var(--chat-unread, var(--chat-accent)), 0 0 0 1px color-mix(in srgb, var(--chat-unread, var(--chat-accent)) 32%, transparent);
 }
 .btn-whisper-mode.whisper-active {
   color: var(--whisper-border) !important;

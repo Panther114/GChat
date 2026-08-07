@@ -179,8 +179,11 @@ test('mobile message actions and channel controls remain touch accessible', asyn
   expect(topbarLayout.filtersTop).toBeGreaterThanOrEqual(topbarLayout.detailsBottom);
   expect(topbarLayout.topbarHeight).toBeGreaterThanOrEqual(80);
 
+  // The channel chips re-render asynchronously (unread counts + cursor
+  // broadcasts), so resolve the chip AFTER the app settles and let click()
+  // retry detaches instead of scrollIntoViewIfNeeded (which aborts on them).
+  await page.waitForTimeout(1200);
   const visualQaChannel = page.getByRole('button', { name: '#visual-qa', exact: true });
-  await visualQaChannel.scrollIntoViewIfNeeded();
   await expect(visualQaChannel).toBeVisible();
   await visualQaChannel.click();
   await expect(visualQaChannel).toHaveClass(/active/);

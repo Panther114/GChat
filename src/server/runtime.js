@@ -3340,6 +3340,7 @@ app.get('/api/groups/:groupId/unread', (req, res) => {
 });
 
 // DELETE /api/groups/:groupId/messages — clear all messages (owner, or members if allowed)
+// Furina (the app owner) can also clear GChat Global, which has no owner.
 app.delete('/api/groups/:groupId/messages', (req, res) => {
   const { groupId } = req.params;
   const userId = req.session.userId;
@@ -3350,8 +3351,10 @@ app.delete('/api/groups/:groupId/messages', (req, res) => {
   const member = stmts.isMember.get(groupId, userId);
   if (!member) return res.status(403).json({ error: 'Not a member of this group' });
 
+  const viewer = stmts.findUserById.get(userId);
   const isOwner = group.created_by === userId;
-  if (!isOwner && !member.is_admin && !group.allow_member_clear) {
+  const isGlobalOwner = String(groupId) === GLOBAL_GROUP_ID && isAppOwnerUser(viewer);
+  if (!isOwner && !isGlobalOwner && !member.is_admin && !group.allow_member_clear) {
     return res.status(403).json({ error: 'Only the group owner can clear chat history' });
   }
 
@@ -3360,6 +3363,8 @@ app.delete('/api/groups/:groupId/messages', (req, res) => {
   res.json({ ok: true });
 });
 
+// DELETE /api/groups/:groupId/tags/:tagIndex/messages — clear one channel.
+// Furina (the app owner) can also delete channels in GChat Global.
 app.delete('/api/groups/:groupId/tags/:tagIndex/messages', (req, res) => {
   const { groupId, tagIndex } = req.params;
   const userId = req.session.userId;
@@ -3372,8 +3377,10 @@ app.delete('/api/groups/:groupId/tags/:tagIndex/messages', (req, res) => {
 
   if (!/^[A-Za-z0-9_-]{43}$/.test(tagIndex)) return res.status(400).json({ error: 'Invalid tag index' });
 
+  const viewer = stmts.findUserById.get(userId);
   const isOwner = group.created_by === userId;
-  if (!isOwner && !member.is_admin && !group.allow_member_clear && !group.allow_member_clear_tag) {
+  const isGlobalOwner = String(groupId) === GLOBAL_GROUP_ID && isAppOwnerUser(viewer);
+  if (!isOwner && !isGlobalOwner && !member.is_admin && !group.allow_member_clear && !group.allow_member_clear_tag) {
     return res.status(403).json({ error: 'Only the group owner can clear this hashtag' });
   }
 

@@ -165,3 +165,60 @@ test('scroll position is restored after a reload (history does not disappear)', 
   expect(after.scrollTop).toBeGreaterThan(0);
   expect(after.scrollTop).toBeLessThan(after.scrollHeight - 100);
 });
+
+test('scrolling stays put: switching groups and resyncing never moves the transcript', async ({ page }) => {
+  await signInAsRoot(page);
+  await expect(page.locator('#messages-area .msg-row').first()).toBeVisible({ timeout: 10_000 });
+
+  // Make the transcript tall enough to scroll, then scroll up to a position.
+  for (let i = 0; i < 20; i += 1) {
+    await page.locator('#message-input').fill(`stay-put-${i}`);
+    await page.locator('#send-btn').click();
+  }
+  await expect(page.locator('#messages-area .msg-row', { hasText: 'stay-put-19' })).toBeVisible({ timeout: 10_000 });
+  await page.evaluate(() => {
+    const area = globalThis.document.getElementById('messages-area');
+    area.scrollTop = Math.round(area.scrollHeight / 3);
+  });
+  await page.waitForTimeout(900); // let the debounced anchor recorder persist
+
+  const firstVisibleMsgId = await page.evaluate(() => {
+    const area = globalThis.document.getElementById('messages-area');
+    const row = Array.from(area.querySelectorAll('.msg-row[data-msg-id]:not([hidden])')).find((r) => {
+      const rect = r.getBoundingClientRect();
+      const aRect = area.getBoundingClientRect();
+      return rect.bottom > aRect.top + 2 && rect.top < aRect.bottom;
+    });
+    return row ? String(row.dataset.msgId) : null;
+  });
+  const scrollBefore = await page.evaluate(() => globalThis.document.getElementById('messages-area').scrollTop);
+  expect(firstVisibleMsgId).toBeTruthy();
+  expect(scrollBefore).toBeGreaterThan(0);
+
+  // Switch to another group (background resync runs), then switch back — the
+  // transcript must re-attach with the reading position intact (the oldest
+  // message is legitimately above the viewport after the restore).
+  const globalItem = page.locator('#group-list .group-item', { hasText: 'GChat Global' }).first();
+  await globalItem.click();
+  await expect(page.locator('#chat-group-name')).toHaveText('GChat Global', { timeout: 10_000 });
+  const playgroundItem = page.locator('#group-list .group-item', { hasText: GROUP_NAME }).first();
+  await playgroundItem.click();
+  await expect(page.locator('#chat-group-name')).toHaveText(GROUP_NAME, { timeout: 10_000 });
+  await expect(page.locator('#messages-area .msg-row').first()).toBeVisible({ timeout: 10_000 });
+
+  const scrollAfter = await page.evaluate(() => globalThis.document.getElementById('messages-area').scrollTop);
+  const firstVisibleMsgIdAfter = await page.evaluate(() => {
+    const area = globalThis.document.getElementById('messages-area');
+    const row = Array.from(area.querySelectorAll('.msg-row[data-msg-id]:not([hidden])')).find((r) => {
+      const rect = r.getBoundingClientRect();
+      const aRect = area.getBoundingClientRect();
+      return rect.bottom > aRect.top + 2 && rect.top < aRect.bottom;
+    });
+    return row ? String(row.dataset.msgId) : null;
+  });
+
+  // The exact first-visible message is preserved, and the scroll offset may
+  // only drift by the height of a few rows (anchored to the message).
+  expect(firstVisibleMsgIdAfter, 'first visible message must not change across the switch').toBe(firstVisibleMsgId);
+  expect(Math.abs(scrollAfter - scrollBefore)).toBeLessThan(400);
+});

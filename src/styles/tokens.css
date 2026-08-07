@@ -106,6 +106,10 @@
   --chat-warning: var(--sx-warning);
   --chat-focus: var(--sx-focus);
   --chat-scrim: var(--sx-scrim);
+  /* v1.3.13: the unread highlight is a violet in BOTH themes — the previous
+     `--chat-accent` mapping was white (#ffffff) on dark and black on light,
+     so unread rows looked like a random "bolded white" left bar. */
+  --chat-unread: #a78bfa;
 
   /* Bridge legacy vars */
   --bg: var(--chat-surface-deep);
@@ -206,6 +210,8 @@
   --chat-warning: var(--sx-warning);
   --chat-focus: var(--sx-focus);
   --chat-scrim: var(--sx-scrim);
+  /* v1.3.13: visible unread highlight in light mode too. */
+  --chat-unread: #7c3aed;
 
   --bg: var(--chat-surface-deep);
   --sidebar-bg: var(--chat-surface);

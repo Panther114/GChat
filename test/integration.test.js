@@ -934,3 +934,50 @@ test('leaving a group removes the member read cursors', async () => {
   assert.equal(stmts.getChannelReadCursor.get(groupId, leaverId, null), undefined, 'kicked member cursors must be removed');
   assert.equal(stmts.isMember.get(groupId, leaverId), undefined);
 });
+
+test('Furina can clear GChat Global history and delete channels; other members cannot', async () => {
+  // GChat Global has no owner — the app owner (username "Furina") is the only
+  // one who can clear the full history and delete channels there.
+  const furina = request.agent(app);
+  const furinaResponse = await register(furina, 'Furina');
+  const furinaId = furinaResponse.body.id;
+  const furinaCsrf = await csrf(furina);
+
+  const globalTag = Buffer.alloc(32, 11).toString('base64url');
+  const globalMainId = crypto.randomUUID();
+  const globalTagId = crypto.randomUUID();
+  const senderId = stmts.findUserByUsername.get('owner-test').id;
+  stmts.insertV2Message.run(globalMainId, 'gchat-global', senderId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null, null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null, '2026-02-01T00:00:00.000Z');
+  stmts.insertV2Message.run(globalTagId, 'gchat-global', senderId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null, null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', globalTag, null, '2026-02-01T00:00:01.000Z');
+
+  // A non-Furina member cannot clear Global history.
+  const memberAgent = request.agent(app);
+  await register(memberAgent, 'furina-bystander');
+  await memberAgent
+    .delete('/api/groups/gchat-global/messages')
+    .set('X-CSRF-Token', await csrf(memberAgent))
+    .expect(403);
+  // …nor delete a Global channel.
+  await memberAgent
+    .delete(`/api/groups/gchat-global/tags/${encodeURIComponent(globalTag)}/messages`)
+    .set('X-CSRF-Token', await csrf(memberAgent))
+    .expect(403);
+  // The messages are untouched.
+  assert.ok(stmts.findMessageById.get(globalMainId));
+  assert.ok(stmts.findMessageById.get(globalTagId));
+
+  // Furina can delete a Global channel…
+  await furina
+    .delete(`/api/groups/gchat-global/tags/${encodeURIComponent(globalTag)}/messages`)
+    .set('X-CSRF-Token', furinaCsrf)
+    .expect(200);
+  assert.equal(stmts.findMessageById.get(globalTagId), undefined, 'Furina must be able to delete a Global channel');
+
+  // …and clear the full Global history.
+  await furina
+    .delete('/api/groups/gchat-global/messages')
+    .set('X-CSRF-Token', furinaCsrf)
+    .expect(200);
+  assert.equal(stmts.findMessageById.get(globalMainId), undefined, 'Furina must be able to clear Global history');
+  assert.ok(furinaId, 'Furina is a registered member of GChat Global');
+});

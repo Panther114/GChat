@@ -442,7 +442,10 @@
 }
 
 .msg-row.unseen {
-  box-shadow: inset 3px 0 0 var(--chat-accent), 0 0 0 1px color-mix(in srgb, var(--chat-accent) 32%, transparent);
+  /* v1.3.13: dedicated violet highlight — the old `--chat-accent` mapping was
+     white-on-dark / black-on-light, which read as a random white bar. */
+  box-shadow: inset 3px 0 0 var(--chat-unread, var(--chat-accent)),
+    0 0 0 1px color-mix(in srgb, var(--chat-unread, var(--chat-accent)) 32%, transparent);
 }
 
 .btn-whisper-mode.whisper-active { color: var(--whisper-border) !important; }
