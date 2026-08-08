@@ -4,6 +4,32 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## v1.3.13
+
+- **Clients auto-clear their cache and restart after EVERY deploy** (version bump or not): the server now exposes a `buildFingerprint` (a content hash of the shipped bundle + server sources, computed once at boot) alongside the version. Every client compares it against its last-seen deploy marker on boot and on the 10-minute poll; a mismatch triggers an automatic cache clear + restart (with a 1.5–9.5s random jitter so a deploy never thunders the server). Crash-restarts of identical code keep the same fingerprint and never force a refresh, and the marker survives the reset so the reload can never loop.
+- **Phantom unread badge — root cause fixed**: messages sent in `#main` were stamped with a blind tag index computed for the literal topic "main", while read cursors for `#main` are stored with `tag_index NULL`. The server's unread query matches `cursor.tag_index IS message.tag_index`, so those rows could never be covered by the `#main` cursor — the group badge kept showing unread even after every message was read. Sends (text + attachments) no longer stamp `#main` with an index, and a one-shot boot migration nulls the phantom "main" index on every group's existing rows (one UPDATE per escrowed group, flagged in `_config`, bounded).
+- **Reading by scrolling now clears the unread count immediately**: the viewport-read path only emitted per-message receipts (delivery ticks) and never advanced the channel read cursor, so a message that arrived while you were scrolled up stayed "unread" on the server even after you scrolled down and read it. Viewport reads now advance the channel cursor (debounced to the newest read message per channel, one emit per window).
+- **Member lists can no longer render "0 members"**: a localStorage mirror write that raced the members fetch persisted `members: []`, and the next boot read the empty array as "already loaded" — so groups (notably GChat Global) showed zero members forever, even after a cache reset. Empty cached/preloaded member lists are now treated as "not loaded" and re-fetched on open.
+- **Search is a real filter now**: entering a term hides every message (and file/image row) that doesn't contain it — including rows that arrive after the search, and paginated history — instead of merely highlighting matches. Search is cleared automatically when you switch group or channel (no more stale highlights leaking into another chat), and the X button only appears while the search box actually contains text.
+- **Reconnect no longer shows "X is empty" on chats that have messages**: the empty-state label used to replace the loading placeholder while a group's first server window was still loading; the placeholder is now kept until the cache is actually loaded.
+- **Uploads**:
+  - A completed upload whose `new_message` echo was lost (e.g. the socket reconnecting right as the HTTP upload landed) used to hang on "Finalizing…" until reload — a short watch now drops the pending row and resyncs the persisted message via REST.
+  - The progress bar is monotonic — a late/out-of-order progress packet can no longer make it regress.
+  - A received file whose sender had no profile picture rendered with the VIEWER's own avatar (the pending row fell back to `currentUser`) — sender identity is now never replaced by the viewer's.
+  - Sending a message while an upload was in flight used to persist server-side but never appear in the transcript (the upload hogged the socket/transport): sends now render optimistically and reconcile the server echo in place.
+- **Hover actions now appear on your own messages too**: the base rule `.msg-row.own .msg-actions` had the exact same specificity as `.msg-row:hover .msg-actions` and, being later in the stylesheet, won for own rows — the reply/edit/delete bar never showed on your own messages. The base rule now uses `:where()` so the hover rule always wins.
+- **Context menus are space-aware**: a right-click near the bottom of the viewport used to clip the menu off-screen (a fixed -100px clamp); menus now measure themselves and flip above the cursor when they wouldn't fit below.
+- **"(edited)" badge is always glued to the end of the message text**: it used to be a separate shrinkable flex item — with hashtag chips it wrapped to its own line for long messages, and it could be squeezed. Text + badge now share one inline-flow wrapper (never wraps below, never clipped).
+- **Channel drag-reorder can no longer duplicate chips**: a concurrent render mid-drag (`renderTagFilters` replaces the chip list) used to detach the dragged chip and the next pointer-move re-inserted the stale node — duplicating the channel. Renders now abort an in-flight drag cleanly, and the drag handler bails on detached chips.
+- **Empty-state GChat logo is theme-aware**: the "Select a group to start chatting" logo was hard-coded to the white icon and vanished in light mode; it now swaps to the light icon like every other logo.
+- **Right-panel scroll**: the member list no longer caps at 220px with its own inner scrollbar and sections can never be flex-squashed below their content — the whole right panel scrolls, so the permissions section is always reachable in huge groups.
+- **Duplicate channel names are rejected at creation** (case/prefix-normalized) with an inline error.
+- **Timestamp right-clicks** no longer trigger the avatar/invite context menu (timestamps rendered inside the avatar gutter for continued series).
+- **Dark-mode notification toggle ON state** uses the brand-indigo track (previously a white knob on a white track).
+- **Hover action bar** moved left of the delivery ticks (right 8→24px, 64px action zone) with smaller buttons (24×22, 12px icons).
+- **Regression coverage**: one-shot migration test (phantom "main" index nulled, real channel indexes untouched, badge drops), existing cursor/badge e2e suites kept green, and the full unit + e2e suites pass.
+- Bumped product version to **1.3.13** and asset cache-bust to v142.
+
 ## v1.3.12
 
 - **Chat history is never lost or out of order again (root-cause overhaul)**:

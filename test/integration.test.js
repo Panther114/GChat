@@ -9,7 +9,7 @@ const request = require('supertest');
 const crypto = require('node:crypto');
 const { purgePreEscrowGroups } = require('../src/server/legacy-group-purge');
 const { migrateGroupCodes } = require('../src/server/group-code-migration');
-const { decryptEscrowPayload, encryptEscrowPayload } = require('../src/server/group-key-escrow');
+const { decryptEscrowPayload, encryptEscrowPayload, parseEscrowMasterKey } = require('../src/server/group-key-escrow');
 const { hashJoinCode } = require('../src/server/group-security');
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-increment-a-'));
@@ -898,6 +898,55 @@ test('per-channel read cursors drive unread counts and broadcast to every device
   assert.equal(myGroupAfterAll.unreadCount, 0);
 
   sock.close();
+});
+
+test('one-shot migration nulls the phantom #main blind tag index so cursors cover it', async () => {
+  const { nullMainTagIndexes } = require('../src/server/main-tag-index-migration');
+  const agent = request.agent(app);
+  await register(agent, 'main-index-migrate-test');
+  const csrfToken = await csrf(agent);
+  const groupSecret = Buffer.alloc(32, 12).toString('base64url');
+  const commitment = crypto.createHash('sha256').update(Buffer.from(groupSecret, 'base64url')).digest('base64url');
+  const created = await agent
+    .post('/api/groups/create')
+    .set('X-CSRF-Token', csrfToken)
+    .send({ name: 'Main index room', code: 'main01', secret: groupSecret, keyCommitment: commitment })
+    .expect(201);
+  const groupId = created.body.id;
+  const otherId = stmts.findUserByUsername.get('owner-test').id;
+  const viewerId = stmts.findUserByUsername.get('main-index-migrate-test').id;
+
+  // Reproduce the pre-1.3.13 bug: a #main message stamped with the blind index
+  // of the literal topic "main".
+  const indexKey = crypto.hkdfSync('sha256', Buffer.from(groupSecret, 'base64url'), Buffer.from(groupId), Buffer.from('gchat-tag-index-v2'), 32);
+  const mainIndex = crypto.createHmac('sha256', indexKey).update('main').digest('base64url');
+  const channelIndex = crypto.createHmac('sha256', indexKey).update('general').digest('base64url');
+  const mainId = crypto.randomUUID();
+  const channelId = crypto.randomUUID();
+  stmts.insertV2Message.run(mainId, groupId, otherId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null, null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', mainIndex, null, '2026-01-02T00:00:00.000Z');
+  stmts.insertV2Message.run(channelId, groupId, otherId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null, null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', channelIndex, null, '2026-01-02T00:00:01.000Z');
+
+  // Before the migration, a NULL #main cursor does NOT cover the phantom row —
+  // this is the phantom-badge condition: the GROUP unread count stays stuck at
+  // 2 (phantom row + real channel row) even though #main was fully read.
+  stmts.upsertChannelReadCursor.run(groupId, viewerId, null, '2026-01-02T00:00:00.000Z', mainId, '2026-01-02T00:00:02.000Z');
+  const mineBefore = await agent.get('/api/groups/mine').expect(200);
+  const groupBefore = mineBefore.body.find((g) => g.id === groupId);
+  assert.equal(groupBefore.unreadCount, 2, 'phantom "main"-indexed row must keep the group badge stuck before the migration');
+
+  // Run the migration: it must NULL only the "main" index rows.
+  const fixed = nullMainTagIndexes(db, parseEscrowMasterKey(process.env.GROUP_KEY_ESCROW_MASTER_KEY));
+  assert.ok(fixed >= 1, `migration must fix at least the phantom row (fixed=${fixed})`);
+  assert.equal(stmts.findMessageById.get(mainId).tag_index, null);
+  assert.equal(stmts.findMessageById.get(channelId).tag_index, channelIndex, 'real channel indexes must be untouched');
+
+  // After the migration the NULL #main cursor covers the row — the group badge
+  // drops to the single genuinely-unread channel message.
+  const mineAfter = await agent.get('/api/groups/mine').expect(200);
+  const groupAfter = mineAfter.body.find((g) => g.id === groupId);
+  assert.equal(groupAfter.unreadCount, 1);
+  const unreadAfter = await agent.get(`/api/groups/${groupId}/unread?tags=${encodeURIComponent(channelIndex)}`).expect(200);
+  assert.deepEqual(unreadAfter.body.counts, { '': 0, [channelIndex]: 1 });
 });
 
 test('leaving a group removes the member read cursors', async () => {

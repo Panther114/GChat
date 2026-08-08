@@ -16,11 +16,11 @@ const cargoMac = fs.readFileSync(path.join(root, 'src-tauri', 'Cargo.toml'), 'ut
 const installDocs = fs.readFileSync(path.join(root, 'INSTALL_DESKTOP.md'), 'utf8');
 const buildWin = fs.readFileSync(path.join(root, 'scripts', 'build-win-thin.js'), 'utf8');
 
-test('product version is 1.3.12 across thin Windows shell and macOS fallback', () => {
-  assert.equal(packageJson.version, '1.3.12');
+test('product version is 1.3.13 across thin Windows shell and macOS fallback', () => {
+  assert.equal(packageJson.version, '1.3.13');
   assert.equal(tauriConfig.version, packageJson.version);
-  assert.match(cargoWin, /version = "1.3.12"/);
-  assert.match(cargoMac, /^version = "1.3.12"$/m);
+  assert.match(cargoWin, /version = "1.3.13"/);
+  assert.match(cargoMac, /^version = "1.3.13"$/m);
 });
 
 test('Windows production path is non-Tauri thin WebView2 shell', () => {
@@ -66,7 +66,7 @@ test('thin Windows bridge exposes full electronAPI surface including updates', (
 test('macOS fallback Tauri stack remains documented and buildable', () => {
   assert.ok(fs.existsSync(path.join(root, 'src-tauri', 'src', 'lib.rs')));
   assert.match(installDocs, /fallback|macOS|WKWebView|Tauri/i);
-  assert.match(installDocs, /thin|WebView2|1.3.12/i);
+  assert.match(installDocs, /thin|WebView2|1.3.13/i);
   assert.match(packageJson.scripts['build:mac'], /tauri build/);
 });
 

@@ -390,6 +390,21 @@
   font-style: italic;
   color: var(--chat-faint) !important;
   margin-left: 4px;
+  /* v1.3.13: never split across lines and never flex-shrink — the badge rides
+     the text flow right after the message it marks. */
+  display: inline-block !important;
+  white-space: nowrap;
+  flex: 0 0 auto;
+  vertical-align: baseline;
+}
+
+/* v1.3.13: the text+badge flow wrapper replaces the bare .msg-text as the
+   flex child of the row (it keeps the old flex behavior of the text). */
+.msg-row .msg-body-row > .msg-text-inline,
+.msg-row .msg-attachment-row > .msg-text-inline {
+  display: inline;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .msg-delivery-tick.read {
@@ -581,9 +596,12 @@
 }
 
 /* Hover actions — stay fully visible inside the row. v1.3.13: pushed further
-   left so the reply button no longer crowds the delivery ticks. */
-.msg-row .msg-actions,
-.msg-row.own .msg-actions {
+   left so the reply button no longer crowds the delivery ticks, and the base
+   rule uses :where() so the `.own` variant can't tie the hover rule's
+   specificity — `.msg-row.own .msg-actions` (0,3,0) is the SAME specificity
+   as `.msg-row:hover .msg-actions`, and being later in the stylesheet it won,
+   which is why the reply button never appeared on your own messages. */
+.msg-row:where(.msg-row, .msg-row.own) .msg-actions {
   position: absolute;
   right: 24px;
   top: 0;

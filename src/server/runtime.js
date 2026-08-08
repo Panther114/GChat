@@ -20,6 +20,7 @@ const { hashJoinCode, isValidKeyCommitment, normalizeJoinCode, safeEqualString }
 const { decryptEscrowPayload, encryptEscrowPayload, isValidGroupSecret, keyCommitmentForSecret } = require('./group-key-escrow');
 const { validateEditEnvelope, validateV2MessageEnvelope } = require('./message-contract');
 const { createSqliteSessionStore } = require('./sqlite-session-store');
+const { nullMainTagIndexes } = require('./main-tag-index-migration');
 
 const packageJson = require('../../package.json');
 const PROJECT_ROOT = path.resolve(__dirname, '../..');
@@ -47,6 +48,39 @@ const GLOBAL_GROUP_OWNER_ID = '__gchat_global_owner__';
 const IV_BYTES = 12;
 const SAFE_IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const APP_VERSION = packageJson.version || '0.0.0';
+
+// v1.3.13: build fingerprint — a content hash of the shipped web bundle + server
+// sources, computed once at boot. It changes whenever ANY shipped code changes
+// (even without a version bump), so clients can auto-reset their cache after
+// every deploy — while a crash-restart of identical code keeps the same
+// fingerprint and never forces a client refresh. Bounded: one-time boot IO.
+function computeBuildFingerprint() {
+  const files = [
+    'server.js',
+    'src/server/runtime.js',
+    'src/server/config.js',
+    'src/server/group-key-escrow.js',
+    'src/server/group-security.js',
+    'src/server/message-contract.js',
+    'public/app.js',
+    'public/style.css',
+    'public/chat.html',
+    'public/index.html',
+  ];
+  const hash = crypto.createHash('sha256');
+  for (const relative of files) {
+    const full = path.join(PROJECT_ROOT, relative);
+    try {
+      const content = fs.readFileSync(full);
+      hash.update(Buffer.from(`${relative}\0`));
+      hash.update(content);
+    } catch {
+      hash.update(Buffer.from(`${relative}:missing\0`));
+    }
+  }
+  return hash.digest('base64url').slice(0, 20);
+}
+const BUILD_FINGERPRINT = computeBuildFingerprint();
 const LOCAL_DEBUG_ENABLED = APP_CONFIG.localDebugEnabled;
 const VAPID_PUBLIC_KEY = typeof process.env.VAPID_PUBLIC_KEY === 'string' ? process.env.VAPID_PUBLIC_KEY.trim() : '';
 const VAPID_PRIVATE_KEY = typeof process.env.VAPID_PRIVATE_KEY === 'string' ? process.env.VAPID_PRIVATE_KEY.trim() : '';
@@ -1095,6 +1129,26 @@ try {
   console.error('Failed to normalize messages.created_at timestamps:', err);
 }
 
+// v1.3.13: messages sent in #main used to carry a blind tag index computed for
+// the literal topic "main" (the client stamped every message with the active
+// channel, #main included), while read cursors for #main are stored with
+// tag_index NULL. The unread query matches `crc.tag_index IS m.tag_index`, so
+// a "main"-indexed row could NEVER be covered by the #main cursor — it stayed
+// unread forever and the group badge showed a phantom red count even after
+// everything was read. One-shot migration: NULL the "main" blind index on
+// every group's messages (bounded: one UPDATE per escrowed group, flagged in
+// _config). New sends no longer stamp #main with an index.
+try {
+  const mainIndexFlag = db.prepare("SELECT value FROM _config WHERE key = 'main_tag_index_nulled'").get();
+  if (!mainIndexFlag) {
+    const fixed = nullMainTagIndexes(db, APP_CONFIG.groupKeyEscrowMasterKey);
+    db.prepare("INSERT OR IGNORE INTO _config (key, value) VALUES ('main_tag_index_nulled', ?)").run(String(fixed));
+    if (fixed > 0) console.log(`[migrate] Nulled ${fixed} #main tag_index rows (one-shot).`);
+  }
+} catch (err) {
+  console.error('Failed to null #main tag indexes:', err);
+}
+
 // Ensure a stable session secret persists across restarts even without SESSION_SECRET env var
 function getOrCreateSessionSecret() {
   if (process.env.SESSION_SECRET) return process.env.SESSION_SECRET;
@@ -1989,6 +2043,7 @@ app.use('/api', requireAuth);
 app.get('/api/meta/version', (_req, res) => {
   res.json({
     version: APP_VERSION,
+    buildFingerprint: BUILD_FINGERPRINT,
     cryptoEpoch: APP_CONFIG.cryptoEpoch,
     encryptionVersion: APP_CONFIG.encryptionVersion,
     aiEnabled: APP_CONFIG.aiEnabled,

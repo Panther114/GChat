@@ -7025,6 +7025,16 @@ button.is-loading {
   font-style: italic;
   color: var(--chat-faint) !important;
   margin-left: 4px;
+  display: inline-block !important;
+  white-space: nowrap;
+  flex: 0 0 auto;
+  vertical-align: baseline;
+}
+.msg-row .msg-body-row > .msg-text-inline,
+.msg-row .msg-attachment-row > .msg-text-inline {
+  display: inline;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .msg-delivery-tick.read {
   color: var(--chat-success);
@@ -7216,8 +7226,7 @@ button.is-loading {
 .msg-file-btn:hover {
   background: var(--chat-hover) !important;
 }
-.msg-row .msg-actions,
-.msg-row.own .msg-actions {
+.msg-row:where(.msg-row, .msg-row.own) .msg-actions {
   position: absolute;
   right: 24px;
   top: 0;

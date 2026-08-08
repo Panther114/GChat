@@ -323,6 +323,8 @@ async function decryptAttachmentBytes(msg, secret, groupId) {
 
 // Keep only long-lived user essentials across a local reset: legacy group keys
 // plus the current/legacy wallpaper and other per-user local settings payloads.
+// v1.3.13: the last-seen-deploy marker survives the reset too — otherwise the
+// post-reload boot would see "new build" again and loop the auto-refresh.
 function shouldPreserveLocalStorageEntry(key) {
   return !!(
     key
@@ -330,6 +332,7 @@ function shouldPreserveLocalStorageEntry(key) {
       key === ACTIVE_LOCAL_SETTINGS_KEY
       || key === LEGACY_LOCAL_SETTINGS_KEY
       || key.startsWith(LOCAL_SETTINGS_KEY_PREFIX)
+      || key === LAST_SEEN_DEPLOY_KEY
     )
   );
 }
@@ -551,7 +554,9 @@ function writeLocalGroupCache(groupId, cache) {
       // Bound the localStorage mirror to the newest window; full history lives
       // in the IndexedDB history store (historyStore* helpers below).
       messages: getCacheableMessages(cache.messages || []).slice(-MAX_CACHED_MESSAGES_PER_GROUP),
-      members: cache.members || [],
+      // v1.3.13: never persist an empty member list — a write that races the
+      // members fetch would poison the mirror and show "0 members" after reload.
+      members: Array.isArray(cache.members) && cache.members.length ? cache.members : null,
       oldestMessageId: cache.oldestMessageId || null,
       channelAnchors: cache.channelAnchors || null,
       updatedAt: Date.now(),
@@ -1020,6 +1025,59 @@ async function clearCacheAndRestartApp() {
   await reloadAppShell();
 }
 
+// v1.3.13: whenever the server reports a NEW build — a version bump OR any code
+// deploy (the build fingerprint is a content hash of the shipped bundle) — every
+// client automatically clears its local cache and restarts. A short random
+// jitter spreads the reload burst so a deploy never slams the server with a
+// synchronized thundering herd of restarts.
+const LAST_SEEN_DEPLOY_KEY = 'gchat:last-seen-deploy';
+let autoResetScheduled = false;
+
+function readLastSeenDeploy() {
+  try {
+    const raw = localStorage.getItem(LAST_SEEN_DEPLOY_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLastSeenDeploy(version, buildFingerprint) {
+  try {
+    localStorage.setItem(LAST_SEEN_DEPLOY_KEY, JSON.stringify({
+      version: String(version || ''),
+      buildFingerprint: String(buildFingerprint || ''),
+    }));
+  } catch {
+    // storage unavailable
+  }
+}
+
+function scheduleAutoResetClientCache(info) {
+  if (!info || autoResetScheduled) return;
+  const lastSeen = readLastSeenDeploy();
+  const lastFp = String((lastSeen && lastSeen.buildFingerprint) || '');
+  const lastVer = String((lastSeen && lastSeen.version) || '');
+  const newFp = String(info.buildFingerprint || '');
+  const newVer = String(info.version || '');
+  // First boot ever on this device: nothing to compare against — just record
+  // the current deploy (a fresh install must never self-reset).
+  if (!lastSeen) {
+    writeLastSeenDeploy(newVer, newFp);
+    return;
+  }
+  const sameBuild = lastFp
+    ? lastFp === newFp && lastVer === newVer
+    : lastVer === newVer && lastVer !== '';
+  if (sameBuild) return;
+  autoResetScheduled = true;
+  writeLastSeenDeploy(newVer, newFp);
+  const jitterMs = 1500 + Math.floor(Math.random() * 8000);
+  setTimeout(() => {
+    void clearCacheAndRestartApp();
+  }, jitterMs);
+}
+
 async function fetchAppVersionInfo() {
   try {
     const versionRes = await fetch('/api/meta/version', { cache: 'no-store' });
@@ -1037,13 +1095,13 @@ async function checkForHostedAppUpdate() {
   currentAppVersion = currentAppVersion || info.version;
   appVersionLabel = 'v' + info.version;
   $('app-version-label').textContent = appVersionLabel;
-  if (currentAppVersion === info.version || hostedAppReloadPending) return false;
+  if (currentAppVersion === info.version && hostedAppReloadPending) return false;
   currentAppVersion = info.version;
   hostedAppReloadPending = true;
-  // v1.3.9: never auto-reload the shell (especially while hidden in the tray
-  // or backgrounded) — surface a user-confirmed in-app banner instead. This
-  // kills the "app refreshes and reloads all history by itself" behavior.
-  showUpdateAvailableBanner();
+  // v1.3.13: no user-confirmed banner — a new build automatically clears the
+  // local cache and restarts (with jitter) so every client lands on the new
+  // bundle. The banner remains as a manual fallback on the reload button.
+  scheduleAutoResetClientCache(info);
   return true;
 }
 
@@ -2274,7 +2332,9 @@ async function hydrateMessageChannel(msg, groupId = msg?.groupId || currentGroup
   msg.hashtag = topic;
   if (groupId) rememberChannel(groupId, topic);
   // Keep tagIndex in sync so server delete / tag_cleared matching works.
-  if (!msg.tagIndex && groupId && topic) {
+  // v1.3.13: #main has no blind index — the server stores NULL for it, and a
+  // synthesized "main" index would break read-cursor matching.
+  if (!msg.tagIndex && groupId && topic && topic !== DEFAULT_TAG_TOPIC) {
     const key = getGroupKey(groupId);
     if (key) {
       try {
@@ -2736,6 +2796,12 @@ function completeViewportTrackingForRow(row) {
       row.dataset.hasRead = '1';
       markMessageReadLocal(rowGroupId, messageId);
       queueMarkReadEmit(rowGroupId, messageId);
+      // v1.3.13: reading a message by scrolling must ALSO advance the channel
+      // read cursor (debounced to the newest read message) — the per-message
+      // receipt only feeds delivery ticks, so without this the server's
+      // authoritative unread count never moved and the group badge stayed
+      // stuck at 1+ even after every message had been read.
+      if (cachedMsg) scheduleChannelCursorAdvance(rowGroupId, cachedMsg);
     }
   }
 
@@ -3311,7 +3377,11 @@ function ensureGroupCacheEntry(groupId) {
     groupDataCache.set(groupId, {
       messages: localMessages.length ? localMessages : (local?.messages ? [] : null),
       messageRows: null,
-      members: local?.members || null,
+      // v1.3.13: an EMPTY cached member list is treated as "not loaded" — a
+      // mirror write that ran before members arrived used to persist
+      // members: [], and the next boot read it as loaded, so groups (notably
+      // GChat Global) rendered "0 members" forever until a cache reset.
+      members: Array.isArray(local?.members) && local.members.length ? local.members : null,
       oldestMessageId: local?.oldestMessageId || null,
       rowsDirty: !!local?.messages,
       knownChannels: new Set(readKnownChannels(groupId)),
@@ -3694,6 +3764,7 @@ async function refreshCurrentGroupFromServer() {
         renderTagFilters();
         syncChannelEmptyState();
         observeCurrentGroupRowsForRead();
+        applySearchVisibility();
         return;
       }
     }
@@ -4369,6 +4440,13 @@ async function renderActiveChannelStream({ restoreScroll = true } = {}) {
     memo.byId = new Map();
     memo.firstMsgId = null;
     memo.lastMsgId = null;
+    // v1.3.13: if the group was NEVER loaded, keep the loading placeholder —
+    // the empty-state label used to appear mid-reconnect while the cache was
+    // still null, making a non-empty chat look empty.
+    if (!Array.isArray(cache.messages)) {
+      area.replaceChildren(createChannelLoadingIndicator());
+      return;
+    }
     if (all.length === 0) {
       area.replaceChildren(createChannelLoadingIndicator());
     } else {
@@ -4376,6 +4454,7 @@ async function renderActiveChannelStream({ restoreScroll = true } = {}) {
     }
     syncChannelEmptyState();
     updateFirstUnreadButton();
+    applySearchVisibility();
     return;
   }
 
@@ -4399,6 +4478,7 @@ async function renderActiveChannelStream({ restoreScroll = true } = {}) {
     observeCurrentGroupRowsForRead();
     syncChannelEmptyState();
     updateFirstUnreadButton();
+    applySearchVisibility();
     return;
   }
 
@@ -4451,11 +4531,15 @@ async function renderActiveChannelStream({ restoreScroll = true } = {}) {
   cache.rowsDirty = true;
   syncChannelEmptyState();
   updateFirstUnreadButton();
+  applySearchVisibility();
 }
 
 function selectTagChannel(topic, { focusComposer = true } = {}) {
   const next = ensureActiveTag(topic);
   rememberChannel(currentGroupId, next);
+  // v1.3.13: channels are separate sub-chats — a search must not leak across
+  // them, and the highlight/filter state must not persist after a switch.
+  clearActiveSearch();
   // Tags are sub-chats: never show a hashtag chip in the composer.
   clearHashtagToken();
   clearWhisperToken();
@@ -4500,6 +4584,17 @@ function syncChannelEmptyState() {
   if (!area || !currentGroupId) return;
   let empty = area.querySelector('.channel-empty-state');
   const visible = countVisibleChannelMessages();
+  // v1.3.13: never replace the loading placeholder with the "empty" label
+  // while the group's first server window is still loading — during a
+  // reconnect the cache could be mid-refresh, and the label used to appear on
+  // chats that were NOT empty ("the chat shows empty during reconnect").
+  const cache = ensureGroupCacheEntry(currentGroupId);
+  if (!Array.isArray(cache.messages)) {
+    const loading = area.querySelector('.channel-loading-indicator');
+    if (!loading) area.appendChild(createChannelLoadingIndicator());
+    if (empty) empty.remove();
+    return;
+  }
   // v1.3.12: once the channel stream settles, drop the loading placeholder so
   // a genuinely empty channel only shows the empty state.
   const loading = area.querySelector('.channel-loading-indicator');
@@ -4612,6 +4707,13 @@ function bindTagFilterDrag() {
   wrap.addEventListener('pointermove', (event) => {
     const drag = tagDragState;
     if (!drag || drag.pointerId !== event.pointerId) return;
+    // v1.3.13: a concurrent render (unread broadcast, incoming message) may
+    // have replaced the chip row mid-drag — the stale chip must never be
+    // re-inserted into the new list (that produced duplicate channel chips).
+    if (!drag.chip.isConnected) {
+      tagDragState = null;
+      return;
+    }
     if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 6) return;
     if (!drag.moved) {
       drag.moved = true;
@@ -4654,6 +4756,18 @@ function bindTagFilterDrag() {
 function renderTagFilters() {
   const wrap = $('chat-tag-filters');
   if (!wrap) return;
+  // v1.3.13: abort any in-flight chip drag before replacing the chip list —
+  // replaceChildren() used to detach the dragged chip mid-drag, and the next
+  // pointermove re-inserted the stale node into the fresh list (duplicate chip).
+  if (tagDragState) {
+    const pending = tagDragState;
+    tagDragState = null;
+    if (pending.chip) {
+      pending.chip.classList.remove('dragging');
+      pending.chip.style.touchAction = '';
+      try { pending.chip.releasePointerCapture(pending.pointerId); } catch { /* ignore */ }
+    }
+  }
   ensureActiveTag(activeTagFilter || DEFAULT_TAG_TOPIC);
   const tags = getAvailableGroupTags();
   const active = getActiveTagTopic();
@@ -5532,6 +5646,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     currentAppVersion = versionInfo.version;
     appVersionLabel = 'v' + versionInfo.version;
     aiFeatureEnabled = versionInfo.aiEnabled === true;
+    // v1.3.13: if this boot sees a different deploy than the last one, clear the
+    // local cache and restart automatically (jittered) — see
+    // scheduleAutoResetClientCache. Fire-and-forget: never blocks boot.
+    scheduleAutoResetClientCache(versionInfo);
   }
   $('app-version-label').textContent = appVersionLabel;
 
@@ -5657,7 +5775,12 @@ async function loadGroups({ withBackendPreload = false } = {}) {
         // Merge instead of replace so paginated history survives reconnects
         // and focus resyncs (dedup by message id).
         mergeMessagesIntoCache(group.id, preloadedMessages, { persist: false });
-        cache.members = Array.isArray(group.preloaded.members) ? group.preloaded.members : [];
+        // v1.3.13: an empty preloaded member list means "not loaded yet" — the
+        // group always has at least one member, so an empty array is treated
+        // as unloaded and re-fetched on open (fixes "0 members" on GChat Global).
+        cache.members = Array.isArray(group.preloaded.members) && group.preloaded.members.length
+          ? group.preloaded.members
+          : null;
         cache.messageRows = null;
         cache.rowsDirty = true;
         writeLocalGroupCache(group.id, cache);
@@ -6231,6 +6354,31 @@ function markChannelReadAt(groupId, msg) {
   })();
 }
 
+// v1.3.13: viewport-read batching for the channel cursor. Scrolling through a
+// channel marks many rows read per frame; instead of emitting one
+// mark_channel_read per row (each a server recompute + broadcast), coalesce the
+// newest read message per (group, channel) and emit once per debounce window.
+const pendingCursorAdvanceTimers = new Map();
+const pendingCursorAdvances = new Map();
+
+function scheduleChannelCursorAdvance(groupId, msg) {
+  if (!msg || !groupId || !currentUser) return;
+  const key = `${String(groupId)}:${resolveMessageTagTopic(msg)}`;
+  pendingCursorAdvances.set(key, { at: msg.createdAt, id: msg.id });
+  if (pendingCursorAdvanceTimers.has(key)) return;
+  pendingCursorAdvanceTimers.set(key, setTimeout(() => {
+    pendingCursorAdvanceTimers.delete(key);
+    const latest = pendingCursorAdvances.get(key);
+    pendingCursorAdvances.delete(key);
+    if (!latest) return;
+    const cache = ensureGroupCacheEntry(groupId);
+    const target = (cache.messages || []).find(
+      (m) => String(m.id) === String(latest.id) || (String(m.createdAt) === String(latest.at))
+    );
+    if (target) markChannelReadAt(groupId, target);
+  }, 250));
+}
+
 // v1.3.12: opening a group marks its active channel read (cursor = the newest
 // non-own channel message). Server broadcasts fresh counts to every device.
 async function markChannelReadOnOpen(groupId) {
@@ -6255,6 +6403,9 @@ async function selectGroup(groupId) {
   if (!normalizedGroupId) return;
   currentGroupId = normalizedGroupId;
   currentGroupData = groups.find(g => String(g.id) === normalizedGroupId) || null;
+  // v1.3.13: a search belongs to the chat it was typed in — switching groups
+  // clears it (term, highlights, and the X button).
+  clearActiveSearch();
   // v1.3.12: remember the open group so a reload restores this exact screen.
   writeStoredLastGroupId(normalizedGroupId);
   replyingTo = null;
@@ -6462,6 +6613,8 @@ async function loadMessages(groupId, before) {
       evictChannelRowBack(memo);
       // Restore scroll position — anchored to the message, not scrollHeight.
       restoreViewportAnchor(area, viewportAnchor);
+      // v1.3.13: paginated history must obey an active search filter too.
+      applySearchVisibility();
     }
     if (groupId === currentGroupId) {
       allMessages = ensureGroupCacheEntry(groupId).messages || allMessages;
@@ -6806,26 +6959,33 @@ const isReadByMe = isOwn || isMessageReadByCursor(msg, groupId, resolveMessageTa
     prefix.append(...inlinePrefixChips);
     textEl.prepend(prefix);
   }
+  // v1.3.13: text + "(edited)" badge live in ONE inline-flow wrapper — the
+  // badge stays glued to the end of the message text (never wrapping below it,
+  // never shrink-clipped). It used to be a separate flex item: with hashtag
+  // chips it wrapped to its own line for long messages, and as a shrinkable
+  // flex sibling it could be squeezed.
+  const textFlow = document.createElement('span');
+  textFlow.className = 'msg-text-inline';
+  textFlow.append(textEl);
+  if (msg.editedAt) textFlow.append(editedBadge);
+
   if (msg.type === 'text') {
     const bodyRow = document.createElement('div');
     bodyRow.className = 'msg-body-row';
     if (inlineChipsForRow.length) {
       const inlineRow = document.createElement('div');
       inlineRow.className = 'msg-inline-row';
-      inlineRow.append(...inlineChipsForRow, textEl);
-      if (msg.editedAt) inlineRow.append(editedBadge);
+      inlineRow.append(...inlineChipsForRow, textFlow);
       bodyRow.append(inlineRow, meta);
     } else {
-      bodyRow.append(textEl);
-      if (msg.editedAt) bodyRow.append(editedBadge);
+      bodyRow.append(textFlow);
       bodyRow.append(meta);
     }
     bubble.appendChild(bodyRow);
   } else {
     const attachmentRow = document.createElement('div');
     attachmentRow.className = 'msg-attachment-row';
-    attachmentRow.append(textEl);
-    if (msg.editedAt) attachmentRow.append(editedBadge);
+    attachmentRow.append(textFlow);
     attachmentRow.append(meta);
     bubble.appendChild(attachmentRow);
   }
@@ -6986,6 +7146,47 @@ async function renderMsgContent(msg, textEl, bubble, groupId = currentGroupId) {
   }
 }
 
+// v1.3.13: optimistic own-message pipeline. The message is merged into the
+// cache FIRST so the socket echo (which dedups by id) never renders a second
+// copy — it reconciles the server's authoritative fields instead.
+function appendOptimisticOwnMessage(msg) {
+  if (!msg || !currentUser || String(msg.groupId) !== String(currentGroupId)) return;
+  if (resolveMessageTagTopic(msg) !== getActiveTagTopic()) return;
+  mergeMessagesIntoCache(msg.groupId, [msg], { persist: false });
+  void appendMessageBubble(msg, true, msg.groupId);
+}
+
+function reconcileOptimisticEcho(serverMsg) {
+  if (!serverMsg) return;
+  const cache = ensureGroupCacheEntry(serverMsg.groupId);
+  const index = (cache.messages || []).findIndex((m) => String(m.id) === String(serverMsg.id));
+  if (index < 0) return;
+  const local = cache.messages[index];
+  if (!local || !local._optimistic) return;
+  // Keep the locally-known plaintext; adopt every server-authoritative field
+  // (createdAt ordering, read counts, delivery totals, disappearing state).
+  const plaintext = local._decryptedText;
+  const hashtag = local.hashtag || null;
+  Object.assign(local, serverMsg);
+  if (plaintext != null) local._decryptedText = plaintext;
+  local.hashtag = hashtag || local.hashtag || null;
+  delete local._optimistic;
+  const row = document.querySelector(`.msg-row[data-msg-id="${CSS.escape(String(serverMsg.id))}"]`);
+  if (row) {
+    const timeEl = row.querySelector('time');
+    if (timeEl) {
+      timeEl.dateTime = serverMsg.createdAt || '';
+      timeEl.textContent = formatTime(serverMsg.createdAt);
+    }
+    const delEl = document.getElementById('del-' + serverMsg.id);
+    if (delEl) {
+      delEl.dataset.totalRecipients = String(Math.max(0, Number(serverMsg.totalRecipients) || 0));
+      delEl.dataset.readCount = String(Math.max(0, Number(serverMsg.readCount) || 0));
+      renderDeliveryTicks(delEl, Number(delEl.dataset.totalRecipients), Number(delEl.dataset.readCount));
+    }
+  }
+}
+
 async function appendMessageBubble(msg, scroll, groupId = currentGroupId) {
   await hydrateMessageChannel(msg, groupId);
   const channel = resolveMessageTagTopic(msg);
@@ -7048,6 +7249,7 @@ async function appendMessageBubble(msg, scroll, groupId = currentGroupId) {
   if (scroll !== false) {
     if (msg.senderId === currentUser.id) {
       scrollToBottom(true);
+      applySearchVisibility();
       return row;
     }
     if (wasNearBottom) {
@@ -7059,6 +7261,8 @@ async function appendMessageBubble(msg, scroll, groupId = currentGroupId) {
       if (msg.senderId !== currentUser.id) playNotifSound();
     }
   }
+  // v1.3.13: a live message must respect an active search filter immediately.
+  applySearchVisibility();
   return row;
 }
 
@@ -7203,6 +7407,20 @@ async function hydrateMissingReplyTarget(groupId, messageId) {
 let ctxMsg = null;
 let ctxText = '';
 let ctxTagTopic = null;
+// v1.3.13: space-aware context menus — measure the actual menu and flip it
+// ABOVE the cursor when it would otherwise clip past the bottom of the
+// viewport (the old fixed -100px clamp cut off tall menus at the screen edge).
+function positionContextMenu(menu, e) {
+  menu.hidden = false;
+  const width = menu.offsetWidth || 180;
+  const height = menu.offsetHeight || 120;
+  const left = Math.max(8, Math.min(e.clientX, window.innerWidth - width - 8));
+  const fitsBelow = e.clientY + height + 8 <= window.innerHeight;
+  const top = fitsBelow ? e.clientY : Math.max(8, e.clientY - height - 8);
+  menu.style.left = left + 'px';
+  menu.style.top = top + 'px';
+}
+
 function showContextMenu(e, msg, text) {
   ctxMsg = msg; ctxText = text;
   hideTagContextMenu();
@@ -7221,8 +7439,7 @@ function showContextMenu(e, msg, text) {
   setElementIcon($('ctx-copy'), 'copy', { label: 'Copy' });
   menu.hidden = false;
   if (e) {
-    menu.style.left = Math.min(e.clientX, window.innerWidth - 160) + 'px';
-    menu.style.top = Math.min(e.clientY, window.innerHeight - 100) + 'px';
+    positionContextMenu(menu, e);
   } else {
     menu.style.left = '50%'; menu.style.top = '50%';
   }
@@ -7240,8 +7457,11 @@ function showTagContextMenu(e, topic) {
   deleteBtn.textContent = `Delete ${formatHashtagLabel(ctxTagTopic)}`;
   setElementIcon(deleteBtn, 'trash-2', { label: `Delete ${formatHashtagLabel(ctxTagTopic)}` });
   menu.hidden = false;
-  menu.style.left = Math.min(e.clientX, window.innerWidth - 170) + 'px';
-  menu.style.top = Math.min(e.clientY, window.innerHeight - 100) + 'px';
+  if (e) {
+    positionContextMenu(menu, e);
+  } else {
+    menu.style.left = '50%'; menu.style.top = '50%';
+  }
 }
 
 function hideTagContextMenu() {
@@ -7263,8 +7483,7 @@ function showAvatarContextMenu(e, userId, username) {
   setElementIcon(inviteBtn, 'user-plus', { label: `Invite ${avatarCtxUsername} to chat` });
   menu.hidden = false;
   if (e) {
-    menu.style.left = Math.min(e.clientX, window.innerWidth - 180) + 'px';
-    menu.style.top = Math.min(e.clientY, window.innerHeight - 100) + 'px';
+    positionContextMenu(menu, e);
   } else {
     menu.style.left = '50%';
     menu.style.top = '50%';
@@ -7733,7 +7952,14 @@ async function doSend(text) {
       return;
     }
     const hashtag = parsedMessage.hashtag || null;
-    const tagIndex = hashtag ? await GChatCryptoV2.blindIndex(hashtag, key, currentGroupId, 'tag-index') : null;
+    // v1.3.13: #main is the DEFAULT channel — it must never carry a blind tag
+    // index. The server stores read cursors for #main with tag_index NULL, and
+    // its unread query matches cursor.tag_index IS message.tag_index, so a
+    // "main"-indexed message could never be covered by the #main cursor and
+    // stayed unread forever (the phantom red badge).
+    const tagIndex = hashtag && hashtag !== DEFAULT_TAG_TOPIC
+      ? await GChatCryptoV2.blindIndex(hashtag, key, currentGroupId, 'tag-index')
+      : null;
     const replyToId = replyingTo?.id || null;
     const envelope = {
       ...messageIdentity,
@@ -7755,6 +7981,43 @@ async function doSend(text) {
     } else {
       socket.emit('send_message', envelope);
     }
+    // v1.3.13: optimistic render — the sent message appears instantly, even
+    // while a large upload is hogging the transport (sends during an upload
+    // used to land in the DB but never show until a reload). The socket echo
+    // reconciles the server timestamp/read counts in place.
+    appendOptimisticOwnMessage({
+      id: messageId,
+      groupId: currentGroupId,
+      senderId: currentUser.id,
+      senderName: currentUser.username,
+      senderColor: currentUser.iconColor,
+      type,
+      encryptedContent,
+      iv,
+      encryptedMetadata,
+      metadataIv,
+      encryptionVersion: 2,
+      keyVersion: 1,
+      revision: 1,
+      hashtag: parsedMessage.hashtag || null,
+      tagIndex,
+      replyToId,
+      replyPreview: metadata.replyPreview || null,
+      whisperTo: parsedMessage.whisperRecipientIds && parsedMessage.whisperRecipientIds.length
+        ? parsedMessage.whisperRecipientIds
+        : null,
+      isDisappearing: parsedMessage.isDisappearing,
+      disappearingDurationMs: parsedMessage.disappearingDurationMs,
+      disappearingStartedAt: null,
+      disappearingExpiresAt: null,
+      disappearingHiddenAt: null,
+      createdAt: new Date().toISOString(),
+      editedAt: null,
+      totalRecipients: 0,
+      readCount: 0,
+      _decryptedText: messageText,
+      _optimistic: true,
+    });
     resetComposerAfterSend();
   } catch(err) {
     console.error('Encryption failed:', err);
@@ -7780,6 +8043,33 @@ function showToast(msg, type = 'info') {
 }
 
 // ── File / Image upload ───────────────────────────────────────────────────────
+// v1.3.13: when an upload finishes, the final message normally arrives via the
+// `new_message` socket echo (which swaps the pending row for the real one).
+// If that echo is lost (socket reconnecting right as the HTTP upload lands) the
+// row used to stay stuck on "Finalizing…" until a reload. Each completed upload
+// now registers a short-lived watch: if the echo doesn't arrive in time, the
+// pending row is dropped and a bounded REST resync pulls the persisted message.
+const uploadFinalizeWatchers = new Map();
+const UPLOAD_FINALIZE_TIMEOUT_MS = 6000;
+
+function watchUploadFinalize(uploadId, groupId) {
+  if (uploadFinalizeWatchers.has(uploadId)) return;
+  uploadFinalizeWatchers.set(uploadId, setTimeout(() => {
+    uploadFinalizeWatchers.delete(uploadId);
+    removePendingAttachment(uploadId);
+    if (String(groupId) === String(currentGroupId)) {
+      void refreshCurrentGroupFromServer();
+    }
+  }, UPLOAD_FINALIZE_TIMEOUT_MS));
+}
+
+function clearUploadFinalizeWatch(uploadId) {
+  const timer = uploadFinalizeWatchers.get(uploadId);
+  if (!timer) return;
+  clearTimeout(timer);
+  uploadFinalizeWatchers.delete(uploadId);
+}
+
 function ensurePendingAttachmentRow(payload) {
   const { uploadId, senderId, senderName, senderColor, type, filename, totalBytes } = payload;
   if (!uploadId || pendingAttachmentRows.has(uploadId) || payload.groupId !== currentGroupId) return;
@@ -7793,9 +8083,12 @@ function ensurePendingAttachmentRow(payload) {
   avatar.className = 'msg-avatar';
   const memberProfile = getMemberProfile(currentGroupId, senderId);
   renderAvatarElement(avatar, {
-    username: memberProfile?.username || senderName || currentUser?.username,
-    iconColor: memberProfile?.iconColor || senderColor || currentUser?.iconColor,
-    profilePicture: memberProfile?.profilePicture || currentUser?.profilePicture || null,
+    username: memberProfile?.username || senderName,
+    iconColor: memberProfile?.iconColor || senderColor,
+    // v1.3.13: never fall back to the CURRENT user's picture for someone
+    // else's upload — a member without a profile picture used to render with
+    // the viewer's own avatar.
+    profilePicture: memberProfile?.profilePicture || payload.senderProfilePicture || null,
   });
 
   const content = document.createElement('div');
@@ -7804,7 +8097,7 @@ function ensurePendingAttachmentRow(payload) {
   header.className = 'msg-header';
   const nameEl = document.createElement('div');
   nameEl.className = 'msg-sender-name';
-  nameEl.textContent = memberProfile?.username || senderName || currentUser?.username || 'Unknown';
+  nameEl.textContent = memberProfile?.username || senderName || 'Unknown';
   header.appendChild(nameEl);
   content.appendChild(header);
 
@@ -7853,7 +8146,12 @@ function updatePendingAttachmentProgress(uploadId, loadedBytes, totalBytes) {
   const label = row.querySelector('.msg-attachment-progress-label');
   const total = Math.max(1, Number(totalBytes) || 1);
   const loaded = Math.max(0, Math.min(total, Number(loadedBytes) || 0));
-  if (fill) fill.style.width = `${(loaded / total) * 100}%`;
+  // v1.3.13: progress is monotonic — a late/out-of-order progress packet (e.g.
+  // a socket reconnecting mid-upload) must never make the bar regress.
+  const current = Number(fill ? parseFloat(fill.style.width) || 0 : 0);
+  const nextPercent = (loaded / total) * 100;
+  if (nextPercent < current) return;
+  if (fill) fill.style.width = `${nextPercent}%`;
   if (label) label.textContent = `${formatBytes(loaded)} / ${formatBytes(total)}`;
 }
 
@@ -7865,6 +8163,7 @@ function setPendingAttachmentStatus(uploadId, statusText) {
 }
 
 function removePendingAttachment(uploadId) {
+  clearUploadFinalizeWatch(uploadId);
   const row = pendingAttachmentRows.get(uploadId);
   if (!row) return;
   row.remove();
@@ -7969,7 +8268,11 @@ async function handleFileUpload(file) {
     // Attachments belong to the active channel (sub-chat), same as text messages.
     const hashtag = getActiveTagTopic();
     const metadataEnvelope = await GChatCryptoV2.encryptJson({ filename: file.name, hashtag }, key, currentGroupId, 'metadata', aad);
-    const tagIndex = hashtag ? await GChatCryptoV2.blindIndex(hashtag, key, currentGroupId, 'tag-index') : null;
+    // v1.3.13: #main must not carry a blind tag index (see doSend) — otherwise
+    // its read cursor (NULL index) could never cover the attachment.
+    const tagIndex = hashtag && hashtag !== DEFAULT_TAG_TOPIC
+      ? await GChatCryptoV2.blindIndex(hashtag, key, currentGroupId, 'tag-index')
+      : null;
 
     let lastBroadcastLoaded = 0;
     let lastBroadcastAt = 0;
@@ -8017,6 +8320,10 @@ async function handleFileUpload(file) {
     updatePendingAttachmentProgress(uploadId, totalBytes, totalBytes);
     setPendingAttachmentStatus(uploadId, 'Finalizing…');
     emitProgress(totalBytes, totalBytes, true);
+    // v1.3.13: the server persists the message BEFORE responding, so if the
+    // `new_message` echo is lost the row must not hang on "Finalizing…" — the
+    // watch clears it and resyncs the persisted message via REST.
+    watchUploadFinalize(uploadId, currentGroupId);
   } catch(err) {
     console.error('File upload error:', err);
     removePendingAttachment(uploadId);
@@ -8424,6 +8731,9 @@ function initSocket() {
     // contains the same message id; never insert a duplicate.
     if (cacheHasMessage(msg.groupId, msg.id)) {
       if (msg.clientUploadId) removePendingAttachment(msg.clientUploadId);
+      // v1.3.13: if the cached copy is this device's optimistic send, adopt
+      // the server echo's authoritative fields (timestamp/ticks) in place.
+      reconcileOptimisticEcho(msg);
       return;
     }
 
@@ -9202,6 +9512,70 @@ function showConfirm(title, message, onConfirm, options = {}) {
 }
 
 // ── Search messages ───────────────────────────────────────────────────────────
+// v1.3.13: search is a FILTER, not a highlight overlay. The active term is
+// tracked at module scope so every transcript render/append can re-apply it,
+// and it is cleared whenever the user switches group or channel (a search must
+// never leak into another chat).
+let activeSearchTerm = '';
+let searchDebounceTimer = 0;
+
+function syncSearchClearButton() {
+  const btn = $('clear-search-btn');
+  const input = $('search-input');
+  if (!btn) return;
+  // v1.3.13: the X only appears while the search box actually contains text.
+  btn.hidden = !input || input.value.length === 0;
+}
+
+function clearActiveSearch() {
+  if (searchDebounceTimer) {
+    clearTimeout(searchDebounceTimer);
+    searchDebounceTimer = 0;
+  }
+  const input = $('search-input');
+  if (input && input.value) input.value = '';
+  activeSearchTerm = '';
+  syncSearchClearButton();
+  searchMessages('');
+}
+
+// v1.3.13: hide every message that does not contain the active term (and hide
+// date dividers that precede hidden rows). Safe to call after any render —
+// re-highlighting is skipped so markdown/link rendering is never destroyed by
+// background renders; highlighting happens in searchMessages on input.
+function applySearchVisibility() {
+  const area = messagesArea();
+  if (!area || !currentGroupId) return;
+  const normalizedTerm = activeSearchTerm ? activeSearchTerm.toLowerCase() : '';
+  let pendingDivider = null;
+  for (const el of Array.from(area.children)) {
+    if (el.classList.contains('msg-date-divider')) {
+      pendingDivider = el;
+      continue;
+    }
+    if (!el.classList.contains('msg-row') && !el.classList.contains('msg-system')) continue;
+    if (!normalizedTerm) {
+      el.style.display = '';
+      if (pendingDivider) {
+        pendingDivider.style.display = '';
+        pendingDivider = null;
+      }
+      continue;
+    }
+    const textEl = el.querySelector('.msg-text');
+    const content = textEl ? textEl.textContent : el.textContent;
+    const match = (content || '').toLowerCase().includes(normalizedTerm);
+    el.style.display = match ? '' : 'none';
+    if (pendingDivider) {
+      pendingDivider.style.display = match ? '' : 'none';
+      pendingDivider = null;
+    }
+  }
+  $('search-results-count').textContent = normalizedTerm
+    ? countVisibleChannelMessages() + ' result' + (countVisibleChannelMessages() !== 1 ? 's' : '')
+    : '';
+}
+
 function highlightText(el, term) {
   // DOM-based highlighting — no innerHTML with user content
   el.textContent = el.textContent; // reset to plain text
@@ -9224,38 +9598,35 @@ function highlightText(el, term) {
 }
 
 function searchMessages(term) {
-  const rows = messagesArea().querySelectorAll('.msg-row');
-  let count = 0;
-  const normalizedTerm = term ? term.toLowerCase() : '';
-  rows.forEach(row => {
+  activeSearchTerm = term ? String(term) : '';
+  syncSearchClearButton();
+  const area = messagesArea();
+  if (!area) return;
+  // Strip stale <mark> highlights (the text content is unchanged, so this is a
+  // cheap re-render of the plain/markdown source)…
+  const rows = area.querySelectorAll('.msg-row');
+  for (const row of rows) {
+    if (!row.dataset.searchHighlighted) continue;
+    delete row.dataset.searchHighlighted;
     const textEl = row.querySelector('.msg-text');
-    if (!textEl) { row.style.display = ''; return; }
-    if (!normalizedTerm) {
-      // When clearing search, just show all rows without expensive re-rendering.
-      // Only re-render if a highlight was previously applied.
-      if (row.dataset.searchHighlighted) {
-        delete row.dataset.searchHighlighted;
-        const markdownSource = textEl.dataset.markdownSource;
-        if (markdownSource != null) renderMarkdown(textEl, markdownSource);
-        else renderPlainText(textEl, textEl.textContent);
-      }
-      row.style.display = '';
-      return;
-    }
-    const text = textEl.textContent;
-    if (text.toLowerCase().includes(normalizedTerm)) {
-      count++;
-      row.style.display = '';
-      const markdownSource = textEl.dataset.markdownSource;
-      if (markdownSource != null) renderMarkdown(textEl, markdownSource);
-      else renderPlainText(textEl, textEl.textContent);
-      highlightText(textEl, term);
-      row.dataset.searchHighlighted = '1';
-    } else {
-      row.style.display = 'none';
-    }
-  });
-  $('search-results-count').textContent = term ? count + ' result' + (count !== 1 ? 's' : '') : '';
+    if (!textEl) continue;
+    const markdownSource = textEl.dataset.markdownSource;
+    if (markdownSource != null) renderMarkdown(textEl, markdownSource);
+    else renderPlainText(textEl, textEl.textContent);
+  }
+  // …then filter, and finally highlight the survivors.
+  applySearchVisibility();
+  if (!activeSearchTerm) return;
+  for (const row of rows) {
+    if (row.style.display === 'none' || row.dataset.searchHighlighted) continue;
+    const textEl = row.querySelector('.msg-text');
+    if (!textEl) continue;
+    const markdownSource = textEl.dataset.markdownSource;
+    if (markdownSource != null) renderMarkdown(textEl, markdownSource);
+    else renderPlainText(textEl, textEl.textContent);
+    highlightText(textEl, activeSearchTerm);
+    row.dataset.searchHighlighted = '1';
+  }
 }
 
 // ── Export chat ───────────────────────────────────────────────────────────────
@@ -11125,9 +11496,9 @@ function setupEventListeners() {
   $('sidebar-overlay').addEventListener('click', closeMobilePanels);
 
   // Search (debounced to avoid expensive DOM re-renders on every keystroke)
-  let searchDebounceTimer = 0;
   $('search-input').addEventListener('input', (e) => {
     const value = e.target.value;
+    syncSearchClearButton();
     if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
     searchDebounceTimer = setTimeout(() => {
       searchDebounceTimer = 0;
@@ -11135,9 +11506,7 @@ function setupEventListeners() {
     }, 180);
   });
   $('clear-search-btn').addEventListener('click', () => {
-    if (searchDebounceTimer) { clearTimeout(searchDebounceTimer); searchDebounceTimer = 0; }
-    $('search-input').value = '';
-    searchMessages('');
+    clearActiveSearch();
   });
 
   // Unread jump button

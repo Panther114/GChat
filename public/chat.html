@@ -10,20 +10,20 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="GChat" />
-  <link rel="manifest" href="/manifest.json?v=20260806-v141" />
-  <link rel="icon" href="/favicon.png?v=20260806-v141" type="image/png" />
+  <link rel="manifest" href="/manifest.json?v=20260806-v142" />
+  <link rel="icon" href="/favicon.png?v=20260806-v142" type="image/png" />
   <link rel="apple-touch-icon" href="/gchat_icon_ios.png" type="image/png" sizes="1254x1254" />
   <link rel="preload" href="/Roca-Regular.ttf?v=20260512" as="font" type="font/ttf" crossorigin="anonymous" />
   <link rel="preload" href="/Botanical.otf?v=20260512" as="font" type="font/otf" crossorigin="anonymous" />
   <title>GChat </title>
-  <script src="theme-init.js?v=1.3.4-release1"></script>
-  <link rel="stylesheet" href="style.css?v=1.3.4-release1" />
+  <script src="theme-init.js?v=1.3.13-release1"></script>
+  <link rel="stylesheet" href="style.css?v=1.3.13-release1" />
 </head>
 <body class="chat-body">
 
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-brand">
-      <img class="brand-icon" src="/gchat_icon.png?v=20260806-v141" data-dark-src="/gchat_icon.png?v=20260806-v141" data-light-src="/gchat_icon_light.png" alt="GChat logo" />
+      <img class="brand-icon" src="/gchat_icon.png?v=20260806-v142" data-dark-src="/gchat_icon.png?v=20260806-v142" data-light-src="/gchat_icon_light.png" alt="GChat logo" />
       <span class="brand-name">GChat</span>
       <button class="btn-icon brand-cache-btn" id="clear-cache-btn" title="Clear cache and restart" aria-label="Clear cache and restart" data-icon="refresh-cw" data-icon-only="true"></button>
       <span class="brand-version" id="app-version-label">v—</span>
@@ -62,7 +62,7 @@
     <div class="chat-empty" id="chat-empty">
       <button class="btn-icon sidebar-toggle mobile-only-toggle" id="sidebar-toggle-empty" title="Menu" aria-label="Menu" data-icon="menu" data-icon-only="true"></button>
       <button class="btn-icon right-panel-toggle mobile-only-toggle" id="right-panel-toggle-empty" title="Group details" aria-label="Group details" data-icon="panel-right" data-icon-only="true"></button>
-      <img class="chat-empty-icon" src="/gchat_icon.png?v=20260806-v141" alt="GChat logo" />
+      <img class="chat-empty-icon" src="/gchat_icon.png?v=20260806-v142" data-dark-src="/gchat_icon.png?v=20260806-v142" data-light-src="/gchat_icon_light.png" alt="GChat logo" />
       <p class="chat-empty-title">Select a group to start chatting</p>
       <p class="chat-empty-sub">Only members of this group can see its messages</p>
     </div>
@@ -181,7 +181,7 @@
         <div class="search-bar">
           <span class="search-icon" data-icon="search" data-icon-only="true" aria-hidden="true"></span>
           <input type="text" id="search-input" placeholder="Search messages" />
-          <button class="btn-icon btn-clear-search" id="clear-search-btn" type="button" aria-label="Clear search" data-icon="x" data-icon-only="true"></button>
+          <button class="btn-icon btn-clear-search" id="clear-search-btn" type="button" aria-label="Clear search" data-icon="x" data-icon-only="true" hidden></button>
         </div>
         <span class="search-results-count" id="search-results-count"></span>
       </section>
@@ -638,7 +638,7 @@
   <div class="sidebar-overlay" id="sidebar-overlay" hidden></div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/pwa.js?v=20260806-v141"></script>
-  <script src="app.js?v=20260806-v141"></script>
+  <script src="/pwa.js?v=20260806-v142"></script>
+  <script src="app.js?v=20260806-v142"></script>
 </body>
 </html>

@@ -372,7 +372,7 @@
     }
   }
   function shouldPreserveLocalStorageEntry(key) {
-    return !!(key && (key === ACTIVE_LOCAL_SETTINGS_KEY || key === LEGACY_LOCAL_SETTINGS_KEY || key.startsWith(LOCAL_SETTINGS_KEY_PREFIX)));
+    return !!(key && (key === ACTIVE_LOCAL_SETTINGS_KEY || key === LEGACY_LOCAL_SETTINGS_KEY || key.startsWith(LOCAL_SETTINGS_KEY_PREFIX) || key === LAST_SEEN_DEPLOY_KEY));
   }
   function capturePreservedLocalStorageEntries() {
     const entries = [];
@@ -567,7 +567,9 @@
         // Bound the localStorage mirror to the newest window; full history lives
         // in the IndexedDB history store (historyStore* helpers below).
         messages: getCacheableMessages(cache.messages || []).slice(-MAX_CACHED_MESSAGES_PER_GROUP),
-        members: cache.members || [],
+        // v1.3.13: never persist an empty member list — a write that races the
+        // members fetch would poison the mirror and show "0 members" after reload.
+        members: Array.isArray(cache.members) && cache.members.length ? cache.members : null,
         oldestMessageId: cache.oldestMessageId || null,
         channelAnchors: cache.channelAnchors || null,
         updatedAt: Date.now()
@@ -951,6 +953,45 @@
     }
     await reloadAppShell();
   }
+  var LAST_SEEN_DEPLOY_KEY = "gchat:last-seen-deploy";
+  var autoResetScheduled = false;
+  function readLastSeenDeploy() {
+    try {
+      const raw = localStorage.getItem(LAST_SEEN_DEPLOY_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  }
+  function writeLastSeenDeploy(version, buildFingerprint) {
+    try {
+      localStorage.setItem(LAST_SEEN_DEPLOY_KEY, JSON.stringify({
+        version: String(version || ""),
+        buildFingerprint: String(buildFingerprint || "")
+      }));
+    } catch {
+    }
+  }
+  function scheduleAutoResetClientCache(info) {
+    if (!info || autoResetScheduled) return;
+    const lastSeen = readLastSeenDeploy();
+    const lastFp = String(lastSeen && lastSeen.buildFingerprint || "");
+    const lastVer = String(lastSeen && lastSeen.version || "");
+    const newFp = String(info.buildFingerprint || "");
+    const newVer = String(info.version || "");
+    if (!lastSeen) {
+      writeLastSeenDeploy(newVer, newFp);
+      return;
+    }
+    const sameBuild = lastFp ? lastFp === newFp && lastVer === newVer : lastVer === newVer && lastVer !== "";
+    if (sameBuild) return;
+    autoResetScheduled = true;
+    writeLastSeenDeploy(newVer, newFp);
+    const jitterMs = 1500 + Math.floor(Math.random() * 8e3);
+    setTimeout(() => {
+      void clearCacheAndRestartApp();
+    }, jitterMs);
+  }
   async function fetchAppVersionInfo() {
     try {
       const versionRes = await fetch("/api/meta/version", { cache: "no-store" });
@@ -967,18 +1008,11 @@
     currentAppVersion = currentAppVersion || info.version;
     appVersionLabel = "v" + info.version;
     $("app-version-label").textContent = appVersionLabel;
-    if (currentAppVersion === info.version || hostedAppReloadPending) return false;
+    if (currentAppVersion === info.version && hostedAppReloadPending) return false;
     currentAppVersion = info.version;
     hostedAppReloadPending = true;
-    showUpdateAvailableBanner();
+    scheduleAutoResetClientCache(info);
     return true;
-  }
-  function showUpdateAvailableBanner() {
-    const banner = $("update-available-banner");
-    if (!banner) return;
-    const text = $("update-available-text");
-    if (text) text.textContent = `GChat ${currentAppVersion} is available.`;
-    banner.hidden = false;
   }
   function startHostedAppUpdatePolling() {
     if (hostedAppUpdateTimer) clearInterval(hostedAppUpdateTimer);
@@ -1878,7 +1912,7 @@
     const topic = resolveMessageTagTopic(msg);
     msg.hashtag = topic;
     if (groupId) rememberChannel(groupId, topic);
-    if (!msg.tagIndex && groupId && topic) {
+    if (!msg.tagIndex && groupId && topic && topic !== DEFAULT_TAG_TOPIC) {
       const key = getGroupKey(groupId);
       if (key) {
         try {
@@ -2255,6 +2289,7 @@
         row.dataset.hasRead = "1";
         markMessageReadLocal(rowGroupId, messageId);
         queueMarkReadEmit(rowGroupId, messageId);
+        if (cachedMsg) scheduleChannelCursorAdvance(rowGroupId, cachedMsg);
       }
     }
     if (row.dataset.disappearing === "1" && row.dataset.senderId !== String(currentUser?.id) && row.dataset.disappearingHidden !== "1" && row.dataset.disappearingStarted !== "1") {
@@ -2757,7 +2792,11 @@
       groupDataCache.set(groupId, {
         messages: localMessages.length ? localMessages : local?.messages ? [] : null,
         messageRows: null,
-        members: local?.members || null,
+        // v1.3.13: an EMPTY cached member list is treated as "not loaded" — a
+        // mirror write that ran before members arrived used to persist
+        // members: [], and the next boot read it as loaded, so groups (notably
+        // GChat Global) rendered "0 members" forever until a cache reset.
+        members: Array.isArray(local?.members) && local.members.length ? local.members : null,
         oldestMessageId: local?.oldestMessageId || null,
         rowsDirty: !!local?.messages,
         knownChannels: new Set(readKnownChannels(groupId))
@@ -3054,6 +3093,7 @@
           renderTagFilters();
           syncChannelEmptyState();
           observeCurrentGroupRowsForRead();
+          applySearchVisibility();
           return;
         }
       }
@@ -3559,6 +3599,10 @@
       memo2.byId = /* @__PURE__ */ new Map();
       memo2.firstMsgId = null;
       memo2.lastMsgId = null;
+      if (!Array.isArray(cache.messages)) {
+        area.replaceChildren(createChannelLoadingIndicator());
+        return;
+      }
       if (all.length === 0) {
         area.replaceChildren(createChannelLoadingIndicator());
       } else {
@@ -3566,6 +3610,7 @@
       }
       syncChannelEmptyState();
       updateFirstUnreadButton();
+      applySearchVisibility();
       return;
     }
     const memo = getChannelRowMemo(cache, channel);
@@ -3585,6 +3630,7 @@
       observeCurrentGroupRowsForRead();
       syncChannelEmptyState();
       updateFirstUnreadButton();
+      applySearchVisibility();
       return;
     }
     transcriptRebuilding = true;
@@ -3628,10 +3674,12 @@
     cache.rowsDirty = true;
     syncChannelEmptyState();
     updateFirstUnreadButton();
+    applySearchVisibility();
   }
   function selectTagChannel(topic, { focusComposer = true } = {}) {
     const next = ensureActiveTag(topic);
     rememberChannel(currentGroupId, next);
+    clearActiveSearch();
     clearHashtagToken();
     clearWhisperToken();
     whisperRecipients = [];
@@ -3668,6 +3716,13 @@
     if (!area || !currentGroupId) return;
     let empty = area.querySelector(".channel-empty-state");
     const visible = countVisibleChannelMessages();
+    const cache = ensureGroupCacheEntry(currentGroupId);
+    if (!Array.isArray(cache.messages)) {
+      const loading2 = area.querySelector(".channel-loading-indicator");
+      if (!loading2) area.appendChild(createChannelLoadingIndicator());
+      if (empty) empty.remove();
+      return;
+    }
     const loading = area.querySelector(".channel-loading-indicator");
     if (visible > 0) {
       if (empty) empty.remove();
@@ -3763,6 +3818,10 @@
     wrap.addEventListener("pointermove", (event) => {
       const drag = tagDragState;
       if (!drag || drag.pointerId !== event.pointerId) return;
+      if (!drag.chip.isConnected) {
+        tagDragState = null;
+        return;
+      }
       if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 6) return;
       if (!drag.moved) {
         drag.moved = true;
@@ -3802,6 +3861,18 @@
   function renderTagFilters() {
     const wrap = $("chat-tag-filters");
     if (!wrap) return;
+    if (tagDragState) {
+      const pending = tagDragState;
+      tagDragState = null;
+      if (pending.chip) {
+        pending.chip.classList.remove("dragging");
+        pending.chip.style.touchAction = "";
+        try {
+          pending.chip.releasePointerCapture(pending.pointerId);
+        } catch {
+        }
+      }
+    }
     ensureActiveTag(activeTagFilter || DEFAULT_TAG_TOPIC);
     const tags = getAvailableGroupTags();
     const active = getActiveTagTopic();
@@ -4596,6 +4667,7 @@
       currentAppVersion = versionInfo.version;
       appVersionLabel = "v" + versionInfo.version;
       aiFeatureEnabled = versionInfo.aiEnabled === true;
+      scheduleAutoResetClientCache(versionInfo);
     }
     $("app-version-label").textContent = appVersionLabel;
     if (aiFeatureEnabled) {
@@ -4700,7 +4772,7 @@
           const cache = ensureGroupCacheEntry(group.id);
           const preloadedMessages = Array.isArray(group.preloaded.messages) ? filterMessagesVisibleToCurrentUser(group.preloaded.messages) : [];
           mergeMessagesIntoCache(group.id, preloadedMessages, { persist: false });
-          cache.members = Array.isArray(group.preloaded.members) ? group.preloaded.members : [];
+          cache.members = Array.isArray(group.preloaded.members) && group.preloaded.members.length ? group.preloaded.members : null;
           cache.messageRows = null;
           cache.rowsDirty = true;
           writeLocalGroupCache(group.id, cache);
@@ -5176,6 +5248,25 @@
       });
     })();
   }
+  var pendingCursorAdvanceTimers = /* @__PURE__ */ new Map();
+  var pendingCursorAdvances = /* @__PURE__ */ new Map();
+  function scheduleChannelCursorAdvance(groupId, msg) {
+    if (!msg || !groupId || !currentUser) return;
+    const key = `${String(groupId)}:${resolveMessageTagTopic(msg)}`;
+    pendingCursorAdvances.set(key, { at: msg.createdAt, id: msg.id });
+    if (pendingCursorAdvanceTimers.has(key)) return;
+    pendingCursorAdvanceTimers.set(key, setTimeout(() => {
+      pendingCursorAdvanceTimers.delete(key);
+      const latest = pendingCursorAdvances.get(key);
+      pendingCursorAdvances.delete(key);
+      if (!latest) return;
+      const cache = ensureGroupCacheEntry(groupId);
+      const target = (cache.messages || []).find(
+        (m) => String(m.id) === String(latest.id) || String(m.createdAt) === String(latest.at)
+      );
+      if (target) markChannelReadAt(groupId, target);
+    }, 250));
+  }
   async function markChannelReadOnOpen(groupId) {
     if (!groupId || !socket || !currentUser) return;
     const cache = ensureGroupCacheEntry(groupId);
@@ -5196,6 +5287,7 @@
     if (!normalizedGroupId) return;
     currentGroupId = normalizedGroupId;
     currentGroupData = groups.find((g) => String(g.id) === normalizedGroupId) || null;
+    clearActiveSearch();
     writeStoredLastGroupId(normalizedGroupId);
     replyingTo = null;
     pendingAttachmentRows.clear();
@@ -5355,6 +5447,7 @@
         memo.firstMsgId = rows.length ? rows[0].dataset?.msgId || memo.firstMsgId : memo.firstMsgId;
         evictChannelRowBack(memo);
         restoreViewportAnchor(area, viewportAnchor);
+        applySearchVisibility();
       }
       if (groupId === currentGroupId) {
         allMessages = ensureGroupCacheEntry(groupId).messages || allMessages;
@@ -5649,26 +5742,27 @@
       prefix.append(...inlinePrefixChips);
       textEl.prepend(prefix);
     }
+    const textFlow = document.createElement("span");
+    textFlow.className = "msg-text-inline";
+    textFlow.append(textEl);
+    if (msg.editedAt) textFlow.append(editedBadge);
     if (msg.type === "text") {
       const bodyRow = document.createElement("div");
       bodyRow.className = "msg-body-row";
       if (inlineChipsForRow.length) {
         const inlineRow = document.createElement("div");
         inlineRow.className = "msg-inline-row";
-        inlineRow.append(...inlineChipsForRow, textEl);
-        if (msg.editedAt) inlineRow.append(editedBadge);
+        inlineRow.append(...inlineChipsForRow, textFlow);
         bodyRow.append(inlineRow, meta);
       } else {
-        bodyRow.append(textEl);
-        if (msg.editedAt) bodyRow.append(editedBadge);
+        bodyRow.append(textFlow);
         bodyRow.append(meta);
       }
       bubble.appendChild(bodyRow);
     } else {
       const attachmentRow = document.createElement("div");
       attachmentRow.className = "msg-attachment-row";
-      attachmentRow.append(textEl);
-      if (msg.editedAt) attachmentRow.append(editedBadge);
+      attachmentRow.append(textFlow);
       attachmentRow.append(meta);
       bubble.appendChild(attachmentRow);
     }
@@ -5814,6 +5908,40 @@
       else renderPlainText(textEl, plaintext);
     }
   }
+  function appendOptimisticOwnMessage(msg) {
+    if (!msg || !currentUser || String(msg.groupId) !== String(currentGroupId)) return;
+    if (resolveMessageTagTopic(msg) !== getActiveTagTopic()) return;
+    mergeMessagesIntoCache(msg.groupId, [msg], { persist: false });
+    void appendMessageBubble(msg, true, msg.groupId);
+  }
+  function reconcileOptimisticEcho(serverMsg) {
+    if (!serverMsg) return;
+    const cache = ensureGroupCacheEntry(serverMsg.groupId);
+    const index = (cache.messages || []).findIndex((m) => String(m.id) === String(serverMsg.id));
+    if (index < 0) return;
+    const local = cache.messages[index];
+    if (!local || !local._optimistic) return;
+    const plaintext = local._decryptedText;
+    const hashtag = local.hashtag || null;
+    Object.assign(local, serverMsg);
+    if (plaintext != null) local._decryptedText = plaintext;
+    local.hashtag = hashtag || local.hashtag || null;
+    delete local._optimistic;
+    const row = document.querySelector(`.msg-row[data-msg-id="${CSS.escape(String(serverMsg.id))}"]`);
+    if (row) {
+      const timeEl = row.querySelector("time");
+      if (timeEl) {
+        timeEl.dateTime = serverMsg.createdAt || "";
+        timeEl.textContent = formatTime(serverMsg.createdAt);
+      }
+      const delEl = document.getElementById("del-" + serverMsg.id);
+      if (delEl) {
+        delEl.dataset.totalRecipients = String(Math.max(0, Number(serverMsg.totalRecipients) || 0));
+        delEl.dataset.readCount = String(Math.max(0, Number(serverMsg.readCount) || 0));
+        renderDeliveryTicks(delEl, Number(delEl.dataset.totalRecipients), Number(delEl.dataset.readCount));
+      }
+    }
+  }
   async function appendMessageBubble(msg, scroll, groupId = currentGroupId) {
     await hydrateMessageChannel(msg, groupId);
     const channel = resolveMessageTagTopic(msg);
@@ -5855,6 +5983,7 @@
     if (scroll !== false) {
       if (msg.senderId === currentUser.id) {
         scrollToBottom(true);
+        applySearchVisibility();
         return row;
       }
       if (wasNearBottom) {
@@ -5865,6 +5994,7 @@
         if (msg.senderId !== currentUser.id) playNotifSound();
       }
     }
+    applySearchVisibility();
     return row;
   }
   function resetComposerAfterSend() {
@@ -5985,6 +6115,16 @@
   var ctxMsg = null;
   var ctxText = "";
   var ctxTagTopic = null;
+  function positionContextMenu(menu, e) {
+    menu.hidden = false;
+    const width = menu.offsetWidth || 180;
+    const height = menu.offsetHeight || 120;
+    const left = Math.max(8, Math.min(e.clientX, window.innerWidth - width - 8));
+    const fitsBelow = e.clientY + height + 8 <= window.innerHeight;
+    const top = fitsBelow ? e.clientY : Math.max(8, e.clientY - height - 8);
+    menu.style.left = left + "px";
+    menu.style.top = top + "px";
+  }
   function showContextMenu(e, msg, text) {
     ctxMsg = msg;
     ctxText = text;
@@ -6003,8 +6143,7 @@
     setElementIcon($("ctx-copy"), "copy", { label: "Copy" });
     menu.hidden = false;
     if (e) {
-      menu.style.left = Math.min(e.clientX, window.innerWidth - 160) + "px";
-      menu.style.top = Math.min(e.clientY, window.innerHeight - 100) + "px";
+      positionContextMenu(menu, e);
     } else {
       menu.style.left = "50%";
       menu.style.top = "50%";
@@ -6024,8 +6163,12 @@
     deleteBtn.textContent = `Delete ${formatHashtagLabel(ctxTagTopic)}`;
     setElementIcon(deleteBtn, "trash-2", { label: `Delete ${formatHashtagLabel(ctxTagTopic)}` });
     menu.hidden = false;
-    menu.style.left = Math.min(e.clientX, window.innerWidth - 170) + "px";
-    menu.style.top = Math.min(e.clientY, window.innerHeight - 100) + "px";
+    if (e) {
+      positionContextMenu(menu, e);
+    } else {
+      menu.style.left = "50%";
+      menu.style.top = "50%";
+    }
   }
   function hideTagContextMenu() {
     $("tag-ctx-menu").hidden = true;
@@ -6043,8 +6186,7 @@
     setElementIcon(inviteBtn, "user-plus", { label: `Invite ${avatarCtxUsername} to chat` });
     menu.hidden = false;
     if (e) {
-      menu.style.left = Math.min(e.clientX, window.innerWidth - 180) + "px";
-      menu.style.top = Math.min(e.clientY, window.innerHeight - 100) + "px";
+      positionContextMenu(menu, e);
     } else {
       menu.style.left = "50%";
       menu.style.top = "50%";
@@ -6482,7 +6624,7 @@
         return;
       }
       const hashtag = parsedMessage.hashtag || null;
-      const tagIndex = hashtag ? await blindIndex(hashtag, key, currentGroupId, "tag-index") : null;
+      const tagIndex = hashtag && hashtag !== DEFAULT_TAG_TOPIC ? await blindIndex(hashtag, key, currentGroupId, "tag-index") : null;
       const replyToId = replyingTo?.id || null;
       const envelope = {
         ...messageIdentity,
@@ -6503,6 +6645,37 @@
       } else {
         socket.emit("send_message", envelope);
       }
+      appendOptimisticOwnMessage({
+        id: messageId,
+        groupId: currentGroupId,
+        senderId: currentUser.id,
+        senderName: currentUser.username,
+        senderColor: currentUser.iconColor,
+        type,
+        encryptedContent,
+        iv,
+        encryptedMetadata,
+        metadataIv,
+        encryptionVersion: 2,
+        keyVersion: 1,
+        revision: 1,
+        hashtag: parsedMessage.hashtag || null,
+        tagIndex,
+        replyToId,
+        replyPreview: metadata.replyPreview || null,
+        whisperTo: parsedMessage.whisperRecipientIds && parsedMessage.whisperRecipientIds.length ? parsedMessage.whisperRecipientIds : null,
+        isDisappearing: parsedMessage.isDisappearing,
+        disappearingDurationMs: parsedMessage.disappearingDurationMs,
+        disappearingStartedAt: null,
+        disappearingExpiresAt: null,
+        disappearingHiddenAt: null,
+        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+        editedAt: null,
+        totalRecipients: 0,
+        readCount: 0,
+        _decryptedText: messageText,
+        _optimistic: true
+      });
       resetComposerAfterSend();
     } catch (err) {
       console.error("Encryption failed:", err);
@@ -6523,6 +6696,24 @@
     };
     setTimeout(remove, 3e3);
   }
+  var uploadFinalizeWatchers = /* @__PURE__ */ new Map();
+  var UPLOAD_FINALIZE_TIMEOUT_MS = 6e3;
+  function watchUploadFinalize(uploadId, groupId) {
+    if (uploadFinalizeWatchers.has(uploadId)) return;
+    uploadFinalizeWatchers.set(uploadId, setTimeout(() => {
+      uploadFinalizeWatchers.delete(uploadId);
+      removePendingAttachment(uploadId);
+      if (String(groupId) === String(currentGroupId)) {
+        void refreshCurrentGroupFromServer();
+      }
+    }, UPLOAD_FINALIZE_TIMEOUT_MS));
+  }
+  function clearUploadFinalizeWatch(uploadId) {
+    const timer = uploadFinalizeWatchers.get(uploadId);
+    if (!timer) return;
+    clearTimeout(timer);
+    uploadFinalizeWatchers.delete(uploadId);
+  }
   function ensurePendingAttachmentRow(payload) {
     const { uploadId, senderId, senderName, senderColor, type, filename, totalBytes } = payload;
     if (!uploadId || pendingAttachmentRows.has(uploadId) || payload.groupId !== currentGroupId) return;
@@ -6534,9 +6725,12 @@
     avatar.className = "msg-avatar";
     const memberProfile = getMemberProfile(currentGroupId, senderId);
     renderAvatarElement(avatar, {
-      username: memberProfile?.username || senderName || currentUser?.username,
-      iconColor: memberProfile?.iconColor || senderColor || currentUser?.iconColor,
-      profilePicture: memberProfile?.profilePicture || currentUser?.profilePicture || null
+      username: memberProfile?.username || senderName,
+      iconColor: memberProfile?.iconColor || senderColor,
+      // v1.3.13: never fall back to the CURRENT user's picture for someone
+      // else's upload — a member without a profile picture used to render with
+      // the viewer's own avatar.
+      profilePicture: memberProfile?.profilePicture || payload.senderProfilePicture || null
     });
     const content = document.createElement("div");
     content.className = "msg-content";
@@ -6544,7 +6738,7 @@
     header.className = "msg-header";
     const nameEl = document.createElement("div");
     nameEl.className = "msg-sender-name";
-    nameEl.textContent = memberProfile?.username || senderName || currentUser?.username || "Unknown";
+    nameEl.textContent = memberProfile?.username || senderName || "Unknown";
     header.appendChild(nameEl);
     content.appendChild(header);
     const bubble = document.createElement("div");
@@ -6589,7 +6783,10 @@
     const label = row.querySelector(".msg-attachment-progress-label");
     const total = Math.max(1, Number(totalBytes) || 1);
     const loaded = Math.max(0, Math.min(total, Number(loadedBytes) || 0));
-    if (fill) fill.style.width = `${loaded / total * 100}%`;
+    const current = Number(fill ? parseFloat(fill.style.width) || 0 : 0);
+    const nextPercent = loaded / total * 100;
+    if (nextPercent < current) return;
+    if (fill) fill.style.width = `${nextPercent}%`;
     if (label) label.textContent = `${formatBytes(loaded)} / ${formatBytes(total)}`;
   }
   function setPendingAttachmentStatus(uploadId, statusText) {
@@ -6599,6 +6796,7 @@
     if (meta) meta.textContent = statusText;
   }
   function removePendingAttachment(uploadId) {
+    clearUploadFinalizeWatch(uploadId);
     const row = pendingAttachmentRows.get(uploadId);
     if (!row) return;
     row.remove();
@@ -6698,7 +6896,7 @@
       const { encryptedBytes, iv } = await encryptBytes(buffer, key, currentGroupId, aad);
       const hashtag = getActiveTagTopic();
       const metadataEnvelope = await encryptJson({ filename: file.name, hashtag }, key, currentGroupId, "metadata", aad);
-      const tagIndex = hashtag ? await blindIndex(hashtag, key, currentGroupId, "tag-index") : null;
+      const tagIndex = hashtag && hashtag !== DEFAULT_TAG_TOPIC ? await blindIndex(hashtag, key, currentGroupId, "tag-index") : null;
       let lastBroadcastLoaded = 0;
       let lastBroadcastAt = 0;
       const emitProgress = (loaded, total, force = false) => {
@@ -6739,6 +6937,7 @@
       updatePendingAttachmentProgress(uploadId, totalBytes, totalBytes);
       setPendingAttachmentStatus(uploadId, "Finalizing\u2026");
       emitProgress(totalBytes, totalBytes, true);
+      watchUploadFinalize(uploadId, currentGroupId);
     } catch (err) {
       console.error("File upload error:", err);
       removePendingAttachment(uploadId);
@@ -7080,6 +7279,7 @@
       }
       if (cacheHasMessage(msg.groupId, msg.id)) {
         if (msg.clientUploadId) removePendingAttachment(msg.clientUploadId);
+        reconcileOptimisticEcho(msg);
         return;
       }
       if (msg.groupId !== currentGroupId) {
@@ -7765,6 +7965,55 @@
     $("confirm-modal").hidden = false;
     confirmCallback = onConfirm;
   }
+  var activeSearchTerm = "";
+  var searchDebounceTimer = 0;
+  function syncSearchClearButton() {
+    const btn = $("clear-search-btn");
+    const input = $("search-input");
+    if (!btn) return;
+    btn.hidden = !input || input.value.length === 0;
+  }
+  function clearActiveSearch() {
+    if (searchDebounceTimer) {
+      clearTimeout(searchDebounceTimer);
+      searchDebounceTimer = 0;
+    }
+    const input = $("search-input");
+    if (input && input.value) input.value = "";
+    activeSearchTerm = "";
+    syncSearchClearButton();
+    searchMessages("");
+  }
+  function applySearchVisibility() {
+    const area = messagesArea();
+    if (!area || !currentGroupId) return;
+    const normalizedTerm = activeSearchTerm ? activeSearchTerm.toLowerCase() : "";
+    let pendingDivider = null;
+    for (const el of Array.from(area.children)) {
+      if (el.classList.contains("msg-date-divider")) {
+        pendingDivider = el;
+        continue;
+      }
+      if (!el.classList.contains("msg-row") && !el.classList.contains("msg-system")) continue;
+      if (!normalizedTerm) {
+        el.style.display = "";
+        if (pendingDivider) {
+          pendingDivider.style.display = "";
+          pendingDivider = null;
+        }
+        continue;
+      }
+      const textEl = el.querySelector(".msg-text");
+      const content = textEl ? textEl.textContent : el.textContent;
+      const match = (content || "").toLowerCase().includes(normalizedTerm);
+      el.style.display = match ? "" : "none";
+      if (pendingDivider) {
+        pendingDivider.style.display = match ? "" : "none";
+        pendingDivider = null;
+      }
+    }
+    $("search-results-count").textContent = normalizedTerm ? countVisibleChannelMessages() + " result" + (countVisibleChannelMessages() !== 1 ? "s" : "") : "";
+  }
   function highlightText(el, term) {
     el.textContent = el.textContent;
     if (!term) return;
@@ -7785,39 +8034,32 @@
     if (idx < text.length) el.appendChild(document.createTextNode(text.slice(idx)));
   }
   function searchMessages(term) {
-    const rows = messagesArea().querySelectorAll(".msg-row");
-    let count = 0;
-    const normalizedTerm = term ? term.toLowerCase() : "";
-    rows.forEach((row) => {
+    activeSearchTerm = term ? String(term) : "";
+    syncSearchClearButton();
+    const area = messagesArea();
+    if (!area) return;
+    const rows = area.querySelectorAll(".msg-row");
+    for (const row of rows) {
+      if (!row.dataset.searchHighlighted) continue;
+      delete row.dataset.searchHighlighted;
       const textEl = row.querySelector(".msg-text");
-      if (!textEl) {
-        row.style.display = "";
-        return;
-      }
-      if (!normalizedTerm) {
-        if (row.dataset.searchHighlighted) {
-          delete row.dataset.searchHighlighted;
-          const markdownSource = textEl.dataset.markdownSource;
-          if (markdownSource != null) renderMarkdown(textEl, markdownSource);
-          else renderPlainText(textEl, textEl.textContent);
-        }
-        row.style.display = "";
-        return;
-      }
-      const text = textEl.textContent;
-      if (text.toLowerCase().includes(normalizedTerm)) {
-        count++;
-        row.style.display = "";
-        const markdownSource = textEl.dataset.markdownSource;
-        if (markdownSource != null) renderMarkdown(textEl, markdownSource);
-        else renderPlainText(textEl, textEl.textContent);
-        highlightText(textEl, term);
-        row.dataset.searchHighlighted = "1";
-      } else {
-        row.style.display = "none";
-      }
-    });
-    $("search-results-count").textContent = term ? count + " result" + (count !== 1 ? "s" : "") : "";
+      if (!textEl) continue;
+      const markdownSource = textEl.dataset.markdownSource;
+      if (markdownSource != null) renderMarkdown(textEl, markdownSource);
+      else renderPlainText(textEl, textEl.textContent);
+    }
+    applySearchVisibility();
+    if (!activeSearchTerm) return;
+    for (const row of rows) {
+      if (row.style.display === "none" || row.dataset.searchHighlighted) continue;
+      const textEl = row.querySelector(".msg-text");
+      if (!textEl) continue;
+      const markdownSource = textEl.dataset.markdownSource;
+      if (markdownSource != null) renderMarkdown(textEl, markdownSource);
+      else renderPlainText(textEl, textEl.textContent);
+      highlightText(textEl, activeSearchTerm);
+      row.dataset.searchHighlighted = "1";
+    }
   }
   async function exportChat() {
     const key = getGroupKey(currentGroupId);
@@ -9554,9 +9796,9 @@ ${grokResponseDraft}` : grokResponseDraft;
     $("sidebar-toggle").addEventListener("click", toggleSidebar);
     $("right-panel-close").addEventListener("click", closeRightPanel);
     $("sidebar-overlay").addEventListener("click", closeMobilePanels);
-    let searchDebounceTimer = 0;
     $("search-input").addEventListener("input", (e) => {
       const value = e.target.value;
+      syncSearchClearButton();
       if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
       searchDebounceTimer = setTimeout(() => {
         searchDebounceTimer = 0;
@@ -9564,12 +9806,7 @@ ${grokResponseDraft}` : grokResponseDraft;
       }, 180);
     });
     $("clear-search-btn").addEventListener("click", () => {
-      if (searchDebounceTimer) {
-        clearTimeout(searchDebounceTimer);
-        searchDebounceTimer = 0;
-      }
-      $("search-input").value = "";
-      searchMessages("");
+      clearActiveSearch();
     });
     $("unread-jump-btn").addEventListener("click", () => {
       const first = messagesArea().querySelector(".msg-row.unseen");
