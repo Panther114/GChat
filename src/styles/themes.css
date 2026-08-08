@@ -132,9 +132,12 @@ body.electron-desktop-effects .right-panel {
   transform: none !important;
 }
 
-:root[data-theme='dark'] .right-panel .toggle-switch-row input:checked + .toggle-switch-ui {
+:root[data-theme='dark'] .toggle-switch-row input:checked + .toggle-switch-ui {
   /* v1.3.8: clearly visible ON state (brand indigo) — the old neutral gray
-     was visually identical to the unchecked track. */
+     was visually identical to the unchecked track. v1.3.13: applies to every
+     toggle, not just the right panel — the profile notification switch used
+     the raw --chat-accent track, which is white in dark mode and made the ON
+     state a white knob on a white track. */
   background: #6c63ff !important;
 }
 
@@ -466,6 +469,10 @@ body.sidebar-narrow .sidebar-actions {
   padding: 10px 2px 12px !important;
   margin: 0 !important;
   border-bottom: 1px solid var(--chat-border-strong) !important;
+  /* Never shrink sections below their content — .right-panel-inner is the
+     single scroll container (its flex children otherwise get squashed and
+     clipped instead of scrolling). */
+  flex: 0 0 auto !important;
 }
 
 .panel-section:last-child {
@@ -638,9 +645,10 @@ body.sidebar-narrow .sidebar-actions {
   gap: 1px !important;
   margin: 0 !important;
   padding: 0 !important;
-  max-height: 220px;
-  overflow-y: auto;
-  scrollbar-width: thin;
+  /* No per-list cap: the whole right panel scrolls instead, so the
+     permissions section can never be clipped off by a long member list. */
+  max-height: none !important;
+  overflow-y: visible !important;
 }
 
 .member-item {

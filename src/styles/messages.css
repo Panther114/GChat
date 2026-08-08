@@ -195,7 +195,7 @@
   min-width: 0;
   position: relative;
   overflow: visible !important;
-  padding-right: 48px; /* room for hover action bar */
+  padding-right: 64px; /* room for hover action bar */
 }
 
 .msg-row .msg-header,
@@ -325,7 +325,7 @@
    messages — independent of message length. The bubble normally shrink-wraps
    to the text width, which made ticks follow the message length; forcing it
    to span the column gives the ticks a stable anchor. The meta escapes the
-   row's 40px right padding + the 48px action-bar zone inside .msg-content
+   row's 40px right padding + the 64px action-bar zone inside .msg-content
    and keeps a 6px breathing margin from the column edge, aligned with the
    first line of text (or the top of the file/image). */
 .msg-row .msg-content > .msg-bubble {
@@ -347,7 +347,7 @@
 .msg-row .msg-body-row > .msg-meta {
   position: absolute;
   top: 0;
-  right: calc(-40px - 48px + 6px);
+  right: calc(-40px - 64px + 6px);
   margin: 0 !important;
 }
 
@@ -358,7 +358,7 @@
 .msg-row .msg-attachment-row > .msg-meta {
   position: absolute;
   top: 4px;
-  right: calc(-40px - 48px + 6px);
+  right: calc(-40px - 64px + 6px);
   margin: 0 !important;
 }
 
@@ -580,11 +580,12 @@
   background: var(--chat-hover) !important;
 }
 
-/* Hover actions — stay fully visible inside the row */
+/* Hover actions — stay fully visible inside the row. v1.3.13: pushed further
+   left so the reply button no longer crowds the delivery ticks. */
 .msg-row .msg-actions,
 .msg-row.own .msg-actions {
   position: absolute;
-  right: 8px;
+  right: 24px;
   top: 0;
   display: flex;
   align-items: center;
@@ -607,8 +608,8 @@
 
 .msg-row .msg-action-btn,
 .msg-row.own .msg-action-btn {
-  width: 28px;
-  height: 26px;
+  width: 24px;
+  height: 22px;
   display: grid;
   place-items: center;
   border: 0;
@@ -627,8 +628,8 @@
 }
 
 .msg-row .msg-action-btn .ui-icon {
-  width: 14px !important;
-  height: 14px !important;
+  width: 12px !important;
+  height: 12px !important;
   margin: 0 !important;
 }
 
@@ -1139,7 +1140,7 @@
   /* Mobile rows use 10px right padding (not 40px) — keep ticks flush right. */
   .msg-row .msg-body-row > .msg-meta,
   .msg-row .msg-attachment-row > .msg-meta {
-    right: calc(-10px - 48px + 6px);
+    right: calc(-10px - 64px + 6px);
   }
 
   .msg-row .msg-bubble,

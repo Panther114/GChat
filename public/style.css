@@ -4728,7 +4728,7 @@ body.electron-desktop-effects .chat-panel,
 body.electron-desktop-effects .right-panel {
   transform: none !important;
 }
-:root[data-theme=dark] .right-panel .toggle-switch-row input:checked + .toggle-switch-ui {
+:root[data-theme=dark] .toggle-switch-row input:checked + .toggle-switch-ui {
   background: #6c63ff !important;
 }
 .sidebar,
@@ -5019,6 +5019,7 @@ body.sidebar-narrow .sidebar-actions {
   padding: 10px 2px 12px !important;
   margin: 0 !important;
   border-bottom: 1px solid var(--chat-border-strong) !important;
+  flex: 0 0 auto !important;
 }
 .panel-section:last-child {
   border-bottom: none !important;
@@ -5168,9 +5169,8 @@ body.sidebar-narrow .sidebar-actions {
   gap: 1px !important;
   margin: 0 !important;
   padding: 0 !important;
-  max-height: 220px;
-  overflow-y: auto;
-  scrollbar-width: thin;
+  max-height: none !important;
+  overflow-y: visible !important;
 }
 .member-item {
   display: flex !important;
@@ -6861,7 +6861,7 @@ button.is-loading {
   min-width: 0;
   position: relative;
   overflow: visible !important;
-  padding-right: 48px;
+  padding-right: 64px;
 }
 .msg-row .msg-header,
 .msg-row.own .msg-header {
@@ -6990,7 +6990,7 @@ button.is-loading {
 .msg-row .msg-body-row > .msg-meta {
   position: absolute;
   top: 0;
-  right: calc(-40px - 48px + 6px);
+  right: calc(-40px - 64px + 6px);
   margin: 0 !important;
 }
 .msg-row .msg-attachment-row {
@@ -6999,7 +6999,7 @@ button.is-loading {
 .msg-row .msg-attachment-row > .msg-meta {
   position: absolute;
   top: 4px;
-  right: calc(-40px - 48px + 6px);
+  right: calc(-40px - 64px + 6px);
   margin: 0 !important;
 }
 .msg-meta,
@@ -7219,7 +7219,7 @@ button.is-loading {
 .msg-row .msg-actions,
 .msg-row.own .msg-actions {
   position: absolute;
-  right: 8px;
+  right: 24px;
   top: 0;
   display: flex;
   align-items: center;
@@ -7240,8 +7240,8 @@ button.is-loading {
 }
 .msg-row .msg-action-btn,
 .msg-row.own .msg-action-btn {
-  width: 28px;
-  height: 26px;
+  width: 24px;
+  height: 22px;
   display: grid;
   place-items: center;
   border: 0;
@@ -7258,8 +7258,8 @@ button.is-loading {
   color: var(--chat-text-strong);
 }
 .msg-row .msg-action-btn .ui-icon {
-  width: 14px !important;
-  height: 14px !important;
+  width: 12px !important;
+  height: 12px !important;
   margin: 0 !important;
 }
 .msg-mobile-actions-btn {
@@ -7693,7 +7693,7 @@ button.is-loading {
   }
   .msg-row .msg-body-row > .msg-meta,
   .msg-row .msg-attachment-row > .msg-meta {
-    right: calc(-10px - 48px + 6px);
+    right: calc(-10px - 64px + 6px);
   }
   .msg-row .msg-bubble,
   .msg-row.own .msg-bubble,

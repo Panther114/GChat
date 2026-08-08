@@ -462,3 +462,72 @@ test('messages sent from a second device appear in a background group without re
   await contextA.close();
   await contextB.close();
 });
+
+test('duplicate channel names are rejected at creation', async ({ page }) => {
+  await signInAsLocalRoot(page);
+  await clickGroup(page, 'Increment A Playground');
+  await page.locator('#messages-area .msg-row, #messages-area .channel-empty-state').first().waitFor();
+
+  const channelName = `dup-${Date.now() % 100000}`;
+  await page.locator('.chat-tag-add-btn').click();
+  await page.locator('#channel-name-input').fill(channelName);
+  await page.locator('#channel-confirm-btn').click();
+  const chip = page.locator('.chat-tag-filter-btn', { hasText: `#${channelName}` });
+  await expect(chip).toHaveCount(1);
+
+  // Exact duplicate: the modal must stay open with an error and no second chip.
+  await page.locator('.chat-tag-add-btn').click();
+  await page.locator('#channel-name-input').fill(channelName);
+  await page.locator('#channel-confirm-btn').click();
+  await expect(page.locator('#channel-error')).toHaveText(/already exists/);
+  await expect(page.locator('#channel-modal')).toBeVisible();
+  await expect(chip).toHaveCount(1);
+
+  // Normalized duplicate ('#' prefix + uppercase) must also be rejected.
+  await page.locator('#channel-name-input').fill(`#${channelName.toUpperCase()}`);
+  await page.locator('#channel-confirm-btn').click();
+  await expect(page.locator('#channel-error')).toHaveText(/already exists/);
+  await expect(chip).toHaveCount(1);
+
+  // Cancel clears the error, and a fresh unique name still creates a channel.
+  await page.locator('#channel-cancel-btn').click();
+  await expect(page.locator('#channel-error')).toHaveText('');
+  const secondName = `ok-${Date.now() % 100000}`;
+  await page.locator('.chat-tag-add-btn').click();
+  await page.locator('#channel-name-input').fill(secondName);
+  await page.locator('#channel-confirm-btn').click();
+  await expect(page.locator('.chat-tag-filter-btn', { hasText: `#${secondName}` })).toHaveCount(1);
+});
+
+test('right-clicking a message timestamp opens the message menu, not the profile invite menu', async ({ page }) => {
+  await signInAsLocalRoot(page);
+  await clickGroup(page, 'Increment A Playground');
+  await page.locator('#messages-area .msg-row, #messages-area .channel-empty-state').first().waitFor();
+
+  // Two quick consecutive messages: the second continues the series, so its
+  // timestamp is rendered inside the avatar gutter.
+  const first = `series-a-${Date.now()}`;
+  const second = `series-b-${Date.now()}`;
+  await page.locator('#message-input').fill(first);
+  await page.locator('#message-input').press('Enter');
+  await expect(page.locator('#messages-area .msg-row', { hasText: first }).last().locator('.msg-text')).toHaveText(first);
+  await page.locator('#message-input').fill(second);
+  await page.locator('#message-input').press('Enter');
+  const continuedRow = page.locator('#messages-area .msg-row.series-continued', { hasText: second }).last();
+  await expect(continuedRow).toBeVisible();
+  const continuationTime = continuedRow.locator('.msg-continuation-time');
+  await expect(continuationTime).toHaveCount(1);
+
+  // Right-click the timestamp: the message context menu opens and the
+  // avatar/invite menu must stay hidden.
+  await continuationTime.dispatchEvent('contextmenu');
+  await expect(page.locator('#ctx-menu')).toBeVisible();
+  await expect(page.locator('#avatar-ctx-menu')).toBeHidden();
+
+  // Regression guard: right-clicking an actual member avatar still offers
+  // the invite action.
+  const miraItem = page.locator('#members-list .member-item', { hasText: 'Mira' }).first();
+  await miraItem.locator('.member-avatar').click({ button: 'right' });
+  await expect(page.locator('#avatar-ctx-menu')).toBeVisible();
+  await expect(page.locator('#avatar-ctx-invite')).toContainText(/Invite Mira/i);
+});

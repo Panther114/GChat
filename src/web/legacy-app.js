@@ -4568,6 +4568,11 @@ function confirmChannelCreate() {
     input?.focus();
     return;
   }
+  if (currentGroupId && getAvailableGroupTags(currentGroupId).some((entry) => entry.topic === topic)) {
+    if (err) err.textContent = `A channel named ${formatHashtagLabel(topic)} already exists`;
+    input?.focus();
+    return;
+  }
   closeChannelCreateModal();
   rememberChannel(currentGroupId, topic);
   announceChannelChange(currentGroupId, topic, 'add');
@@ -10887,6 +10892,9 @@ function setupEventListeners() {
   document.addEventListener('contextmenu', (event) => {
     const avatar = event.target.closest('.msg-avatar, .member-avatar');
     if (!avatar) return;
+    // Continued message series render their timestamp inside the avatar cell —
+    // right-clicking a timestamp must never act like right-clicking the profile.
+    if (event.target.closest('time')) return;
     const row = avatar.closest('.msg-row, .member-item');
     if (!row) return;
     const userId = row.dataset.senderId || row.dataset.userId;
