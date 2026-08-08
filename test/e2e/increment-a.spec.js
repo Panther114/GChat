@@ -463,6 +463,78 @@ test('messages sent from a second device appear in a background group without re
   await contextB.close();
 });
 
+test('a sent message always shows its own sender header, never another user', async ({ browser }) => {
+  // v1.3.14 regression: the optimistic-send path merged the message into the
+  // cache before building its row, so the series scan found the message ITSELF
+  // and rendered it as a continuation — no name header, time in the avatar
+  // gutter — visually gluing the sender's own message to the previous (often
+  // another user's) message block.
+  const contextA = await browser.newContext();
+  const contextB = await browser.newContext();
+  const pageA = await contextA.newPage();
+  const pageB = await contextB.newPage();
+
+  await signInAsLocalRoot(pageA);
+  await clickGroup(pageA, 'Increment A Playground');
+  await pageA.locator('#messages-area .msg-row, #messages-area .channel-empty-state').first().waitFor();
+
+  // Friend signs up and joins the fixture group via its invite code.
+  await pageB.goto('/');
+  await pageB.locator('.auth-tab[data-tab=signup]').click();
+  const friendName = `friend${Date.now() % 100000}`;
+  await pageB.locator('#signup-username').fill(friendName);
+  await pageB.locator('#signup-password').fill('probe-pass');
+  await pageB.locator('#signup-confirm').fill('probe-pass');
+  await pageB.locator('#signup-btn').click();
+  await pageB.locator('#group-list').first().waitFor({ timeout: 15000 });
+  await pageB.locator('#join-group-btn').click();
+  await pageB.locator('#join-group-code').fill('inca01');
+  await pageB.locator('#join-confirm-btn').click();
+  await pageB.waitForTimeout(800);
+  await clickGroup(pageB, 'Increment A Playground');
+
+  // A sends, then B sends immediately after (same day, minutes apart) — the
+  // harshest condition for the identity-gluing bug. B then sends a second
+  // message to prove legitimate same-sender continuations still collapse.
+  const textA = `a-send-${Date.now()}`;
+  const textB = `b-send-${Date.now()}`;
+  const textB2 = `b-send-2-${Date.now()}`;
+  await pageA.locator('#message-input').fill(textA);
+  await pageA.locator('#message-input').press('Enter');
+  await pageA.waitForTimeout(600);
+  await pageB.locator('#message-input').fill(textB);
+  await pageB.locator('#message-input').press('Enter');
+  await pageB.waitForTimeout(400);
+  await pageB.locator('#message-input').fill(textB2);
+  await pageB.locator('#message-input').press('Enter');
+
+  // On B's screen, B's first message (which follows A's, a DIFFERENT sender)
+  // must carry B's own name header + letter avatar — the pre-fix bug rendered
+  // it headerless and glued it to A's block.
+  const bOwnRow = pageB.locator('#messages-area .msg-row.own', { hasText: textB }).last();
+  await expect(bOwnRow).toBeVisible({ timeout: 10000 });
+  await expect(bOwnRow.locator('.msg-sender-name')).toHaveText(friendName);
+  await expect(bOwnRow).not.toHaveClass(/series-continued/);
+  await expect(bOwnRow.locator('.msg-avatar')).toHaveText(friendName[0].toUpperCase());
+
+  // B's SECOND message follows B's own — the legitimate series continuation
+  // must still collapse into the same block (no duplicate headers).
+  const bOwnRow2 = pageB.locator('#messages-area .msg-row.own', { hasText: textB2 }).last();
+  await expect(bOwnRow2).toHaveClass(/series-continued/);
+
+  // On A's screen, B's message shows B's identity and is never A's own.
+  const bRowOnA = pageA.locator('#messages-area .msg-row', { hasText: textB }).last();
+  await expect(bRowOnA).toBeVisible({ timeout: 10000 });
+  await expect(bRowOnA.locator('.msg-sender-name')).toHaveText(friendName);
+  await expect(bRowOnA).not.toHaveClass(/own/);
+  const aOwnRow = pageA.locator('#messages-area .msg-row.own', { hasText: textA }).last();
+  await expect(aOwnRow).toHaveAttribute('data-sender-id', /local-debug-root/);
+  await expect(aOwnRow).not.toContainText(friendName);
+
+  await contextA.close();
+  await contextB.close();
+});
+
 test('duplicate channel names are rejected at creation', async ({ page }) => {
   await signInAsLocalRoot(page);
   await clickGroup(page, 'Increment A Playground');

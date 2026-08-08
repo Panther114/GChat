@@ -4349,7 +4349,10 @@ function evictChannelRowFront(memo, keep = CHANNEL_RENDER_WINDOW, max = CHANNEL_
     revokeBlobUrlsIn(row);
     row.remove();
   }
-  memo.firstMsgId = memo.rows.length ? memo.rows[0].dataset?.msgId || null : null;
+  // v1.3.14: the window may start with a date divider — resolve the first
+  // real message id instead of assuming rows[0] is a message.
+  const firstMsgRow = memo.rows.find((r) => r && r.dataset?.msgId);
+  memo.firstMsgId = firstMsgRow ? firstMsgRow.dataset.msgId : null;
   if (!memo.rows.length) memo.lastMsgId = null;
   restoreViewportAnchor(area, anchor);
 }
@@ -4375,6 +4378,10 @@ function evictChannelRowBack(memo, keep = CHANNEL_RENDER_WINDOW * 2) {
     row.remove();
   }
   memo.lastMsgId = memo.rows.length ? memo.rows[memo.rows.length - 1].dataset?.msgId || null : null;
+  const lastMsgRow = memo.rows.length
+    ? Array.from(memo.rows).reverse().find((r) => r && r.dataset?.msgId)
+    : null;
+  memo.lastMsgId = lastMsgRow ? lastMsgRow.dataset.msgId : null;
   if (!memo.rows.length) memo.firstMsgId = null;
 }
 
@@ -4464,13 +4471,22 @@ async function renderActiveChannelStream({ restoreScroll = true } = {}) {
   const lastWindowId = String(windowMsgs[windowMsgs.length - 1].id);
   if (memo.rows.length > 0 && memo.lastMsgId === lastWindowId) {
     // Drop rows whose messages were deleted/cleared since the memo was built.
+    // v1.3.14: date dividers have no dataset.msgId — keep them (dropping them
+    // shrank the re-attached transcript by a divider per day and shifted the
+    // reading position after every group/channel switch).
     const cacheIds = new Set(all.map((m) => String(m.id)));
-    const valid = memo.rows.filter((row) => row && row.dataset?.msgId && cacheIds.has(String(row.dataset.msgId)));
+    const valid = memo.rows.filter((row) => {
+      if (!row) return false;
+      if (!row.dataset?.msgId) return true;
+      return cacheIds.has(String(row.dataset.msgId));
+    });
     if (valid.length !== memo.rows.length) {
       memo.rows = valid;
-      memo.byId = new Map(memo.rows.map((row) => [String(row.dataset.msgId), row]));
-      memo.firstMsgId = memo.rows.length ? memo.rows[0].dataset.msgId : null;
-      memo.lastMsgId = memo.rows.length ? memo.rows[memo.rows.length - 1].dataset.msgId : null;
+      memo.byId = new Map(valid.filter((row) => row?.dataset?.msgId).map((row) => [String(row.dataset.msgId), row]));
+      const firstMsgRow = valid.find((row) => row?.dataset?.msgId);
+      memo.firstMsgId = firstMsgRow ? firstMsgRow.dataset.msgId : null;
+      const lastMsgRow = Array.from(valid).reverse().find((row) => row?.dataset?.msgId);
+      memo.lastMsgId = lastMsgRow ? lastMsgRow.dataset.msgId : null;
     }
     evictChannelRowFront(memo);
     attachChannelRowsToArea(area, memo);
@@ -4519,8 +4535,12 @@ async function renderActiveChannelStream({ restoreScroll = true } = {}) {
     }
     memo.rows = rows;
     memo.byId = new Map(rows.filter((row) => row?.dataset?.msgId).map((row) => [String(row.dataset.msgId), row]));
-    memo.firstMsgId = rows.length ? rows[0].dataset?.msgId || null : null;
-    memo.lastMsgId = rows.length ? rows[rows.length - 1].dataset?.msgId || null : null;
+    // v1.3.14: the window may start/end with date dividers — resolve the real
+    // message ids instead of assuming rows[0] / rows[last] are messages.
+    const firstMsgRow = rows.find((row) => row?.dataset?.msgId);
+    memo.firstMsgId = firstMsgRow ? firstMsgRow.dataset.msgId : null;
+    const lastMsgRow = Array.from(rows).reverse().find((row) => row?.dataset?.msgId);
+    memo.lastMsgId = lastMsgRow ? lastMsgRow.dataset.msgId : null;
     evictChannelRowFront(memo);
     attachChannelRowsToArea(area, memo);
     if (restoreScroll) restoreOrScrollToBottom();
@@ -7200,8 +7220,16 @@ async function appendMessageBubble(msg, scroll, groupId = currentGroupId) {
   }
 
   // Series against last message *in this channel*, not the whole group timeline.
+  // v1.3.14: SKIP the message itself — the optimistic-send path merges the
+  // message into the cache before calling this, so the scan used to find the
+  // message itself and `shouldContinueSeries(msg, msg)` returned true. That
+  // rendered the sender's own optimistic message as a series continuation —
+  // no name header, time in the avatar gutter — visually gluing it to the
+  // previous (often the OTHER user's) message: "my message shows as my
+  // friend's, and vice versa".
   let previousInChannel = null;
   for (let i = allMessages.length - 1; i >= 0; i -= 1) {
+    if (String(allMessages[i].id) === String(msg.id)) continue;
     if (resolveMessageTagTopic(allMessages[i]) === channel) {
       previousInChannel = allMessages[i];
       break;
@@ -7231,8 +7259,14 @@ async function appendMessageBubble(msg, scroll, groupId = currentGroupId) {
   // Remove empty state if present.
   area.querySelector('.channel-empty-state')?.remove();
 
+  // v1.3.14: date dividers are part of the memoized channel window too — a
+  // divider created live here used to be dropped on the next channel/group
+  // switch (the memo only held msg rows), which shrank the re-attached
+  // transcript by the divider height and shifted the reading position.
+  let appendedDivider = null;
   if (!previousInChannel || !isSameMessageDay(previousInChannel.createdAt, msg.createdAt)) {
-    area.appendChild(createDateDivider(msg.createdAt));
+    appendedDivider = createDateDivider(msg.createdAt);
+    area.appendChild(appendedDivider);
   }
   row.hidden = false;
   area.appendChild(row);
@@ -7240,6 +7274,7 @@ async function appendMessageBubble(msg, scroll, groupId = currentGroupId) {
   // v1.3.12: keep the memoized channel rows in sync with the live DOM so a
   // switch away and back re-attaches this row instead of rebuilding.
   const memo = getChannelRowMemo(cache, channel);
+  if (appendedDivider) memo.rows.push(appendedDivider);
   memo.rows.push(row);
   memo.byId.set(String(msg.id), row);
   memo.lastMsgId = String(msg.id);

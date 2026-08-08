@@ -3539,7 +3539,8 @@
       revokeBlobUrlsIn(row);
       row.remove();
     }
-    memo.firstMsgId = memo.rows.length ? memo.rows[0].dataset?.msgId || null : null;
+    const firstMsgRow = memo.rows.find((r) => r && r.dataset?.msgId);
+    memo.firstMsgId = firstMsgRow ? firstMsgRow.dataset.msgId : null;
     if (!memo.rows.length) memo.lastMsgId = null;
     restoreViewportAnchor(area, anchor);
   }
@@ -3562,6 +3563,8 @@
       row.remove();
     }
     memo.lastMsgId = memo.rows.length ? memo.rows[memo.rows.length - 1].dataset?.msgId || null : null;
+    const lastMsgRow = memo.rows.length ? Array.from(memo.rows).reverse().find((r) => r && r.dataset?.msgId) : null;
+    memo.lastMsgId = lastMsgRow ? lastMsgRow.dataset.msgId : null;
     if (!memo.rows.length) memo.firstMsgId = null;
   }
   function restoreOrScrollToBottom() {
@@ -3617,12 +3620,18 @@
     const lastWindowId = String(windowMsgs[windowMsgs.length - 1].id);
     if (memo.rows.length > 0 && memo.lastMsgId === lastWindowId) {
       const cacheIds = new Set(all.map((m) => String(m.id)));
-      const valid = memo.rows.filter((row) => row && row.dataset?.msgId && cacheIds.has(String(row.dataset.msgId)));
+      const valid = memo.rows.filter((row) => {
+        if (!row) return false;
+        if (!row.dataset?.msgId) return true;
+        return cacheIds.has(String(row.dataset.msgId));
+      });
       if (valid.length !== memo.rows.length) {
         memo.rows = valid;
-        memo.byId = new Map(memo.rows.map((row) => [String(row.dataset.msgId), row]));
-        memo.firstMsgId = memo.rows.length ? memo.rows[0].dataset.msgId : null;
-        memo.lastMsgId = memo.rows.length ? memo.rows[memo.rows.length - 1].dataset.msgId : null;
+        memo.byId = new Map(valid.filter((row) => row?.dataset?.msgId).map((row) => [String(row.dataset.msgId), row]));
+        const firstMsgRow = valid.find((row) => row?.dataset?.msgId);
+        memo.firstMsgId = firstMsgRow ? firstMsgRow.dataset.msgId : null;
+        const lastMsgRow = Array.from(valid).reverse().find((row) => row?.dataset?.msgId);
+        memo.lastMsgId = lastMsgRow ? lastMsgRow.dataset.msgId : null;
       }
       evictChannelRowFront(memo);
       attachChannelRowsToArea(area, memo);
@@ -3662,8 +3671,10 @@
       }
       memo.rows = rows;
       memo.byId = new Map(rows.filter((row) => row?.dataset?.msgId).map((row) => [String(row.dataset.msgId), row]));
-      memo.firstMsgId = rows.length ? rows[0].dataset?.msgId || null : null;
-      memo.lastMsgId = rows.length ? rows[rows.length - 1].dataset?.msgId || null : null;
+      const firstMsgRow = rows.find((row) => row?.dataset?.msgId);
+      memo.firstMsgId = firstMsgRow ? firstMsgRow.dataset.msgId : null;
+      const lastMsgRow = Array.from(rows).reverse().find((row) => row?.dataset?.msgId);
+      memo.lastMsgId = lastMsgRow ? lastMsgRow.dataset.msgId : null;
       evictChannelRowFront(memo);
       attachChannelRowsToArea(area, memo);
       if (restoreScroll) restoreOrScrollToBottom();
@@ -5951,6 +5962,7 @@
     }
     let previousInChannel = null;
     for (let i = allMessages.length - 1; i >= 0; i -= 1) {
+      if (String(allMessages[i].id) === String(msg.id)) continue;
       if (resolveMessageTagTopic(allMessages[i]) === channel) {
         previousInChannel = allMessages[i];
         break;
@@ -5969,13 +5981,16 @@
     if (groupId !== currentGroupId || !messageMatchesActiveTag(msg)) return row;
     if (!area) return row;
     area.querySelector(".channel-empty-state")?.remove();
+    let appendedDivider = null;
     if (!previousInChannel || !isSameMessageDay(previousInChannel.createdAt, msg.createdAt)) {
-      area.appendChild(createDateDivider(msg.createdAt));
+      appendedDivider = createDateDivider(msg.createdAt);
+      area.appendChild(appendedDivider);
     }
     row.hidden = false;
     area.appendChild(row);
     observeMessageForRead(row, msg);
     const memo = getChannelRowMemo(cache, channel);
+    if (appendedDivider) memo.rows.push(appendedDivider);
     memo.rows.push(row);
     memo.byId.set(String(msg.id), row);
     memo.lastMsgId = String(msg.id);

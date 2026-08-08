@@ -4,6 +4,13 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## v1.3.14
+
+- **Messages no longer show under the wrong sender — root cause fixed**: the optimistic-send path (v1.3.13) merged a sent message into the local cache BEFORE building its row, so the series-scan found the message itself and `shouldContinueSeries(msg, msg)` returned true. The sender's own message was then rendered as a *series continuation* — no name header, the clock in the avatar gutter — which visually glued it to the previous message block, usually the OTHER person's: "my message looks like my friend's, and my friend's looks like mine." The previous-in-channel scan now skips the message itself, so every sent message gets its own sender header and avatar. (The echo/reload paths already rendered correctly — the mismatch was strictly the optimistic row.)
+- **Date dividers survive channel/group switches**: live-appended dividers weren't part of the memoized row window, and the memo's validity filter dropped divider elements on re-attach — so switching away and back silently removed a divider, shrank the transcript, and shifted the reading position. Dividers are now tracked in the memo window, preserved by the filter, and all first/last-message-id bookkeeping is divider-safe.
+- **Regression coverage**: a new two-user e2e test — A sends, B sends immediately after — asserts on both screens that each sender's message carries its own name header and letter avatar, is never `series-continued` (while a legit same-sender continuation still collapses), and the existing scroll-restore e2e test passes again.
+- Bumped product version to **1.3.14** and asset cache-bust to v143.
+
 ## v1.3.13
 
 - **Clients auto-clear their cache and restart after EVERY deploy** (version bump or not): the server now exposes a `buildFingerprint` (a content hash of the shipped bundle + server sources, computed once at boot) alongside the version. Every client compares it against its last-seen deploy marker on boot and on the 10-minute poll; a mismatch triggers an automatic cache clear + restart (with a 1.5–9.5s random jitter so a deploy never thunders the server). Crash-restarts of identical code keep the same fingerprint and never force a refresh, and the marker survives the reset so the reload can never loop.
