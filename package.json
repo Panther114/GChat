@@ -1,6 +1,6 @@
 {
   "name": "Gchat",
-  "version": "1.3.14",
+  "version": "1.4.0",
   "description": "End-to-end encrypted group chat app",
   "author": "Gchat",
   "main": "server.js",
@@ -12,7 +12,7 @@
     "migrate:group-invite-codes": "node scripts/migrate-group-invite-codes.js",
     "purge:pre-escrow-groups": "node scripts/purge-pre-escrow-groups.js",
     "lint": "eslint server.js src/server src-tauri/src/bridge.js src-desktop-win/src/bridge.js electron scripts test",
-    "test": "node --test test/security.test.js test/web-crypto.test.js test/integration.test.js test/electron-runtime.test.js test/desktop-packaging.test.js",
+    "test": "node --test test/security.test.js test/web-crypto.test.js test/ai-agent.test.js test/integration.test.js test/electron-runtime.test.js test/desktop-packaging.test.js",
     "test:unit": "node --test test/security.test.js test/web-crypto.test.js test/electron-runtime.test.js",
     "test:integration": "node --test test/integration.test.js",
     "test:cli": "npm --prefix cli test",

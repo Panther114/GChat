@@ -484,19 +484,24 @@
   var MAX_PROFILE_PICTURE_BYTES = 2 * 1024 * 1024;
   var MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024;
   var MAX_TEXT_MESSAGE_BYTES = 64 * 1024;
-  var GROK_CONTEXT_MESSAGE_LIMIT = 40;
-  var GROK_CONTEXT_TOTAL_CHARS = 24e3;
+  var MAX_AI_TOOL_ROUNDS = 4;
+  var AI_CHANNEL_HISTORY_DEFAULT_LIMIT = 20;
+  var AI_CHANNEL_HISTORY_MAX_LIMIT = 40;
+  var AI_TOOL_RESULT_MAX_CHARS = 24e3;
+  var AI_CHANNEL_LIST_MAX_CHANNELS = 50;
+  var AI_TONE_STORAGE_KEY = "gchat:ai-tone";
   var AI_ASSISTANT_USER_ID = "__gchat_ai_grok__";
   var AI_ASSISTANT_NAME = "AI";
   var AI_ASSISTANT_COLOR = "#8d7bff";
-  var AI_ASSISTANT_PROFILE_PICTURE = "/grok.webp";
+  var AI_ASSISTANT_PROFILE_PICTURE = "/deepseek.webp";
   var AI_MODEL_PROFILE_PICTURES = {
-    "deepseek/deepseek-v4-flash": "/deepseek.webp",
-    "grok-4-1-fast-non-reasoning": "/grok.webp"
+    "deepseek-v4-flash": "/deepseek.webp"
   };
   var AI_MODEL_TAGS = {
-    "deepseek/deepseek-v4-flash": "deepseek",
-    "grok-4-1-fast-non-reasoning": "grok"
+    "deepseek-v4-flash": "deepseek"
+  };
+  var AI_MODEL_ALIASES = {
+    "deepseek/deepseek-v4-flash": "deepseek-v4-flash"
   };
   var APP_OWNER_USERNAME = "Furina";
   var AI_RESET_TIME_LABEL = "4:00 AM Shanghai time";
@@ -507,15 +512,15 @@
   var MIN_CURRENCY_DISPLAY_THRESHOLD = 0.01;
   var SMALL_CURRENCY_PRECISION = 4;
   var AI_MODEL_OPTIONS = {
-    "deepseek/deepseek-v4-flash": "DeepSeek V4 Flash",
-    "grok-4-1-fast-non-reasoning": "Grok 4.1 Fast"
+    "deepseek-v4-flash": "DeepSeek V4 Flash"
   };
-  var DEFAULT_AI_MODEL = "grok-4-1-fast-non-reasoning";
+  var DEFAULT_AI_MODEL = "deepseek-v4-flash";
   var AI_MODE_LABELS = {
     fast: "Context-less",
-    thinking: "Context"
+    thinking: "Context",
+    agent: "Agent"
   };
-  var DEFAULT_AI_MODE = "fast";
+  var DEFAULT_AI_MODE = "agent";
   var AI_TONE_LABELS = {
     casual: "Casual",
     professional: "Professional",
@@ -1166,12 +1171,18 @@
     const toneKey = String(meta.tone || "").trim().toLowerCase();
     const webSearchRequestsRaw = Number(meta.webSearchRequests ?? meta.web_search_requests);
     const webSearchRequests = Number.isFinite(webSearchRequestsRaw) && webSearchRequestsRaw > 0 ? Math.max(0, Math.round(webSearchRequestsRaw)) : 0;
+    const toolCallsRaw = Number(meta.toolCalls ?? meta.tool_calls);
+    const toolCalls = Number.isFinite(toolCallsRaw) && toolCallsRaw > 0 ? Math.max(0, Math.round(toolCallsRaw)) : 0;
+    const toolRoundsRaw = Number(meta.toolRounds ?? meta.tool_rounds);
+    const toolRounds = Number.isFinite(toolRoundsRaw) && toolRoundsRaw > 0 ? Math.max(0, Math.round(toolRoundsRaw)) : 0;
     return {
-      model: modelKey || DEFAULT_AI_MODEL,
+      model: AI_MODEL_ALIASES[modelKey] || modelKey || DEFAULT_AI_MODEL,
       mode: AI_MODE_LABELS[modeKey] ? modeKey : DEFAULT_AI_MODE,
       tone: AI_TONE_LABELS[toneKey] ? toneKey : DEFAULT_AI_TONE,
       webSearchEnabled: meta.webSearchEnabled === true || meta.web_search_enabled === true,
       webSearchRequests,
+      toolCalls,
+      toolRounds,
       promptTokens,
       completionTokens,
       totalTokens,
@@ -1194,7 +1205,9 @@
     return formatCurrencyValue(value, "\xA5");
   }
   function getAiModelLabel(model) {
-    return AI_MODEL_OPTIONS[String(model || "").trim()] || String(model || "").trim() || AI_MODEL_OPTIONS[DEFAULT_AI_MODEL];
+    const key = String(model || "").trim();
+    const canonical = AI_MODEL_ALIASES[key] || key;
+    return AI_MODEL_OPTIONS[canonical] || canonical || AI_MODEL_OPTIONS[DEFAULT_AI_MODEL];
   }
   function slugifyAiTagPart(value, fallback = "ai") {
     const slug = String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -1212,6 +1225,7 @@
   }
   function getAiModeTag(mode) {
     const normalizedMode = String(mode || "").trim().toLowerCase();
+    if (normalizedMode === "agent") return "agent";
     if (normalizedMode === "thinking" || normalizedMode === "context") return "context";
     return normalizedMode === "fast" ? "fast" : "context";
   }
@@ -1219,8 +1233,9 @@
     return AI_TONE_LABELS[String(tone || "").trim().toLowerCase()] || AI_TONE_LABELS[DEFAULT_AI_TONE];
   }
   function getAiAssistantProfilePicture(model) {
-    const normalizedModel = String(model || "").trim();
-    return AI_MODEL_PROFILE_PICTURES[normalizedModel] || AI_ASSISTANT_PROFILE_PICTURE;
+    const key = String(model || "").trim();
+    const canonical = AI_MODEL_ALIASES[key] || key;
+    return AI_MODEL_PROFILE_PICTURES[canonical] || AI_ASSISTANT_PROFILE_PICTURE;
   }
   function buildAiMentionLabel(meta) {
     const normalized = normalizeAiMeta(meta);
@@ -1241,6 +1256,9 @@
     }
     const costText = formatRmbCost(normalized.estimatedCostRmb);
     if (costText) statsParts.push(costText);
+    if (normalized.toolCalls > 0) {
+      statsParts.push(`${normalized.toolCalls} tool call${normalized.toolCalls === 1 ? "" : "s"}${normalized.toolRounds > 1 ? ` in ${normalized.toolRounds} rounds` : ""}`);
+    }
     if (normalized.webSearchRequests > 0) {
       statsParts.push(`${normalized.webSearchRequests} web search${normalized.webSearchRequests === 1 ? "" : "es"}`);
     } else if (normalized.webSearchEnabled) {
@@ -2703,12 +2721,8 @@
   var desktopSidebarWidth = DESKTOP_DEFAULT_SIDEBAR_WIDTH;
   var desktopRightPanelExpanded = true;
   var activeTagFilter = DEFAULT_TAG_TOPIC;
-  var grokRequestInFlight = false;
-  var grokResponseDraft = "";
-  var grokResponseModel = "";
-  var grokResponseMeta = null;
-  var grokRequestSource = "panel";
-  var grokRequestHashtag = null;
+  var aiRequestInFlight = false;
+  var selectedAiTone = readStoredAiTone();
   var aiUsageSummary = null;
   var userManagementSummary = null;
   var whisperPickerMode = null;
@@ -3267,7 +3281,6 @@
     messageMode = "normal";
     syncComposerTokens();
     updateWhisperBtn();
-    updateSlashCommandMenu();
     return true;
   }
   function clearHashtagToken({ restoreText = false } = {}) {
@@ -3294,6 +3307,7 @@
         input.selectionStart = input.selectionEnd = token.raw.length;
       }
     }
+    updateAiBtn();
   }
   function syncComposerTokens() {
     const strip = $("message-token-strip");
@@ -3308,16 +3322,6 @@
     }
     strip.hidden = tokens.length === 0;
     strip.append(...tokens);
-  }
-  function updateSlashCommandMenu() {
-    const menu = $("slash-command-menu");
-    const input = $("message-input");
-    if (!menu || !input) return;
-    const match = /^\/([^\s]*)$/.exec(input.value);
-    const commandQuery = match ? match[1].toLowerCase() : null;
-    const availableCommands = aiFeatureEnabled ? ["ai"] : [];
-    const shouldShow = !composerTokens.ai && commandQuery != null && availableCommands.some((command) => command.startsWith(commandQuery));
-    menu.hidden = !shouldShow;
   }
   function isAiModeEnabled(groupData = currentGroupData) {
     return !!(groupData && groupData.aiEnabled);
@@ -3346,16 +3350,17 @@
     return true;
   }
   function updateAiControls() {
-    const quotaMessage = getAiQuotaBlockedMessage();
-    const enabled = !!currentGroupId && isAiModeEnabled() && !quotaMessage;
-    const disabledReason = !isAiModeEnabled() ? getAiDisabledMessage() : quotaMessage;
-    const slashAiBtn = $("slash-command-ai-item");
-    if (slashAiBtn) {
-      slashAiBtn.hidden = !aiFeatureEnabled;
-      slashAiBtn.disabled = !enabled;
-      slashAiBtn.title = enabled ? "Ask AI" : disabledReason || "Ask AI";
+    if (composerTokens.ai && !canUseAiInCurrentGroup()) {
+      composerTokens.ai = null;
+      syncComposerTokens();
     }
-    if (!enabled && !$("grok-modal").hidden) closeGrokModal();
+    updateAiBtn();
+  }
+  function syncAiFeatureVisibility() {
+    const show = aiFeatureEnabled;
+    document.querySelectorAll("[data-ai-feature]").forEach((el) => {
+      el.hidden = !show;
+    });
   }
   function messageMatchesActiveTag(msg) {
     const active = getActiveTagTopic();
@@ -3716,7 +3721,6 @@
     void markChannelReadOnOpen(currentGroupId);
     void renderActiveChannelStream().then(() => {
       updateKeyState();
-      updateSlashCommandMenu();
       if (focusComposer) {
         const input = $("message-input");
         if (input) {
@@ -3956,7 +3960,6 @@
     if (composerTokens.ai) {
       clearAiToken({ restoreText: true });
       syncComposerTokens();
-      updateSlashCommandMenu();
       autoResizeTextarea(input);
       return true;
     }
@@ -3965,35 +3968,7 @@
       syncComposerTokens();
       renderTagFilters();
       applyActiveTagFilterToRenderedMessages();
-      updateSlashCommandMenu();
       autoResizeTextarea(input);
-      return true;
-    }
-    return false;
-  }
-  function maybeTokenizeSlashCommand(input) {
-    if (!input) return false;
-    if (/^\/#(\s|$)/.test(input.value)) {
-      showToast("Use + Create channel in the top bar", "info");
-      input.value = input.value.replace(/^\/#\s*/, "");
-      autoResizeTextarea(input);
-      return true;
-    }
-    const aiMatch = /^\/ai\s$/.exec(input.value);
-    if (aiMatch) {
-      if (composerTokens.whisper || messageMode === "whisper" && whisperRecipients.length > 0) {
-        showToast("AI requests cannot be combined with whispers", "error");
-        return false;
-      }
-      if (!canUseAiInCurrentGroup({ showError: true })) return false;
-      input.value = "";
-      syncComposerTokens();
-      updateSlashCommandMenu();
-      autoResizeTextarea(input);
-      openGrokModal({
-        source: "chat",
-        hashtag: composerTokens.hashtag ? composerTokens.hashtag.topic : null
-      });
       return true;
     }
     return false;
@@ -4004,13 +3979,6 @@
     return {
       value: match[1],
       rest: body.slice(match[0].length).trim()
-    };
-  }
-  function parseAiCommand(body) {
-    const match = /^\/ai(?:\s+|$)([\s\S]*)$/.exec(body);
-    if (!match) return null;
-    return {
-      prompt: match[1].trim()
     };
   }
   function parseComposerMessageInput(rawText) {
@@ -4025,13 +3993,6 @@
     if (!whisperRecipientIds.length) {
       if (parseCommandToken(body, "#")) {
         return { ok: false, error: "Use + Create channel to make a new channel" };
-      }
-      const aiToken = parseAiCommand(body);
-      if (aiToken) {
-        isAiPrompt = true;
-        body = aiToken.prompt;
-        const invalidWhisper = parseCommandToken(body, "w");
-        if (invalidWhisper) return { ok: false, error: "AI requests cannot be combined with whispers" };
       }
     }
     if (isAiPrompt) {
@@ -4345,6 +4306,11 @@
       ["path", { d: "M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6L12 3z" }],
       ["path", { d: "M18.5 14l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z" }],
       ["path", { d: "M5.5 13l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z" }]
+    ],
+    // v1.4: professional AI mark — a four-point star inside an orbit ring.
+    ai: [
+      ["circle", { cx: "12", cy: "12", r: "7.5" }],
+      ["path", { d: "M12 8.4l1 3.1 3.1 1-3.1 1-1 3.1-1-3.1-3.1-1 3.1-1 1-3.1z" }]
     ],
     reply: [
       ["polyline", { points: "9 17 4 12 9 7" }],
@@ -4691,6 +4657,7 @@
       scheduleAutoResetClientCache(versionInfo);
     }
     $("app-version-label").textContent = appVersionLabel;
+    syncAiFeatureVisibility();
     if (aiFeatureEnabled) {
       await refreshAiUsageSummary();
       void loadAndRenderAiTones();
@@ -4715,6 +4682,7 @@
     setupEmojiPicker();
     setupKeyboardShortcuts();
     updateWhisperBtn();
+    updateAiBtn();
     syncResponsiveUiState();
     startHostedAppUpdatePolling();
     if (window.electronAPI) {
@@ -5398,29 +5366,26 @@
     if (isMobileLayout()) setMobileView("chat");
   }
   function updateKeyState() {
-    const modalBlockingInput = !$("grok-modal").hidden;
     const input = $("message-input");
     const sendBtn = $("send-btn");
     const blockedStatus = $("composer-blocked-status");
-    input.disabled = modalBlockingInput;
+    const aiPending = !!composerTokens.ai;
     const groupName = currentGroupData?.name ? String(currentGroupData.name) : "group";
     const channel = formatHashtagLabel(getActiveTagTopic());
     const whisperRecipients2 = getActiveWhisperRecipientIds();
-    if (modalBlockingInput) {
-      input.placeholder = "Complete Ask AI first\u2026";
-    } else if (messageMode === "whisper" && whisperRecipients2.length) {
+    if (messageMode === "whisper" && whisperRecipients2.length) {
       input.placeholder = `Whisper to ${formatWhisperRecipientLabel(whisperRecipients2, currentGroupId, { prefix: "" })} \xB7 ${channel} \xB7 ${groupName}`;
     } else if (messageMode === "disappearing") {
       input.placeholder = `Disappearing message ${channel} \xB7 ${groupName}`;
+    } else if (aiPending) {
+      input.placeholder = `Ask AI ${channel} \xB7 ${groupName}`;
     } else {
       input.placeholder = `Message ${channel} \xB7 ${groupName}`;
     }
-    if (modalBlockingInput) input.setAttribute("aria-describedby", "composer-blocked-status");
-    else input.removeAttribute("aria-describedby");
-    sendBtn.disabled = modalBlockingInput;
-    setComposerShellDisabled(modalBlockingInput);
+    sendBtn.disabled = false;
+    setComposerShellDisabled(false);
     if (blockedStatus) {
-      blockedStatus.textContent = modalBlockingInput ? "Chat input is temporarily disabled while the Ask AI modal is open." : "";
+      blockedStatus.textContent = "";
     }
   }
   async function loadMessages(groupId, before) {
@@ -5595,7 +5560,6 @@
         syncComposerTokens();
         syncWhisperPickerStatus();
         updateWhisperBtn();
-        updateSlashCommandMenu();
       });
       const lbl = document.createElement("label");
       lbl.htmlFor = "wp-" + m.id;
@@ -6052,7 +6016,6 @@
     ensureActiveTag(activeTagFilter || DEFAULT_TAG_TOPIC);
     syncComposerTokens();
     updateWhisperBtn();
-    updateSlashCommandMenu();
     renderTagFilters();
     autoResizeTextarea(inp);
     scrollToBottom(true);
@@ -6632,11 +6595,7 @@
       return;
     }
     if (parsedMessage.isAiPrompt) {
-      openGrokModal({
-        source: "chat",
-        prompt: parsedMessage.text,
-        hashtag: parsedMessage.hashtag || null
-      });
+      void sendAiPromptMessage(parsedMessage);
       return;
     }
     const messageText = parsedMessage.text;
@@ -7911,16 +7870,11 @@
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
         document.querySelectorAll(".modal-overlay:not([hidden])").forEach((m) => {
-          if (m.id === "grok-modal") {
-            closeGrokModal();
-            return;
-          }
           m.hidden = true;
         });
         $("ctx-menu").hidden = true;
         $("emoji-picker").hidden = true;
         cancelWhisperSelection();
-        $("slash-command-menu").hidden = true;
         hideImageViewer();
         replyingTo = null;
         $("reply-preview-bar").hidden = true;
@@ -8165,149 +8119,237 @@
       for (const key of Object.keys(AI_TONE_LABELS)) {
         if (!tones[key]) delete AI_TONE_LABELS[key];
       }
-      const container = $("grok-tone-toggle");
-      if (!container) return;
-      container.replaceChildren();
+      const select = $("ai-tone-select");
+      if (!select) return;
+      select.replaceChildren();
       for (const key of keys) {
         const label = tones[key] && tones[key].label || key.charAt(0).toUpperCase() + key.slice(1);
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = "grok-model-option grok-tone-option";
-        btn.dataset.tone = key;
-        btn.setAttribute("aria-pressed", "false");
-        btn.textContent = label;
-        btn.addEventListener("click", () => {
-          $("grok-tone-input").value = key;
-          syncAiModalSelectionUi();
-          updateAskAiSubmitButton();
-        });
-        container.appendChild(btn);
+        const option = document.createElement("option");
+        option.value = key;
+        option.textContent = label;
+        select.appendChild(option);
       }
-      syncAiModalSelectionUi();
+      select.value = getSelectedAiTone();
     } catch {
     }
   }
-  function resetGrokModalState() {
-    grokResponseDraft = "";
-    grokResponseModel = "";
-    grokResponseMeta = null;
-    grokRequestSource = "panel";
-    grokRequestHashtag = null;
-    $("grok-prompt-input").value = "";
-    $("grok-model-input").value = DEFAULT_AI_MODEL;
-    $("grok-mode-input").value = DEFAULT_AI_MODE === "fast" ? "0" : "1";
-    $("grok-tone-input").value = DEFAULT_AI_TONE;
-    $("grok-error").textContent = "";
-    $("grok-status").textContent = "";
-    $("grok-status").hidden = true;
-    $("grok-response-wrap").hidden = true;
-    renderPlainText($("grok-response"), "");
-    $("grok-response").classList.remove("is-error");
-    $("grok-response-model").textContent = "";
-    $("grok-response-meta").replaceChildren();
-    $("grok-response-meta").hidden = true;
-    $("grok-copy-btn").disabled = true;
-    $("grok-insert-btn").disabled = true;
-    $("grok-submit-btn").textContent = "Ask AI";
-    $("grok-cancel-btn").disabled = false;
-    $("grok-close-btn").disabled = false;
-    syncAiModalSelectionUi();
-    updateAskAiSubmitButton();
+  function readStoredAiTone() {
+    try {
+      const stored = String(localStorage.getItem(AI_TONE_STORAGE_KEY) || "").trim().toLowerCase();
+      return AI_TONE_LABELS[stored] ? stored : DEFAULT_AI_TONE;
+    } catch {
+      return DEFAULT_AI_TONE;
+    }
   }
-  function getSelectedAiModel() {
-    const selected = String($("grok-model-input").value || "").trim();
-    return AI_MODEL_OPTIONS[selected] ? selected : DEFAULT_AI_MODEL;
-  }
-  function getSelectedAiMode() {
-    return String($("grok-mode-input").value) === "0" ? "fast" : "thinking";
+  function writeStoredAiTone(tone) {
+    const normalized = String(tone || "").trim().toLowerCase();
+    if (!AI_TONE_LABELS[normalized]) return;
+    try {
+      localStorage.setItem(AI_TONE_STORAGE_KEY, normalized);
+    } catch {
+    }
   }
   function getSelectedAiTone() {
-    const value = String($("grok-tone-input").value || DEFAULT_AI_TONE).trim().toLowerCase();
+    const value = String(selectedAiTone || "").trim().toLowerCase();
     return AI_TONE_LABELS[value] ? value : DEFAULT_AI_TONE;
   }
-  function syncAiModalSelectionUi() {
-    const selectedModel = getSelectedAiModel();
-    document.querySelectorAll(".grok-model-option").forEach((button) => {
-      const isActive = button.dataset.model === selectedModel;
-      button.classList.toggle("active", isActive);
-      button.setAttribute("aria-pressed", isActive ? "true" : "false");
+  function canToggleAiMode() {
+    if (!currentGroupId || !currentGroupData) return false;
+    if (composerTokens.whisper || messageMode === "whisper" && whisperRecipients.length > 0) return false;
+    return true;
+  }
+  function updateAiBtn() {
+    const btn = $("ai-mode-btn");
+    if (!btn) return;
+    const aiActive = !!composerTokens.ai;
+    const available = canUseAiInCurrentGroup();
+    btn.classList.toggle("ai-active", aiActive);
+    btn.classList.toggle("ai-unavailable", !available);
+    setElementIcon(btn, "ai", {
+      iconOnly: true,
+      label: aiActive ? "AI armed \u2014 next message goes to AI" : "Ask AI"
     });
-    const selectedMode = getSelectedAiMode();
-    $("grok-mode-fast-label").classList.toggle("active", selectedMode === "fast");
-    $("grok-mode-thinking-label").classList.toggle("active", selectedMode === "thinking");
-    const selectedTone = getSelectedAiTone();
-    document.querySelectorAll(".grok-tone-option").forEach((button) => {
-      const isActive = button.dataset.tone === selectedTone;
-      button.classList.toggle("active", isActive);
-      button.setAttribute("aria-pressed", isActive ? "true" : "false");
-    });
-  }
-  function updateAskAiSubmitButton() {
-    const hasPrompt = !!$("grok-prompt-input").value.trim();
-    const hasSelections = !!AI_MODEL_OPTIONS[getSelectedAiModel()] && !!AI_MODE_LABELS[getSelectedAiMode()] && !!AI_TONE_LABELS[getSelectedAiTone()];
-    $("grok-submit-btn").disabled = grokRequestInFlight || !hasPrompt || !hasSelections;
-  }
-  function setGrokBusy(isBusy, statusText = "") {
-    grokRequestInFlight = !!isBusy;
-    $("grok-submit-btn").textContent = isBusy ? "Working\u2026" : "Ask AI";
-    $("grok-cancel-btn").disabled = !!isBusy;
-    $("grok-close-btn").disabled = !!isBusy;
-    $("grok-copy-btn").disabled = isBusy || !grokResponseDraft;
-    $("grok-insert-btn").disabled = isBusy || !grokResponseDraft;
-    $("grok-status").textContent = statusText || "";
-    $("grok-status").hidden = !statusText;
-    updateAskAiSubmitButton();
-  }
-  function renderGrokResponseMeta(meta) {
-    const metaEl = $("grok-response-meta");
-    metaEl.replaceChildren();
-    const display = buildAiMetaDisplay(meta);
-    if (!display) {
-      metaEl.hidden = true;
-      return;
-    }
-    const info = document.createElement("span");
-    info.className = "msg-ai-meta-info";
-    info.textContent = display.info;
-    const stats = document.createElement("span");
-    stats.className = "msg-ai-meta-stats";
-    stats.textContent = display.stats;
-    metaEl.append(info, stats);
-    metaEl.hidden = false;
-  }
-  function setGrokResponse(text, model = "", meta = null, { isError = false } = {}) {
-    const response = $("grok-response");
-    if (isError) renderPlainText(response, text || "");
-    else renderMarkdown(response, text || "");
-    response.classList.toggle("is-error", !!isError);
-    $("grok-response-wrap").hidden = !text;
-    $("grok-response-model").textContent = model ? getAiModelLabel(model) : "";
-    renderGrokResponseMeta(meta);
-    $("grok-copy-btn").disabled = !text || !!isError || grokRequestInFlight;
-    $("grok-insert-btn").disabled = !text || !!isError || grokRequestInFlight;
-  }
-  function closeGrokModal() {
-    if (grokRequestInFlight) return;
-    $("grok-modal").hidden = true;
-    resetGrokModalState();
+    btn.setAttribute("aria-pressed", String(aiActive));
+    btn.title = aiActive ? "AI armed \u2014 click to cancel" : available ? "Ask AI \u2014 next message goes to AI" : getAiDisabledMessage() || "Ask AI";
     updateKeyState();
   }
-  function openGrokModal(options = {}) {
-    if (!currentGroupId || !currentGroupData) {
-      showToast("Select a group first", "error");
+  function toggleAiMode() {
+    if (composerTokens.ai) {
+      composerTokens.ai = null;
+      syncComposerTokens();
+      updateAiBtn();
       return;
     }
     if (!canUseAiInCurrentGroup({ showError: true })) return;
-    resetGrokModalState();
-    grokRequestSource = options.source === "chat" ? "chat" : "panel";
-    grokRequestHashtag = normalizeHashtagTopic(options.hashtag || null);
-    $("grok-group-name").textContent = currentGroupData.name;
-    $("grok-prompt-input").value = String(options.prompt || "").trim();
-    $("grok-modal").hidden = false;
-    syncAiModalSelectionUi();
-    updateAskAiSubmitButton();
-    updateKeyState();
-    $("grok-prompt-input").focus();
+    if (!canToggleAiMode()) {
+      showToast("AI requests cannot be combined with whispers", "error");
+      return;
+    }
+    composerTokens.ai = { raw: "", label: "AI" };
+    syncComposerTokens();
+    updateAiBtn();
+    showToast("AI armed \u2014 next message goes to AI", "success");
+    const input = $("message-input");
+    if (input) input.focus();
+  }
+  function isAiReadableMessage(msg) {
+    return !!(msg && (msg.type === "text" || msg.type == null) && !(Array.isArray(msg.whisperTo) && msg.whisperTo.length) && !isDisappearingMessage(msg));
+  }
+  function normalizeAiToolChannel(value, fallbackChannel) {
+    return normalizeHashtagTopic(value) || normalizeHashtagTopic(fallbackChannel) || DEFAULT_TAG_TOPIC;
+  }
+  function truncateAiToolResult(result) {
+    let json = JSON.stringify(result);
+    if (json.length <= AI_TOOL_RESULT_MAX_CHARS) return json;
+    const kept = [];
+    let used = 2;
+    for (let i = (result.messages || []).length - 1; i >= 0; i -= 1) {
+      const entryJson = JSON.stringify(result.messages[i]);
+      if (used + entryJson.length + 2 > AI_TOOL_RESULT_MAX_CHARS) break;
+      kept.unshift(result.messages[i]);
+      used += entryJson.length + 2;
+    }
+    json = JSON.stringify({ ...result, messages: kept });
+    return json.length <= AI_TOOL_RESULT_MAX_CHARS ? json : json.slice(0, AI_TOOL_RESULT_MAX_CHARS);
+  }
+  async function collectAiToolMessages(groupId) {
+    const cache = ensureGroupCacheEntry(groupId);
+    const localMessages = Array.isArray(cache.messages) ? cache.messages : [];
+    const seen = /* @__PURE__ */ new Set();
+    const combined = [];
+    const pushUnique = (list) => {
+      for (const m of list || []) {
+        if (!m || seen.has(String(m.id))) continue;
+        seen.add(String(m.id));
+        combined.push(m);
+      }
+    };
+    let historyMessages = [];
+    try {
+      historyMessages = await readHistoryMessages(groupId);
+    } catch {
+      historyMessages = [];
+    }
+    pushUnique(historyMessages);
+    pushUnique(localMessages);
+    return combined;
+  }
+  async function executeAiToolGetChannelHistory(input, options) {
+    const groupId = options.groupId;
+    const channel = normalizeAiToolChannel(input && input.channel, options.channel);
+    const rawLimit = Number(input && input.limit);
+    const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(AI_CHANNEL_HISTORY_MAX_LIMIT, Math.round(rawLimit))) : AI_CHANNEL_HISTORY_DEFAULT_LIMIT;
+    const before = typeof input?.before === "string" ? String(input.before).trim() : "";
+    const combined = await collectAiToolMessages(groupId);
+    const candidates = combined.filter((m) => isAiReadableMessage(m) && resolveMessageTagTopic(m) === channel).sort((a, b) => {
+      const timeDiff = String(a.createdAt || "").localeCompare(String(b.createdAt || ""));
+      return timeDiff !== 0 ? timeDiff : String(a.id).localeCompare(String(b.id));
+    });
+    let window2 = candidates;
+    if (before) {
+      const beforeIndex = candidates.findIndex((m) => String(m.id) === before);
+      if (beforeIndex >= 0) window2 = candidates.slice(0, beforeIndex);
+    }
+    const slice = window2.slice(-limit);
+    const key = getGroupKey(groupId);
+    const lines = [];
+    for (const msg of slice) {
+      const text = key ? await decryptMessageText(msg, key, groupId).catch(() => null) : null;
+      if (!text) continue;
+      const trimmed = String(text).trim();
+      if (!trimmed) continue;
+      lines.push({
+        id: String(msg.id),
+        createdAt: msg.createdAt || "",
+        senderName: String(msg.senderName || "Unknown").slice(0, 64),
+        content: trimmed.slice(0, 2e3)
+      });
+    }
+    return truncateAiToolResult({
+      channel,
+      count: lines.length,
+      oldestMessageId: slice.length ? String(slice[0].id) : null,
+      newestMessageId: slice.length ? String(slice[slice.length - 1].id) : null,
+      messages: lines
+    });
+  }
+  async function executeAiToolGetChannelList(options) {
+    const groupId = options.groupId;
+    const combined = await collectAiToolMessages(groupId);
+    const stats = /* @__PURE__ */ new Map();
+    const knownTopics = /* @__PURE__ */ new Set();
+    for (const topic of getKnownChannels(groupId)) knownTopics.add(topic);
+    for (const m of combined) {
+      if (!isAiReadableMessage(m)) continue;
+      const topic = resolveMessageTagTopic(m);
+      knownTopics.add(topic);
+      const entry = stats.get(topic) || { messageCount: 0, lastMessageAt: "", senders: /* @__PURE__ */ new Set() };
+      entry.messageCount += 1;
+      if (!entry.lastMessageAt || String(m.createdAt || "") > entry.lastMessageAt) {
+        entry.lastMessageAt = String(m.createdAt || "");
+      }
+      if (m.senderId) entry.senders.add(String(m.senderId));
+      stats.set(topic, entry);
+    }
+    const channels = [];
+    for (const topic of knownTopics) {
+      const entry = stats.get(topic);
+      channels.push({
+        channel: topic,
+        messageCount: entry ? entry.messageCount : 0,
+        lastMessageAt: entry ? entry.lastMessageAt : "",
+        participantCount: entry ? entry.senders.size : 0
+      });
+    }
+    channels.sort((a, b) => {
+      if (a.channel === DEFAULT_TAG_TOPIC) return -1;
+      if (b.channel === DEFAULT_TAG_TOPIC) return 1;
+      return String(b.lastMessageAt).localeCompare(String(a.lastMessageAt));
+    });
+    return truncateAiToolResult({ channels: channels.slice(0, AI_CHANNEL_LIST_MAX_CHANNELS) });
+  }
+  async function executeAiToolCall(toolCall, options) {
+    const name = String(toolCall && toolCall.name ? toolCall.name : "").trim();
+    let input = {};
+    if (typeof toolCall?.input === "string") {
+      try {
+        input = JSON.parse(toolCall.input);
+      } catch {
+        input = {};
+      }
+    } else if (toolCall?.input && typeof toolCall.input === "object") {
+      input = toolCall.input;
+    }
+    try {
+      if (name === "get_channel_history") {
+        return await executeAiToolGetChannelHistory(input, options);
+      }
+      if (name === "get_channel_list") {
+        return await executeAiToolGetChannelList(options);
+      }
+      return JSON.stringify({ error: "Unknown AI tool" });
+    } catch (err) {
+      return JSON.stringify({ error: String(err && err.message ? err.message : "Tool execution failed") });
+    }
+  }
+  function accumulateAiMeta(acc, meta) {
+    if (!meta) return acc;
+    if (!acc) return { ...meta, toolCalls: 0, toolRounds: 0 };
+    const sum = (a, b) => roundAiTokenAmount((a || 0) + (b || 0));
+    return {
+      ...acc,
+      model: meta.model || acc.model,
+      promptTokens: sum(acc.promptTokens, meta.promptTokens),
+      completionTokens: sum(acc.completionTokens, meta.completionTokens),
+      totalTokens: sum(acc.totalTokens, meta.totalTokens),
+      rawPromptTokens: sum(acc.rawPromptTokens, meta.rawPromptTokens),
+      rawCompletionTokens: sum(acc.rawCompletionTokens, meta.rawCompletionTokens),
+      rawTotalTokens: sum(acc.rawTotalTokens, meta.rawTotalTokens),
+      estimatedCostUsd: acc.estimatedCostUsd != null && meta.estimatedCostUsd != null ? sum(acc.estimatedCostUsd, meta.estimatedCostUsd) : null,
+      estimatedCostRmb: acc.estimatedCostRmb != null && meta.estimatedCostRmb != null ? sum(acc.estimatedCostRmb, meta.estimatedCostRmb) : null,
+      toolCalls: 0,
+      toolRounds: 0
+    };
   }
   function formatDesktopUpdateStatus(status) {
     if (!status || typeof status !== "object") {
@@ -8452,89 +8494,75 @@
     await fetch("/api/auth/logout", { method: "POST", headers: apiHeaders() });
     window.location.href = "index.html";
   }
-  async function buildGrokContextMessages(groupId, options = {}) {
-    const key = getGroupKey(groupId);
-    if (!key) throw new Error("Chat content is not ready yet");
-    const normalizedTag = normalizeHashtagTopic(options.tagFilter || null);
-    const snapshot = Array.isArray(options.sourceMessages) ? options.sourceMessages : allMessages;
-    const sourceMessages = (snapshot || []).filter((msg) => !normalizedTag || getMessageHashtagKey(msg) === normalizedTag).slice(-GROK_CONTEXT_MESSAGE_LIMIT);
-    const resolved = await Promise.all(sourceMessages.map(async (msg) => {
-      if (!msg) return null;
-      if (msg.type === "whisper" || msg.type === "image" || msg.type === "file" || isDisappearingMessage(msg)) return null;
-      let content = "";
-      const plaintext = await decryptMessageText(msg, key, groupId).catch(() => null);
-      if (!plaintext) return null;
-      content = plaintext.trim();
-      if (!content) return null;
-      const hashtag = getMessageHashtagKey(msg);
-      return {
-        senderName: msg.senderName || "Unknown",
-        createdAt: msg.createdAt || "",
-        content,
-        type: msg.type || "text",
-        hashtag: hashtag || null,
-        isDisappearing: !!msg.isDisappearing
-      };
-    }));
-    const compact = [];
-    let remaining = GROK_CONTEXT_TOTAL_CHARS;
-    for (let i = resolved.length - 1; i >= 0; i -= 1) {
-      const entry = resolved[i];
-      if (!entry || !entry.content) continue;
-      if (remaining <= 0) break;
-      const text = String(entry.content).trim();
-      if (!text) continue;
-      const trimmedContent = text.length > remaining ? text.slice(0, remaining) : text;
-      compact.push({ ...entry, content: trimmedContent });
-      remaining -= trimmedContent.length;
-    }
-    compact.reverse();
-    return compact;
-  }
   async function requestAiResponse(groupId, options = {}) {
-    const mode = options.mode || DEFAULT_AI_MODE;
-    const model = options.model || DEFAULT_AI_MODEL;
-    const tone = options.tone || DEFAULT_AI_TONE;
-    const contextMessages = mode === "thinking" ? await buildGrokContextMessages(groupId, {
-      sourceMessages: options.sourceMessages,
-      tagFilter: options.tagFilter || null
-    }) : [];
-    if (!options.skipBusyUi) {
-      const modelLabel = getAiModelLabel(model);
-      const modeLabel = getAiModeLabel(mode);
-      setGrokBusy(true, mode === "thinking" ? contextMessages.length ? `Asking ${modelLabel} in ${modeLabel} mode\u2026` : `Asking ${modelLabel} in ${modeLabel} mode without chat context\u2026` : `Asking ${modelLabel} in ${modeLabel} mode\u2026`);
+    const tone = options.tone || getSelectedAiTone();
+    const channel = normalizeHashtagTopic(options.channel) || DEFAULT_TAG_TOPIC;
+    const groupName = String(options.groupName || "");
+    const prompt = String(options.prompt || "").trim();
+    if (!prompt) throw new Error("AI prompt is required");
+    const transcript = [{ role: "user", content: prompt }];
+    let toolRounds = 0;
+    let toolCallsTotal = 0;
+    let accumulated = null;
+    for (; ; ) {
+      if (toolRounds > MAX_AI_TOOL_ROUNDS) {
+        throw new Error("AI needed too many steps to answer");
+      }
+      const res = await fetch(`/api/groups/${groupId}/ai/chat`, {
+        method: "POST",
+        headers: apiHeaders(),
+        body: JSON.stringify({ groupName, prompt, tone, channel, transcript })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const message = String(data.error || "AI request failed");
+        if (/daily AI token limit/i.test(message) || /global daily AI token limit/i.test(message)) {
+          void refreshAiUsageSummary();
+        }
+        throw new Error(message);
+      }
+      accumulated = accumulateAiMeta(accumulated, normalizeAiMeta(data.aiMeta));
+      if (data.status === "tool_calls" && Array.isArray(data.toolCalls) && data.toolCalls.length) {
+        toolRounds += 1;
+        toolCallsTotal += data.toolCalls.length;
+        if (toolRounds > MAX_AI_TOOL_ROUNDS) {
+          throw new Error("AI needed too many steps to answer");
+        }
+        transcript.push(data.assistantMessage || { role: "assistant", content: null, tool_calls: [] });
+        const toolOptions = { groupId, channel, key: getGroupKey(groupId) };
+        for (const toolCall of data.toolCalls) {
+          const output = await executeAiToolCall(toolCall, toolOptions);
+          transcript.push({
+            role: "tool",
+            tool_call_id: String(toolCall.id || ""),
+            content: String(output || "")
+          });
+        }
+        continue;
+      }
+      const answer = String(data.answer || "").trim();
+      if (!answer) throw new Error("AI returned an empty response");
+      if (accumulated) {
+        accumulated.toolCalls = toolCallsTotal;
+        accumulated.toolRounds = toolRounds;
+      }
+      return {
+        answer,
+        model: String(data.model || DEFAULT_AI_MODEL),
+        aiMeta: accumulated,
+        aiUsage: data.aiUsage || null
+      };
     }
-    const res = await fetch(`/api/groups/${groupId}/ai/chat`, {
-      method: "POST",
-      headers: apiHeaders(),
-      body: JSON.stringify({
-        groupName: options.groupName,
-        prompt: options.prompt,
-        contextMessages,
-        model,
-        mode,
-        tone
-      })
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || "AI request failed");
-    return {
-      answer: String(data.answer || "").trim(),
-      model: String(data.model || model),
-      aiMeta: normalizeAiMeta(data.aiMeta),
-      aiUsage: data.aiUsage || null
-    };
   }
   async function sendAiReplyInBackground(request) {
+    if (aiRequestInFlight) return;
+    aiRequestInFlight = true;
     try {
       const result = await requestAiResponse(request.groupId, {
         groupName: request.groupName,
         prompt: request.prompt,
-        model: request.model,
-        mode: request.mode,
         tone: request.tone,
-        tagFilter: request.tagFilter,
-        sourceMessages: request.sourceMessages,
+        channel: request.channel,
         skipBusyUi: true
       });
       if (!result.answer) throw new Error("AI returned an empty response");
@@ -8548,7 +8576,7 @@
         encryptedContent,
         iv,
         replyTo: request.replyToData,
-        hashtag: request.tagFilter || null,
+        hashtag: request.hashtag || null,
         aiMeta: result.aiMeta
       });
       showToast("AI reply sent", "success");
@@ -8558,37 +8586,26 @@
         void refreshAiUsageSummary();
       }
       showToast(message, "error");
+    } finally {
+      aiRequestInFlight = false;
     }
   }
-  async function submitGrokPrompt() {
-    if (grokRequestInFlight || !currentGroupId || !currentGroupData) return;
-    if (!canUseAiInCurrentGroup()) {
-      $("grok-error").textContent = getAiQuotaBlockedMessage() || getAiDisabledMessage();
-      return;
-    }
-    const prompt = $("grok-prompt-input").value.trim();
-    if (!prompt) {
-      $("grok-error").textContent = "Prompt cannot be empty";
-      updateAskAiSubmitButton();
-      return;
-    }
+  async function sendAiPromptMessage(parsedMessage) {
     const groupId = currentGroupId;
-    const groupName = currentGroupData.name;
-    const sourceMessagesSnapshot = [...allMessages];
-    const requestSource = grokRequestSource;
-    const model = getSelectedAiModel();
-    const mode = getSelectedAiMode();
-    const tone = getSelectedAiTone();
-    const tagFilter = grokRequestHashtag || null;
-    grokResponseDraft = "";
-    grokResponseModel = "";
-    grokResponseMeta = null;
-    $("grok-error").textContent = "";
-    setGrokResponse("", "", null);
-    setGrokBusy(true, "Preparing AI message\u2026");
+    const groupName = currentGroupData?.name || "";
+    const prompt = parsedMessage.text;
+    const hashtag = parsedMessage.hashtag || null;
+    const channel = hashtag || DEFAULT_TAG_TOPIC;
+    const key = getGroupKey(groupId);
+    if (!key) {
+      showToast("Chat content is not ready yet", "error");
+      return;
+    }
+    if (aiRequestInFlight) {
+      showToast("An AI request is already in progress", "error");
+      return;
+    }
     try {
-      const key = getGroupKey(groupId);
-      if (!key) throw new Error("Chat content is not ready yet");
       let replyToData = null;
       if (replyingTo) {
         replyToData = JSON.stringify({
@@ -8608,14 +8625,14 @@
         revision: 1
       };
       const metadata = {
-        hashtag: tagFilter,
+        hashtag,
         replyPreview: replyingTo ? { senderName: replyingTo.senderName, preview: replyingTo.preview } : null
       };
       const encryptedPrompt = await encryptV2Message(prompt, metadata, messageIdentity, key);
       if (estimateBase64Bytes(encryptedPrompt.encryptedContent) > MAX_TEXT_MESSAGE_BYTES) {
         throw new Error("Message too large");
       }
-      const tagIndex = tagFilter ? await blindIndex(tagFilter, key, groupId, "tag-index") : null;
+      const tagIndex = hashtag && hashtag !== DEFAULT_TAG_TOPIC ? await blindIndex(hashtag, key, groupId, "tag-index") : null;
       await emitSocketWithAck("send_message", {
         ...messageIdentity,
         encryptedContent: encryptedPrompt.encryptedContent,
@@ -8627,57 +8644,23 @@
         isDisappearing: false,
         disappearingDurationMs: 0,
         aiMention: true,
-        aiMeta: { model, mode, tone, webSearchEnabled: false }
+        aiMeta: { model: DEFAULT_AI_MODEL, mode: DEFAULT_AI_MODE, tone: getSelectedAiTone(), webSearchEnabled: false }
       });
       resetComposerAfterSend();
-      if (requestSource === "chat") {
-        setGrokBusy(false);
-        closeGrokModal();
-        showToast("AI request sent", "success");
-        void sendAiReplyInBackground({
-          groupId,
-          groupName,
-          prompt,
-          model,
-          mode,
-          tone,
-          tagFilter,
-          sourceMessages: sourceMessagesSnapshot,
-          replyToData,
-          key
-        });
-        return;
-      }
-      const modelLabel = getAiModelLabel(model);
-      const modeLabel = getAiModeLabel(mode);
-      setGrokBusy(true, `Asking ${modelLabel} in ${modeLabel} mode\u2026`);
-      const result = await requestAiResponse(groupId, {
+      showToast("AI request sent", "success");
+      void sendAiReplyInBackground({
+        groupId,
         groupName,
         prompt,
-        model,
-        mode,
-        tone,
-        tagFilter,
-        sourceMessages: sourceMessagesSnapshot,
-        skipBusyUi: true
+        tone: getSelectedAiTone(),
+        channel,
+        hashtag,
+        replyToData,
+        key
       });
-      if (!result.answer) throw new Error("AI returned an empty response");
-      if (result.aiUsage) setAiUsageSummary(result.aiUsage);
-      grokResponseDraft = result.answer;
-      grokResponseModel = result.model;
-      grokResponseMeta = result.aiMeta;
-      setGrokResponse(grokResponseDraft, grokResponseModel, grokResponseMeta);
-      showToast("AI response ready", "success");
     } catch (err) {
-      const message = String(err && err.message ? err.message : "AI request failed");
-      $("grok-error").textContent = message;
-      if (/daily AI token limit/i.test(message) || /global daily AI token limit/i.test(message)) {
-        void refreshAiUsageSummary();
-      }
-      if (requestSource === "panel") setGrokResponse(message, "", null, { isError: true });
-      else showToast(message, "error");
-    } finally {
-      setGrokBusy(false);
+      console.error("AI prompt send failed:", err);
+      showToast("Failed to send AI request", "error");
     }
   }
   async function openUserManagementModal() {
@@ -8885,9 +8868,7 @@
     document.querySelectorAll(".modal-overlay").forEach((modal) => {
       modal.addEventListener("click", (event) => {
         if (event.target !== modal) return;
-        if (modal.id === "grok-modal") {
-          closeGrokModal();
-        } else if (modal.id === "channel-modal") {
+        if (modal.id === "channel-modal") {
           closeChannelCreateModal();
         } else {
           modal.hidden = true;
@@ -9185,59 +9166,6 @@
         joinGroupInFlight = false;
         setButtonBusy($("join-confirm-btn"), false, "Joining\u2026", "Join");
       }
-    });
-    $("grok-close-btn").addEventListener("click", closeGrokModal);
-    $("grok-cancel-btn").addEventListener("click", closeGrokModal);
-    $("grok-modal").addEventListener("click", (e) => {
-      if (e.target !== $("grok-modal")) return;
-      closeGrokModal();
-    });
-    document.querySelectorAll(".grok-model-option").forEach((button) => {
-      button.addEventListener("click", () => {
-        $("grok-model-input").value = button.dataset.model || DEFAULT_AI_MODEL;
-        syncAiModalSelectionUi();
-        updateAskAiSubmitButton();
-      });
-    });
-    $("grok-submit-btn").addEventListener("click", () => {
-      void submitGrokPrompt();
-    });
-    $("grok-prompt-input").addEventListener("input", updateAskAiSubmitButton);
-    $("grok-mode-input").addEventListener("input", () => {
-      syncAiModalSelectionUi();
-      updateAskAiSubmitButton();
-    });
-    $("grok-tone-input").addEventListener("input", () => {
-      syncAiModalSelectionUi();
-      updateAskAiSubmitButton();
-    });
-    $("grok-prompt-input").addEventListener("keydown", (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
-        e.preventDefault();
-        void submitGrokPrompt();
-      }
-    });
-    $("grok-copy-btn").addEventListener("click", async () => {
-      if (!grokResponseDraft) return;
-      try {
-        await navigator.clipboard.writeText(grokResponseDraft);
-        showToast("Copied to clipboard", "success");
-      } catch {
-        showToast("Failed to copy response", "error");
-      }
-    });
-    $("grok-insert-btn").addEventListener("click", () => {
-      if (!grokResponseDraft) return;
-      const input = $("message-input");
-      if (!input) {
-        return;
-      }
-      input.value = input.value ? `${input.value.trimEnd()}
-
-${grokResponseDraft}` : grokResponseDraft;
-      autoResizeTextarea(input);
-      closeGrokModal();
-      if (!input.disabled) input.focus();
     });
     $("copy-code-btn").addEventListener("click", async () => {
       if (!currentGroupData) return;
@@ -9669,9 +9597,6 @@ ${grokResponseDraft}` : grokResponseDraft;
       if (!$("emoji-picker").contains(e.target) && e.target !== $("emoji-btn")) {
         $("emoji-picker").hidden = true;
       }
-      if (!$("slash-command-menu").contains(e.target) && e.target !== $("message-input")) {
-        $("slash-command-menu").hidden = true;
-      }
       if (!$("whisper-picker").contains(e.target) && !$("whisper-mode-btn").contains(e.target) && e.target !== $("message-input")) {
         cancelWhisperSelection();
       }
@@ -9681,32 +9606,8 @@ ${grokResponseDraft}` : grokResponseDraft;
       $("reply-preview-bar").hidden = true;
     });
     const msgInput = $("message-input");
-    document.querySelectorAll(".slash-command-item").forEach((item) => {
-      item.addEventListener("click", () => {
-        if ((item.dataset.command || "") === "/ai ") {
-          msgInput.value = "";
-          syncComposerTokens();
-          updateSlashCommandMenu();
-          autoResizeTextarea(msgInput);
-          openGrokModal({
-            source: "chat",
-            hashtag: composerTokens.hashtag ? composerTokens.hashtag.topic : null
-          });
-          return;
-        }
-        msgInput.value = item.dataset.command || "/";
-        msgInput.focus();
-        msgInput.selectionStart = msgInput.selectionEnd = msgInput.value.length;
-        maybeTokenizeSlashCommand(msgInput);
-        syncComposerTokens();
-        updateSlashCommandMenu();
-        autoResizeTextarea(msgInput);
-      });
-    });
     msgInput.addEventListener("input", () => {
-      maybeTokenizeSlashCommand(msgInput);
       syncComposerTokens();
-      updateSlashCommandMenu();
       autoResizeTextarea(msgInput);
       if (currentGroupId && socket) {
         socket.emit("typing", { groupId: currentGroupId });
@@ -9725,6 +9626,20 @@ ${grokResponseDraft}` : grokResponseDraft;
         if (composerNearBottomBeforeFocus) scrollToBottom(true);
       }, MOBILE_KEYBOARD_FOCUS_DELAY_MS);
     });
+    const aiModeBtn = $("ai-mode-btn");
+    if (aiModeBtn) {
+      aiModeBtn.addEventListener("click", () => {
+        toggleAiMode();
+        updateAiBtn();
+      });
+    }
+    const aiToneSelect = $("ai-tone-select");
+    if (aiToneSelect) {
+      aiToneSelect.addEventListener("change", () => {
+        selectedAiTone = aiToneSelect.value;
+        writeStoredAiTone(selectedAiTone);
+      });
+    }
     msgInput.addEventListener("blur", () => {
       clearTimeout(window._myTypingTimer);
       if (currentGroupId && socket) socket.emit("stop_typing", { groupId: currentGroupId });

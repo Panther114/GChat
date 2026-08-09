@@ -146,7 +146,6 @@ button,
 .group-item,
 .member-item,
 .whisper-picker-item,
-.slash-command-item,
 .emoji-btn-item,
 .ctx-item,
 .chat-tag-filter-btn {
@@ -1671,52 +1670,6 @@ img.gchat-global-icon {
 .message-input-bar textarea:disabled {
   opacity: .4;
 }
-.slash-command-menu {
-  position: absolute;
-  left: 0;
-  right: auto;
-  bottom: calc(100% + 10px);
-  max-width: min(280px, calc(100vw - 32px));
-  min-width: 220px;
-  background: rgba(17, 17, 32, .98);
-  border: 1px solid #2a2a3e;
-  border-radius: 12px;
-  box-shadow: 0 16px 32px rgba(0, 0, 0, .35);
-  padding: 6px;
-  z-index: 25;
-}
-.slash-command-item {
-  width: 100%;
-  border: none;
-  border-radius: 10px;
-  background: transparent;
-  color: var(--text-primary);
-  padding: 8px 10px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  cursor: pointer;
-  text-align: left;
-}
-.slash-command-item:hover {
-  background: rgba(255, 255, 255, .06);
-}
-.slash-command-item:disabled {
-  cursor: not-allowed;
-  opacity: .55;
-}
-.slash-command-item:disabled:hover {
-  background: transparent;
-}
-.slash-command-name {
-  font-size: 13px;
-  font-weight: 700;
-}
-.slash-command-hint {
-  font-size: 11px;
-  color: var(--text-secondary);
-}
 .btn-send {
   background: var(--accent);
   border: none;
@@ -1757,6 +1710,34 @@ img.gchat-global-icon {
 }
 .btn-whisper-mode.whisper-active {
   color: #a78bfa;
+}
+.btn-ai-mode {
+  font-size: 16px;
+}
+.btn-ai-mode .ui-icon {
+  width: 18px;
+  height: 18px;
+}
+.btn-ai-mode.ai-active {
+  color: #a78bfa;
+  background: rgba(139, 123, 255, .16);
+}
+.btn-ai-mode.ai-active .ui-icon {
+  stroke-width: 2.4;
+}
+.btn-ai-mode.ai-unavailable {
+  opacity: .5;
+}
+.ai-tone-select {
+  width: 100%;
+  min-height: 38px;
+  border-radius: 8px;
+  border: 1px solid #2a2a3e;
+  background: #0d0d18;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: inherit;
+  padding: 8px 10px;
 }
 .btn-emoji .ui-icon,
 .btn-whisper-mode .ui-icon,
@@ -2814,176 +2795,6 @@ img.gchat-global-icon {
 #wallpaper-modal .modal {
   max-width: 440px;
 }
-.grok-modal {
-  max-width: 640px;
-}
-.grok-group-name {
-  border: 1px solid #2a2a3e;
-  border-radius: 8px;
-  background: #0d0d18;
-  color: var(--text-primary);
-  font-size: 14px;
-  padding: 10px 12px;
-}
-.grok-model-toggle {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  border: 1px solid #2a2a3e;
-  border-radius: 10px;
-  overflow: hidden;
-  background: #0d0d18;
-}
-.grok-model-option {
-  border: none;
-  border-right: 1px solid #2a2a3e;
-  background: transparent;
-  color: var(--text-secondary);
-  padding: 12px 14px;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background .2s, color .2s;
-}
-.grok-model-option:last-child {
-  border-right: none;
-}
-.grok-model-option.active {
-  background: rgba(108, 99, 255, .16);
-  color: #d9e5ff;
-}
-.grok-slider-labels {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-.grok-slider-label {
-  font-size: 12px;
-  color: var(--text-secondary);
-  transition: color .2s, font-weight .2s;
-}
-.grok-slider-label.active {
-  color: #d9e5ff;
-  font-weight: 700;
-}
-.grok-toggle-row {
-  align-items: flex-start;
-  gap: 14px;
-}
-.grok-toggle-copy {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 4px;
-}
-.grok-toggle-title {
-  color: var(--text-primary);
-  font-size: 13px;
-  font-weight: 600;
-}
-.grok-toggle-help {
-  color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1.4;
-}
-.grok-slider-labels-tone .grok-slider-label:nth-child(2) {
-  text-align: center;
-  flex: 1;
-}
-#grok-mode-input,
-#grok-tone-input {
-  width: 100%;
-  height: 6px;
-  border-radius: 999px;
-  appearance: none;
-  background:
-    linear-gradient(
-      90deg,
-      #6c63ff 0%,
-      #30cfd0 100%);
-  outline: none;
-  cursor: ew-resize;
-}
-#grok-mode-input::-webkit-slider-thumb,
-#grok-tone-input::-webkit-slider-thumb {
-  appearance: none;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  border: 2px solid #fff;
-  background: #0f0f1a;
-}
-#grok-mode-input::-moz-range-thumb,
-#grok-tone-input::-moz-range-thumb {
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  border: 2px solid #fff;
-  background: #0f0f1a;
-}
-#grok-prompt-input {
-  min-height: 120px;
-  resize: vertical;
-}
-.grok-status {
-  border: 1px solid rgba(108, 99, 255, .24);
-  border-radius: 8px;
-  background: rgba(108, 99, 255, .08);
-  color: #d9d5ff;
-  font-size: 12px;
-  padding: 10px 12px;
-}
-.grok-response-wrap {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.grok-response-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  text-transform: uppercase;
-  letter-spacing: .04em;
-}
-.grok-response-model {
-  color: #c9c0ff;
-  text-transform: none;
-  letter-spacing: 0;
-}
-.grok-response {
-  border: 1px solid #2a2a3e;
-  border-radius: 10px;
-  background: #0d0d18;
-  color: var(--text-primary);
-  font-size: 14px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  padding: 14px;
-  max-height: 320px;
-  overflow: auto;
-}
-.grok-response.markdown-rendered {
-  white-space: normal;
-}
-.grok-response-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-  font-size: 12px;
-  color: #8ecbff;
-}
-.grok-response.is-error {
-  border-color: rgba(255, 68, 102, .28);
-  color: #ffc2cf;
-}
-.grok-submit-help {
-  margin-top: -6px;
-}
 .user-management-modal {
   max-width: 860px;
 }
@@ -3395,7 +3206,6 @@ body.chat-body.mobile-layout .sidebar-overlay {
   #profile-username,
   #profile-color,
   #search-input,
-  #grok-prompt-input,
   #user-management-global-limit-input,
   .user-management-user-actions input {
     font-size: 16px;
@@ -3770,7 +3580,6 @@ body.chat-body.mobile-layout .sidebar-overlay {
   .group-item,
   .member-item,
   .whisper-picker-item,
-  .slash-command-item,
   .ctx-item {
     min-width: 44px;
     min-height: 44px;
@@ -3960,14 +3769,6 @@ body.chat-body.mobile-layout .sidebar-overlay {
     bottom: calc(100% + 6px);
     max-height: min(34dvh, 260px);
   }
-  .slash-command-menu {
-    left: 0;
-    right: 0;
-    bottom: calc(100% + 8px);
-    min-width: 0;
-    max-width: none;
-    width: 100%;
-  }
   .ctx-menu {
     min-width: min(220px, calc(100vw - 16px));
   }
@@ -4029,7 +3830,6 @@ body.chat-body.mobile-layout .sidebar-overlay {
     flex: 1 1 140px;
     min-height: 44px;
   }
-  .grok-modal,
   .user-management-modal {
     min-height: 100%;
   }
@@ -4067,9 +3867,6 @@ body.chat-body.mobile-layout .sidebar-overlay {
     display: flex;
     border-color: rgba(255, 68, 102, .16);
     background: rgba(255, 68, 102, .06);
-  }
-  .grok-response {
-    max-height: min(36dvh, 280px);
   }
   .profile-push-header,
   .user-management-global-head {
@@ -4502,6 +4299,7 @@ body.electron-desktop-effects::before {
   --chat-focus: var(--sx-focus);
   --chat-scrim: var(--sx-scrim);
   --chat-unread: #a78bfa;
+  --chat-ai: #a78bfa;
   --bg: var(--chat-surface-deep);
   --sidebar-bg: var(--chat-surface);
   --chat-bg: var(--chat-canvas);
@@ -4594,6 +4392,7 @@ body.electron-desktop-effects::before {
   --chat-focus: var(--sx-focus);
   --chat-scrim: var(--sx-scrim);
   --chat-unread: #7c3aed;
+  --chat-ai: #7c3aed;
   --bg: var(--chat-surface-deep);
   --sidebar-bg: var(--chat-surface);
   --chat-bg: var(--chat-canvas);
@@ -4663,7 +4462,6 @@ button,
 .msg-row,
 .msg-action-btn,
 .ctx-item,
-.slash-command-item,
 input,
 textarea,
 select,
@@ -5580,7 +5378,6 @@ html body.sidebar-compact .sidebar #clear-cache-btn {
 .modal,
 .modal-page,
 .ctx-menu,
-.slash-command-menu,
 .emoji-picker,
 .whisper-picker,
 .mobile-sidebar-actions-menu {
@@ -6188,11 +5985,6 @@ textarea::placeholder {
 .wallpaper-btn,
 #wallpaper-modal,
 #wallpaper-btn {
-  display: none !important;
-}
-[data-ai-feature],
-#slash-command-ai-item,
-label[for=ai-mode-toggle] {
   display: none !important;
 }
 .messages-area,
@@ -7086,6 +6878,13 @@ button.is-loading {
 .btn-whisper-mode.disappearing-active {
   color: var(--chat-danger) !important;
 }
+.btn-ai-mode.ai-active {
+  color: var(--chat-ai, var(--chat-accent)) !important;
+  background: color-mix(in srgb, var(--chat-ai, var(--chat-accent)) 14%, transparent) !important;
+}
+.btn-ai-mode.ai-unavailable {
+  opacity: .45 !important;
+}
 .whisper-picker-actions {
   display: flex;
   gap: 6px;
@@ -7612,7 +7411,6 @@ button.is-loading {
   height: 15px !important;
   margin: 0 !important;
 }
-.slash-command-menu,
 .emoji-picker,
 .whisper-picker {
   background: var(--chat-floating) !important;
@@ -7626,22 +7424,6 @@ button.is-loading {
   left: calc(12px + var(--safe-area-left));
   right: auto;
   width: min(280px, calc(100vw - 24px - var(--safe-area-left) - var(--safe-area-right)));
-}
-.slash-command-item {
-  color: var(--chat-text) !important;
-  border-radius: var(--radius-sm);
-  font-family: var(--font-ui) !important;
-}
-.slash-command-item:hover {
-  background: var(--chat-hover) !important;
-}
-.slash-command-name {
-  font-size: var(--type-sm);
-  font-weight: 600;
-}
-.slash-command-hint {
-  color: var(--chat-muted) !important;
-  font-size: var(--type-xs);
 }
 @media (max-width: 768px) {
   .messages-area {
@@ -7789,14 +7571,11 @@ button.is-loading {
 .member-item,
 .chat-tag-filter-btn,
 .chat-tag-add-btn,
-.slash-command-item,
 .whisper-picker-item,
 .emoji-btn-item,
 .msg-action-btn,
 .msg-file-btn,
 .sidebar-user,
-.grok-model-option,
-.grok-tone-option,
 .profile-mode-chip,
 .auth-tab,
 .unread-jump-btn,
@@ -7893,32 +7672,6 @@ button.is-loading {
 }
 .invite-item-btn {
   flex-shrink: 0;
-}
-.grok-group-name,
-.grok-model-toggle,
-.grok-response {
-  background: var(--chat-input) !important;
-  border-color: var(--chat-border-strong) !important;
-  color: var(--chat-text) !important;
-}
-.grok-model-option {
-  color: var(--chat-muted) !important;
-  border-right-color: var(--chat-border-strong) !important;
-}
-.grok-model-option.active {
-  background: var(--chat-selected) !important;
-  color: var(--chat-text-strong) !important;
-}
-.grok-slider-label.active {
-  color: var(--chat-text-strong) !important;
-}
-.grok-status {
-  background: var(--chat-hover) !important;
-  border-color: var(--chat-border-strong) !important;
-  color: var(--chat-text) !important;
-}
-.grok-response-model {
-  color: var(--chat-muted) !important;
 }
 :root[data-theme=light] .reconnect-banner {
   background: rgba(176, 108, 20, 0.14) !important;

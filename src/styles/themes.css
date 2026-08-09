@@ -58,7 +58,6 @@ button,
 .msg-row,
 .msg-action-btn,
 .ctx-item,
-.slash-command-item,
 input,
 textarea,
 select,
@@ -1131,7 +1130,6 @@ html body.sidebar-compact .sidebar #clear-cache-btn {
 .modal,
 .modal-page,
 .ctx-menu,
-.slash-command-menu,
 .emoji-picker,
 .whisper-picker,
 .mobile-sidebar-actions-menu {
@@ -1839,12 +1837,6 @@ textarea::placeholder {
 .wallpaper-btn,
 #wallpaper-modal,
 #wallpaper-btn {
-  display: none !important;
-}
-
-[data-ai-feature],
-#slash-command-ai-item,
-label[for='ai-mode-toggle'] {
   display: none !important;
 }
 

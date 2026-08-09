@@ -87,32 +87,33 @@ const VAPID_PRIVATE_KEY = typeof process.env.VAPID_PRIVATE_KEY === 'string' ? pr
 const VAPID_SUBJECT = typeof process.env.VAPID_SUBJECT === 'string' ? process.env.VAPID_SUBJECT.trim() : '';
 const MIN_DISAPPEARING_DURATION_MS = 3000;
 const MAX_DISAPPEARING_DURATION_MS = 22500;
-const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
-const OPENROUTER_CHAT_COMPLETIONS_URL = `${OPENROUTER_BASE_URL}/chat/completions`;
-const GETGOAPI_BASE_URL = 'https://api.getgoapi.com';
-const GETGOAPI_CHAT_COMPLETIONS_URL = `${GETGOAPI_BASE_URL}/v1/chat/completions`;
-const GETGOAPI_MODELS = new Set(['grok-4-1-fast-non-reasoning']);
+// v1.4: the AI assistant is a single-model agent (DeepSeek V4 Flash) served by
+// OpenCode Zen first, with the official DeepSeek API as an automatic fallback.
+// Both endpoints speak the OpenAI chat-completions format, so one request
+// builder and one response parser serve every provider.
+const ZEN_BASE_URL = 'https://opencode.ai/zen/v1';
+const ZEN_CHAT_COMPLETIONS_URL = `${ZEN_BASE_URL}/chat/completions`;
+const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
+const DEEPSEEK_CHAT_COMPLETIONS_URL = `${DEEPSEEK_BASE_URL}/chat/completions`;
 const AI_MODEL_OPTIONS = {
-  'deepseek/deepseek-v4-flash': {
+  'deepseek-v4-flash': {
     label: 'DeepSeek V4 Flash',
-    inputCostPerMillion: 0.069,
-    outputCostPerMillion: 0.281,
+    // OpenCode Zen list price for DeepSeek V4 Flash (USD per 1M tokens).
+    inputCostPerMillion: 0.14,
+    outputCostPerMillion: 0.28,
     creditMultiplier: 1,
   },
-  'grok-4-1-fast-non-reasoning': {
-    label: 'Grok 4.1 Fast',
-    inputCostPerMillion: 0.2,
-    outputCostPerMillion: 0.5,
-    creditMultiplier: 2,
-  },
 };
-const DEFAULT_AI_MODEL = 'deepseek/deepseek-v4-flash';
+// Legacy model ids that predate v1.4 (stored ai_meta) normalize to the current model.
+const AI_MODEL_ALIASES = {
+  'deepseek/deepseek-v4-flash': 'deepseek-v4-flash',
+};
+const DEFAULT_AI_MODEL = 'deepseek-v4-flash';
 const AI_MODEL_PROFILE_PICTURES = {
-  'deepseek/deepseek-v4-flash': '/deepseek.webp',
-  'grok-4-1-fast-non-reasoning': '/grok.webp',
+  'deepseek-v4-flash': '/deepseek.webp',
 };
-const AI_MODE_OPTIONS = new Set(['fast', 'thinking']);
-const DEFAULT_AI_MODE = 'thinking';
+const AI_MODE_OPTIONS = new Set(['fast', 'thinking', 'agent']);
+const DEFAULT_AI_MODE = 'agent';
 // Load tones from ai_tones.json — adding/editing entries automatically updates the UI
 let AI_SYSTEM_PROMPTS = {};
 let AI_TONE_OPTIONS = new Set();
@@ -142,22 +143,30 @@ try {
   }
 }
 const DEFAULT_AI_TONE = AI_TONE_OPTIONS.has('casual') ? 'casual' : [...AI_TONE_OPTIONS][0] || 'casual';
-const OPENROUTER_TIMEOUT_MS = 45000;
-const OPENROUTER_TEMPERATURE = 0;
-const OPENROUTER_TOP_P = 1;
-const OPENROUTER_FREQUENCY_PENALTY = 0;
-const OPENROUTER_PRESENCE_PENALTY = 0;
-const OPENROUTER_MAX_TOKENS = 1200;
+const AI_TIMEOUT_MS = 45000;
+const AI_TEMPERATURE = 0;
+const AI_TOP_P = 1;
+const AI_FREQUENCY_PENALTY = 0;
+const AI_PRESENCE_PENALTY = 0;
+const AI_MAX_TOKENS = 2000;
 const USD_TO_RMB_RATE = 7.2;
 const AI_TOKEN_AMOUNT_DECIMALS = 4;
 const MAX_AI_PROMPT_CHARS = 4000;
-const MAX_AI_CONTEXT_MESSAGES = 40;
-const MAX_AI_CONTEXT_MESSAGE_CHARS = 2000;
-const MAX_AI_CONTEXT_TOTAL_CHARS = 32000;
+// v1.4 agent loop guardrails — the client owns the transcript (stateless
+// relay), so every bound below is enforced against the client-provided array
+// on every round. Together they keep one agent request cheap and bounded.
+const MAX_AI_TRANSCRIPT_MESSAGES = 40;
+const MAX_AI_TRANSCRIPT_TOTAL_CHARS = 98304; // 96 KB of JSON-encoded transcript
+const MAX_AI_TRANSCRIPT_USER_CHARS = 4000;
+const MAX_AI_TRANSCRIPT_ASSISTANT_CHARS = 8000;
+const MAX_AI_TOOL_CALLS_PER_MESSAGE = 8;
+const MAX_AI_TOOL_CALL_ARGS_CHARS = 8192;
+const MAX_AI_TOOL_RESULT_CHARS = 24576; // 24 KB per tool result
+const MAX_AI_TOOL_ROUNDS = 4;
 const AI_ASSISTANT_USER_ID = '__gchat_ai_grok__';
 const AI_ASSISTANT_NAME = 'AI';
 const AI_ASSISTANT_COLOR = '#8d7bff';
-const AI_ASSISTANT_PROFILE_PICTURE = '/grok.webp';
+const AI_ASSISTANT_PROFILE_PICTURE = '/deepseek.webp';
 const APP_OWNER_USERNAME = 'Furina';
 const DEFAULT_USER_DAILY_AI_TOKEN_LIMIT = 20000;
 const DEFAULT_GLOBAL_DAILY_AI_TOKEN_LIMIT = 200000;
@@ -355,13 +364,14 @@ function convertUsdToRmb(value) {
 
 function normalizeAiModel(value) {
   const model = sanitizeAiText(value, 80);
-  return model && AI_MODEL_OPTIONS[model] ? model : DEFAULT_AI_MODEL;
+  if (!model) return DEFAULT_AI_MODEL;
+  return AI_MODEL_OPTIONS[model] ? model : (AI_MODEL_ALIASES[model] || DEFAULT_AI_MODEL);
 }
 
 function normalizeAiMode(value) {
   const mode = sanitizeAiText(value, 24)?.toLowerCase();
-  // The UI now says "Context", but the stored/requested mode remains "thinking"
-  // so existing AI request logic and persisted metadata keep working unchanged.
+  // Legacy UI sent "context"; the persisted metadata stays "thinking" for
+  // older messages. New v1.4 requests always run as "agent".
   if (mode === 'context') return 'thinking';
   return mode && AI_MODE_OPTIONS.has(mode) ? mode : DEFAULT_AI_MODE;
 }
@@ -439,12 +449,16 @@ function sanitizeAiMessageMeta(value) {
     ?? value.web_search_request_count
   );
   const costSource = sanitizeAiText(value.costSource, 16) || (estimatedCostUsd != null ? 'estimated' : 'unknown');
+  const toolCalls = Math.max(0, Math.round(Number(value.toolCalls) || 0));
+  const toolRounds = Math.max(0, Math.round(Number(value.toolRounds) || 0));
   return {
     model,
     mode,
     tone,
     webSearchEnabled,
     webSearchRequests,
+    toolCalls,
+    toolRounds,
     promptTokens,
     completionTokens,
     totalTokens,
@@ -471,65 +485,145 @@ function parseStoredAiMessageMeta(raw) {
   }
 }
 
-function normalizeAiContextMessages(value) {
+/**
+ * Validate the client-owned agent transcript for one AI request round.
+ * The client carries the full conversation between tool rounds (stateless
+ * relay); every cap here bounds the tokens the server relays upstream.
+ */
+function normalizeAiAgentTranscript(value) {
   if (value == null) return { ok: true, value: [] };
   if (!Array.isArray(value)) {
-    return { ok: false, error: 'Invalid AI context payload' };
+    return { ok: false, error: 'Invalid AI transcript payload' };
   }
-  if (value.length > MAX_AI_CONTEXT_MESSAGES) {
-    return { ok: false, error: 'Too many AI context messages' };
+  if (value.length > MAX_AI_TRANSCRIPT_MESSAGES) {
+    return { ok: false, error: 'AI transcript is too long' };
   }
 
   const normalized = [];
   let totalChars = 0;
+  let toolRounds = 0;
+  let hasUserMessage = false;
   for (const entry of value) {
     if (!entry || typeof entry !== 'object') {
-      return { ok: false, error: 'Invalid AI context payload' };
+      return { ok: false, error: 'Invalid AI transcript payload' };
     }
-    const content = sanitizeAiText(entry.content, MAX_AI_CONTEXT_MESSAGE_CHARS);
-    if (!content) continue;
-    const senderName = sanitizeAiText(entry.senderName, 64) || 'Unknown';
-    const createdAt = sanitizeAiText(entry.createdAt, 64) || 'unknown time';
-    const type = typeof entry.type === 'string' ? entry.type.slice(0, 32) : 'text';
-    const hashtag = normalizeHashtag(entry.hashtag);
-    const isDisappearing = !!entry.isDisappearing;
-    totalChars += content.length;
-    if (totalChars > MAX_AI_CONTEXT_TOTAL_CHARS) {
-      return { ok: false, error: 'AI context is too large' };
+    const role = sanitizeAiText(entry.role, 16);
+    if (role !== 'user' && role !== 'assistant' && role !== 'tool') {
+      return { ok: false, error: 'Invalid AI transcript role' };
     }
-    normalized.push({
-      senderName,
-      createdAt,
-      content,
-      type,
-      hashtag,
-      isDisappearing,
-    });
+    const clean = { role };
+    if (role === 'user') {
+      const content = sanitizeAiText(entry.content, MAX_AI_TRANSCRIPT_USER_CHARS);
+      if (!content) return { ok: false, error: 'Invalid AI transcript user message' };
+      clean.content = content;
+      hasUserMessage = true;
+    } else if (role === 'assistant') {
+      const content = entry.content == null
+        ? null
+        : sanitizeAiText(entry.content, MAX_AI_TRANSCRIPT_ASSISTANT_CHARS);
+      clean.content = content;
+      if (Array.isArray(entry.tool_calls) && entry.tool_calls.length) {
+        if (entry.tool_calls.length > MAX_AI_TOOL_CALLS_PER_MESSAGE) {
+          return { ok: false, error: 'Too many AI tool calls in one step' };
+        }
+        const toolCalls = [];
+        for (const call of entry.tool_calls) {
+          if (!call || typeof call !== 'object') {
+            return { ok: false, error: 'Invalid AI tool call' };
+          }
+          const id = sanitizeAiText(call.id, 64);
+          const name = sanitizeAiText(call.function?.name, 64);
+          const args = sanitizeAiText(call.function?.arguments, MAX_AI_TOOL_CALL_ARGS_CHARS);
+          if (!id || !name || args == null) {
+            return { ok: false, error: 'Invalid AI tool call' };
+          }
+          toolCalls.push({ id, type: 'function', function: { name, arguments: args } });
+        }
+        clean.tool_calls = toolCalls;
+        toolRounds += 1;
+      }
+    } else {
+      const toolCallId = sanitizeAiText(entry.tool_call_id, 64);
+      const content = sanitizeAiText(entry.content, MAX_AI_TOOL_RESULT_CHARS);
+      if (!toolCallId || content == null) {
+        return { ok: false, error: 'Invalid AI tool result' };
+      }
+      clean.tool_call_id = toolCallId;
+      clean.content = content;
+    }
+    totalChars += JSON.stringify(clean).length;
+    if (totalChars > MAX_AI_TRANSCRIPT_TOTAL_CHARS) {
+      return { ok: false, error: 'AI transcript is too large' };
+    }
+    normalized.push(clean);
   }
-
+  if (toolRounds > MAX_AI_TOOL_ROUNDS) {
+    return { ok: false, error: 'Too many AI tool rounds' };
+  }
+  if (normalized.length && !hasUserMessage) {
+    return { ok: false, error: 'AI transcript requires a user message' };
+  }
   return { ok: true, value: normalized };
 }
 
-function buildAiTranscript(contextMessages, fallbackGroupName) {
-  const groupName = sanitizeAiText(fallbackGroupName, 64) || 'Current group';
-  const filteredMessages = contextMessages.filter((entry) => (
-    entry
-    && entry.type === 'text'
-    && !entry.isDisappearing
-    && typeof entry.content === 'string'
-    && entry.content.trim()
-  ));
-  if (!filteredMessages.length) {
-    return `Group: ${groupName}\n\nConversation excerpt:\n[No prior messages were provided.]`;
-  }
-  const lines = filteredMessages.map((entry) => {
-    const hashtagPrefix = entry.hashtag ? `#${entry.hashtag} ` : '';
-    return `[${entry.createdAt}] ${entry.senderName}: ${hashtagPrefix}${entry.content}`;
-  });
-  return `Group: ${groupName}\n\nConversation excerpt:\n${lines.join('\n')}`;
+// Tool surface exposed to the agent. The server only relays the tool calls —
+// every tool executes client-side, where the decryption keys live.
+const AI_TOOL_DEFINITIONS = [
+  {
+    type: 'function',
+    function: {
+      name: 'get_channel_history',
+      description: 'Retrieve recent plaintext messages from a channel (sub-chat) of the current chat group. Use when a question references the conversation or anything said in this chat. Omit "channel" to read the channel where the question was asked. Pass the "before" message id returned as oldestMessageId by a previous call to load older messages.',
+      parameters: {
+        type: 'object',
+        properties: {
+          channel: {
+            type: 'string',
+            description: 'Channel topic without the leading # (e.g. "main", "general"). Omit to read the channel where the question was asked.',
+          },
+          limit: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 40,
+            description: 'Maximum number of messages to return (default 20).',
+          },
+          before: {
+            type: 'string',
+            description: 'Message id returned as oldestMessageId by a previous get_channel_history call, to fetch older messages.',
+          },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_channel_list',
+      description: 'List every channel (sub-chat) of the current chat group with message counts and latest activity. Use when a question may reference another channel of this chat.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  },
+];
+
+function buildAiTranscriptAgent(tone, context = {}) {
+  const groupName = sanitizeAiText(context.groupName, 64) || 'the current chat';
+  const channel = normalizeHashtag(context.channel);
+  const policyLines = [
+    'Answer directly WITHOUT calling any tool when the question needs no conversation history (general questions, clarifications, calculations, creative writing, and so on).',
+    'If the question references the current conversation or anything said in this chat, call get_channel_history to retrieve the relevant history before answering.',
+    'If the needed messages are older than the first page, keep calling get_channel_history with the before cursor to fetch older messages.',
+    'If the question references another channel of this chat, use get_channel_list to discover channels and get_channel_history to read the channel the question references.',
+    `You can ONLY access channels inside the chat group "${groupName}"${channel ? `, where the question was asked in channel #${channel}` : ''}. You have no access to any other chats or groups. Never claim knowledge of other chats.`,
+    'Never invent or fabricate message content. If the history is unavailable or empty, say so honestly.',
+    'Answer in the language of the question.',
+  ];
+  return `${buildAiSystemPrompt(tone)}\n\n${policyLines.join('\n')}`;
 }
 
-function extractOpenRouterText(content) {
+function extractAiMessageText(content) {
   if (typeof content === 'string') return content.trim();
   if (!Array.isArray(content)) return '';
   return content
@@ -542,7 +636,7 @@ function extractOpenRouterText(content) {
     .trim();
 }
 
-function getOpenRouterErrorMessage(payload, fallbackLabel = 'OpenRouter') {
+function getAiUpstreamErrorMessage(payload, fallbackLabel = 'AI provider') {
   const fallback = `${fallbackLabel} request failed`;
   if (!payload || typeof payload !== 'object') return fallback;
   const nested = payload.error && typeof payload.error === 'object'
@@ -551,7 +645,7 @@ function getOpenRouterErrorMessage(payload, fallbackLabel = 'OpenRouter') {
   return nested || fallback;
 }
 
-function extractOpenRouterUsage(payload) {
+function extractAiUsage(payload) {
   const usage = payload && typeof payload === 'object' && payload.usage && typeof payload.usage === 'object'
     ? payload.usage
     : {};
@@ -609,7 +703,7 @@ function convertModelUsageToStandardTokens(usage, model = DEFAULT_AI_MODEL) {
   };
 }
 
-function extractOpenRouterCostUsd(payload) {
+function extractAiCostUsd(payload) {
   if (!payload || typeof payload !== 'object') return null;
   const candidates = [
     payload?.usage?.cost,
@@ -628,7 +722,7 @@ function extractOpenRouterCostUsd(payload) {
   return null;
 }
 
-function estimateOpenRouterCostUsd(usage, model = DEFAULT_AI_MODEL) {
+function estimateAiCostUsd(usage, model = DEFAULT_AI_MODEL) {
   if (!usage) return null;
   const promptTokens = normalizeAiTokenCount(usage.promptTokens);
   const completionTokens = normalizeAiTokenCount(usage.completionTokens);
@@ -640,7 +734,7 @@ function estimateOpenRouterCostUsd(usage, model = DEFAULT_AI_MODEL) {
   );
 }
 
-function getOpenRouterResponseModel(payload, fallbackModel = DEFAULT_AI_MODEL) {
+function getAiResponseModel(payload, fallbackModel = DEFAULT_AI_MODEL) {
   const directModel = sanitizeAiText(payload?.model, 80);
   if (directModel && AI_MODEL_OPTIONS[directModel]) return directModel;
   const metaModel = sanitizeAiText(payload?.meta?.model, 80);
@@ -649,36 +743,45 @@ function getOpenRouterResponseModel(payload, fallbackModel = DEFAULT_AI_MODEL) {
   return providerModel && AI_MODEL_OPTIONS[providerModel] ? providerModel : normalizeAiModel(fallbackModel);
 }
 
-function getAiApiConfig(model) {
-  if (GETGOAPI_MODELS.has(model)) {
+function getAiApiConfig() {
+  if (process.env.OPENCODE_ZEN_API_KEY) {
     return {
-      url: GETGOAPI_CHAT_COMPLETIONS_URL,
-      apiKey: process.env.GETGOAPI_API_KEY || '',
-      provider: 'getgoapi',
+      url: ZEN_CHAT_COMPLETIONS_URL,
+      apiKey: process.env.OPENCODE_ZEN_API_KEY,
+      provider: 'zen',
+    };
+  }
+  if (process.env.DEEPSEEK_API_KEY) {
+    return {
+      url: DEEPSEEK_CHAT_COMPLETIONS_URL,
+      apiKey: process.env.DEEPSEEK_API_KEY,
+      provider: 'deepseek',
     };
   }
   return {
-    url: OPENROUTER_CHAT_COMPLETIONS_URL,
-    apiKey: process.env.OPENROUTER_API_KEY || '',
-    provider: 'openrouter',
+    url: ZEN_CHAT_COMPLETIONS_URL,
+    apiKey: '',
+    provider: 'zen',
   };
 }
 
-function getAiProviderLabel(model) {
-  return GETGOAPI_MODELS.has(model) ? 'GetGoAPI' : 'OpenRouter';
+function getAiProviderLabel(apiConfig) {
+  return apiConfig?.provider === 'deepseek' ? 'DeepSeek' : 'OpenCode Zen';
 }
 
-function buildAiRequestBody(model, provider, messages) {
+function buildAiRequestBody(model, provider, messages, options = {}) {
   const requestBody = {
     model,
-    temperature: OPENROUTER_TEMPERATURE,
-    max_tokens: OPENROUTER_MAX_TOKENS,
+    temperature: AI_TEMPERATURE,
+    max_tokens: AI_MAX_TOKENS,
+    top_p: AI_TOP_P,
+    frequency_penalty: AI_FREQUENCY_PENALTY,
+    presence_penalty: AI_PRESENCE_PENALTY,
     messages,
   };
-  if (provider !== 'getgoapi') {
-    requestBody.top_p = OPENROUTER_TOP_P;
-    requestBody.frequency_penalty = OPENROUTER_FREQUENCY_PENALTY;
-    requestBody.presence_penalty = OPENROUTER_PRESENCE_PENALTY;
+  if (Array.isArray(options.tools) && options.tools.length) {
+    requestBody.tools = options.tools;
+    requestBody.tool_choice = options.toolChoice || 'auto';
   }
   return requestBody;
 }
@@ -686,14 +789,14 @@ function buildAiRequestBody(model, provider, messages) {
 function buildAiSystemPrompt(tone = DEFAULT_AI_TONE) {
   const basePrompt = AI_SYSTEM_PROMPTS[tone] || AI_SYSTEM_PROMPTS[DEFAULT_AI_TONE];
   const policyLines = [
-    'Web search is disabled for this request.',
-    'Answer using the prompt and any provided context only.',
+    'You are the GChat AI assistant (DeepSeek V4 Flash) inside a group chat application.',
+    'You can read chat history only through the provided tools.',
     'Do not claim to have searched the web.',
   ];
   return `${basePrompt}\n\n${policyLines.join('\n')}`;
 }
 
-function extractOpenRouterDebugMeta(upstream, payload) {
+function extractAiDebugMeta(upstream, payload) {
   const requestId = sanitizeAiText(
     upstream?.headers?.get('x-request-id')
       || upstream?.headers?.get('request-id')
@@ -2186,7 +2289,7 @@ function buildGroupPayload(group, viewer = null, unreadCount = 0) {
     allowMemberExport: group.allow_member_export || 0,
     allowMemberKick: group.allow_member_kick || 0,
     allowMemberInvite: group.allow_member_invite == null ? 1 : !!group.allow_member_invite,
-    aiEnabled: false,
+    aiEnabled: APP_CONFIG.aiEnabled && !!group.ai_enabled,
     groupColor: group.group_color || null,
     groupIcon: group.group_icon || null,
     isGlobal: String(group.id) === GLOBAL_GROUP_ID,
@@ -3888,12 +3991,72 @@ app.delete('/api/groups/:groupId', (req, res) => {
   res.json({ ok: true });
 });
 
+// v1.4: the Ask-AI endpoint is a stateless agent relay. The client owns the
+// transcript and the tool EXECUTION (the server cannot decrypt messages); this
+// endpoint validates the round, forwards it to the model with the agent tools,
+// and either returns the final answer or relays the model's tool calls back to
+// the client for execution.
+function recordAiUsageEvent(userId, groupId, aiMeta) {
+  if (!aiMeta || aiMeta.totalTokens <= 0) return;
+  try {
+    stmts.insertAiUsageEvent.run(
+      crypto.randomUUID(),
+      userId,
+      groupId,
+      aiMeta.promptTokens,
+      aiMeta.completionTokens,
+      aiMeta.totalTokens,
+      new Date().toISOString()
+    );
+  } catch (recordErr) {
+    console.error('Failed to record AI token usage:', recordErr);
+  }
+}
+
+function buildAiRoundMeta(payload, selectedTone) {
+  const usage = extractAiUsage(payload);
+  const standardizedUsage = convertModelUsageToStandardTokens(usage, DEFAULT_AI_MODEL);
+  const directCostUsd = extractAiCostUsd(payload);
+  const estimatedCostUsd = directCostUsd ?? estimateAiCostUsd(usage, DEFAULT_AI_MODEL);
+  return {
+    meta: sanitizeAiMessageMeta({
+      model: getAiResponseModel(payload, DEFAULT_AI_MODEL),
+      mode: DEFAULT_AI_MODE,
+      tone: selectedTone,
+      webSearchEnabled: false,
+      webSearchRequests: 0,
+      promptTokens: standardizedUsage.promptTokens,
+      completionTokens: standardizedUsage.completionTokens,
+      totalTokens: standardizedUsage.totalTokens,
+      rawPromptTokens: standardizedUsage.rawPromptTokens,
+      rawCompletionTokens: standardizedUsage.rawCompletionTokens,
+      rawTotalTokens: standardizedUsage.rawTotalTokens,
+      estimatedCostUsd,
+      estimatedCostRmb: convertUsdToRmb(estimatedCostUsd),
+      costSource: directCostUsd != null ? 'upstream' : 'estimated',
+    }),
+    estimatedCostUsd,
+  };
+}
+
+function buildAiAssistantToolCalls(rawToolCalls) {
+  return rawToolCalls.map((call) => ({
+    id: sanitizeAiText(call?.id, 64),
+    type: 'function',
+    function: {
+      name: sanitizeAiText(call?.function?.name, 64),
+      arguments: typeof call?.function?.arguments === 'string'
+        ? call.function.arguments
+        : JSON.stringify(call?.function?.arguments ?? {}),
+    },
+  }));
+}
+
 app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
   const { groupId } = req.params;
   const userId = req.session.userId;
-  const selectedModel = normalizeAiModel(req.body.model);
-  const apiConfig = getAiApiConfig(selectedModel);
-  const providerLabel = getAiProviderLabel(selectedModel);
+  const apiConfig = getAiApiConfig();
+  const providerLabel = getAiProviderLabel(apiConfig);
   if (!apiConfig.apiKey) {
     return res.status(503).json({ error: 'AI assistant is not configured on this server' });
   }
@@ -3918,35 +4081,24 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
     return res.status(429).json({ error: quotaError, aiUsage: quotaSummary });
   }
 
-  const selectedMode = normalizeAiMode(req.body.mode);
   const selectedTone = normalizeAiTone(req.body.tone);
-  const normalizedContext = normalizeAiContextMessages(selectedMode === 'thinking' ? req.body.contextMessages : []);
-  if (!normalizedContext.ok) {
-    return res.status(400).json({ error: normalizedContext.error });
+  const transcriptCheck = normalizeAiAgentTranscript(req.body.transcript);
+  if (!transcriptCheck.ok) {
+    return res.status(400).json({ error: transcriptCheck.error });
   }
 
-  const transcript = selectedMode === 'thinking'
-    ? buildAiTranscript(
-      normalizedContext.value,
-      sanitizeAiText(req.body.groupName, 64) || group.name
-    )
-    : '';
-  const userPrompt = selectedMode === 'thinking' && transcript
-    ? `${transcript}\n\nUser request:\n${prompt}`
-    : prompt;
-  const messages = [
-    {
-      role: 'system',
-      content: buildAiSystemPrompt(selectedTone),
-    },
-    {
-      role: 'user',
-      content: userPrompt,
-    },
-  ];
+  const systemContent = buildAiTranscriptAgent(selectedTone, {
+    groupName: sanitizeAiText(req.body.groupName, 64) || group.name,
+    channel: req.body.channel,
+  });
+  const messages = [{ role: 'system', content: systemContent }];
+  if (!transcriptCheck.value.some((entry) => entry.role === 'user')) {
+    messages.push({ role: 'user', content: prompt });
+  }
+  messages.push(...transcriptCheck.value);
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), OPENROUTER_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
   try {
     const origin = typeof req.headers.origin === 'string' && /^https?:\/\//.test(req.headers.origin)
       ? req.headers.origin
@@ -3956,20 +4108,19 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiConfig.apiKey}`,
-        ...(apiConfig.provider === 'getgoapi'
-          ? { 'x-api-key': apiConfig.apiKey }
-          : {
-              'X-Title': 'GChat',
-              ...(origin ? { 'HTTP-Referer': origin } : {}),
-            }),
+        'X-Title': 'GChat',
+        ...(origin ? { 'HTTP-Referer': origin } : {}),
       },
-      body: JSON.stringify(buildAiRequestBody(selectedModel, apiConfig.provider, messages)),
+      body: JSON.stringify(buildAiRequestBody(DEFAULT_AI_MODEL, apiConfig.provider, messages, {
+        tools: AI_TOOL_DEFINITIONS,
+        toolChoice: 'auto',
+      })),
       signal: controller.signal,
     });
     const payload = await upstream.json().catch(() => ({}));
-    const debug = extractOpenRouterDebugMeta(upstream, payload);
+    const debug = extractAiDebugMeta(upstream, payload);
     if (!upstream.ok) {
-      const errorMessage = getOpenRouterErrorMessage(payload, providerLabel);
+      const errorMessage = getAiUpstreamErrorMessage(payload, providerLabel);
       console.warn('AI upstream error:', {
         ...debug,
         providerLabel,
@@ -3979,53 +4130,63 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
       return res.status(status).json({ error: errorMessage, debug });
     }
 
-    const answer = extractOpenRouterText(payload?.choices?.[0]?.message?.content);
+    const message = payload?.choices?.[0]?.message || {};
+    const rawToolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+
+    // Tool round: relay the calls back to the client for execution.
+    if (rawToolCalls.length) {
+      const toolCalls = [];
+      for (const call of rawToolCalls) {
+        const id = sanitizeAiText(call?.id, 64);
+        const name = sanitizeAiText(call?.function?.name, 64);
+        if (!id || !name) continue;
+        let input;
+        try {
+          input = JSON.parse(call?.function?.arguments);
+        } catch {
+          input = call?.function?.arguments || {};
+        }
+        toolCalls.push({ id, name, input });
+      }
+      if (!toolCalls.length) {
+        console.warn('AI returned invalid tool calls:', debug);
+        return res.status(502).json({ error: 'AI returned an invalid tool call', debug });
+      }
+
+      const { meta: aiMeta } = buildAiRoundMeta(payload, selectedTone);
+      recordAiUsageEvent(userId, groupId, aiMeta);
+
+      return res.json({
+        ok: true,
+        status: 'tool_calls',
+        toolCalls,
+        assistantMessage: {
+          role: 'assistant',
+          content: message.content == null
+            ? null
+            : sanitizeAiText(extractAiMessageText(message.content), MAX_AI_TRANSCRIPT_ASSISTANT_CHARS),
+          tool_calls: buildAiAssistantToolCalls(rawToolCalls),
+        },
+        aiMeta,
+        aiUsage: getAiUsageSnapshotForUser(userId),
+        debug,
+      });
+    }
+
+    const answer = extractAiMessageText(message.content);
     if (!answer) {
       console.warn('AI returned empty content:', debug);
       return res.status(502).json({ error: 'AI returned an empty response', debug });
     }
 
-    const usage = extractOpenRouterUsage(payload);
-    const standardizedUsage = convertModelUsageToStandardTokens(usage, selectedModel);
-    const directCostUsd = extractOpenRouterCostUsd(payload);
-    const estimatedCostUsd = directCostUsd ?? estimateOpenRouterCostUsd(usage, selectedModel);
-    const aiMeta = sanitizeAiMessageMeta({
-      model: getOpenRouterResponseModel(payload, selectedModel),
-      mode: selectedMode,
-      tone: selectedTone,
-      webSearchEnabled: false,
-      webSearchRequests: 0,
-      promptTokens: standardizedUsage.promptTokens,
-      completionTokens: standardizedUsage.completionTokens,
-      totalTokens: standardizedUsage.totalTokens,
-      rawPromptTokens: standardizedUsage.rawPromptTokens,
-      rawCompletionTokens: standardizedUsage.rawCompletionTokens,
-      rawTotalTokens: standardizedUsage.rawTotalTokens,
-      estimatedCostUsd,
-      estimatedCostRmb: convertUsdToRmb(estimatedCostUsd),
-      costSource: directCostUsd != null ? 'upstream' : 'estimated',
-    });
-
-    if (aiMeta && aiMeta.totalTokens > 0) {
-      try {
-        stmts.insertAiUsageEvent.run(
-          crypto.randomUUID(),
-          userId,
-          groupId,
-          aiMeta.promptTokens,
-          aiMeta.completionTokens,
-          aiMeta.totalTokens,
-          new Date().toISOString()
-        );
-      } catch (recordErr) {
-        console.error('Failed to record AI token usage:', recordErr);
-      }
-    }
+    const { meta: aiMeta } = buildAiRoundMeta(payload, selectedTone);
+    recordAiUsageEvent(userId, groupId, aiMeta);
     const updatedUsage = getAiUsageSnapshotForUser(userId);
 
     res.json({
       ok: true,
-      model: aiMeta?.model || selectedModel,
+      status: 'answer',
+      model: aiMeta?.model || DEFAULT_AI_MODEL,
       answer,
       aiMeta,
       aiUsage: updatedUsage,
@@ -4468,7 +4629,7 @@ io.on('connection', (socket) => {
 
   socket.on('send_ai_message', (payload = {}, ack) => {
     if (!APP_CONFIG.aiEnabled) {
-      const message = 'AI is unavailable in Increment A';
+      const message = 'AI is unavailable';
       socket.emit('error', { message });
       if (typeof ack === 'function') ack({ ok: false, error: message });
       return;

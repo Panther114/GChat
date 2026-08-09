@@ -5,7 +5,8 @@ const { parseEscrowMasterKey } = require('./group-key-escrow');
 const CRYPTO_EPOCH = 2;
 const ENCRYPTION_VERSION = 2;
 const KEY_VERSION = 1;
-const AI_TEMPORARILY_DISABLED = true;
+// v1.4: the Ask-AI agent ships — AI is gated only by the AI_ENABLED env flag.
+const AI_TEMPORARILY_DISABLED = false;
 
 function readConfig(env = process.env) {
   const isProduction = env.NODE_ENV === 'production' || env.RAILWAY_ENVIRONMENT != null;

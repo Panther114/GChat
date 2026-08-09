@@ -4,6 +4,27 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## v1.4 — Ask-AI agent
+
+### The AI assistant is now a cheap, tool-using agent
+
+- **Single model, always DeepSeek V4 Flash**: the model picker, Grok 4.1 Fast, and the GetGoAPI provider were removed. Every request uses the agent mode.
+- **New provider chain**: OpenCode Zen first (`OPENCODE_ZEN_API_KEY`), automatic fallback to the official DeepSeek API (`DEEPSEEK_API_KEY`). Both speak the OpenAI chat-completions format, so one request builder/parser serves both.
+- **New entry point — no modal, no slash commands**: an AI tool-button sits next to the attach button. Clicking it *arms* the composer (highlighted button + `AI` token chip + "Ask AI #channel · group" placeholder); the **next message the user sends goes to the AI agent**, in the active channel. `/ai` and the slash-command menu are gone.
+- **Agentic escalation, decided by the model itself**:
+  - No context needed → answers immediately (cheapest path).
+  - Conversation question → calls `get_channel_history` (paginates older history with the `before` cursor).
+  - Other-channel question → calls `get_channel_list` + `get_channel_history`.
+  - The tool surface is scoped to the current chat group — the agent cannot read other chats.
+- **Tools execute in the browser**: messages are E2E-encrypted and only the client holds the keys, so the server relays tool calls and the client runs them against its decrypted cache (IndexedDB + in-memory window). The stateless relay re-validates the client-owned transcript every round.
+- **Bounded loop (load budget)**: max 4 tool rounds, 8 tool calls per round, 40 messages / 24 KB per history fetch, 96 KB transcript, 45 s per round, per-round quota checks, per-round token billing into `ai_usage_events`. `ai_meta` now records `toolCalls`/`toolRounds` so every reply shows its context cost ("1 tool call", tokens, ¥ cost).
+- **Tone moved to the profile panel** (Casual / Professional / Playful, persisted per device); the profile AI usage card and tone picker are now visible when `AI_ENABLED=1`.
+- **Re-enabled**: `AI_TEMPORARILY_DISABLED` is off; group payloads now report the real `ai_enabled` state; AI routes/sends are gated by `AI_ENABLED` as documented.
+- **Legacy compatibility**: stored `deepseek/deepseek-v4-flash` model ids and `fast`/`thinking` modes still normalize and render correctly on old messages.
+- **Tests**: new `test/ai-agent.test.js` (7 cases: direct answer, tool relay + second round, round cap, transcript caps, provider fallback, unconfigured 503, quota block) wired into `npm test`. Full suite (60 node tests) and all 21 Playwright e2e tests pass; a browser smoke test drove the complete armed-composer → tool-execution → reply flow against real decrypted history.
+
+---
+
 ## v1.3.14
 
 ### Hardening (post-release, no version bump)

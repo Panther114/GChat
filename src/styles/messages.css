@@ -465,6 +465,11 @@
 
 .btn-whisper-mode.whisper-active { color: var(--whisper-border) !important; }
 .btn-whisper-mode.disappearing-active { color: var(--chat-danger) !important; }
+.btn-ai-mode.ai-active {
+  color: var(--chat-ai, var(--chat-accent)) !important;
+  background: color-mix(in srgb, var(--chat-ai, var(--chat-accent)) 14%, transparent) !important;
+}
+.btn-ai-mode.ai-unavailable { opacity: .45 !important; }
 .whisper-picker-actions { display: flex; gap: 6px; margin-top: 8px; }
 .whisper-picker-actions > button { flex: 1; }
 
@@ -1051,7 +1056,6 @@
   margin: 0 !important;
 }
 
-.slash-command-menu,
 .emoji-picker,
 .whisper-picker {
   background: var(--chat-floating) !important;
@@ -1066,26 +1070,6 @@
   left: calc(12px + var(--safe-area-left));
   right: auto;
   width: min(280px, calc(100vw - 24px - var(--safe-area-left) - var(--safe-area-right)));
-}
-
-.slash-command-item {
-  color: var(--chat-text) !important;
-  border-radius: var(--radius-sm);
-  font-family: var(--font-ui) !important;
-}
-
-.slash-command-item:hover {
-  background: var(--chat-hover) !important;
-}
-
-.slash-command-name {
-  font-size: var(--type-sm);
-  font-weight: 600;
-}
-
-.slash-command-hint {
-  color: var(--chat-muted) !important;
-  font-size: var(--type-xs);
 }
 
 /* Mobile */
@@ -1264,14 +1248,11 @@
 .member-item,
 .chat-tag-filter-btn,
 .chat-tag-add-btn,
-.slash-command-item,
 .whisper-picker-item,
 .emoji-btn-item,
 .msg-action-btn,
 .msg-file-btn,
 .sidebar-user,
-.grok-model-option,
-.grok-tone-option,
 .profile-mode-chip,
 .auth-tab,
 .unread-jump-btn,
@@ -1384,41 +1365,6 @@
 
 .invite-item-btn {
   flex-shrink: 0;
-}
-
-/* ── v1.3.8: AI (Grok) modal follows the active theme ─────────────────────────
-   The base rules hardcode dark navy surfaces, which make the AI response
-   unreadable in light mode (dark-on-dark). Route everything through tokens. */
-.grok-group-name,
-.grok-model-toggle,
-.grok-response {
-  background: var(--chat-input) !important;
-  border-color: var(--chat-border-strong) !important;
-  color: var(--chat-text) !important;
-}
-
-.grok-model-option {
-  color: var(--chat-muted) !important;
-  border-right-color: var(--chat-border-strong) !important;
-}
-
-.grok-model-option.active {
-  background: var(--chat-selected) !important;
-  color: var(--chat-text-strong) !important;
-}
-
-.grok-slider-label.active {
-  color: var(--chat-text-strong) !important;
-}
-
-.grok-status {
-  background: var(--chat-hover) !important;
-  border-color: var(--chat-border-strong) !important;
-  color: var(--chat-text) !important;
-}
-
-.grok-response-model {
-  color: var(--chat-muted) !important;
 }
 
 /* ── v1.3.8: reconnect banner readable in light mode ───────────────────────── */

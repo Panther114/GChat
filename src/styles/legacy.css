@@ -123,7 +123,6 @@ button,
 .group-item,
 .member-item,
 .whisper-picker-item,
-.slash-command-item,
 .emoji-btn-item,
 .ctx-item,
 .chat-tag-filter-btn {
@@ -1307,42 +1306,7 @@ img.gchat-global-icon {
 }
 .message-input-bar textarea:disabled { opacity: .4; }
 
-.slash-command-menu {
-  position: absolute;
-  left: 0;
-  right: auto;
-  bottom: calc(100% + 10px);
-  max-width: min(280px, calc(100vw - 32px));
-  min-width: 220px;
-  background: rgba(17,17,32,.98);
-  border: 1px solid #2a2a3e;
-  border-radius: 12px;
-  box-shadow: 0 16px 32px rgba(0,0,0,.35);
-  padding: 6px;
-  z-index: 25;
-}
-.slash-command-item {
-  width: 100%;
-  border: none;
-  border-radius: 10px;
-  background: transparent;
-  color: var(--text-primary);
-  padding: 8px 10px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  cursor: pointer;
-  text-align: left;
-}
-.slash-command-item:hover { background: rgba(255,255,255,.06); }
-.slash-command-item:disabled {
-  cursor: not-allowed;
-  opacity: .55;
-}
-.slash-command-item:disabled:hover { background: transparent; }
-.slash-command-name { font-size: 13px; font-weight: 700; }
-.slash-command-hint { font-size: 11px; color: var(--text-secondary); }
+
 
 .btn-send {
   background: var(--accent);
@@ -1372,6 +1336,30 @@ img.gchat-global-icon {
 /* Whisper mode button */
 .btn-whisper-mode { font-size: 16px; }
 .btn-whisper-mode.whisper-active { color: #a78bfa; }
+
+/* v1.4: Ask-AI arm button — sits to the right of attach, highlights when the
+   composer is armed so the next message goes to the AI agent. */
+.btn-ai-mode { font-size: 16px; }
+.btn-ai-mode .ui-icon { width: 18px; height: 18px; }
+.btn-ai-mode.ai-active {
+  color: #a78bfa;
+  background: rgba(139, 123, 255, .16);
+}
+.btn-ai-mode.ai-active .ui-icon { stroke-width: 2.4; }
+.btn-ai-mode.ai-unavailable { opacity: .5; }
+
+/* AI tone picker (profile panel) */
+.ai-tone-select {
+  width: 100%;
+  min-height: 38px;
+  border-radius: 8px;
+  border: 1px solid #2a2a3e;
+  background: #0d0d18;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: inherit;
+  padding: 8px 10px;
+}
 
 /* Emoji button */
 .btn-emoji .ui-icon,
@@ -2192,171 +2180,6 @@ img.gchat-global-icon {
 .wallpaper-progress-fill { width: 0%; height: 100%; background: linear-gradient(90deg, var(--accent1), var(--accent2)); transition: width .15s ease; }
 .wallpaper-progress-label { font-size: 12px; color: var(--text-secondary); }
 #wallpaper-modal .modal { max-width: 440px; }
-.grok-modal { max-width: 640px; }
-/* Profile modal layout owned by themes.css (dense label|control rows) */
-.grok-group-name {
-  border: 1px solid #2a2a3e;
-  border-radius: 8px;
-  background: #0d0d18;
-  color: var(--text-primary);
-  font-size: 14px;
-  padding: 10px 12px;
-}
-.grok-model-toggle {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  border: 1px solid #2a2a3e;
-  border-radius: 10px;
-  overflow: hidden;
-  background: #0d0d18;
-}
-.grok-model-option {
-  border: none;
-  border-right: 1px solid #2a2a3e;
-  background: transparent;
-  color: var(--text-secondary);
-  padding: 12px 14px;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background .2s, color .2s;
-}
-.grok-model-option:last-child {
-  border-right: none;
-}
-.grok-model-option.active {
-  background: rgba(108,99,255,.16);
-  color: #d9e5ff;
-}
-.grok-slider-labels {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-.grok-slider-label {
-  font-size: 12px;
-  color: var(--text-secondary);
-  transition: color .2s, font-weight .2s;
-}
-.grok-slider-label.active {
-  color: #d9e5ff;
-  font-weight: 700;
-}
-.grok-toggle-row {
-  align-items: flex-start;
-  gap: 14px;
-}
-.grok-toggle-copy {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 4px;
-}
-.grok-toggle-title {
-  color: var(--text-primary);
-  font-size: 13px;
-  font-weight: 600;
-}
-.grok-toggle-help {
-  color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1.4;
-}
-.grok-slider-labels-tone .grok-slider-label:nth-child(2) {
-  text-align: center;
-  flex: 1;
-}
-#grok-mode-input,
-#grok-tone-input {
-  width: 100%;
-  height: 6px;
-  border-radius: 999px;
-  appearance: none;
-  background: linear-gradient(90deg, #6c63ff 0%, #30cfd0 100%);
-  outline: none;
-  cursor: ew-resize;
-}
-#grok-mode-input::-webkit-slider-thumb,
-#grok-tone-input::-webkit-slider-thumb {
-  appearance: none;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  border: 2px solid #fff;
-  background: #0f0f1a;
-}
-#grok-mode-input::-moz-range-thumb,
-#grok-tone-input::-moz-range-thumb {
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  border: 2px solid #fff;
-  background: #0f0f1a;
-}
-#grok-prompt-input {
-  min-height: 120px;
-  resize: vertical;
-}
-.grok-status {
-  border: 1px solid rgba(108,99,255,.24);
-  border-radius: 8px;
-  background: rgba(108,99,255,.08);
-  color: #d9d5ff;
-  font-size: 12px;
-  padding: 10px 12px;
-}
-.grok-response-wrap {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.grok-response-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  text-transform: uppercase;
-  letter-spacing: .04em;
-}
-.grok-response-model {
-  color: #c9c0ff;
-  text-transform: none;
-  letter-spacing: 0;
-}
-.grok-response {
-  border: 1px solid #2a2a3e;
-  border-radius: 10px;
-  background: #0d0d18;
-  color: var(--text-primary);
-  font-size: 14px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  padding: 14px;
-  max-height: 320px;
-  overflow: auto;
-}
-.grok-response.markdown-rendered {
-  white-space: normal;
-}
-.grok-response-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-  font-size: 12px;
-  color: #8ecbff;
-}
-.grok-response.is-error {
-  border-color: rgba(255,68,102,.28);
-  color: #ffc2cf;
-}
-.grok-submit-help {
-  margin-top: -6px;
-}
 .user-management-modal {
   max-width: 860px;
 }
@@ -2748,7 +2571,6 @@ body.chat-body.mobile-layout .sidebar-overlay {
   #profile-username,
   #profile-color,
   #search-input,
-  #grok-prompt-input,
   #user-management-global-limit-input,
   .user-management-user-actions input {
     font-size: 16px;
@@ -3107,8 +2929,7 @@ body.chat-body.mobile-layout .sidebar-overlay {
   .group-item,
   .member-item,
   .whisper-picker-item,
-  .slash-command-item,
-  .ctx-item {
+    .ctx-item {
     min-width: 44px;
     min-height: 44px;
   }
@@ -3284,14 +3105,6 @@ body.chat-body.mobile-layout .sidebar-overlay {
     bottom: calc(100% + 6px);
     max-height: min(34dvh, 260px);
   }
-  .slash-command-menu {
-    left: 0;
-    right: 0;
-    bottom: calc(100% + 8px);
-    min-width: 0;
-    max-width: none;
-    width: 100%;
-  }
 
   /* Context menu positioning for mobile */
   .ctx-menu { min-width: min(220px, calc(100vw - 16px)); }
@@ -3356,7 +3169,6 @@ body.chat-body.mobile-layout .sidebar-overlay {
     flex: 1 1 140px;
     min-height: 44px;
   }
-  .grok-modal,
   .user-management-modal {
     min-height: 100%;
   }
@@ -3394,9 +3206,6 @@ body.chat-body.mobile-layout .sidebar-overlay {
     display: flex;
     border-color: rgba(255,68,102,.16);
     background: rgba(255,68,102,.06);
-  }
-  .grok-response {
-    max-height: min(36dvh, 280px);
   }
   .profile-push-header,
   .user-management-global-head {

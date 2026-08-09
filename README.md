@@ -21,7 +21,7 @@ Current version: **v1.3.12** (Windows: thin WebView2 shell; macOS: Tauri/WKWebVi
 - Image viewer and automatic image compression
 - Emoji picker and mobile-responsive layout
 - Installable hosted PWA for Android Chrome/Chromium and iPhone/iPad Safari home screen
-- AI is disabled in Increment A; dormant backend modules are retained behind `AI_ENABLED`
+- v1.4 Ask-AI agent: a tool-using DeepSeek V4 Flash assistant that can read channel history inside the current chat (enabled with `AI_ENABLED=1`)
 
 ### Accounts and Groups
 
@@ -134,11 +134,11 @@ Important limitations:
 | `DB_PATH` | Recommended | SQLite database path. Use `/data/gchat.db` with a Railway volume for persistence. |
 | `GROUP_CODE_PEPPER` | Recommended | At least 32 characters; used to HMAC normalized join codes. Falls back to the stable `SESSION_SECRET` during the v1.3.0 cutover. |
 | `GROUP_KEY_ESCROW_MASTER_KEY` | Yes | Canonical base64url-encoded 32-byte server-only key that encrypts group secrets and join codes at rest. Store it only in deployment secrets. |
-| `AI_ENABLED` | No | Reserved for a later release. v1.3.0 keeps AI disabled in code even if this variable is set. |
+| `AI_ENABLED` | No | Set to `1` to enable the v1.4 Ask-AI agent. Without it all `/api/ai/*` routes return 404 and AI sends are rejected. |
 | `GCHAT_LOCAL_DEBUG` | No | Set to `1` only for the local `root/root` fixtures. |
 | `ADMIN_SECRET` | Optional | Enables the admin users endpoint when set. |
-| `OPENROUTER_API_KEY` | Optional | Enables the server-side Ask AI integration for DeepSeek V4 Flash. Keep this only in server/runtime environment variables such as Railway service variables. |
-| `GETGOAPI_API_KEY` | Optional | Enables the server-side Ask AI integration for Grok 4.1 Fast through GetGoAPI. Keep this only in server/runtime environment variables such as Railway service variables. |
+| `OPENCODE_ZEN_API_KEY` | Optional | Primary Ask-AI provider key (OpenCode Zen). Enables the v1.4 agent for DeepSeek V4 Flash via `https://opencode.ai/zen/v1/chat/completions`. |
+| `DEEPSEEK_API_KEY` | Optional | Fallback Ask-AI provider key (official DeepSeek API) used automatically when the Zen key is missing or fails. |
 
 | `VAPID_PUBLIC_KEY` | Optional | Public VAPID key used by the hosted PWA to subscribe to Web Push notifications. |
 | `VAPID_PRIVATE_KEY` | Optional | Private VAPID key used only on the server to send Web Push notifications. Never expose this to clients. |
@@ -215,31 +215,21 @@ The main application pages are served from `public/`.
 
 ---
 
-## Ask AI (temporarily disabled in v1.3.0)
+## Ask AI (v1.4 agent)
 
-Client controls are hidden, `/api/ai/*` returns 404, socket AI sends are rejected, group settings cannot enable AI, and the server reports `aiEnabled: false`. The notes below describe the dormant v1.2.4 implementation retained for a later reviewed release.
+The Ask-AI agent is a single-model, tool-using assistant built on **DeepSeek V4 Flash** (Grok/GetGoAPI were removed in v1.4). Requests are proxied server-side through **OpenCode Zen** (`OPENCODE_ZEN_API_KEY`), falling back to the official **DeepSeek API** (`DEEPSEEK_API_KEY`) automatically.
 
-- Typing `/ai ` in the chat composer or clicking **Ask AI** in the right panel opens the same modal before the AI-tagged prompt is sent into chat.
-- The modal defaults to:
-  - Model: `DeepSeek V4 Flash`
-  - Mode: `Context`
-  - Tone: `Casual`
-- Model options:
-  - `DeepSeek V4 Flash` → `deepseek/deepseek-v4-flash`
-  - `Grok 4.1 Fast` → `grok-4-1-fast-non-reasoning`
-- Mode behavior:
-  - `Fast` normally sends only the user prompt plus the selected system prompt.
-  - `Context` can include eligible decrypted chat context, while still respecting `/ai` vs `/# tag /ai` scoping rules.
-- Tone options map to built-in system prompts:
-  - `Casual`
-  - `Professional`
-  - `Playful`
-- `Search the web` is a manual toggle and defaults to OFF.
-- When `Search the web` is ON, web search can be used in both `Fast` and `Context` mode.
-- Web search works for `DeepSeek V4 Flash` through the server-side OpenRouter integration.
-- `Grok 4.1 Fast` is routed through GetGoAPI.
-- Submitted Ask AI prompts are tagged in chat with model/mode/tone labels such as `@deepseek-context-casual`, and the AI reply is posted when the background request completes.
-- AI replies show the selected model, mode, tone, token count, and estimated RMB cost in the response metadata line.
+- **Entry point**: the AI tool-button next to the attach button. Clicking it *arms* the composer (highlighted button + `AI` token chip); the **next message you send goes to the AI agent** in the channel you are in. No modal, no slash commands.
+- The agent **decides for itself** whether it needs context:
+  - No history needed → answers immediately (cheapest path).
+  - Question references the conversation → it calls `get_channel_history` (and can paginate older messages with the `before` cursor).
+  - Question references another channel of the same chat → it calls `get_channel_list` and reads that channel.
+  - It can **never** read other chats — the tool surface is scoped to the current chat group.
+- **Tools execute in the browser**: message content is E2E-encrypted, so only the client holds the keys. The server relays tool calls, the client runs them against its decrypted cache (IndexedDB + memory), and the loop continues until the agent answers. The loop is bounded: max 4 tool rounds, 40 messages / 24 KB per history fetch, 96 KB total transcript.
+- The AI reply is posted as a normal E2E-encrypted message in the same channel, stamped with `ai_meta` (model, tone, tokens, cost, and tool-call stats). Prompts are tagged `@deepseek-agent-<tone>`.
+- **Tone** (Casual / Professional / Playful) is chosen in the profile panel.
+- Daily token quotas still apply per user (default 20,000) and globally (default 200,000), resetting at 4:00 AM Shanghai time; every agent round is billed toward the quota.
+- Enable with `AI_ENABLED=1`; the per-group `ai_enabled` setting controls it per chat.
 
 ---
 
@@ -255,7 +245,8 @@ SESSION_SECRET=<long random secret>
 DB_PATH=/data/gchat.db
 GROUP_CODE_PEPPER=<stable random secret of at least 32 characters>
 GROUP_KEY_ESCROW_MASTER_KEY=<random canonical base64url 32-byte secret>
-AI_ENABLED=0
+AI_ENABLED=1
+OPENCODE_ZEN_API_KEY=<OpenCode Zen API key>
 ```
 
 5. Deploy.
@@ -487,7 +478,7 @@ The desktop package contains only a compiled native shell and small recovery ass
 - SQLite database files should not be committed.
 - The server stores encrypted message payloads, not plaintext message content.
 - Group secrets and invite codes are escrowed server-side under `GROUP_KEY_ESCROW_MASTER_KEY` so authenticated members can recover them on new devices. Run `npm run migrate:group-invite-codes` only after a verified backup; production runs additionally require `GCHAT_GROUP_CODE_MIGRATION_APPROVED=1`.
-- The browser never calls AI providers directly; Ask AI requests are proxied through `server.js` with `OPENROUTER_API_KEY` and `GETGOAPI_API_KEY` kept server-side.
+- The browser never calls AI providers directly; Ask AI requests are proxied through `server.js` with `OPENCODE_ZEN_API_KEY` (and the `DEEPSEEK_API_KEY` fallback) kept server-side.
 - Large file handling should be reviewed carefully before public-scale deployment.
 
 ---
@@ -500,7 +491,7 @@ Before using Gchat with real users:
 - Mount a Railway volume.
 - Set `DB_PATH=/data/gchat.db`.
 - Set a stable `GROUP_CODE_PEPPER`, or verify the `SESSION_SECRET` fallback before issuing invitation links.
-- Keep AI disabled unless provider keys and product policy explicitly enable it.
+- Set `AI_ENABLED=1` plus `OPENCODE_ZEN_API_KEY` (and optionally `DEEPSEEK_API_KEY`) to run the Ask-AI agent; keep AI off unless provider keys and product policy explicitly enable it.
 - Confirm login, invitation-link joining, message sending, and file upload behavior.
 - Test the desktop installer on a clean Windows machine.
 - Verify notification behavior in Windows settings.

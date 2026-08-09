@@ -8,7 +8,7 @@ const { decryptEscrowPayload, encryptEscrowPayload, parseEscrowMasterKey } = req
 const { validateEditEnvelope, validateV2MessageEnvelope } = require('../src/server/message-contract');
 const { readConfig } = require('../src/server/config');
 
-test('production config keeps AI disabled and can use the stable session secret as the join-code pepper', () => {
+test('v1.4 production config enables AI only via the AI_ENABLED flag and uses the stable session secret as the join-code pepper', () => {
   const sessionSecret = 's'.repeat(32);
   const config = readConfig({
     NODE_ENV: 'production',
@@ -16,8 +16,17 @@ test('production config keeps AI disabled and can use the stable session secret 
     AI_ENABLED: '1',
     GROUP_KEY_ESCROW_MASTER_KEY: Buffer.alloc(32, 7).toString('base64url'),
   });
-  assert.equal(config.aiEnabled, false);
+  assert.equal(config.aiEnabled, true);
   assert.equal(config.groupCodePepper, sessionSecret);
+  assert.equal(
+    readConfig({
+      NODE_ENV: 'production',
+      SESSION_SECRET: sessionSecret,
+      AI_ENABLED: '0',
+      GROUP_KEY_ESCROW_MASTER_KEY: Buffer.alloc(32, 7).toString('base64url'),
+    }).aiEnabled,
+    false
+  );
   assert.throws(() => readConfig({ NODE_ENV: 'production', SESSION_SECRET: sessionSecret }));
 });
 
