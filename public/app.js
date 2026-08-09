@@ -241,6 +241,7 @@
   var hostedAppUpdateTimer = null;
   var hostedAppReloadPending = false;
   var HOSTED_APP_UPDATE_CHECK_INTERVAL_MS = 10 * 60 * 1e3;
+  var SOCKET_RECOVERY_WINDOW_MS = 2 * 60 * 1e3;
   var MIN_DISAPPEARING_DURATION_MS = 3e3;
   var DISAPPEARING_DURATION_PER_CHAR_MS = 90;
   var MAX_DISAPPEARING_DURATION_MS = 22500;
@@ -372,7 +373,7 @@
     }
   }
   function shouldPreserveLocalStorageEntry(key) {
-    return !!(key && (key === ACTIVE_LOCAL_SETTINGS_KEY || key === LEGACY_LOCAL_SETTINGS_KEY || key.startsWith(LOCAL_SETTINGS_KEY_PREFIX) || key === LAST_SEEN_DEPLOY_KEY));
+    return !!(key && (key === ACTIVE_LOCAL_SETTINGS_KEY || key === LEGACY_LOCAL_SETTINGS_KEY || key.startsWith(LOCAL_SETTINGS_KEY_PREFIX) || key === LAST_SEEN_DEPLOY_KEY || key.startsWith(CHANNEL_PREF_KEY_PREFIX) || key.startsWith("gchat:tag-order:")));
   }
   function capturePreservedLocalStorageEntries() {
     const entries = [];
@@ -746,7 +747,32 @@
           store.put({ id: String(msg.id), groupId: String(groupId), createdAt: msg.createdAt || "", msg });
         }
       });
+      await pruneHistoryMessages(groupId);
     })();
+  }
+  async function pruneHistoryMessages(groupId) {
+    if (!historyDbSupported) return;
+    const key = String(groupId);
+    try {
+      const countRequest = await runHistoryStore(HISTORY_MESSAGES_STORE, "readonly", (store) => {
+        const request = store.index("groupId").count(key);
+        request.onsuccess = () => {
+          request._count = request.result;
+        };
+        return request;
+      });
+      if (!countRequest || !Number.isFinite(countRequest._count)) return;
+      if (countRequest._count <= HISTORY_MAX_MESSAGES_PER_GROUP) return;
+      const messages = await readHistoryMessages(groupId);
+      const excess = messages.length - HISTORY_MAX_MESSAGES_PER_GROUP;
+      if (excess <= 0) return;
+      const excessIds = messages.slice(0, excess).map((m) => String(m.id));
+      await runHistoryStore(HISTORY_MESSAGES_STORE, "readwrite", (store) => {
+        for (const id of excessIds) store.delete(id);
+      });
+      invalidateHistoryReadMemo(key);
+    } catch {
+    }
   }
   var historyReadMemo = /* @__PURE__ */ new Map();
   function invalidateHistoryReadMemo(groupId) {
@@ -3445,13 +3471,14 @@
             const senderId = child.dataset.senderId;
             const senderNameEl = child.querySelector(".msg-sender-name");
             const memberProfile = getMemberProfile(currentGroupId, senderId);
-            renderAvatarElement(avatar, {
-              username: memberProfile?.username || senderNameEl && senderNameEl.textContent || "?",
-              iconColor: memberProfile?.iconColor || null,
-              profilePicture: memberProfile?.profilePicture || null
-            });
             avatar.style.background = "";
             avatar.style.color = "";
+            const cachedMessage = (allMessages || []).find((m) => String(m.id) === String(child.dataset.msgId));
+            renderAvatarElement(avatar, {
+              username: memberProfile?.username || senderNameEl && senderNameEl.textContent || "?",
+              iconColor: memberProfile?.iconColor || cachedMessage?.senderColor || null,
+              profilePicture: memberProfile?.profilePicture || null
+            });
           }
         }
       }
@@ -5029,7 +5056,8 @@
       "allow-member-clear-tag-toggle",
       "allow-member-export-toggle",
       "allow-member-kick-toggle",
-      "allow-member-invite-toggle"
+      "allow-member-invite-toggle",
+      "ai-mode-toggle"
     ].forEach((id) => {
       const input = $(id);
       if (input) input.disabled = !canManage;
@@ -7139,7 +7167,7 @@
     if (now - lastFocusStateSyncAt < 30 * 1e3) return;
     lastFocusStateSyncAt = now;
     if (!socket?.connected) {
-      void loadGroups({ withBackendPreload: true });
+      void loadGroups();
       if (currentGroupId) void refreshCurrentGroupFromServer();
     }
   }
@@ -7200,7 +7228,9 @@
       joinAllGroupRooms();
       flushMarkReadEmits();
       if (socketHasConnectedOnce) {
-        void refreshCurrentGroupAfterReconnect({ fullSync: true });
+        const downMs = socketDiagnostics.lastDisconnectAt ? Date.now() - new Date(socketDiagnostics.lastDisconnectAt).getTime() : Number.POSITIVE_INFINITY;
+        const needFullResync = downMs > SOCKET_RECOVERY_WINDOW_MS;
+        void refreshCurrentGroupAfterReconnect({ fullSync: needFullResync });
       } else {
         socketHasConnectedOnce = true;
         void refreshCurrentGroupAfterReconnect();

@@ -1732,9 +1732,9 @@ img.gchat-global-icon {
   width: 100%;
   min-height: 38px;
   border-radius: 8px;
-  border: 1px solid #2a2a3e;
-  background: #0d0d18;
-  color: var(--text-primary);
+  border: 1px solid var(--chat-border-strong);
+  background: var(--chat-input);
+  color: var(--chat-text);
   font-size: 13px;
   font-family: inherit;
   padding: 8px 10px;
@@ -6884,6 +6884,9 @@ button.is-loading {
 }
 .btn-ai-mode.ai-unavailable {
   opacity: .45 !important;
+}
+.msg-ai-meta {
+  color: var(--chat-muted) !important;
 }
 .whisper-picker-actions {
   display: flex;

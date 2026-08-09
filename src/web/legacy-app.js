@@ -175,6 +175,10 @@ let aiFeatureEnabled = false;
 let hostedAppUpdateTimer = null;
 let hostedAppReloadPending = false;
 const HOSTED_APP_UPDATE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
+// v1.4.1: server-side Socket.IO connection-state recovery window (runtime.js).
+// Missed packets are re-delivered within it, so reconnect resyncs can stay
+// light unless the gap exceeded the window.
+const SOCKET_RECOVERY_WINDOW_MS = 2 * 60 * 1000;
 const MESSAGE_VIEW_BASE_DELAY_MS = 2200;
 const MESSAGE_VIEW_PER_CHAR_MS = 200;
 const MESSAGE_VIEW_MAX_DELAY_MS = 18000;
@@ -325,6 +329,8 @@ async function decryptAttachmentBytes(msg, secret, groupId) {
 // plus the current/legacy wallpaper and other per-user local settings payloads.
 // v1.3.13: the last-seen-deploy marker survives the reset too — otherwise the
 // post-reload boot would see "new build" again and loop the auto-refresh.
+// v1.4.1: channel lists and channel order are user preferences, not caches —
+// wiping them made sparse channels vanish until a new message arrived in them.
 function shouldPreserveLocalStorageEntry(key) {
   return !!(
     key
@@ -333,6 +339,8 @@ function shouldPreserveLocalStorageEntry(key) {
       || key === LEGACY_LOCAL_SETTINGS_KEY
       || key.startsWith(LOCAL_SETTINGS_KEY_PREFIX)
       || key === LAST_SEEN_DEPLOY_KEY
+      || key.startsWith(CHANNEL_PREF_KEY_PREFIX)
+      || key.startsWith('gchat:tag-order:')
     )
   );
 }
@@ -778,7 +786,40 @@ function persistHistoryMessages(groupId, messages) {
         store.put({ id: String(msg.id), groupId: String(groupId), createdAt: msg.createdAt || '', msg });
       }
     });
+    // v1.4.1: enforce the per-group history cap at WRITE time — it used to be
+    // applied only when reading, so the durable store (and the read memo)
+    // grew without bound on disk for active groups.
+    await pruneHistoryMessages(groupId);
   })();
+}
+
+// v1.4.1: keep at most HISTORY_MAX_MESSAGES_PER_GROUP per group in the durable
+// history store. The count query is cheap; the full read + delete only happens
+// after the cap is exceeded (rare once enforced).
+async function pruneHistoryMessages(groupId) {
+  if (!historyDbSupported) return;
+  const key = String(groupId);
+  try {
+    const countRequest = await runHistoryStore(HISTORY_MESSAGES_STORE, 'readonly', (store) => {
+      const request = store.index('groupId').count(key);
+      request.onsuccess = () => {
+        request._count = request.result;
+      };
+      return request;
+    });
+    if (!countRequest || !Number.isFinite(countRequest._count)) return;
+    if (countRequest._count <= HISTORY_MAX_MESSAGES_PER_GROUP) return;
+    const messages = await readHistoryMessages(groupId);
+    const excess = messages.length - HISTORY_MAX_MESSAGES_PER_GROUP;
+    if (excess <= 0) return;
+    const excessIds = messages.slice(0, excess).map((m) => String(m.id));
+    await runHistoryStore(HISTORY_MESSAGES_STORE, 'readwrite', (store) => {
+      for (const id of excessIds) store.delete(id);
+    });
+    invalidateHistoryReadMemo(key);
+  } catch {
+    /* best effort */
+  }
 }
 
 // v1.3.12: in-memory mirror of each group's sorted IndexedDB history — read once
@@ -4229,13 +4270,20 @@ function applyActiveTagFilterToRenderedMessages() {
           const senderId = child.dataset.senderId;
           const senderNameEl = child.querySelector('.msg-sender-name');
           const memberProfile = getMemberProfile(currentGroupId, senderId);
-          renderAvatarElement(avatar, {
-            username: memberProfile?.username || (senderNameEl && senderNameEl.textContent) || '?',
-            iconColor: memberProfile?.iconColor || null,
-            profilePicture: memberProfile?.profilePicture || null,
-          });
+          // v1.4.1: clear the continuation's transparent inline styles BEFORE
+          // re-painting — clearing after the paint wiped the freshly applied
+          // avatar color and left the restored avatar colorless/black.
           avatar.style.background = '';
           avatar.style.color = '';
+          // v1.4.1: fall back to the message's own senderColor when the sender
+          // is absent from the member list (the previous code dropped it, so
+          // the avatar could render with no color at all).
+          const cachedMessage = (allMessages || []).find((m) => String(m.id) === String(child.dataset.msgId));
+          renderAvatarElement(avatar, {
+            username: memberProfile?.username || (senderNameEl && senderNameEl.textContent) || '?',
+            iconColor: memberProfile?.iconColor || cachedMessage?.senderColor || null,
+            profilePicture: memberProfile?.profilePicture || null,
+          });
         }
       }
     }
@@ -6118,6 +6166,7 @@ function syncGroupPermissionControls() {
     'allow-member-export-toggle',
     'allow-member-kick-toggle',
     'allow-member-invite-toggle',
+    'ai-mode-toggle',
   ].forEach((id) => {
     const input = $(id);
     if (input) input.disabled = !canManage;
@@ -8596,12 +8645,16 @@ let lastFocusStateSyncAt = 0;
 
 // v1.3.8: when the tab regains focus after being backgrounded and the socket
 // is down, resync everything so nothing was missed. Throttled to bound load.
+// v1.4.1: LIGHT resync — the full 50-message preload for every group ran here
+// AND again on the actual socket reconnect, so a single background/reconnect
+// cycle re-downloaded every group's tail twice. The open group still gets its
+// bounded since-cursor sync; the preload stays on the reconnect path only.
 function syncStateOnFocus() {
   const now = Date.now();
   if (now - lastFocusStateSyncAt < 30 * 1000) return;
   lastFocusStateSyncAt = now;
   if (!socket?.connected) {
-    void loadGroups({ withBackendPreload: true });
+    void loadGroups();
     if (currentGroupId) void refreshCurrentGroupFromServer();
   }
 }
@@ -8668,8 +8721,16 @@ function initSocket() {
     // v1.3.9: flush any read receipts that were queued while offline.
     flushMarkReadEmits();
     if (socketHasConnectedOnce) {
-      // Real reconnect: full resync so messages missed while offline appear.
-      void refreshCurrentGroupAfterReconnect({ fullSync: true });
+      // v1.4.1: only run the full 50-message preload for every group when the
+      // disconnect outlasted the server's Socket.IO recovery window (2 min) —
+      // within that window the server re-delivers every missed packet, so the
+      // full resync would re-download identical tails for nothing. Short
+      // blips take the light path (group list + open-group since-sync).
+      const downMs = socketDiagnostics.lastDisconnectAt
+        ? Date.now() - new Date(socketDiagnostics.lastDisconnectAt).getTime()
+        : Number.POSITIVE_INFINITY;
+      const needFullResync = downMs > SOCKET_RECOVERY_WINDOW_MS;
+      void refreshCurrentGroupAfterReconnect({ fullSync: needFullResync });
     } else {
       socketHasConnectedOnce = true;
       void refreshCurrentGroupAfterReconnect();

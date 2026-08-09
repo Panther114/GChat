@@ -470,6 +470,9 @@
   background: color-mix(in srgb, var(--chat-ai, var(--chat-accent)) 14%, transparent) !important;
 }
 .btn-ai-mode.ai-unavailable { opacity: .45 !important; }
+/* v1.4.1: the AI metadata line under AI replies follows the theme — the base
+   rule hardcoded a light blue that was illegible on light backgrounds. */
+.msg-ai-meta { color: var(--chat-muted) !important; }
 .whisper-picker-actions { display: flex; gap: 6px; margin-top: 8px; }
 .whisper-picker-actions > button { flex: 1; }
 

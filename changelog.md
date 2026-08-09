@@ -4,6 +4,33 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## v1.4.1 — Ask-AI group toggle, avatar restore, channel persistence, load budget
+
+### Ask-AI now has a visible on/off switch per group
+
+- The **Ask AI toggle in the group settings panel was hidden** (`display:none!important`) and never surfaced, so `group.ai_enabled` stayed 0 for every group and the AI arm button always answered "AI mode is disabled by the group owner". The toggle is now visible (owner/administrator only, hidden when AI is globally disabled) and wired to the existing settings PATCH + socket sync. Root cause of "clicking the icon does not work".
+
+### Avatar color on the second message no longer turns black
+
+- `applyActiveTagFilterToRenderedMessages` restored a series-continuation avatar by re-painting it and THEN clearing the inline background — wiping the freshly applied color, so a row flipped out of a series rendered as a colorless circle (near-black in light mode). The continuation's transparent styles are now cleared BEFORE the re-paint, and the restore falls back to the message's own `senderColor` when the sender is absent from the member list.
+
+### Channels no longer vanish after a deploy
+
+- The deploy cache-reset wiped the per-group channel lists (`gchat:active-channel:*`) and channel order (`gchat:tag-order:*`) along with message caches, and channels were only re-discovered from the newest ~50 cached messages — so sparse channels silently disappeared until a new message arrived. Channel lists and ordering are user preferences, not caches: they are now preserved across the reset.
+
+### Network egress and RAM budget
+
+- **Focus resyncs went light**: regaining focus with the socket down used to run the full `/api/groups/preload?limit=50` (every group's 50-message tail + all members) — AND the socket reconnect ran it again, so one background/reconnect cycle re-downloaded everything twice. Focus now does the light group list + a bounded since-cursor sync for the open group.
+- **Reconnect preloads only when needed**: Socket.IO connection-state recovery re-delivers every missed packet within its 2-minute window, so a short blip no longer triggers the full preload — the full resync now only runs when the disconnect outlasted the recovery window.
+- **IndexedDB history is capped at write time**: the per-group cap (5,000 messages) used to be applied only when reading, so the durable store grew without bound on disk for active groups; writes now prune the oldest rows past the cap (cheap count first, full prune only when exceeded).
+
+### AI interface follows the theme in light mode
+
+- The AI tone picker hardcoded a dark navy surface that made it unreadable in light mode; it now uses the theme input tokens.
+- The AI metadata line under AI replies hardcoded a light blue that was illegible on light backgrounds; it now uses the theme muted color.
+
+---
+
 ## v1.4 — Ask-AI agent
 
 ### The AI assistant is now a cheap, tool-using agent
