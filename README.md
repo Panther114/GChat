@@ -137,7 +137,7 @@ Important limitations:
 | `AI_ENABLED` | No | Set to `1` to enable the v1.4 Ask-AI agent. Without it all `/api/ai/*` routes return 404 and AI sends are rejected. |
 | `GCHAT_LOCAL_DEBUG` | No | Set to `1` only for the local `root/root` fixtures. |
 | `ADMIN_SECRET` | Optional | Enables the admin users endpoint when set. |
-| `OPENCODE_ZEN_API_KEY` | Optional | Primary Ask-AI provider key (OpenCode Zen). Enables the v1.4 agent for DeepSeek V4 Flash via `https://opencode.ai/zen/v1/chat/completions`. |
+| `OPENCODE_ZEN_API_KEY` | Optional | Primary Ask-AI provider key (OpenCode Go subscription; the env name predates Go). Enables the v1.4 agent for DeepSeek V4 Flash via `https://opencode.ai/zen/go/v1/chat/completions`. |
 | `DEEPSEEK_API_KEY` | Optional | Fallback Ask-AI provider key (official DeepSeek API) used automatically when the Zen key is missing or fails. |
 
 | `VAPID_PUBLIC_KEY` | Optional | Public VAPID key used by the hosted PWA to subscribe to Web Push notifications. |
@@ -217,7 +217,7 @@ The main application pages are served from `public/`.
 
 ## Ask AI (v1.4 agent)
 
-The Ask-AI agent is a single-model, tool-using assistant built on **DeepSeek V4 Flash** (Grok/GetGoAPI were removed in v1.4). Requests are proxied server-side through **OpenCode Zen** (`OPENCODE_ZEN_API_KEY`), falling back to the official **DeepSeek API** (`DEEPSEEK_API_KEY`) automatically.
+The Ask-AI agent is a single-model, tool-using assistant built on **DeepSeek V4 Flash** (Grok/GetGoAPI were removed in v1.4). Requests are proxied server-side through **OpenCode Go** (`OPENCODE_ZEN_API_KEY`, the OpenCode subscription key), falling back to the official **DeepSeek API** (`DEEPSEEK_API_KEY`) automatically — the fallback fires on any provider failure, so a broken primary key never blocks the agent.
 
 - **Entry point**: the AI tool-button next to the attach button. Clicking it *arms* the composer (highlighted button + `AI` token chip); the **next message you send goes to the AI agent** in the channel you are in. No modal, no slash commands.
 - The agent **decides for itself** whether it needs context:
@@ -246,7 +246,7 @@ DB_PATH=/data/gchat.db
 GROUP_CODE_PEPPER=<stable random secret of at least 32 characters>
 GROUP_KEY_ESCROW_MASTER_KEY=<random canonical base64url 32-byte secret>
 AI_ENABLED=1
-OPENCODE_ZEN_API_KEY=<OpenCode Zen API key>
+OPENCODE_ZEN_API_KEY=<OpenCode Go subscription API key>
 ```
 
 5. Deploy.

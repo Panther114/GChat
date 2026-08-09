@@ -4,6 +4,14 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## v1.4.2 — OpenCode Go endpoint + full provider failover
+
+- **The OpenCode key now consumes the OpenCode GO subscription**: requests are sent to `https://opencode.ai/zen/go/v1/chat/completions` (the Go plan endpoint) instead of the Zen pay-as-you-go endpoint, so the Go subscription key works without any balance. The env var intentionally keeps its original name `OPENCODE_ZEN_API_KEY` — no Railway config change needed.
+- **Fallback now fires on EVERY failure scenario**: the agent tries every configured provider in order (OpenCode Go → official DeepSeek API) when the primary returns an HTTP error (401/403/429/5xx), times out, fails on the network, returns an empty answer, or returns invalid tool calls. Previously the fallback only ran when the primary key was missing — a broken primary key blocked the agent entirely. The final error response includes a `providerFailures` breakdown of every attempted provider for debugging.
+- **Tests**: the ai-agent suite now covers HTTP-error failover, empty-answer failover, all-providers-fail reporting, and the Go endpoint URL (10 cases total).
+
+---
+
 ## v1.4.1 — Ask-AI group toggle, avatar restore, channel persistence, load budget
 
 ### Ask-AI now has a visible on/off switch per group

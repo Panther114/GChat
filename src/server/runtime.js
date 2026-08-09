@@ -88,17 +88,19 @@ const VAPID_SUBJECT = typeof process.env.VAPID_SUBJECT === 'string' ? process.en
 const MIN_DISAPPEARING_DURATION_MS = 3000;
 const MAX_DISAPPEARING_DURATION_MS = 22500;
 // v1.4: the AI assistant is a single-model agent (DeepSeek V4 Flash) served by
-// OpenCode Zen first, with the official DeepSeek API as an automatic fallback.
-// Both endpoints speak the OpenAI chat-completions format, so one request
-// builder and one response parser serve every provider.
-const ZEN_BASE_URL = 'https://opencode.ai/zen/v1';
-const ZEN_CHAT_COMPLETIONS_URL = `${ZEN_BASE_URL}/chat/completions`;
+// v1.4.2: the OpenCode API key consumes the OpenCode GO subscription quota
+// (endpoint https://opencode.ai/zen/go/v1). The env var intentionally keeps
+// its original name (OPENCODE_ZEN_API_KEY) so existing Railway configs keep
+// working unchanged. The official DeepSeek API stays as the automatic
+// fallback provider.
+const OPENCODE_BASE_URL = 'https://opencode.ai/zen/go/v1';
+const OPENCODE_CHAT_COMPLETIONS_URL = `${OPENCODE_BASE_URL}/chat/completions`;
 const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 const DEEPSEEK_CHAT_COMPLETIONS_URL = `${DEEPSEEK_BASE_URL}/chat/completions`;
 const AI_MODEL_OPTIONS = {
   'deepseek-v4-flash': {
     label: 'DeepSeek V4 Flash',
-    // OpenCode Zen list price for DeepSeek V4 Flash (USD per 1M tokens).
+    // OpenCode Go list price for DeepSeek V4 Flash (USD per 1M tokens).
     inputCostPerMillion: 0.14,
     outputCostPerMillion: 0.28,
     creditMultiplier: 1,
@@ -743,30 +745,31 @@ function getAiResponseModel(payload, fallbackModel = DEFAULT_AI_MODEL) {
   return providerModel && AI_MODEL_OPTIONS[providerModel] ? providerModel : normalizeAiModel(fallbackModel);
 }
 
-function getAiApiConfig() {
+// v1.4.2: ordered provider chain — OpenCode Go first, then the official
+// DeepSeek API. Every configured provider is tried in order on ANY failure
+// (invalid key, rate limit, provider error, timeout, empty/invalid answer),
+// so a broken primary key never blocks the agent.
+function getAiProviderChain() {
+  const chain = [];
   if (process.env.OPENCODE_ZEN_API_KEY) {
-    return {
-      url: ZEN_CHAT_COMPLETIONS_URL,
+    chain.push({
+      url: OPENCODE_CHAT_COMPLETIONS_URL,
       apiKey: process.env.OPENCODE_ZEN_API_KEY,
-      provider: 'zen',
-    };
+      provider: 'opencode-go',
+    });
   }
   if (process.env.DEEPSEEK_API_KEY) {
-    return {
+    chain.push({
       url: DEEPSEEK_CHAT_COMPLETIONS_URL,
       apiKey: process.env.DEEPSEEK_API_KEY,
       provider: 'deepseek',
-    };
+    });
   }
-  return {
-    url: ZEN_CHAT_COMPLETIONS_URL,
-    apiKey: '',
-    provider: 'zen',
-  };
+  return chain;
 }
 
 function getAiProviderLabel(apiConfig) {
-  return apiConfig?.provider === 'deepseek' ? 'DeepSeek' : 'OpenCode Zen';
+  return apiConfig?.provider === 'deepseek' ? 'DeepSeek' : 'OpenCode Go';
 }
 
 function buildAiRequestBody(model, provider, messages, options = {}) {
@@ -4052,12 +4055,67 @@ function buildAiAssistantToolCalls(rawToolCalls) {
   }));
 }
 
+/**
+ * One provider attempt for a round. Never throws — every outcome (HTTP error,
+ * network failure, timeout) is returned as a structured failure so the caller
+ * can fall through to the next provider in the chain.
+ */
+async function attemptAiUpstream(apiConfig, bodyString, origin) {
+  const providerLabel = getAiProviderLabel(apiConfig);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+  try {
+    const upstream = await fetch(apiConfig.url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiConfig.apiKey}`,
+        'X-Title': 'GChat',
+        ...(origin ? { 'HTTP-Referer': origin } : {}),
+      },
+      body: bodyString,
+      signal: controller.signal,
+    });
+    const payload = await upstream.json().catch(() => ({}));
+    const debug = extractAiDebugMeta(upstream, payload);
+    if (!upstream.ok) {
+      const errorMessage = getAiUpstreamErrorMessage(payload, providerLabel);
+      console.warn('AI upstream error:', {
+        ...debug,
+        providerLabel,
+        errorMessage,
+      });
+      return {
+        ok: false,
+        status: upstream.status === 429 ? 429 : 502,
+        error: errorMessage,
+        debug,
+        payload: null,
+        providerLabel,
+      };
+    }
+    return { ok: true, status: upstream.status, error: null, debug, payload, providerLabel };
+  } catch (err) {
+    if (err && err.name === 'AbortError') {
+      return { ok: false, status: 504, error: 'AI request timed out', debug: null, payload: null, providerLabel };
+    }
+    console.error('AI upstream request error:', {
+      name: err?.name || 'Error',
+      message: sanitizeAiText(err?.message, 240) || 'Unknown error',
+      code: sanitizeAiText(err?.code, 64),
+      providerLabel,
+    });
+    return { ok: false, status: 502, error: `Failed to contact ${providerLabel}`, debug: null, payload: null, providerLabel };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
   const { groupId } = req.params;
   const userId = req.session.userId;
-  const apiConfig = getAiApiConfig();
-  const providerLabel = getAiProviderLabel(apiConfig);
-  if (!apiConfig.apiKey) {
+  const providerChain = getAiProviderChain();
+  if (!providerChain.length) {
     return res.status(503).json({ error: 'AI assistant is not configured on this server' });
   }
 
@@ -4097,115 +4155,115 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
   }
   messages.push(...transcriptCheck.value);
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
-  try {
-    const origin = typeof req.headers.origin === 'string' && /^https?:\/\//.test(req.headers.origin)
-      ? req.headers.origin
-      : null;
-    const upstream = await fetch(apiConfig.url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiConfig.apiKey}`,
-        'X-Title': 'GChat',
-        ...(origin ? { 'HTTP-Referer': origin } : {}),
-      },
-      body: JSON.stringify(buildAiRequestBody(DEFAULT_AI_MODEL, apiConfig.provider, messages, {
-        tools: AI_TOOL_DEFINITIONS,
-        toolChoice: 'auto',
-      })),
-      signal: controller.signal,
-    });
-    const payload = await upstream.json().catch(() => ({}));
-    const debug = extractAiDebugMeta(upstream, payload);
-    if (!upstream.ok) {
-      const errorMessage = getAiUpstreamErrorMessage(payload, providerLabel);
-      console.warn('AI upstream error:', {
-        ...debug,
-        providerLabel,
-        errorMessage,
-      });
-      const status = upstream.status === 429 ? 429 : 502;
-      return res.status(status).json({ error: errorMessage, debug });
-    }
+  const bodyString = JSON.stringify(buildAiRequestBody(DEFAULT_AI_MODEL, providerChain[0].provider, messages, {
+    tools: AI_TOOL_DEFINITIONS,
+    toolChoice: 'auto',
+  }));
+  const origin = typeof req.headers.origin === 'string' && /^https?:\/\//.test(req.headers.origin)
+    ? req.headers.origin
+    : null;
 
-    const message = payload?.choices?.[0]?.message || {};
+  // v1.4.2: try every configured provider on ANY failure — invalid key,
+  // rate limit, upstream error, timeout, empty or invalid answer — before
+  // giving up. A broken primary key can never block the agent.
+  let selected = null;
+  const failures = [];
+  for (const apiConfig of providerChain) {
+    const attempt = await attemptAiUpstream(apiConfig, bodyString, origin);
+    if (!attempt.ok || !attempt.payload) {
+      failures.push(attempt);
+      continue;
+    }
+    const message = attempt.payload?.choices?.[0]?.message || {};
     const rawToolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
-
-    // Tool round: relay the calls back to the client for execution.
     if (rawToolCalls.length) {
-      const toolCalls = [];
-      for (const call of rawToolCalls) {
-        const id = sanitizeAiText(call?.id, 64);
-        const name = sanitizeAiText(call?.function?.name, 64);
-        if (!id || !name) continue;
-        let input;
-        try {
-          input = JSON.parse(call?.function?.arguments);
-        } catch {
-          input = call?.function?.arguments || {};
-        }
-        toolCalls.push({ id, name, input });
+      const hasValidCall = rawToolCalls.some(
+        (call) => sanitizeAiText(call?.id, 64) && sanitizeAiText(call?.function?.name, 64)
+      );
+      if (!hasValidCall) {
+        failures.push({ ...attempt, ok: false, status: 502, error: 'AI returned an invalid tool call', payload: null });
+        continue;
       }
-      if (!toolCalls.length) {
-        console.warn('AI returned invalid tool calls:', debug);
-        return res.status(502).json({ error: 'AI returned an invalid tool call', debug });
-      }
-
-      const { meta: aiMeta } = buildAiRoundMeta(payload, selectedTone);
-      recordAiUsageEvent(userId, groupId, aiMeta);
-
-      return res.json({
-        ok: true,
-        status: 'tool_calls',
-        toolCalls,
-        assistantMessage: {
-          role: 'assistant',
-          content: message.content == null
-            ? null
-            : sanitizeAiText(extractAiMessageText(message.content), MAX_AI_TRANSCRIPT_ASSISTANT_CHARS),
-          tool_calls: buildAiAssistantToolCalls(rawToolCalls),
-        },
-        aiMeta,
-        aiUsage: getAiUsageSnapshotForUser(userId),
-        debug,
-      });
+    } else if (!extractAiMessageText(message.content)) {
+      failures.push({ ...attempt, ok: false, status: 502, error: 'AI returned an empty response', payload: null });
+      continue;
     }
+    selected = { payload: attempt.payload, debug: attempt.debug, provider: apiConfig };
+    break;
+  }
 
-    const answer = extractAiMessageText(message.content);
-    if (!answer) {
-      console.warn('AI returned empty content:', debug);
-      return res.status(502).json({ error: 'AI returned an empty response', debug });
+  if (!selected) {
+    const last = failures[failures.length - 1] || {};
+    console.warn('All AI providers failed for this round:', failures.map((f) => ({
+      provider: f.providerLabel,
+      status: f.status,
+      error: f.error,
+    })));
+    const status = Number.isInteger(last.status) ? last.status : 502;
+    return res.status(status).json({
+      error: last.error || 'AI request failed',
+      debug: {
+        ...(last.debug || {}),
+        providerFailures: failures.map((f) => ({ provider: f.providerLabel, status: f.status, error: f.error })),
+      },
+    });
+  }
+
+  const { payload, debug, provider } = selected;
+  const message = payload?.choices?.[0]?.message || {};
+  const rawToolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+  debug.providerLabel = getAiProviderLabel(provider);
+
+  // Tool round: relay the calls back to the client for execution.
+  if (rawToolCalls.length) {
+    const toolCalls = [];
+    for (const call of rawToolCalls) {
+      const id = sanitizeAiText(call?.id, 64);
+      const name = sanitizeAiText(call?.function?.name, 64);
+      if (!id || !name) continue;
+      let input;
+      try {
+        input = JSON.parse(call?.function?.arguments);
+      } catch {
+        input = call?.function?.arguments || {};
+      }
+      toolCalls.push({ id, name, input });
     }
 
     const { meta: aiMeta } = buildAiRoundMeta(payload, selectedTone);
     recordAiUsageEvent(userId, groupId, aiMeta);
-    const updatedUsage = getAiUsageSnapshotForUser(userId);
 
-    res.json({
+    return res.json({
       ok: true,
-      status: 'answer',
-      model: aiMeta?.model || DEFAULT_AI_MODEL,
-      answer,
+      status: 'tool_calls',
+      toolCalls,
+      assistantMessage: {
+        role: 'assistant',
+        content: message.content == null
+          ? null
+          : sanitizeAiText(extractAiMessageText(message.content), MAX_AI_TRANSCRIPT_ASSISTANT_CHARS),
+        tool_calls: buildAiAssistantToolCalls(rawToolCalls),
+      },
       aiMeta,
-      aiUsage: updatedUsage,
+      aiUsage: getAiUsageSnapshotForUser(userId),
       debug,
     });
-  } catch (err) {
-    if (err && err.name === 'AbortError') {
-      return res.status(504).json({ error: 'AI request timed out' });
-    }
-    console.error('AI request error:', {
-      name: err?.name || 'Error',
-      message: sanitizeAiText(err?.message, 240) || 'Unknown error',
-      code: sanitizeAiText(err?.code, 64),
-      providerLabel,
-    });
-    res.status(502).json({ error: `Failed to contact ${providerLabel}` });
-  } finally {
-    clearTimeout(timeout);
   }
+
+  const answer = extractAiMessageText(message.content);
+  const { meta: aiMeta } = buildAiRoundMeta(payload, selectedTone);
+  recordAiUsageEvent(userId, groupId, aiMeta);
+  const updatedUsage = getAiUsageSnapshotForUser(userId);
+
+  res.json({
+    ok: true,
+    status: 'answer',
+    model: aiMeta?.model || DEFAULT_AI_MODEL,
+    answer,
+    aiMeta,
+    aiUsage: updatedUsage,
+    debug,
+  });
 });
 
 // ── Socket.IO ─────────────────────────────────────────────────────────────────

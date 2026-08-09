@@ -136,7 +136,7 @@ test('agent answers directly when the model returns content (no tools)', async (
   const usage = stmts.getUserAiUsageInWindow.get(group.ownerId, res.body.aiUsage.window.startIso, res.body.aiUsage.window.endIso);
   assert.ok(usage && usage.total_tokens > 0);
   assert.equal(upstreamCalls.length, 1);
-  assert.equal(upstreamCalls[0].url, 'https://opencode.ai/zen/v1/chat/completions');
+  assert.equal(upstreamCalls[0].url, 'https://opencode.ai/zen/go/v1/chat/completions');
   const sent = upstreamCalls[0].body;
   assert.equal(sent.model, 'deepseek-v4-flash');
   assert.equal(sent.messages[0].role, 'system');
@@ -224,6 +224,94 @@ test('fallback to the official DeepSeek API when the Zen key is missing', async 
   assert.equal(upstreamCalls[upstreamCalls.length - 1].url, 'https://api.deepseek.com/chat/completions');
   process.env.OPENCODE_ZEN_API_KEY = previousZenKey;
   process.env.DEEPSEEK_API_KEY = '';
+});
+
+test('v1.4.2: a failing primary provider (HTTP error) falls through to the fallback', async () => {
+  const previousZenKey = process.env.OPENCODE_ZEN_API_KEY;
+  const previousDeepseekKey = process.env.DEEPSEEK_API_KEY;
+  process.env.DEEPSEEK_API_KEY = 'test-deepseek-key';
+  const calls = [];
+  global.fetch = async (url) => {
+    calls.push(String(url));
+    if (String(url).includes('opencode.ai')) {
+      return {
+        ok: false,
+        status: 401,
+        json: async () => ({ error: { message: 'invalid api key' } }),
+      };
+    }
+    return openAiJsonResponse({
+      id: 'resp-fb',
+      model: 'deepseek-v4-flash',
+      choices: [{ index: 0, message: { role: 'assistant', content: 'recovered via fallback' } }],
+      usage: { prompt_tokens: 90, completion_tokens: 20, total_tokens: 110 },
+    });
+  };
+  const res = await postAiChat({ prompt: 'hello', tone: 'casual', groupName: 'AI room', channel: 'main' });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.status, 'answer');
+  assert.equal(res.body.answer, 'recovered via fallback');
+  assert.equal(res.body.debug.providerLabel, 'DeepSeek');
+  assert.deepEqual(calls, [
+    'https://opencode.ai/zen/go/v1/chat/completions',
+    'https://api.deepseek.com/chat/completions',
+  ]);
+  process.env.OPENCODE_ZEN_API_KEY = previousZenKey;
+  process.env.DEEPSEEK_API_KEY = previousDeepseekKey;
+});
+
+test('v1.4.2: an empty primary answer falls through to the fallback', async () => {
+  const previousZenKey = process.env.OPENCODE_ZEN_API_KEY;
+  const previousDeepseekKey = process.env.DEEPSEEK_API_KEY;
+  process.env.DEEPSEEK_API_KEY = 'test-deepseek-key';
+  const calls = [];
+  global.fetch = async (url) => {
+    calls.push(String(url));
+    if (String(url).includes('opencode.ai')) {
+      return openAiJsonResponse({
+        id: 'resp-empty',
+        model: 'deepseek-v4-flash',
+        choices: [{ index: 0, message: { role: 'assistant', content: '' } }],
+        usage: { prompt_tokens: 80, completion_tokens: 0, total_tokens: 80 },
+      });
+    }
+    return upstreamAnswer('fallback answered');
+  };
+  const res = await postAiChat({ prompt: 'hello', tone: 'casual', groupName: 'AI room', channel: 'main' });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.status, 'answer');
+  assert.equal(res.body.answer, 'fallback answered');
+  assert.equal(calls.length, 2);
+  process.env.OPENCODE_ZEN_API_KEY = previousZenKey;
+  process.env.DEEPSEEK_API_KEY = previousDeepseekKey;
+});
+
+test('v1.4.2: when every provider fails the round reports the failures', async () => {
+  const previousZenKey = process.env.OPENCODE_ZEN_API_KEY;
+  const previousDeepseekKey = process.env.DEEPSEEK_API_KEY;
+  process.env.DEEPSEEK_API_KEY = 'test-deepseek-key';
+  global.fetch = async (url) => {
+    if (String(url).includes('opencode.ai')) {
+      return {
+        ok: false,
+        status: 401,
+        json: async () => ({ error: { message: 'invalid api key' } }),
+      };
+    }
+    return {
+      ok: false,
+      status: 502,
+      json: async () => ({ error: { message: 'upstream exploded' } }),
+    };
+  };
+  const res = await postAiChat({ prompt: 'hello', tone: 'casual', groupName: 'AI room', channel: 'main' });
+  assert.equal(res.status, 502);
+  assert.equal(res.body.error, 'upstream exploded');
+  assert.equal(res.body.debug.providerFailures.length, 2);
+  assert.equal(res.body.debug.providerFailures[0].provider, 'OpenCode Go');
+  assert.equal(res.body.debug.providerFailures[1].provider, 'DeepSeek');
+  process.env.OPENCODE_ZEN_API_KEY = previousZenKey;
+  process.env.DEEPSEEK_API_KEY = previousDeepseekKey;
 });
 
 test('AI chat returns 503 when no provider key is configured', async () => {
