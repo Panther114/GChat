@@ -492,7 +492,7 @@
   var AI_CHANNEL_LIST_MAX_CHANNELS = 50;
   var AI_TONE_STORAGE_KEY = "gchat:ai-tone";
   var AI_ASSISTANT_USER_ID = "__gchat_ai_grok__";
-  var AI_ASSISTANT_NAME = "AI";
+  var AI_ASSISTANT_NAME = "GChat AI";
   var AI_ASSISTANT_COLOR = "#8d7bff";
   var AI_ASSISTANT_PROFILE_PICTURE = "/deepseek.webp";
   var AI_MODEL_PROFILE_PICTURES = {
@@ -2755,8 +2755,7 @@
   var pendingWhisperCommandStart = null;
   var composerTokens = {
     whisper: null,
-    hashtag: null,
-    ai: null
+    hashtag: null
   };
   var socketDiagnostics = {
     connectionState: "connecting",
@@ -2834,6 +2833,60 @@
     const known = getKnownChannels(groupId);
     known.delete(normalized);
     writeKnownChannels(groupId, [...known]);
+  }
+  async function syncServerChannels(groupId) {
+    if (!groupId) return;
+    try {
+      const res = await fetch(`/api/groups/${groupId}/channels`);
+      if (!res.ok) return;
+      const data = await res.json().catch(() => ({}));
+      const channels = Array.isArray(data.channels) ? data.channels : [];
+      if (!channels.length) return;
+      const cache = ensureGroupCacheEntry(groupId);
+      const byIndex = /* @__PURE__ */ new Map();
+      for (const msg of cache.messages || []) {
+        if (msg.tagIndex) byIndex.set(String(msg.tagIndex), msg);
+      }
+      let changed = false;
+      for (const entry of channels) {
+        const tagIndex = String(entry.tagIndex || "");
+        if (!tagIndex) continue;
+        let topic = null;
+        const cached = byIndex.get(tagIndex);
+        if (cached && !getMessageHashtagKey(cached)) {
+          try {
+            await hydrateMessageChannel(cached, groupId);
+          } catch {
+          }
+        }
+        topic = cached ? getMessageHashtagKey(cached) : null;
+        if (!topic && entry.sampleMessageId) {
+          try {
+            const msgRes = await fetch(`/api/groups/${groupId}/messages/${entry.sampleMessageId}`);
+            if (msgRes.ok) {
+              const msg = await msgRes.json();
+              if (msg && !getMessageHashtagKey(msg)) {
+                try {
+                  await hydrateMessageChannel(msg, groupId);
+                } catch {
+                }
+              }
+              topic = msg ? getMessageHashtagKey(msg) : null;
+            }
+          } catch {
+          }
+        }
+        if (topic && topic !== DEFAULT_TAG_TOPIC) {
+          const known = getKnownChannels(groupId);
+          if (!known.has(topic)) {
+            rememberChannel(groupId, topic);
+            changed = true;
+          }
+        }
+      }
+      if (changed && String(groupId) === String(currentGroupId)) renderTagFilters();
+    } catch {
+    }
   }
   function ensureGroupCacheEntry(groupId) {
     if (!groupDataCache.has(groupId)) {
@@ -3322,32 +3375,11 @@
     }
     ensureActiveTag(activeTagFilter || DEFAULT_TAG_TOPIC);
   }
-  function clearAiToken({ restoreText = false } = {}) {
-    const token = composerTokens.ai;
-    if (!token) return;
-    composerTokens.ai = null;
-    if (restoreText) {
-      const input = $("message-input");
-      if (input) {
-        input.value = token.raw + input.value;
-        input.selectionStart = input.selectionEnd = token.raw.length;
-      }
-    }
-    updateAiBtn();
-  }
   function syncComposerTokens() {
     const strip = $("message-token-strip");
     if (!strip) return;
     strip.replaceChildren();
-    const tokens = [];
-    if (composerTokens.ai) {
-      const token = document.createElement("span");
-      token.className = "message-token message-token-ai";
-      token.textContent = composerTokens.ai.label;
-      tokens.push(token);
-    }
-    strip.hidden = tokens.length === 0;
-    strip.append(...tokens);
+    strip.hidden = true;
   }
   function isAiModeEnabled(groupData = currentGroupData) {
     return !!(groupData && groupData.aiEnabled);
@@ -3376,11 +3408,11 @@
     return true;
   }
   function updateAiControls() {
-    if (composerTokens.ai && !canUseAiInCurrentGroup()) {
-      composerTokens.ai = null;
+    if (messageMode === "ai" && !canUseAiInCurrentGroup()) {
+      messageMode = "normal";
       syncComposerTokens();
     }
-    updateAiBtn();
+    updateMessageModeBtn();
   }
   function syncAiFeatureVisibility() {
     const show = aiFeatureEnabled;
@@ -3984,12 +4016,6 @@
   }
   function handleComposerBackspace(input) {
     if (!input || input.value || input.selectionStart !== 0 || input.selectionEnd !== 0) return false;
-    if (composerTokens.ai) {
-      clearAiToken({ restoreText: true });
-      syncComposerTokens();
-      autoResizeTextarea(input);
-      return true;
-    }
     if (composerTokens.hashtag) {
       clearHashtagToken({ restoreText: true });
       syncComposerTokens();
@@ -4012,7 +4038,7 @@
     let body = String(rawText || "").trim();
     let whisperRecipientIds = getActiveWhisperRecipientIds();
     let hashtag = getActiveTagTopic();
-    let isAiPrompt = !!composerTokens.ai;
+    let isAiPrompt = messageMode === "ai";
     let isDisappearing = messageMode === "disappearing";
     if (messageMode === "whisper" && !composerTokens.whisper && whisperRecipients.length === 0) {
       return { ok: false, error: "Select at least one whisper recipient" };
@@ -4338,6 +4364,15 @@
     ai: [
       ["circle", { cx: "12", cy: "12", r: "7.5" }],
       ["path", { d: "M12 8.4l1 3.1 3.1 1-3.1 1-1 3.1-1-3.1-3.1-1 3.1-1 1-3.1z" }]
+    ],
+    // v1.4.3: AI tone picker icons.
+    briefcase: [
+      ["rect", { x: "2", y: "7", width: "20", height: "14", rx: "2" }],
+      ["path", { d: "M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16" }]
+    ],
+    crown: [
+      ["path", { d: "M3 7l3.5 4L12 4l5.5 7L21 7v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1Z" }],
+      ["path", { d: "M5 21h14" }]
     ],
     reply: [
       ["polyline", { points: "9 17 4 12 9 7" }],
@@ -4708,8 +4743,7 @@
     syncProfilePictureModeUI();
     setupEmojiPicker();
     setupKeyboardShortcuts();
-    updateWhisperBtn();
-    updateAiBtn();
+    updateMessageModeBtn();
     syncResponsiveUiState();
     startHostedAppUpdatePolling();
     if (window.electronAPI) {
@@ -5388,6 +5422,7 @@
     renderGroupFromCache(normalizedGroupId);
     void markChannelReadOnOpen(normalizedGroupId);
     void fetchChannelUnreadCounts(normalizedGroupId);
+    void syncServerChannels(normalizedGroupId);
     if (document.hasFocus()) clearPageTitleNotification();
     if (hadCompleteCache) void refreshCurrentGroupFromServer();
     closeMobileActionMenu();
@@ -5397,7 +5432,6 @@
     const input = $("message-input");
     const sendBtn = $("send-btn");
     const blockedStatus = $("composer-blocked-status");
-    const aiPending = !!composerTokens.ai;
     const groupName = currentGroupData?.name ? String(currentGroupData.name) : "group";
     const channel = formatHashtagLabel(getActiveTagTopic());
     const whisperRecipients2 = getActiveWhisperRecipientIds();
@@ -5405,8 +5439,8 @@
       input.placeholder = `Whisper to ${formatWhisperRecipientLabel(whisperRecipients2, currentGroupId, { prefix: "" })} \xB7 ${channel} \xB7 ${groupName}`;
     } else if (messageMode === "disappearing") {
       input.placeholder = `Disappearing message ${channel} \xB7 ${groupName}`;
-    } else if (aiPending) {
-      input.placeholder = `Ask AI ${channel} \xB7 ${groupName}`;
+    } else if (messageMode === "ai") {
+      input.placeholder = `Ask GChat AI ${channel} \xB7 ${groupName}`;
     } else {
       input.placeholder = `Message ${channel} \xB7 ${groupName}`;
     }
@@ -6035,7 +6069,6 @@
     $("reply-preview-bar").hidden = true;
     const inp = $("message-input");
     inp.value = "";
-    clearAiToken();
     composerTokens.hashtag = null;
     composerTokens.whisper = null;
     whisperRecipients = [];
@@ -6612,6 +6645,7 @@
   }
   async function doSend(text) {
     if (!currentGroupId || !socket) return;
+    if (aiTonePickOpen) return;
     const key = getGroupKey(currentGroupId);
     if (!key) {
       showToast("Chat content is not ready yet", "error");
@@ -6623,7 +6657,7 @@
       return;
     }
     if (parsedMessage.isAiPrompt) {
-      void sendAiPromptMessage(parsedMessage);
+      void sendAiPromptWithTonePicker(parsedMessage);
       return;
     }
     const messageText = parsedMessage.text;
@@ -6869,6 +6903,7 @@
         xhr.setRequestHeader("X-Key-Version", "1");
         xhr.setRequestHeader("X-Client-Upload-Id", body.clientUploadId || "");
         if (body.tagIndex) xhr.setRequestHeader("X-Tag-Index", body.tagIndex);
+        if (body.replyToId) xhr.setRequestHeader("X-Reply-To-Id", String(body.replyToId));
         xhr.send(body.encryptedBytes);
         return;
       }
@@ -6921,7 +6956,8 @@
       const aad = v2Aad(messageIdentity);
       const { encryptedBytes, iv } = await encryptBytes(buffer, key, currentGroupId, aad);
       const hashtag = getActiveTagTopic();
-      const metadataEnvelope = await encryptJson({ filename: file.name, hashtag }, key, currentGroupId, "metadata", aad);
+      const replyPreview = replyingTo ? { senderName: replyingTo.senderName, preview: replyingTo.preview } : null;
+      const metadataEnvelope = await encryptJson({ filename: file.name, hashtag, replyPreview }, key, currentGroupId, "metadata", aad);
       const tagIndex = hashtag && hashtag !== DEFAULT_TAG_TOPIC ? await blindIndex(hashtag, key, currentGroupId, "tag-index") : null;
       let lastBroadcastLoaded = 0;
       let lastBroadcastAt = 0;
@@ -6946,7 +6982,8 @@
         encryptedMetadata: metadataEnvelope.encryptedContent,
         metadataIv: metadataEnvelope.iv,
         tagIndex,
-        clientUploadId: uploadId
+        clientUploadId: uploadId,
+        replyToId: replyingTo?.id || null
       };
       const res = await uploadEncryptedAttachment(currentGroupId, body, (loaded, total) => {
         updatePendingAttachmentProgress(uploadId, loaded, total);
@@ -7898,6 +7935,7 @@
   }
   function setupKeyboardShortcuts() {
     document.addEventListener("keydown", (e) => {
+      if (handleAiTonePickerKey(e)) return;
       if (e.key === "Escape") {
         document.querySelectorAll(".modal-overlay:not([hidden])").forEach((m) => {
           m.hidden = true;
@@ -7919,33 +7957,42 @@
     el.style.height = Math.min(el.scrollHeight, maxH) + "px";
     if (keepBottomPinned) pinMessagesToBottom();
   }
-  function updateWhisperBtn() {
+  function updateMessageModeBtn() {
     const keepBottomPinned = isMessagesPinnedToBottom();
     const btn = $("whisper-mode-btn");
     const whisperActive = messageMode === "whisper";
     const disappearingActive = messageMode === "disappearing";
+    const aiActive = messageMode === "ai";
     if (whisperActive) {
       setElementIcon(btn, "megaphone", { iconOnly: true, label: "Whisper message mode" });
       btn.classList.add("whisper-active");
-      btn.classList.remove("disappearing-active");
+      btn.classList.remove("disappearing-active", "ai-active");
       if (!whisperRecipients.length && whisperPickerMode == null) $("whisper-picker").hidden = true;
     } else if (disappearingActive) {
       setElementIcon(btn, "timer", { iconOnly: true, label: "Disappearing message mode" });
-      btn.classList.remove("whisper-active");
+      btn.classList.remove("whisper-active", "ai-active");
       btn.classList.add("disappearing-active");
+      hideWhisperPicker();
+    } else if (aiActive) {
+      setElementIcon(btn, "ai", { iconOnly: true, label: "AI mode \u2014 next message goes to GChat AI" });
+      btn.classList.remove("whisper-active", "disappearing-active");
+      btn.classList.add("ai-active");
       hideWhisperPicker();
     } else {
       setElementIcon(btn, "message-square", { iconOnly: true });
-      btn.classList.remove("whisper-active");
-      btn.classList.remove("disappearing-active");
+      btn.classList.remove("whisper-active", "disappearing-active", "ai-active");
       hideWhisperPicker();
     }
     const composer = $("message-input-bar");
     composer?.classList.toggle("whisper-mode-active", whisperActive);
     composer?.classList.toggle("disappearing-mode-active", disappearingActive);
+    composer?.classList.toggle("ai-mode-active", aiActive);
     updateKeyState();
     syncWhisperPickerStatus();
     if (keepBottomPinned) pinMessagesToBottom();
+  }
+  function updateWhisperBtn() {
+    updateMessageModeBtn();
   }
   async function kickMember(userId, username) {
     showConfirm("Kick Member", "Remove " + username + " from this group?", async () => {
@@ -8182,45 +8229,6 @@
   function getSelectedAiTone() {
     const value = String(selectedAiTone || "").trim().toLowerCase();
     return AI_TONE_LABELS[value] ? value : DEFAULT_AI_TONE;
-  }
-  function canToggleAiMode() {
-    if (!currentGroupId || !currentGroupData) return false;
-    if (composerTokens.whisper || messageMode === "whisper" && whisperRecipients.length > 0) return false;
-    return true;
-  }
-  function updateAiBtn() {
-    const btn = $("ai-mode-btn");
-    if (!btn) return;
-    const aiActive = !!composerTokens.ai;
-    const available = canUseAiInCurrentGroup();
-    btn.classList.toggle("ai-active", aiActive);
-    btn.classList.toggle("ai-unavailable", !available);
-    setElementIcon(btn, "ai", {
-      iconOnly: true,
-      label: aiActive ? "AI armed \u2014 next message goes to AI" : "Ask AI"
-    });
-    btn.setAttribute("aria-pressed", String(aiActive));
-    btn.title = aiActive ? "AI armed \u2014 click to cancel" : available ? "Ask AI \u2014 next message goes to AI" : getAiDisabledMessage() || "Ask AI";
-    updateKeyState();
-  }
-  function toggleAiMode() {
-    if (composerTokens.ai) {
-      composerTokens.ai = null;
-      syncComposerTokens();
-      updateAiBtn();
-      return;
-    }
-    if (!canUseAiInCurrentGroup({ showError: true })) return;
-    if (!canToggleAiMode()) {
-      showToast("AI requests cannot be combined with whispers", "error");
-      return;
-    }
-    composerTokens.ai = { raw: "", label: "AI" };
-    syncComposerTokens();
-    updateAiBtn();
-    showToast("AI armed \u2014 next message goes to AI", "success");
-    const input = $("message-input");
-    if (input) input.focus();
   }
   function isAiReadableMessage(msg) {
     return !!(msg && (msg.type === "text" || msg.type == null) && !(Array.isArray(msg.whisperTo) && msg.whisperTo.length) && !isDisappearingMessage(msg));
@@ -8572,12 +8580,13 @@
       }
       const answer = String(data.answer || "").trim();
       if (!answer) throw new Error("AI returned an empty response");
+      const normalizedAnswer = answer.replace(/^\n+/, "");
       if (accumulated) {
         accumulated.toolCalls = toolCallsTotal;
         accumulated.toolRounds = toolRounds;
       }
       return {
-        answer,
+        answer: normalizedAnswer,
         model: String(data.model || DEFAULT_AI_MODEL),
         aiMeta: accumulated,
         aiUsage: data.aiUsage || null
@@ -8620,7 +8629,103 @@
       aiRequestInFlight = false;
     }
   }
-  async function sendAiPromptMessage(parsedMessage) {
+  var AI_TONE_PICKER_TONES = [
+    { tone: "casual", key: "1", icon: "smile", label: "Casual", className: "tone-casual" },
+    { tone: "professional", key: "2", icon: "briefcase", label: "Professional", className: "tone-professional" },
+    { tone: "playful", key: "3", icon: "sparkles", label: "Playful", className: "tone-playful" },
+    { tone: "playful_gangster", key: "4", icon: "crown", label: "Playful Gangster", className: "tone-gangster" }
+  ];
+  var aiTonePickOpen = false;
+  var aiTonePickResolver = null;
+  var aiTonePickHighlighted = null;
+  function populateAiTonePicker() {
+    const grid = $("ai-tone-picker-grid");
+    if (!grid || grid.childNodes.length) return;
+    for (const entry of AI_TONE_PICKER_TONES) {
+      const label = AI_TONE_LABELS[entry.tone] || entry.label;
+      const box = document.createElement("button");
+      box.type = "button";
+      box.className = `ai-tone-box ${entry.className}`;
+      box.dataset.tone = entry.tone;
+      box.dataset.key = entry.key;
+      box.title = `Send with ${label} tone (${entry.key})`;
+      const icon = document.createElement("span");
+      icon.className = "ai-tone-box-icon";
+      icon.appendChild(createIcon(entry.icon));
+      const text = document.createElement("span");
+      text.className = "ai-tone-box-label";
+      text.textContent = label;
+      const badge = document.createElement("span");
+      badge.className = "ai-tone-box-key";
+      badge.textContent = entry.key;
+      box.append(icon, text, badge);
+      box.addEventListener("click", () => {
+        resolveAiTonePick(entry.tone);
+      });
+      grid.appendChild(box);
+    }
+  }
+  function resolveAiTonePick(tone) {
+    if (!aiTonePickOpen) return;
+    const resolver = aiTonePickResolver;
+    aiTonePickOpen = false;
+    aiTonePickResolver = null;
+    aiTonePickHighlighted = null;
+    const picker = $("ai-tone-picker");
+    if (picker) picker.hidden = true;
+    if (resolver) resolver(tone);
+  }
+  function cancelAiTonePick() {
+    resolveAiTonePick(null);
+  }
+  function showAiTonePicker() {
+    populateAiTonePicker();
+    const picker = $("ai-tone-picker");
+    if (!picker) return Promise.resolve(null);
+    const current = getSelectedAiTone();
+    aiTonePickHighlighted = AI_TONE_PICKER_TONES.some((entry) => entry.tone === current) ? current : AI_TONE_PICKER_TONES[0].tone;
+    for (const box of picker.querySelectorAll(".ai-tone-box")) {
+      box.classList.toggle("is-highlighted", box.dataset.tone === aiTonePickHighlighted);
+    }
+    picker.hidden = false;
+    aiTonePickOpen = true;
+    return new Promise((resolve) => {
+      aiTonePickResolver = resolve;
+    });
+  }
+  function handleAiTonePickerKey(event) {
+    if (!aiTonePickOpen) return false;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      cancelAiTonePick();
+      return true;
+    }
+    if (event.key === "Enter") {
+      if (event.defaultPrevented) return false;
+      event.preventDefault();
+      event.stopPropagation();
+      resolveAiTonePick(aiTonePickHighlighted || AI_TONE_PICKER_TONES[0].tone);
+      return true;
+    }
+    const entry = AI_TONE_PICKER_TONES.find(
+      (item) => item.key === event.key || item.tone === String(event.key || "").toLowerCase()
+    );
+    if (entry) {
+      event.preventDefault();
+      event.stopPropagation();
+      resolveAiTonePick(entry.tone);
+      return true;
+    }
+    return false;
+  }
+  async function sendAiPromptWithTonePicker(parsedMessage) {
+    if (aiTonePickOpen) return;
+    const tone = await showAiTonePicker();
+    if (!tone) return;
+    await sendAiPromptMessage(parsedMessage, tone);
+  }
+  async function sendAiPromptMessage(parsedMessage, tone = getSelectedAiTone()) {
     const groupId = currentGroupId;
     const groupName = currentGroupData?.name || "";
     const prompt = parsedMessage.text;
@@ -8674,7 +8779,7 @@
         isDisappearing: false,
         disappearingDurationMs: 0,
         aiMention: true,
-        aiMeta: { model: DEFAULT_AI_MODEL, mode: DEFAULT_AI_MODE, tone: getSelectedAiTone(), webSearchEnabled: false }
+        aiMeta: { model: DEFAULT_AI_MODEL, mode: DEFAULT_AI_MODE, tone, webSearchEnabled: false }
       });
       resetComposerAfterSend();
       showToast("AI request sent", "success");
@@ -8682,7 +8787,7 @@
         groupId,
         groupName,
         prompt,
-        tone: getSelectedAiTone(),
+        tone,
         channel,
         hashtag,
         replyToData,
@@ -9529,6 +9634,14 @@
       $("reply-preview-name").textContent = msg.senderName;
       $("reply-preview-text").textContent = truncate(replyingTo.preview, 80);
       $("reply-preview-bar").hidden = false;
+      if (isAiAssistantMessage(msg) && canUseAiInCurrentGroup()) {
+        messageMode = "ai";
+        whisperRecipients = [];
+        composerTokens.whisper = null;
+        hideWhisperPicker();
+        updateMessageModeBtn();
+        showToast("Reply will be sent to GChat AI", "info");
+      }
       $("message-input").focus();
     });
     $("ctx-edit").addEventListener("click", () => {
@@ -9627,6 +9740,10 @@
       if (!$("emoji-picker").contains(e.target) && e.target !== $("emoji-btn")) {
         $("emoji-picker").hidden = true;
       }
+      const tonePicker = $("ai-tone-picker");
+      if (tonePicker && !tonePicker.hidden && !tonePicker.contains(e.target) && !e.target.closest("#message-input-bar")) {
+        cancelAiTonePick();
+      }
       if (!$("whisper-picker").contains(e.target) && !$("whisper-mode-btn").contains(e.target) && e.target !== $("message-input")) {
         cancelWhisperSelection();
       }
@@ -9656,13 +9773,6 @@
         if (composerNearBottomBeforeFocus) scrollToBottom(true);
       }, MOBILE_KEYBOARD_FOCUS_DELAY_MS);
     });
-    const aiModeBtn = $("ai-mode-btn");
-    if (aiModeBtn) {
-      aiModeBtn.addEventListener("click", () => {
-        toggleAiMode();
-        updateAiBtn();
-      });
-    }
     const aiToneSelect = $("ai-tone-select");
     if (aiToneSelect) {
       aiToneSelect.addEventListener("change", () => {
@@ -9682,6 +9792,7 @@
         return;
       }
       if (e.key === "Enter" && !e.shiftKey) {
+        if (aiTonePickOpen) return;
         e.preventDefault();
         doSend(msgInput.value);
       }
@@ -9722,11 +9833,18 @@
         messageMode = "disappearing";
         whisperRecipients = [];
         composerTokens.whisper = null;
+      } else if (messageMode === "disappearing") {
+        messageMode = "ai";
+        whisperRecipients = [];
+        composerTokens.whisper = null;
+        if (!canUseAiInCurrentGroup({ showError: true })) {
+          messageMode = "normal";
+        }
       } else messageMode = "normal";
       if (messageMode === "whisper") showWhisperPicker("button");
       else hideWhisperPicker();
       syncComposerTokens();
-      updateWhisperBtn();
+      updateMessageModeBtn();
     });
     $("whisper-picker-confirm").addEventListener("click", () => {
       if (!getActiveWhisperRecipientIds().length) {

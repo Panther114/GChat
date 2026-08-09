@@ -481,7 +481,7 @@ const AI_TOOL_RESULT_MAX_CHARS = 24000;
 const AI_CHANNEL_LIST_MAX_CHANNELS = 50;
 const AI_TONE_STORAGE_KEY = 'gchat:ai-tone';
 const AI_ASSISTANT_USER_ID = '__gchat_ai_grok__';
-const AI_ASSISTANT_NAME = 'AI';
+const AI_ASSISTANT_NAME = 'GChat AI';
 const AI_ASSISTANT_COLOR = '#8d7bff';
 const AI_ASSISTANT_PROFILE_PICTURE = '/deepseek.webp';
 const AI_MODEL_PROFILE_PICTURES = {
@@ -3295,7 +3295,7 @@ let currentGroupData = null;
 let groups = [];
 let members = [];
 let socket = null;
-let messageMode = 'normal'; // 'normal' | 'whisper' | 'disappearing'
+let messageMode = 'normal'; // 'normal' | 'whisper' | 'disappearing' | 'ai'
 let whisperRecipients = [];
 let replyingTo = null;
 let unreadCounts = {};
@@ -3351,7 +3351,6 @@ let pendingWhisperCommandStart = null;
 const composerTokens = {
   whisper: null,
   hashtag: null,
-  ai: null,
 };
 const socketDiagnostics = {
   connectionState: 'connecting',
@@ -3438,6 +3437,62 @@ function forgetChannel(groupId, topic) {
   const known = getKnownChannels(groupId);
   known.delete(normalized);
   writeKnownChannels(groupId, [...known]);
+}
+
+// v1.4.3: server-side channel reconciliation. The server knows every distinct
+// blind tag index of the group's messages plus a sample message id; topic
+// NAMES are resolved here via local decryption (E2E — no plaintext topics
+// leave the server). This keeps the channel list consistent across members
+// even when one member never saw another member's channel messages.
+async function syncServerChannels(groupId) {
+  if (!groupId) return;
+  try {
+    const res = await fetch(`/api/groups/${groupId}/channels`);
+    if (!res.ok) return;
+    const data = await res.json().catch(() => ({}));
+    const channels = Array.isArray(data.channels) ? data.channels : [];
+    if (!channels.length) return;
+    const cache = ensureGroupCacheEntry(groupId);
+    const byIndex = new Map();
+    for (const msg of cache.messages || []) {
+      if (msg.tagIndex) byIndex.set(String(msg.tagIndex), msg);
+    }
+    let changed = false;
+    for (const entry of channels) {
+      const tagIndex = String(entry.tagIndex || '');
+      if (!tagIndex) continue;
+      let topic = null;
+      const cached = byIndex.get(tagIndex);
+      if (cached && !getMessageHashtagKey(cached)) {
+        try {
+          await hydrateMessageChannel(cached, groupId);
+        } catch { /* keep fallback */ }
+      }
+      topic = cached ? getMessageHashtagKey(cached) : null;
+      if (!topic && entry.sampleMessageId) {
+        try {
+          const msgRes = await fetch(`/api/groups/${groupId}/messages/${entry.sampleMessageId}`);
+          if (msgRes.ok) {
+            const msg = await msgRes.json();
+            if (msg && !getMessageHashtagKey(msg)) {
+              try {
+                await hydrateMessageChannel(msg, groupId);
+              } catch { /* keep fallback */ }
+            }
+            topic = msg ? getMessageHashtagKey(msg) : null;
+          }
+        } catch { /* ignore */ }
+      }
+      if (topic && topic !== DEFAULT_TAG_TOPIC) {
+        const known = getKnownChannels(groupId);
+        if (!known.has(topic)) {
+          rememberChannel(groupId, topic);
+          changed = true;
+        }
+      }
+    }
+    if (changed && String(groupId) === String(currentGroupId)) renderTagFilters();
+  } catch { /* best effort — local channel knowledge still works */ }
 }
 
 function ensureGroupCacheEntry(groupId) {
@@ -4085,42 +4140,13 @@ function clearHashtagToken({ restoreText = false } = {}) {
   ensureActiveTag(activeTagFilter || DEFAULT_TAG_TOPIC);
 }
 
-function setAiToken() {
-  composerTokens.ai = {
-    raw: '',
-    label: 'AI',
-  };
-  updateAiBtn();
-  return true;
-}
-
-function clearAiToken({ restoreText = false } = {}) {
-  const token = composerTokens.ai;
-  if (!token) return;
-  composerTokens.ai = null;
-  if (restoreText) {
-    const input = $('message-input');
-    if (input) {
-      input.value = token.raw + input.value;
-      input.selectionStart = input.selectionEnd = token.raw.length;
-    }
-  }
-  updateAiBtn();
-}
-
 function syncComposerTokens() {
   const strip = $('message-token-strip');
   if (!strip) return;
   strip.replaceChildren();
-  const tokens = [];
-  if (composerTokens.ai) {
-    const token = document.createElement('span');
-    token.className = 'message-token message-token-ai';
-    token.textContent = composerTokens.ai.label;
-    tokens.push(token);
-  }
-  strip.hidden = tokens.length === 0;
-  strip.append(...tokens);
+  // v1.4.3: AI mode is indicated by the colored mode button + blue input,
+  // never by a token chip in the input strip.
+  strip.hidden = true;
 }
 
 function isAiModeEnabled(groupData = currentGroupData) {
@@ -4153,13 +4179,13 @@ function canUseAiInCurrentGroup({ showError = false } = {}) {
 }
 
 function updateAiControls() {
-  // The armed AI token must not survive a group switch / AI becoming
-  // unavailable — otherwise the next message would silently go to AI.
-  if (composerTokens.ai && !canUseAiInCurrentGroup()) {
-    composerTokens.ai = null;
+  // AI mode must not survive a group switch / AI becoming unavailable —
+  // otherwise the next message would silently go to the agent.
+  if (messageMode === 'ai' && !canUseAiInCurrentGroup()) {
+    messageMode = 'normal';
     syncComposerTokens();
   }
-  updateAiBtn();
+  updateMessageModeBtn();
 }
 
 // v1.4: reveal the AI-only UI (profile usage card, tone picker) when the
@@ -4931,12 +4957,6 @@ function renderTagFilters() {
 
 function handleComposerBackspace(input) {
   if (!input || input.value || input.selectionStart !== 0 || input.selectionEnd !== 0) return false;
-  if (composerTokens.ai) {
-    clearAiToken({ restoreText: true });
-    syncComposerTokens();
-      autoResizeTextarea(input);
-    return true;
-  }
   if (composerTokens.hashtag) {
     clearHashtagToken({ restoreText: true });
     syncComposerTokens();
@@ -4962,7 +4982,7 @@ function parseComposerMessageInput(rawText) {
   let whisperRecipientIds = getActiveWhisperRecipientIds();
   // Every message is stamped with the active sub-chat channel (default #main).
   let hashtag = getActiveTagTopic();
-  let isAiPrompt = !!composerTokens.ai;
+  let isAiPrompt = messageMode === 'ai';
   let isDisappearing = messageMode === 'disappearing';
 
   if (messageMode === 'whisper' && !composerTokens.whisper && whisperRecipients.length === 0) {
@@ -5314,6 +5334,15 @@ const ICON_SPECS = {
   ai: [
     ['circle', { cx: '12', cy: '12', r: '7.5' }],
     ['path', { d: 'M12 8.4l1 3.1 3.1 1-3.1 1-1 3.1-1-3.1-3.1-1 3.1-1 1-3.1z' }],
+  ],
+  // v1.4.3: AI tone picker icons.
+  briefcase: [
+    ['rect', { x: '2', y: '7', width: '20', height: '14', rx: '2' }],
+    ['path', { d: 'M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16' }],
+  ],
+  crown: [
+    ['path', { d: 'M3 7l3.5 4L12 4l5.5 7L21 7v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1Z' }],
+    ['path', { d: 'M5 21h14' }],
   ],
   reply: [
     ['polyline', { points: '9 17 4 12 9 7' }],
@@ -5739,8 +5768,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   syncProfilePictureModeUI();
   setupEmojiPicker();
   setupKeyboardShortcuts();
-  updateWhisperBtn();
-  updateAiBtn();
+  updateMessageModeBtn();
   syncResponsiveUiState();
   startHostedAppUpdatePolling();
 
@@ -6580,6 +6608,10 @@ async function selectGroup(groupId) {
   // renderActiveChannelStream, which re-attaches the memoized window.)
   void markChannelReadOnOpen(normalizedGroupId);
   void fetchChannelUnreadCounts(normalizedGroupId);
+  // v1.4.3: reconcile the channel list with every member's channels (the
+  // server knows each channel's blind tag index + a sample message; the topic
+  // name is resolved locally via decryption).
+  void syncServerChannels(normalizedGroupId);
   // v1.3.9: reading the group counts as "seen" — stop the title blink even if
   // the window itself isn't focused (e.g. multiple windows on one account).
   if (document.hasFocus()) clearPageTitleNotification();
@@ -6595,7 +6627,6 @@ function updateKeyState() {
   const input = $('message-input');
   const sendBtn = $('send-btn');
   const blockedStatus = $('composer-blocked-status');
-  const aiPending = !!composerTokens.ai;
   const groupName = currentGroupData?.name ? String(currentGroupData.name) : 'group';
   const channel = formatHashtagLabel(getActiveTagTopic());
   const whisperRecipients = getActiveWhisperRecipientIds();
@@ -6603,8 +6634,8 @@ function updateKeyState() {
     input.placeholder = `Whisper to ${formatWhisperRecipientLabel(whisperRecipients, currentGroupId, { prefix: '' })} · ${channel} · ${groupName}`;
   } else if (messageMode === 'disappearing') {
     input.placeholder = `Disappearing message ${channel} · ${groupName}`;
-  } else if (aiPending) {
-    input.placeholder = `Ask AI ${channel} · ${groupName}`;
+  } else if (messageMode === 'ai') {
+    input.placeholder = `Ask GChat AI ${channel} · ${groupName}`;
   } else {
     input.placeholder = `Message ${channel} · ${groupName}`;
   }
@@ -7363,7 +7394,6 @@ function resetComposerAfterSend() {
   $('reply-preview-bar').hidden = true;
   const inp = $('message-input');
   inp.value = '';
-  clearAiToken();
   composerTokens.hashtag = null;
   composerTokens.whisper = null;
   whisperRecipients = [];
@@ -7999,6 +8029,7 @@ async function startEditMessage(msg, currentPlaintext) {
 // ── Send message ──────────────────────────────────────────────────────────────
 async function doSend(text) {
   if (!currentGroupId || !socket) return;
+  if (aiTonePickOpen) return;
   const key = getGroupKey(currentGroupId);
   if (!key) {
     showToast('Chat content is not ready yet', 'error');
@@ -8010,7 +8041,7 @@ async function doSend(text) {
     return;
   }
   if (parsedMessage.isAiPrompt) {
-    void sendAiPromptMessage(parsedMessage);
+    void sendAiPromptWithTonePicker(parsedMessage);
     return;
   }
   const messageText = parsedMessage.text;
@@ -8294,6 +8325,7 @@ function uploadEncryptedAttachment(groupId, body, onProgress) {
       xhr.setRequestHeader('X-Key-Version', '1');
       xhr.setRequestHeader('X-Client-Upload-Id', body.clientUploadId || '');
       if (body.tagIndex) xhr.setRequestHeader('X-Tag-Index', body.tagIndex);
+      if (body.replyToId) xhr.setRequestHeader('X-Reply-To-Id', String(body.replyToId));
       xhr.send(body.encryptedBytes);
       return;
     }
@@ -8352,7 +8384,12 @@ async function handleFileUpload(file) {
     const { encryptedBytes, iv } = await GChatCryptoV2.encryptBytes(buffer, key, currentGroupId, aad);
     // Attachments belong to the active channel (sub-chat), same as text messages.
     const hashtag = getActiveTagTopic();
-    const metadataEnvelope = await GChatCryptoV2.encryptJson({ filename: file.name, hashtag }, key, currentGroupId, 'metadata', aad);
+    // v1.4.3: attachments can reply to a message — the reply identity travels
+    // in the encrypted metadata (rendered quote) and as replyToId (server).
+    const replyPreview = replyingTo
+      ? { senderName: replyingTo.senderName, preview: replyingTo.preview }
+      : null;
+    const metadataEnvelope = await GChatCryptoV2.encryptJson({ filename: file.name, hashtag, replyPreview }, key, currentGroupId, 'metadata', aad);
     // v1.3.13: #main must not carry a blind tag index (see doSend) — otherwise
     // its read cursor (NULL index) could never cover the attachment.
     const tagIndex = hashtag && hashtag !== DEFAULT_TAG_TOPIC
@@ -8388,6 +8425,7 @@ async function handleFileUpload(file) {
       metadataIv: metadataEnvelope.iv,
       tagIndex,
       clientUploadId: uploadId,
+      replyToId: replyingTo?.id || null,
     };
     const res = await uploadEncryptedAttachment(currentGroupId, body, (loaded, total) => {
       updatePendingAttachmentProgress(uploadId, loaded, total);
@@ -9504,6 +9542,8 @@ function insertEmoji(em) {
 // ── Keyboard shortcuts ────────────────────────────────────────────────────────
 function setupKeyboardShortcuts() {
   document.addEventListener('keydown', (e) => {
+    // v1.4.3: while the AI tone picker is open, 1-4 / Enter / Escape drive it.
+    if (handleAiTonePickerKey(e)) return;
     if (e.key === 'Escape') {
       // Close modals
       document.querySelectorAll('.modal-overlay:not([hidden])').forEach((m) => {
@@ -9533,33 +9573,46 @@ function autoResizeTextarea(el) {
 }
 
 // ── Whisper mode ──────────────────────────────────────────────────────────────
-function updateWhisperBtn() {
+// v1.4.3: the message-mode button cycles normal → whisper → disappearing →
+// AI. AI mode is BLUE (button + input text); the mode is also how the user
+// arms the Ask-AI agent — no token chip, no separate AI button.
+function updateMessageModeBtn() {
   const keepBottomPinned = isMessagesPinnedToBottom();
   const btn = $('whisper-mode-btn');
   const whisperActive = messageMode === 'whisper';
   const disappearingActive = messageMode === 'disappearing';
+  const aiActive = messageMode === 'ai';
   if (whisperActive) {
     setElementIcon(btn, 'megaphone', { iconOnly: true, label: 'Whisper message mode' });
     btn.classList.add('whisper-active');
-    btn.classList.remove('disappearing-active');
+    btn.classList.remove('disappearing-active', 'ai-active');
     if (!whisperRecipients.length && whisperPickerMode == null) $('whisper-picker').hidden = true;
   } else if (disappearingActive) {
     setElementIcon(btn, 'timer', { iconOnly: true, label: 'Disappearing message mode' });
-    btn.classList.remove('whisper-active');
+    btn.classList.remove('whisper-active', 'ai-active');
     btn.classList.add('disappearing-active');
+    hideWhisperPicker();
+  } else if (aiActive) {
+    setElementIcon(btn, 'ai', { iconOnly: true, label: 'AI mode — next message goes to GChat AI' });
+    btn.classList.remove('whisper-active', 'disappearing-active');
+    btn.classList.add('ai-active');
     hideWhisperPicker();
   } else {
     setElementIcon(btn, 'message-square', { iconOnly: true });
-    btn.classList.remove('whisper-active');
-    btn.classList.remove('disappearing-active');
+    btn.classList.remove('whisper-active', 'disappearing-active', 'ai-active');
     hideWhisperPicker();
   }
   const composer = $('message-input-bar');
   composer?.classList.toggle('whisper-mode-active', whisperActive);
   composer?.classList.toggle('disappearing-mode-active', disappearingActive);
+  composer?.classList.toggle('ai-mode-active', aiActive);
   updateKeyState();
   syncWhisperPickerStatus();
   if (keepBottomPinned) pinMessagesToBottom();
+}
+
+function updateWhisperBtn() {
+  updateMessageModeBtn();
 }
 
 // ── Kick member ───────────────────────────────────────────────────────────────
@@ -9830,53 +9883,9 @@ function getSelectedAiTone() {
 }
 
 // ── v1.4: Ask-AI composer toggle ─────────────────────────────────────────────
-// The AI entry point is a tool-button next to attach. Toggling it arms the
-// composer: the highlighted button + the AI token chip show that the NEXT
-// message the user sends goes to the AI agent. No modal, no popup.
-
-function canToggleAiMode() {
-  if (!currentGroupId || !currentGroupData) return false;
-  if (composerTokens.whisper || (messageMode === 'whisper' && whisperRecipients.length > 0)) return false;
-  return true;
-}
-
-function updateAiBtn() {
-  const btn = $('ai-mode-btn');
-  if (!btn) return;
-  const aiActive = !!composerTokens.ai;
-  const available = canUseAiInCurrentGroup();
-  btn.classList.toggle('ai-active', aiActive);
-  btn.classList.toggle('ai-unavailable', !available);
-  setElementIcon(btn, 'ai', {
-    iconOnly: true,
-    label: aiActive ? 'AI armed — next message goes to AI' : 'Ask AI',
-  });
-  btn.setAttribute('aria-pressed', String(aiActive));
-  btn.title = aiActive
-    ? 'AI armed — click to cancel'
-    : (available ? 'Ask AI — next message goes to AI' : (getAiDisabledMessage() || 'Ask AI'));
-  updateKeyState();
-}
-
-function toggleAiMode() {
-  if (composerTokens.ai) {
-    composerTokens.ai = null;
-    syncComposerTokens();
-    updateAiBtn();
-    return;
-  }
-  if (!canUseAiInCurrentGroup({ showError: true })) return;
-  if (!canToggleAiMode()) {
-    showToast('AI requests cannot be combined with whispers', 'error');
-    return;
-  }
-  composerTokens.ai = { raw: '', label: 'AI' };
-  syncComposerTokens();
-  updateAiBtn();
-  showToast('AI armed — next message goes to AI', 'success');
-  const input = $('message-input');
-  if (input) input.focus();
-}
+// The AI entry point is the message-mode cycle: AI mode is a blue composer
+// state (button + input text). The NEXT message the user sends goes to the
+// GChat AI agent, with a tone picked right before sending.
 
 // ── v1.4: agent tools (client-executed) ──────────────────────────────────────
 // Message content is E2E-encrypted and only the browser holds the keys, so the
@@ -10296,12 +10305,15 @@ async function requestAiResponse(groupId, options = {}) {
 
     const answer = String(data.answer || '').trim();
     if (!answer) throw new Error('AI returned an empty response');
+    // v1.4.3: some providers lead the answer with blank lines; never let a
+    // leading newline reach the bubble (renders as an empty first line).
+    const normalizedAnswer = answer.replace(/^\n+/, '');
     if (accumulated) {
       accumulated.toolCalls = toolCallsTotal;
       accumulated.toolRounds = toolRounds;
     }
     return {
-      answer,
+      answer: normalizedAnswer,
       model: String(data.model || DEFAULT_AI_MODEL),
       aiMeta: accumulated,
       aiUsage: data.aiUsage || null,
@@ -10352,7 +10364,122 @@ async function sendAiReplyInBackground(request) {
 // normal v2 message stamped with aiMention + aiMeta (and the active channel),
 // then the agent runs in the background and its reply lands in the same
 // channel via the send_ai_message socket flow.
-async function sendAiPromptMessage(parsedMessage) {
+// ── v1.4.3: AI tone picker ───────────────────────────────────────────────────
+// Sending a message to the AI agent pops a quick tone selector (four themed
+// boxes with icons + number keys). Press 1-4 or click a box to send with that
+// tone; Enter confirms the highlighted tone; Escape cancels the send (the
+// typed text stays in the composer).
+
+const AI_TONE_PICKER_TONES = [
+  { tone: 'casual', key: '1', icon: 'smile', label: 'Casual', className: 'tone-casual' },
+  { tone: 'professional', key: '2', icon: 'briefcase', label: 'Professional', className: 'tone-professional' },
+  { tone: 'playful', key: '3', icon: 'sparkles', label: 'Playful', className: 'tone-playful' },
+  { tone: 'playful_gangster', key: '4', icon: 'crown', label: 'Playful Gangster', className: 'tone-gangster' },
+];
+
+let aiTonePickOpen = false;
+let aiTonePickResolver = null;
+let aiTonePickHighlighted = null;
+
+function populateAiTonePicker() {
+  const grid = $('ai-tone-picker-grid');
+  if (!grid || grid.childNodes.length) return;
+  for (const entry of AI_TONE_PICKER_TONES) {
+    const label = AI_TONE_LABELS[entry.tone] || entry.label;
+    const box = document.createElement('button');
+    box.type = 'button';
+    box.className = `ai-tone-box ${entry.className}`;
+    box.dataset.tone = entry.tone;
+    box.dataset.key = entry.key;
+    box.title = `Send with ${label} tone (${entry.key})`;
+    const icon = document.createElement('span');
+    icon.className = 'ai-tone-box-icon';
+    icon.appendChild(createIcon(entry.icon));
+    const text = document.createElement('span');
+    text.className = 'ai-tone-box-label';
+    text.textContent = label;
+    const badge = document.createElement('span');
+    badge.className = 'ai-tone-box-key';
+    badge.textContent = entry.key;
+    box.append(icon, text, badge);
+    box.addEventListener('click', () => {
+      resolveAiTonePick(entry.tone);
+    });
+    grid.appendChild(box);
+  }
+}
+
+function resolveAiTonePick(tone) {
+  if (!aiTonePickOpen) return;
+  const resolver = aiTonePickResolver;
+  aiTonePickOpen = false;
+  aiTonePickResolver = null;
+  aiTonePickHighlighted = null;
+  const picker = $('ai-tone-picker');
+  if (picker) picker.hidden = true;
+  if (resolver) resolver(tone);
+}
+
+function cancelAiTonePick() {
+  resolveAiTonePick(null);
+}
+
+function showAiTonePicker() {
+  populateAiTonePicker();
+  const picker = $('ai-tone-picker');
+  if (!picker) return Promise.resolve(null);
+  const current = getSelectedAiTone();
+  aiTonePickHighlighted = AI_TONE_PICKER_TONES.some((entry) => entry.tone === current)
+    ? current
+    : AI_TONE_PICKER_TONES[0].tone;
+  for (const box of picker.querySelectorAll('.ai-tone-box')) {
+    box.classList.toggle('is-highlighted', box.dataset.tone === aiTonePickHighlighted);
+  }
+  picker.hidden = false;
+  aiTonePickOpen = true;
+  return new Promise((resolve) => {
+    aiTonePickResolver = resolve;
+  });
+}
+
+function handleAiTonePickerKey(event) {
+  if (!aiTonePickOpen) return false;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopPropagation();
+    cancelAiTonePick();
+    return true;
+  }
+  if (event.key === 'Enter') {
+    // v1.4.3: the Enter that OPENED the picker (send keypress, already
+    // preventDefault'ed by the composer) must not instantly confirm it — only
+    // a subsequent Enter confirms the highlighted tone.
+    if (event.defaultPrevented) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    resolveAiTonePick(aiTonePickHighlighted || AI_TONE_PICKER_TONES[0].tone);
+    return true;
+  }
+  const entry = AI_TONE_PICKER_TONES.find(
+    (item) => item.key === event.key || item.tone === String(event.key || '').toLowerCase()
+  );
+  if (entry) {
+    event.preventDefault();
+    event.stopPropagation();
+    resolveAiTonePick(entry.tone);
+    return true;
+  }
+  return false;
+}
+
+async function sendAiPromptWithTonePicker(parsedMessage) {
+  if (aiTonePickOpen) return;
+  const tone = await showAiTonePicker();
+  if (!tone) return; // cancelled — the message text stays in the composer
+  await sendAiPromptMessage(parsedMessage, tone);
+}
+
+async function sendAiPromptMessage(parsedMessage, tone = getSelectedAiTone()) {
   const groupId = currentGroupId;
   const groupName = currentGroupData?.name || '';
   const prompt = parsedMessage.text;
@@ -10413,7 +10540,7 @@ async function sendAiPromptMessage(parsedMessage) {
       isDisappearing: false,
       disappearingDurationMs: 0,
       aiMention: true,
-      aiMeta: { model: DEFAULT_AI_MODEL, mode: DEFAULT_AI_MODE, tone: getSelectedAiTone(), webSearchEnabled: false },
+      aiMeta: { model: DEFAULT_AI_MODEL, mode: DEFAULT_AI_MODE, tone, webSearchEnabled: false },
     });
 
     resetComposerAfterSend();
@@ -10423,7 +10550,7 @@ async function sendAiPromptMessage(parsedMessage) {
       groupId,
       groupName,
       prompt,
-      tone: getSelectedAiTone(),
+      tone,
       channel,
       hashtag,
       replyToData,
@@ -11274,6 +11401,16 @@ function setupEventListeners() {
     $('reply-preview-name').textContent = msg.senderName;
     $('reply-preview-text').textContent = truncate(replyingTo.preview, 80);
     $('reply-preview-bar').hidden = false;
+    // v1.4.3: replying to a GChat AI message arms AI mode automatically — the
+    // reply goes to the agent (the user can still cycle the mode back off).
+    if (isAiAssistantMessage(msg) && canUseAiInCurrentGroup()) {
+      messageMode = 'ai';
+      whisperRecipients = [];
+      composerTokens.whisper = null;
+      hideWhisperPicker();
+      updateMessageModeBtn();
+      showToast('Reply will be sent to GChat AI', 'info');
+    }
     $('message-input').focus();
   });
 
@@ -11389,6 +11526,12 @@ function setupEventListeners() {
     if (!$('emoji-picker').contains(e.target) && e.target !== $('emoji-btn')) {
       $('emoji-picker').hidden = true;
     }
+    // v1.4.3: clicking outside the tone picker (and outside the composer bar,
+    // so the send button and input never self-cancel) abandons the pick.
+    const tonePicker = $('ai-tone-picker');
+    if (tonePicker && !tonePicker.hidden && !tonePicker.contains(e.target) && !e.target.closest('#message-input-bar')) {
+      cancelAiTonePick();
+    }
     if (!$('whisper-picker').contains(e.target) && !$('whisper-mode-btn').contains(e.target) && e.target !== $('message-input')) {
       cancelWhisperSelection();
     }
@@ -11425,15 +11568,8 @@ function setupEventListeners() {
     }, MOBILE_KEYBOARD_FOCUS_DELAY_MS);
   });
 
-  // v1.4: the AI entry point — a tool button that arms the composer so the
-  // next message goes to the AI agent (no modal, no popup).
-  const aiModeBtn = $('ai-mode-btn');
-  if (aiModeBtn) {
-    aiModeBtn.addEventListener('click', () => {
-      toggleAiMode();
-      updateAiBtn();
-    });
-  }
+  // v1.4.3: the AI entry point is the message-mode cycle (whisper-mode-btn);
+  // no separate AI button.
   const aiToneSelect = $('ai-tone-select');
   if (aiToneSelect) {
     aiToneSelect.addEventListener('change', () => {
@@ -11455,6 +11591,10 @@ function setupEventListeners() {
       return;
     }
     if (e.key === 'Enter' && !e.shiftKey) {
+      // v1.4.3: while the AI tone picker is open, Enter confirms the
+      // highlighted tone via the document handler — don't re-trigger doSend
+      // and don't preventDefault (the picker needs defaultPrevented=false).
+      if (aiTonePickOpen) return;
       e.preventDefault();
       doSend(msgInput.value);
     }
@@ -11493,7 +11633,7 @@ function setupEventListeners() {
     $('emoji-picker').hidden = !$('emoji-picker').hidden;
   });
 
-  // Whisper mode toggle
+  // Message-mode toggle: normal → whisper → disappearing → AI → normal.
   $('whisper-mode-btn').addEventListener('click', (event) => {
     event.stopPropagation();
     if (messageMode === 'normal') messageMode = 'whisper';
@@ -11501,11 +11641,19 @@ function setupEventListeners() {
       messageMode = 'disappearing';
       whisperRecipients = [];
       composerTokens.whisper = null;
+    } else if (messageMode === 'disappearing') {
+      messageMode = 'ai';
+      // AI mode cannot combine with whisper recipients.
+      whisperRecipients = [];
+      composerTokens.whisper = null;
+      if (!canUseAiInCurrentGroup({ showError: true })) {
+        messageMode = 'normal';
+      }
     } else messageMode = 'normal';
     if (messageMode === 'whisper') showWhisperPicker('button');
     else hideWhisperPicker();
     syncComposerTokens();
-    updateWhisperBtn();
+    updateMessageModeBtn();
   });
   $('whisper-picker-confirm').addEventListener('click', () => {
     if (!getActiveWhisperRecipientIds().length) {

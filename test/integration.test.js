@@ -234,6 +234,101 @@ test('AI routes are unavailable while the feature flag is disabled', async () =>
   await owner.get('/api/ai/tones').expect(404, { error: 'AI is unavailable' });
 });
 
+test('v1.4.3 channels endpoint lists distinct blind tag indexes with sample messages', async () => {
+  const ids = [
+    'cccccccc-0000-4ccc-8ccc-cccccccccc01',
+    'cccccccc-0000-4ccc-8ccc-cccccccccc02',
+    'cccccccc-0000-4ccc-8ccc-cccccccccc03',
+  ];
+  stmts.insertV2Message.run(
+    ids[0], group.id, group.ownerId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null,
+    null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', 'tag-aaa', null,
+    '2026-02-01T00:00:00.000Z'
+  );
+  stmts.insertV2Message.run(
+    ids[1], group.id, group.ownerId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null,
+    null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', 'tag-bbb', null,
+    '2026-02-02T00:00:00.000Z'
+  );
+  // #main (NULL tag index) must never be listed.
+  stmts.insertV2Message.run(
+    ids[2], group.id, group.ownerId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null,
+    null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null,
+    '2026-02-03T00:00:00.000Z'
+  );
+
+  const res = await owner.get(`/api/groups/${group.id}/channels`).expect(200);
+  assert.equal(res.body.ok, true);
+  const channels = res.body.channels;
+  assert.equal(channels.length, 2);
+  const byTag = Object.fromEntries(channels.map((c) => [c.tagIndex, c]));
+  assert.equal(byTag['tag-aaa'].sampleMessageId, ids[0]);
+  assert.equal(byTag['tag-aaa'].messageCount, 1);
+  assert.equal(byTag['tag-bbb'].sampleMessageId, ids[1]);
+  assert.ok(byTag['tag-bbb'].lastMessageAt >= byTag['tag-aaa'].lastMessageAt);
+
+  // Membership is enforced.
+  const outsider = request.agent(app);
+  await register(outsider, 'channels-outsider');
+  await outsider.get(`/api/groups/${group.id}/channels`).expect(403);
+});
+
+test('v1.4.3 uploads can carry a reply target', async () => {
+  const targetMessageId = '99999999-9999-4999-8999-999999999901';
+  stmts.insertV2Message.run(
+    targetMessageId, group.id, group.ownerId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null,
+    null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null,
+    '2026-03-01T00:00:00.000Z'
+  );
+  const ownerCsrf = await csrf(owner);
+  const uploadId = '88888888-8888-4888-8888-888888888801';
+  await owner
+    .post(`/api/groups/${group.id}/upload`)
+    .set('X-CSRF-Token', ownerCsrf)
+    .set('Content-Type', 'application/octet-stream')
+    .set('X-Upload-IV', 'AAAAAAAAAAAAAAAA')
+    .set('X-Upload-Type', 'file')
+    .set('X-Message-Id', uploadId)
+    .set('X-Encrypted-Metadata', Buffer.from('metadata').toString('base64'))
+    .set('X-Metadata-IV', 'AAAAAAAAAAAAAAAA')
+    .set('X-Encryption-Version', '2')
+    .set('X-Key-Version', '1')
+    .set('X-Reply-To-Id', targetMessageId)
+    .send(Buffer.from('encrypted-bytes'))
+    .expect(200);
+  const stored = stmts.findMessageById.get(uploadId);
+  assert.equal(stored.reply_to_id, targetMessageId);
+
+  // Unknown reply targets are rejected and nothing is persisted.
+  const badUploadId = '88888888-8888-4888-8888-888888888802';
+  await owner
+    .post(`/api/groups/${group.id}/upload`)
+    .set('X-CSRF-Token', ownerCsrf)
+    .set('Content-Type', 'application/octet-stream')
+    .set('X-Upload-IV', 'AAAAAAAAAAAAAAAA')
+    .set('X-Upload-Type', 'file')
+    .set('X-Message-Id', badUploadId)
+    .set('X-Encrypted-Metadata', Buffer.from('metadata').toString('base64'))
+    .set('X-Metadata-IV', 'AAAAAAAAAAAAAAAA')
+    .set('X-Encryption-Version', '2')
+    .set('X-Key-Version', '1')
+    .set('X-Reply-To-Id', 'missing-target')
+    .send(Buffer.from('encrypted-bytes'))
+    .expect(400);
+  assert.equal(stmts.findMessageById.get(badUploadId), undefined);
+});
+
+test('v1.4.3 AI assistant messages serialize with the GChat AI display name', async () => {
+  const aiMessageId = '77777777-7777-4777-8777-777777777701';
+  stmts.insertV2Message.run(
+    aiMessageId, group.id, '__gchat_ai_grok__', 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null,
+    null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null,
+    '2026-04-01T00:00:00.000Z'
+  );
+  const res = await owner.get(`/api/groups/${group.id}/messages/${aiMessageId}`).expect(200);
+  assert.equal(res.body.senderName, 'GChat AI');
+});
+
 test('message deletion is author-only and transactionally removes dependent state', async () => {
   const messageId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
   stmts.insertV2Message.run(

@@ -166,7 +166,7 @@ const MAX_AI_TOOL_CALL_ARGS_CHARS = 8192;
 const MAX_AI_TOOL_RESULT_CHARS = 24576; // 24 KB per tool result
 const MAX_AI_TOOL_ROUNDS = 4;
 const AI_ASSISTANT_USER_ID = '__gchat_ai_grok__';
-const AI_ASSISTANT_NAME = 'AI';
+const AI_ASSISTANT_NAME = 'GChat AI';
 const AI_ASSISTANT_COLOR = '#8d7bff';
 const AI_ASSISTANT_PROFILE_PICTURE = '/deepseek.webp';
 const APP_OWNER_USERNAME = 'Furina';
@@ -1573,6 +1573,30 @@ const stmts = {
      ORDER BY m.created_at DESC, m.id DESC
      LIMIT @limit
    `),
+  // v1.4.3: per-group channel identity from blind tag indexes — one bounded
+  // windowed query returns every distinct channel (newest message as the
+  // sample for client-side name resolution) plus its message count.
+  getGroupChannelIndexes: db.prepare(`
+    SELECT tag_index AS tagIndex,
+           sample_id,
+           created_at AS lastMessageAt,
+           cnt AS messageCount
+    FROM (
+      SELECT tag_index,
+             id AS sample_id,
+             created_at,
+             COUNT(*) OVER (PARTITION BY tag_index) AS cnt,
+             ROW_NUMBER() OVER (
+               PARTITION BY tag_index
+               ORDER BY created_at DESC, id DESC
+             ) AS rn
+      FROM messages
+      WHERE group_id = ? AND tag_index IS NOT NULL
+    )
+    WHERE rn = 1
+    ORDER BY created_at DESC, sample_id DESC
+    LIMIT 50
+  `),
   getMessagesBefore: db.prepare(`
     WITH ref AS (SELECT created_at, id FROM messages WHERE id = @beforeId)
       SELECT m.id, m.group_id, m.sender_id, u.username AS sender_name,
@@ -3551,6 +3575,31 @@ app.get('/api/groups/:groupId/messages/:messageId', (req, res) => {
   res.json(formatMessage(row));
 });
 
+// v1.4.3: server-side channel discovery — every distinct blind tag_index in the
+// group's messages (bounded). Clients resolve each tagIndex back to its topic
+// name locally (they hold the decryption keys) using the sample message id, so
+// channel lists stay consistent across members without ever exposing topics in
+// plaintext. Channels without messages are announced live via channel_announced.
+app.get('/api/groups/:groupId/channels', (req, res) => {
+  const { groupId } = req.params;
+  const userId = req.session.userId;
+  const group = stmts.findGroupById.get(groupId);
+  if (!group) return res.status(404).json({ error: 'Group not found' });
+  if (!stmts.isMember.get(groupId, userId)) {
+    return res.status(403).json({ error: 'Not a member of this group' });
+  }
+  const rows = stmts.getGroupChannelIndexes.all(groupId);
+  res.json({
+    ok: true,
+    channels: rows.map((row) => ({
+      tagIndex: row.tagIndex,
+      sampleMessageId: row.sample_id,
+      messageCount: Number(row.messageCount) || 0,
+      lastMessageAt: row.lastMessageAt,
+    })),
+  });
+});
+
 // GET /api/groups/:groupId/unread — per-channel unread counts (capped at 999)
 // for the caller, keyed by blind tag_index ('' = #main). The caller supplies
 // the tag indexes of the channels it can display (the server cannot read the
@@ -3802,6 +3851,7 @@ app.post('/api/groups/:groupId/upload', uploadRawBodyParser, (req, res) => {
   let encryptedMetadata = null;
   let metadataIv = null;
   let tagIndex = null;
+  let replyToId = null;
 
   if (isBinaryUpload) {
     encryptedContent = req.body.toString('base64');
@@ -3812,8 +3862,9 @@ app.post('/api/groups/:groupId/upload', uploadRawBodyParser, (req, res) => {
     metadataIv = typeof req.headers['x-metadata-iv'] === 'string' ? req.headers['x-metadata-iv'] : null;
     tagIndex = typeof req.headers['x-tag-index'] === 'string' ? req.headers['x-tag-index'] : null;
     clientUploadId = typeof req.headers['x-client-upload-id'] === 'string' ? req.headers['x-client-upload-id'] : null;
+    replyToId = typeof req.headers['x-reply-to-id'] === 'string' ? req.headers['x-reply-to-id'] : null;
   } else {
-    ({ encryptedContent, iv, type, clientUploadId, messageId, encryptedMetadata, metadataIv, tagIndex } = req.body || {});
+    ({ encryptedContent, iv, type, clientUploadId, messageId, encryptedMetadata, metadataIv, tagIndex, replyToId } = req.body || {});
   }
 
   if (!encryptedContent || typeof encryptedContent !== 'string' || !iv || typeof iv !== 'string') {
@@ -3854,6 +3905,16 @@ app.post('/api/groups/:groupId/upload', uploadRawBodyParser, (req, res) => {
   const user = stmts.findUserById.get(userId);
   const totalRecipients = Math.max(0, (stmts.countGroupMembers.get(groupId)?.count || 0) - 1);
 
+  // v1.4.3: uploads can reply to a message, same as text sends.
+  let normalizedReplyToId = null;
+  if (replyToId) {
+    const replyTarget = stmts.findMessageById.get(replyToId);
+    if (!replyTarget || replyTarget.group_id !== groupId) {
+      return res.status(400).json({ error: 'Reply target not found' });
+    }
+    normalizedReplyToId = replyToId;
+  }
+
   try {
     stmts.insertV2Message.run(
       msgId,
@@ -3862,7 +3923,7 @@ app.post('/api/groups/:groupId/upload', uploadRawBodyParser, (req, res) => {
       encryptedContent,
       iv,
       msgType,
-      null,
+      normalizedReplyToId,
       null,
       0,
       null,
@@ -3896,6 +3957,7 @@ app.post('/api/groups/:groupId/upload', uploadRawBodyParser, (req, res) => {
     revision: 1,
     type: msgType,
     replyTo: null,
+    replyToId: normalizedReplyToId,
     filename: null,
     whisperTo: null,
     hashtag: null,

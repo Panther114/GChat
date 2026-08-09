@@ -1281,11 +1281,6 @@ img.gchat-global-icon {
   color: var(--hashtag-token-text);
   border: 1px solid rgba(0,0,0,.08);
 }
-.message-token-ai {
-  background: #d9d0ff;
-  color: #111111;
-  border: 1px solid rgba(108,99,255,.3);
-}
 
 .message-input-bar textarea {
   flex: 0 1 auto;
@@ -1336,17 +1331,6 @@ img.gchat-global-icon {
 /* Whisper mode button */
 .btn-whisper-mode { font-size: 16px; }
 .btn-whisper-mode.whisper-active { color: #a78bfa; }
-
-/* v1.4: Ask-AI arm button — sits to the right of attach, highlights when the
-   composer is armed so the next message goes to the AI agent. */
-.btn-ai-mode { font-size: 16px; }
-.btn-ai-mode .ui-icon { width: 18px; height: 18px; }
-.btn-ai-mode.ai-active {
-  color: #a78bfa;
-  background: rgba(139, 123, 255, .16);
-}
-.btn-ai-mode.ai-active .ui-icon { stroke-width: 2.4; }
-.btn-ai-mode.ai-unavailable { opacity: .5; }
 
 /* AI tone picker (profile panel) — follows the active theme (v1.4.1: the
    hardcoded dark navy surface made the picker unreadable in light mode). */

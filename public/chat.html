@@ -125,7 +125,6 @@
           <label class="btn-icon btn-attach message-tool-btn" title="Attach file">
             <span class="attach-icon" data-icon="paperclip" data-icon-only="true" aria-hidden="true"></span><input type="file" id="file-input" accept="*/*" hidden />
           </label>
-          <button class="btn-icon btn-ai-mode message-tool-btn" id="ai-mode-btn" title="Ask AI" aria-label="Ask AI" aria-pressed="false"></button>
         </div>
         <div class="message-composer-shell" id="message-composer-shell">
           <div class="message-token-strip" id="message-token-strip" hidden></div>
@@ -135,6 +134,13 @@
             autocomplete="off"
             rows="1"
           ></textarea>
+        </div>
+        <div class="ai-tone-picker" id="ai-tone-picker" hidden role="dialog" aria-label="Choose an AI tone">
+          <div class="ai-tone-picker-head">
+            <span>Choose a tone for GChat AI</span>
+            <span class="ai-tone-picker-hint">1-4 or click · Esc to cancel</span>
+          </div>
+          <div class="ai-tone-picker-grid" id="ai-tone-picker-grid"></div>
         </div>
         <button class="btn-send" id="send-btn" title="Send" aria-label="Send" data-icon="send" data-icon-only="true"></button>
         <div class="whisper-picker" id="whisper-picker" hidden>

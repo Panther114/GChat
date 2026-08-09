@@ -1645,11 +1645,6 @@ img.gchat-global-icon {
   color: var(--hashtag-token-text);
   border: 1px solid rgba(0, 0, 0, .08);
 }
-.message-token-ai {
-  background: #d9d0ff;
-  color: #111111;
-  border: 1px solid rgba(108, 99, 255, .3);
-}
 .message-input-bar textarea {
   flex: 0 1 auto;
   width: 100%;
@@ -1710,23 +1705,6 @@ img.gchat-global-icon {
 }
 .btn-whisper-mode.whisper-active {
   color: #a78bfa;
-}
-.btn-ai-mode {
-  font-size: 16px;
-}
-.btn-ai-mode .ui-icon {
-  width: 18px;
-  height: 18px;
-}
-.btn-ai-mode.ai-active {
-  color: #a78bfa;
-  background: rgba(139, 123, 255, .16);
-}
-.btn-ai-mode.ai-active .ui-icon {
-  stroke-width: 2.4;
-}
-.btn-ai-mode.ai-unavailable {
-  opacity: .5;
 }
 .ai-tone-select {
   width: 100%;
@@ -4299,7 +4277,7 @@ body.electron-desktop-effects::before {
   --chat-focus: var(--sx-focus);
   --chat-scrim: var(--sx-scrim);
   --chat-unread: #a78bfa;
-  --chat-ai: #a78bfa;
+  --chat-ai: #60a5fa;
   --bg: var(--chat-surface-deep);
   --sidebar-bg: var(--chat-surface);
   --chat-bg: var(--chat-canvas);
@@ -4392,7 +4370,7 @@ body.electron-desktop-effects::before {
   --chat-focus: var(--sx-focus);
   --chat-scrim: var(--sx-scrim);
   --chat-unread: #7c3aed;
-  --chat-ai: #7c3aed;
+  --chat-ai: #2563eb;
   --bg: var(--chat-surface-deep);
   --sidebar-bg: var(--chat-surface);
   --chat-bg: var(--chat-canvas);
@@ -6878,13 +6856,6 @@ button.is-loading {
 .btn-whisper-mode.disappearing-active {
   color: var(--chat-danger) !important;
 }
-.btn-ai-mode.ai-active {
-  color: var(--chat-ai, var(--chat-accent)) !important;
-  background: color-mix(in srgb, var(--chat-ai, var(--chat-accent)) 14%, transparent) !important;
-}
-.btn-ai-mode.ai-unavailable {
-  opacity: .45 !important;
-}
 .msg-ai-meta {
   color: var(--chat-muted) !important;
 }
@@ -6892,6 +6863,159 @@ button.is-loading {
   display: flex;
   gap: 6px;
   margin-top: 8px;
+}
+.ai-tone-picker {
+  position: absolute;
+  left: 12px;
+  right: auto;
+  bottom: calc(100% + 10px);
+  width: min(560px, calc(100vw - 24px - var(--safe-area-left) - var(--safe-area-right)));
+  background: color-mix(in srgb, var(--chat-floating) 86%, transparent);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  border: 1px solid var(--chat-border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  color: var(--chat-text) !important;
+  font-family: var(--font-ui) !important;
+  padding: 12px;
+  z-index: 26;
+  animation: ai-tone-pop 0.18s ease-out;
+}
+.ai-tone-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: var(--type-sm);
+  font-weight: 600;
+  color: var(--chat-text-strong);
+}
+.ai-tone-picker-hint {
+  font-size: var(--type-xs);
+  font-weight: 400;
+  color: var(--chat-muted);
+}
+.ai-tone-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+.ai-tone-box {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 14px 8px 12px;
+  border: 1px solid var(--chat-border-strong);
+  border-radius: 14px;
+  cursor: pointer;
+  color: var(--chat-text-strong);
+  font-family: var(--font-ui);
+  transition:
+    transform var(--dur-med) var(--ease-tech),
+    border-color var(--dur-med) var(--ease-tech),
+    box-shadow var(--dur-med) var(--ease-tech);
+}
+.ai-tone-box:hover {
+  transform: translateY(-2px);
+  border-color: var(--chat-border-strong);
+}
+.ai-tone-box.is-highlighted {
+  border-color: var(--chat-focus);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--chat-focus) 38%, transparent);
+}
+.ai-tone-box-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+}
+.ai-tone-box-icon .ui-icon {
+  width: 18px;
+  height: 18px;
+}
+.ai-tone-box-label {
+  font-size: var(--type-xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.ai-tone-box-key {
+  position: absolute;
+  top: 6px;
+  right: 9px;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--chat-muted);
+}
+.ai-tone-box.tone-casual {
+  background:
+    linear-gradient(
+      135deg,
+      rgba(34, 197, 94, 0.26),
+      rgba(34, 197, 94, 0.07));
+}
+.ai-tone-box.tone-casual .ai-tone-box-icon {
+  background: rgba(34, 197, 94, 0.24);
+  color: #22c55e;
+}
+.ai-tone-box.tone-professional {
+  background:
+    linear-gradient(
+      135deg,
+      rgba(59, 130, 246, 0.26),
+      rgba(59, 130, 246, 0.07));
+}
+.ai-tone-box.tone-professional .ai-tone-box-icon {
+  background: rgba(59, 130, 246, 0.24);
+  color: #3b82f6;
+}
+.ai-tone-box.tone-playful {
+  background:
+    linear-gradient(
+      135deg,
+      rgba(236, 72, 153, 0.26),
+      rgba(236, 72, 153, 0.07));
+}
+.ai-tone-box.tone-playful .ai-tone-box-icon {
+  background: rgba(236, 72, 153, 0.24);
+  color: #ec4899;
+}
+.ai-tone-box.tone-gangster {
+  background:
+    linear-gradient(
+      135deg,
+      rgba(249, 115, 22, 0.26),
+      rgba(249, 115, 22, 0.07));
+}
+.ai-tone-box.tone-gangster .ai-tone-box-icon {
+  background: rgba(249, 115, 22, 0.24);
+  color: #f97316;
+}
+@keyframes ai-tone-pop {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (max-width: 480px) {
+  .ai-tone-picker-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .ai-tone-picker {
+    left: calc(8px + var(--safe-area-left));
+    right: calc(8px + var(--safe-area-right));
+    width: auto;
+    max-width: none;
+  }
 }
 .whisper-picker-actions > button {
   flex: 1;
@@ -6931,6 +7055,9 @@ button.is-loading {
 }
 .message-input-bar.disappearing-mode-active #message-input {
   color: var(--chat-danger) !important;
+}
+.message-input-bar.ai-mode-active #message-input {
+  color: var(--chat-ai) !important;
 }
 .msg-image {
   max-width: min(360px, 100%);
@@ -7369,6 +7496,10 @@ button.is-loading {
 .message-input-bar.disappearing-mode-active #whisper-mode-btn,
 .message-input-bar.disappearing-mode-active #whisper-mode-btn .ui-icon {
   color: var(--chat-danger) !important;
+}
+.message-input-bar.ai-mode-active #whisper-mode-btn,
+.message-input-bar.ai-mode-active #whisper-mode-btn .ui-icon {
+  color: var(--chat-ai) !important;
 }
 .message-input-bar > .btn-send,
 .btn-send {

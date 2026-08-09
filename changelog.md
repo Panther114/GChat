@@ -4,6 +4,30 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## v1.4.3 — AI message mode, tone picker, replies, channel consistency
+
+### The AI entry point is now a message MODE (blue)
+
+- The separate AI arm-button is gone. The message-mode button now cycles **normal → whisper → disappearing → AI → normal**. AI mode tints the button and the input text **blue** and the composer placeholder reads "Ask GChat AI #channel · group". No token chip appears in the input strip — the mode IS the indicator.
+- **Tone picker on send**: the instant you press Enter / the send button in AI mode, a blurred gradient panel pops above the composer with four rounded tone boxes (Casual, Professional, Playful, Playful Gangster), each with its own icon, color, and number badge. Press **1-4** or click a box to send with that tone; **Enter** confirms the highlighted (currently selected) tone; **Escape** cancels the send and the typed text stays in the composer. The Enter that opens the picker never double-confirms it.
+- **GChat AI**: the assistant's display name is now "GChat AI" (old messages still render correctly — the rename is display-only).
+- **Leading newline fix**: model answers are stripped of leading blank lines so the reply bubble never starts from an empty first line.
+- **Reply → AI**: replying to a GChat AI message automatically arms AI mode (still toggleable), so the reply goes to the agent; replying to any other message while in AI mode works the same — the quoted message travels with the prompt.
+
+### Replies for attachments
+
+- Uploads (images/files) can now reply to a message: the reply identity rides in the encrypted metadata (rendered quote) and as `replyToId` on the server, exactly like text sends. The server validates the target belongs to the same group.
+
+### Channel lists are consistent across members
+
+- New `GET /api/groups/:groupId/channels` returns every distinct **blind tag index** of the group's messages (bounded, membership-scoped) with a sample message id and count. Clients resolve each index back to its topic **locally via decryption** (E2E — no channel names in plaintext on the server), so every member converges on the same channel list on group open — no more "the other member sees channels I don't" that only fixed itself on a cache refresh.
+
+### Verified
+
+- 66 node tests (new: channels endpoint incl. membership enforcement, upload reply target, GChat AI serialization), 21 Playwright e2e tests, and a browser smoke test covering the full mode cycle, tone picker (1-4 / Enter / Escape), the leading-newline strip, reply auto-arm, and channel discovery.
+
+---
+
 ## v1.4.2 — OpenCode Go endpoint + full provider failover
 
 - **The OpenCode key now consumes the OpenCode GO subscription**: requests are sent to `https://opencode.ai/zen/go/v1/chat/completions` (the Go plan endpoint) instead of the Zen pay-as-you-go endpoint, so the Go subscription key works without any balance. The env var intentionally keeps its original name `OPENCODE_ZEN_API_KEY` — no Railway config change needed.
