@@ -613,10 +613,20 @@
     } catch {
     }
   }
+  function isCursorNewerThan(at, id, otherAt, otherId) {
+    const cmp = String(at || "").localeCompare(String(otherAt || ""));
+    if (cmp !== 0) return cmp > 0;
+    return String(id || "") > String(otherId || "");
+  }
   function setLocalReadCursor(groupId, topic, cursor) {
     const groupKey = String(groupId);
+    const channel = topic || DEFAULT_TAG_TOPIC;
     readCursors[groupKey] = readCursors[groupKey] || {};
-    readCursors[groupKey][topic || DEFAULT_TAG_TOPIC] = { at: cursor?.at || "", id: cursor?.id || "" };
+    const current = readCursors[groupKey][channel];
+    if (current && current.at && !isCursorNewerThan(cursor?.at, cursor?.id, current.at, current.id)) {
+      return;
+    }
+    readCursors[groupKey][channel] = { at: cursor?.at || "", id: cursor?.id || "" };
     persistReadCursors();
   }
   function getLocalReadCursor(groupId, topic) {
@@ -2996,8 +3006,8 @@
         if (!res.ok) break;
         const rawMsgs = await res.json();
         if (String(currentGroupId) !== groupId) return;
+        if (!rawMsgs.length) break;
         const msgs = filterMessagesVisibleToCurrentUser(rawMsgs);
-        if (!msgs.length) break;
         for (const msg of msgs) {
           const known = byId.get(String(msg.id));
           if (!known) {
@@ -3008,10 +3018,10 @@
             edits.push(msg);
           }
         }
-        const lastFetched = msgs[msgs.length - 1];
+        const lastFetched = rawMsgs[rawMsgs.length - 1];
         cursor = { at: lastFetched.createdAt, id: lastFetched.id };
         void writeHistoryCursor(groupId, cursor);
-        if (msgs.length < SYNC_PAGE_LIMIT) break;
+        if (rawMsgs.length < SYNC_PAGE_LIMIT) break;
         if (page < MAX_SYNC_PAGES_PER_EVENT - 1) {
           await new Promise((resolve) => setTimeout(resolve, 30));
         }
@@ -5247,6 +5257,10 @@
     if (!msg || !socket || !currentUser) return;
     const topic = resolveMessageTagTopic(msg);
     if (String(msg.senderId) === String(currentUser.id)) return;
+    const current = getLocalReadCursor(groupId, topic);
+    if (current && current.at && !isCursorNewerThan(msg.createdAt, msg.id, current.at, current.id)) {
+      return;
+    }
     setLocalReadCursor(groupId, topic, { at: msg.createdAt, id: msg.id });
     if (String(groupId) === String(currentGroupId)) refreshUnseenRowClasses();
     void (async () => {
@@ -5263,7 +5277,16 @@
   var pendingCursorAdvances = /* @__PURE__ */ new Map();
   function scheduleChannelCursorAdvance(groupId, msg) {
     if (!msg || !groupId || !currentUser) return;
-    const key = `${String(groupId)}:${resolveMessageTagTopic(msg)}`;
+    const topic = resolveMessageTagTopic(msg);
+    const key = `${String(groupId)}:${topic}`;
+    const current = getLocalReadCursor(groupId, topic);
+    if (current && current.at && !isCursorNewerThan(msg.createdAt, msg.id, current.at, current.id)) {
+      return;
+    }
+    const previous = pendingCursorAdvances.get(key);
+    if (previous && !isCursorNewerThan(msg.createdAt, msg.id, previous.at, previous.id)) {
+      return;
+    }
     pendingCursorAdvances.set(key, { at: msg.createdAt, id: msg.id });
     if (pendingCursorAdvanceTimers.has(key)) return;
     pendingCursorAdvanceTimers.set(key, setTimeout(() => {
@@ -5932,6 +5955,7 @@
     if (index < 0) return;
     const local = cache.messages[index];
     if (!local || !local._optimistic) return;
+    if (Number(local.revision || 1) > Number(serverMsg.revision || 1)) return;
     const plaintext = local._decryptedText;
     const hashtag = local.hashtag || null;
     Object.assign(local, serverMsg);
@@ -7470,9 +7494,12 @@
         if (updated.tagIndex !== void 0) stored.tagIndex = updated.tagIndex;
         stored.editedAt = editedAt;
         stored.revision = revision;
+        delete stored._decryptedText;
+        delete stored.hashtag;
         if (groupId !== currentGroupId) cache.rowsDirty = true;
         if (groupId === currentGroupId) allMessages = cache.messages;
         writeLocalGroupCache(groupId, cache);
+        if (historyDbSupported) void persistHistoryMessages(groupId, [stored]);
         break;
       }
     });

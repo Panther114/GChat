@@ -13,6 +13,7 @@ const {
 } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const { pathToFileURL } = require('url');
 const {
   badgeLabelForUnread,
   normalizeUnreadCount,
@@ -24,6 +25,10 @@ const APP_USER_MODEL_ID = 'com.Gchat.app';
 const GITHUB_RELEASES_URL = 'https://github.com/Panther114/GChat/releases/latest';
 const ERR_ABORTED = -3;
 const UPDATE_START_DELAY_MS = 15 * 1000;
+// v1.3.14: H8 — clipboard copy bound to the app's max attachment (15MB bytes
+// ≈ 20MB base64); a renderer can no longer OOM the main process with a
+// multi-GB base64 string.
+const MAX_CLIPBOARD_BASE64_LENGTH = 21 * 1024 * 1024;
 
 // Lower Chromium memory surface: no WebGPU, tighter V8 heap, no background networking extras.
 app.commandLine.appendSwitch(
@@ -93,6 +98,36 @@ function isHostedUrl(url) {
   } catch {
     return false;
   }
+}
+
+// v1.3.14: H8 — the offline recovery page is the only file:// document the
+// shell ever loads in-window.
+function getOfflineFileUrl() {
+  return pathToFileURL(path.join(__dirname, 'offline.html')).href;
+}
+
+function isOfflineFileUrl(url) {
+  try {
+    return new URL(url).href === getOfflineFileUrl();
+  } catch {
+    return false;
+  }
+}
+
+// v1.3.14: H8 — every IPC handler must come from the trusted renderer: the
+// hosted app (official origin) or the offline page. A compromised/foreign
+// page (data:/about:/file:/other origin) is cut off from all bridge commands.
+function isTrustedSender(event) {
+  const frame = event && event.senderFrame;
+  const frameUrl = frame
+    ? (typeof frame.url === 'function' ? frame.url() : frame.url) || ''
+    : '';
+  if (isHostedUrl(frameUrl) || isOfflineFileUrl(frameUrl)) return true;
+  // Fallback for very old Electron where senderFrame may be null.
+  const senderUrl = event && event.sender && event.sender !== mainWindow?.webContents
+    ? ''
+    : (event && event.sender && typeof event.sender.getURL === 'function' ? event.sender.getURL() : '');
+  return isHostedUrl(senderUrl) || isOfflineFileUrl(senderUrl);
 }
 
 function hideToTray() {
@@ -234,13 +269,18 @@ async function createWindow() {
     broadcastUpdateStatus(status);
   });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    // v1.3.14: H8 — only open safe https links externally; never hand file:/
+    // or other schemes to the OS handler from renderer content.
+    if (/^https:/i.test(url)) shell.openExternal(url);
     return { action: 'deny' };
   });
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (isHostedUrl(url) || url.startsWith('file://')) return;
+    // v1.3.14: H8 — the window may only show the hosted app or the packaged
+    // offline page. Everything else (data:/about:/file:/foreign origins) is
+    // blocked; safe https links open in the default browser.
+    if (isHostedUrl(url) || isOfflineFileUrl(url)) return;
     event.preventDefault();
-    if (/^https?:/i.test(url)) shell.openExternal(url);
+    if (/^https:/i.test(url)) shell.openExternal(url);
   });
   mainWindow.on('close', (event) => {
     if (!isQuitting) {
@@ -301,7 +341,10 @@ function createBadgeIcon(count) {
   return icon;
 }
 
-ipcMain.on('set-unread-count', (_event, count) => {
+// v1.3.14: H8 — every bridge handler validates its sender. Only the hosted
+// app (official origin) or the packaged offline page may invoke them.
+ipcMain.on('set-unread-count', (event, count) => {
+  if (!isTrustedSender(event)) return;
   const unread = normalizeUnreadCount(count);
   if (unread === lastUnreadCount) return;
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -318,7 +361,8 @@ ipcMain.on('set-unread-count', (_event, count) => {
   updateTrayMenu(unread);
 });
 
-ipcMain.on('show-notification', (_event, { title, body, groupId } = {}) => {
+ipcMain.on('show-notification', (event, { title, body, groupId } = {}) => {
+  if (!isTrustedSender(event)) return;
   if (!Notification.isSupported()) return;
   const notification = new Notification({
     title: title || 'Gchat',
@@ -333,13 +377,18 @@ ipcMain.on('show-notification', (_event, { title, body, groupId } = {}) => {
   notification.show();
 });
 
-ipcMain.handle('get-launch-at-startup', () => !!app.getLoginItemSettings().openAtLogin);
-ipcMain.handle('set-launch-at-startup', (_event, enabled) => {
+ipcMain.handle('get-launch-at-startup', (event) => {
+  if (!isTrustedSender(event)) return false;
+  return !!app.getLoginItemSettings().openAtLogin;
+});
+ipcMain.handle('set-launch-at-startup', (event, enabled) => {
+  if (!isTrustedSender(event)) return false;
   const openAtLogin = !!enabled;
   app.setLoginItemSettings({ openAtLogin });
   return openAtLogin;
 });
-ipcMain.handle('retry-connection', async () => {
+ipcMain.handle('retry-connection', async (event) => {
+  if (!isTrustedSender(event)) return false;
   try {
     await loadHostedApp();
     return true;
@@ -347,13 +396,21 @@ ipcMain.handle('retry-connection', async () => {
     return false;
   }
 });
-ipcMain.handle('get-connection-context', () => ({
-  serverUrl: OFFICIAL_SERVER_URL,
-  lastLoadError,
-}));
-ipcMain.handle('copy-binary-to-clipboard', (_event, payload = {}) => {
+ipcMain.handle('get-connection-context', (event) => {
+  if (!isTrustedSender(event)) return null;
+  return {
+    serverUrl: OFFICIAL_SERVER_URL,
+    lastLoadError,
+  };
+});
+ipcMain.handle('copy-binary-to-clipboard', (event, payload = {}) => {
+  if (!isTrustedSender(event)) return false;
   try {
-    const buffer = Buffer.from(typeof payload.base64 === 'string' ? payload.base64 : '', 'base64');
+    const base64 = typeof payload.base64 === 'string' ? payload.base64 : '';
+    // v1.3.14: H8 — bound the payload; the renderer's max attachment is 15MB
+    // of bytes (~20MB base64), so anything beyond that is rejected up front.
+    if (base64.length > MAX_CLIPBOARD_BASE64_LENGTH) return false;
+    const buffer = Buffer.from(base64, 'base64');
     if (typeof payload.mimeType === 'string' && payload.mimeType.startsWith('image/')) {
       const image = nativeImage.createFromBuffer(buffer);
       if (!image.isEmpty()) {
@@ -367,14 +424,16 @@ ipcMain.handle('copy-binary-to-clipboard', (_event, payload = {}) => {
     return false;
   }
 });
-ipcMain.handle('clear-cache-and-restart', async () => {
+ipcMain.handle('clear-cache-and-restart', async (event) => {
+  if (!isTrustedSender(event)) return false;
   await mainWindow?.webContents.session.clearCache();
   isQuitting = true;
   app.relaunch();
   app.exit(0);
   return true;
 });
-ipcMain.handle('reload-hosted-app', async () => {
+ipcMain.handle('reload-hosted-app', async (event) => {
+  if (!isTrustedSender(event)) return false;
   if (!mainWindow || mainWindow.isDestroyed()) return false;
   lastLoadError = null;
   cancelConnectionMonitor();
@@ -384,17 +443,20 @@ ipcMain.handle('reload-hosted-app', async () => {
   scheduleConnectionMonitor();
   return true;
 });
-ipcMain.handle('check-for-updates', async () => {
+ipcMain.handle('check-for-updates', async (event) => {
+  if (!isTrustedSender(event)) return 'idle';
   const result = await getUpdaterController().checkForUpdates({ silent: false });
   return result.status;
 });
 ipcMain.handle('get-update-status', () => getUpdaterController().getStatus());
-ipcMain.handle('install-update', () => {
+ipcMain.handle('install-update', (event) => {
+  if (!isTrustedSender(event)) return false;
   const installed = getUpdaterController().installUpdate();
   if (installed) isQuitting = true;
   return installed;
 });
-ipcMain.handle('open-latest-release', async () => {
+ipcMain.handle('open-latest-release', async (event) => {
+  if (!isTrustedSender(event)) return false;
   await shell.openExternal(GITHUB_RELEASES_URL);
   return true;
 });

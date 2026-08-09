@@ -47,6 +47,10 @@ Current version: **v1.3.12** (Windows: thin WebView2 shell; macOS: Tauri/WKWebVi
 - In-app Settings update check
 - No bundled Chromium in production packages
 
+### App owner account ("Furina")
+
+The hosted deployment has a designated app-owner account with the username **Furina**. It is the operator's personal account: it already exists, it is actively used, and it will not be deleted. The owner account is the only one with global-moderation powers — clearing GChat Global history/channels and managing user accounts — so those powers are reserved to the operator by design and are not available to other members.
+
 ---
 
 ## Architecture

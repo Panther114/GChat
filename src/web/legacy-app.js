@@ -617,10 +617,25 @@ function persistReadCursors() {
   }
 }
 
+// v1.3.14: H1 — "read" cursors are MONOTONIC: a cursor can only move forward.
+// A stale cursor event (viewport reads re-fired after a reload, an older
+// broadcast from another device) must never regress the local cursor — that
+// made already-read messages look unread again (badge, chips, .unseen bar).
+function isCursorNewerThan(at, id, otherAt, otherId) {
+  const cmp = String(at || '').localeCompare(String(otherAt || ''));
+  if (cmp !== 0) return cmp > 0;
+  return String(id || '') > String(otherId || '');
+}
+
 function setLocalReadCursor(groupId, topic, cursor) {
   const groupKey = String(groupId);
+  const channel = topic || DEFAULT_TAG_TOPIC;
   readCursors[groupKey] = readCursors[groupKey] || {};
-  readCursors[groupKey][topic || DEFAULT_TAG_TOPIC] = { at: cursor?.at || '', id: cursor?.id || '' };
+  const current = readCursors[groupKey][channel];
+  if (current && current.at && !isCursorNewerThan(cursor?.at, cursor?.id, current.at, current.id)) {
+    return;
+  }
+  readCursors[groupKey][channel] = { at: cursor?.at || '', id: cursor?.id || '' };
   persistReadCursors();
 }
 
@@ -3647,8 +3662,14 @@ async function refreshCurrentGroupFromServer() {
       if (!res.ok) break;
       const rawMsgs = await res.json();
       if (String(currentGroupId) !== groupId) return;
+      // v1.3.14: H3 — the persisted cursor tracks the RAW page, not the
+      // visible-filtered one. A full page of whispers the viewer can't access
+      // used to stop the drain here with the cursor unmoved, so every resync
+      // re-fetched the same invisible window and all visible messages behind
+      // it were never delivered. Invisible messages still never enter the
+      // cache (the merge below stays visible-only).
+      if (!rawMsgs.length) break;
       const msgs = filterMessagesVisibleToCurrentUser(rawMsgs);
-      if (!msgs.length) break;
       for (const msg of msgs) {
         const known = byId.get(String(msg.id));
         if (!known) {
@@ -3667,10 +3688,10 @@ async function refreshCurrentGroupFromServer() {
       // Advance the persisted cursor after EVERY non-empty page so the drain
       // always converges (the old code skipped the write when nothing
       // "changed", re-fetching the same 100 messages on every group open).
-      const lastFetched = msgs[msgs.length - 1];
+      const lastFetched = rawMsgs[rawMsgs.length - 1];
       cursor = { at: lastFetched.createdAt, id: lastFetched.id };
       void writeHistoryCursor(groupId, cursor);
-      if (msgs.length < SYNC_PAGE_LIMIT) break;
+      if (rawMsgs.length < SYNC_PAGE_LIMIT) break;
       if (page < MAX_SYNC_PAGES_PER_EVENT - 1) {
         await new Promise((resolve) => setTimeout(resolve, 30));
       }
@@ -6359,6 +6380,13 @@ function markChannelReadAt(groupId, msg) {
   if (!msg || !socket || !currentUser) return;
   const topic = resolveMessageTagTopic(msg);
   if (String(msg.senderId) === String(currentUser.id)) return;
+  // v1.3.14: H1 — never advance (or re-emit) a cursor older than the current
+  // one; stale viewport replays used to regress the server cursor and bring
+  // unread badges back on messages that were already read.
+  const current = getLocalReadCursor(groupId, topic);
+  if (current && current.at && !isCursorNewerThan(msg.createdAt, msg.id, current.at, current.id)) {
+    return;
+  }
   setLocalReadCursor(groupId, topic, { at: msg.createdAt, id: msg.id });
   // v1.3.13: rows painted before this cursor advance must lose the unread
   // highlight immediately (the accent bar used to linger on them).
@@ -6383,7 +6411,18 @@ const pendingCursorAdvances = new Map();
 
 function scheduleChannelCursorAdvance(groupId, msg) {
   if (!msg || !groupId || !currentUser) return;
-  const key = `${String(groupId)}:${resolveMessageTagTopic(msg)}`;
+  const topic = resolveMessageTagTopic(msg);
+  const key = `${String(groupId)}:${topic}`;
+  // v1.3.14: H1 — never coalesce a cursor OLDER than the current one; the
+  // newest-message-wins merge keeps the batch monotonic.
+  const current = getLocalReadCursor(groupId, topic);
+  if (current && current.at && !isCursorNewerThan(msg.createdAt, msg.id, current.at, current.id)) {
+    return;
+  }
+  const previous = pendingCursorAdvances.get(key);
+  if (previous && !isCursorNewerThan(msg.createdAt, msg.id, previous.at, previous.id)) {
+    return;
+  }
   pendingCursorAdvances.set(key, { at: msg.createdAt, id: msg.id });
   if (pendingCursorAdvanceTimers.has(key)) return;
   pendingCursorAdvanceTimers.set(key, setTimeout(() => {
@@ -7183,6 +7222,9 @@ function reconcileOptimisticEcho(serverMsg) {
   if (index < 0) return;
   const local = cache.messages[index];
   if (!local || !local._optimistic) return;
+  // v1.3.14: H2 — if the user edited the message before the echo landed, the
+  // echo carries the pre-edit envelope (revision 1) and must NOT overwrite it.
+  if (Number(local.revision || 1) > Number(serverMsg.revision || 1)) return;
   // Keep the locally-known plaintext; adopt every server-authoritative field
   // (createdAt ordering, read counts, delivery totals, disappearing state).
   const plaintext = local._decryptedText;
@@ -8978,9 +9020,18 @@ function initSocket() {
       if (updated.tagIndex !== undefined) stored.tagIndex = updated.tagIndex;
       stored.editedAt = editedAt;
       stored.revision = revision;
+      // v1.3.14: H2 — the cached plaintext (and decrypted channel) belong to
+      // the OLD ciphertext. Without this, any row rebuild re-rendered the
+      // pre-edit text, and a reload re-read the pre-edit ciphertext from
+      // IndexedDB — the edit visibly reverted until the next since-sync.
+      delete stored._decryptedText;
+      delete stored.hashtag;
       if (groupId !== currentGroupId) cache.rowsDirty = true;
       if (groupId === currentGroupId) allMessages = cache.messages;
       writeLocalGroupCache(groupId, cache);
+      // Persist the edited envelope to the durable store so reloads keep the
+      // edit (the old code only updated the localStorage mirror).
+      if (historyDbSupported) void persistHistoryMessages(groupId, [stored]);
       break;
     }
   });

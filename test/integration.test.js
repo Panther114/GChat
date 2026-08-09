@@ -1030,3 +1030,210 @@ test('Furina can clear GChat Global history and delete channels; other members c
   assert.equal(stmts.findMessageById.get(globalMainId), undefined, 'Furina must be able to clear Global history');
   assert.ok(furinaId, 'Furina is a registered member of GChat Global');
 });
+
+test('C1: malformed socket payloads are rejected without crashing the server', async () => {
+  const { io: socketClient } = require('socket.io-client');
+  const url = await ensureServerListening();
+  const agent = request.agent(app);
+  const response = await register(agent, 'crash-guard-test');
+  const csrfToken = await csrf(agent);
+  const secret = Buffer.alloc(32, 21).toString('base64url');
+  const commitment = crypto.createHash('sha256').update(Buffer.from(secret, 'base64url')).digest('base64url');
+  const created = await agent
+    .post('/api/groups/create')
+    .set('X-CSRF-Token', csrfToken)
+    .send({ name: 'Crash guard room', code: 'cras01', secret, keyCommitment: commitment })
+    .expect(201);
+  const groupId = created.body.id;
+
+  const cookie = response.headers['set-cookie'][0].split(';')[0];
+  const sock = socketClient(url, { transports: ['polling'], extraHeaders: { Cookie: cookie } });
+  await new Promise((resolve) => sock.on('connect', resolve));
+  const errors = [];
+  sock.on('error', (error) => errors.push(error.message));
+
+  // Object groupId — used to throw inside better-sqlite3 and kill the process.
+  sock.emit('send_message', { groupId: {}, encryptedContent: 'AAAA', iv: 'AAAAAAAAAAAAAAAA' });
+  // Object messageId on the disappearing-timer path.
+  sock.emit('start_disappearing_timer', { groupId, messageId: {} });
+  // Object whisper recipients list entries are normalized to strings; a groupId object must be rejected.
+  sock.emit('send_whisper', { groupId: {}, whisperTo: ['owner-test'], encryptedContent: 'AAAA', iv: 'AAAAAAAAAAAAAAAA' });
+  // Array groupId.
+  sock.emit('send_message', { groupId: [], encryptedContent: 'AAAA', iv: 'AAAAAAAAAAAAAAAA' });
+
+  await new Promise((resolve) => setTimeout(resolve, 500));
+
+  // And a well-formed message still works.
+  let acked = false;
+  sock.emit('send_message', {
+    id: crypto.randomUUID(),
+    groupId,
+    encryptedContent: Buffer.from('aGVsbG8=', 'base64').toString('base64url'),
+    iv: 'AAAAAAAAAAAAAAAA',
+    encryptedMetadata: 'e30=',
+    metadataIv: 'AAAAAAAAAAAAAAAA',
+    encryptionVersion: 2,
+    keyVersion: 1,
+    revision: 1,
+    tagIndex: null,
+    replyToId: null,
+    isDisappearing: false,
+  }, () => { acked = true; });
+  await new Promise((resolve) => setTimeout(resolve, 500));
+
+  // The server must still be alive and the socket still connected.
+  const stayedConnected = sock.connected;
+  sock.close();
+  assert.equal(stayedConnected, true, 'socket must stay connected after malformed payloads');
+  assert.equal(acked, true, 'a valid send must still be acknowledged after the malformed ones');
+  assert.ok(errors.length >= 1, 'malformed payloads must be rejected with an error event');
+  assert.ok(errors.some((message) => /group/i.test(message)), 'rejections mention the group id');
+});
+
+test('C2 + H1: #main read cursors upsert (no duplicates) and never regress', async () => {
+  const { io: socketClient } = require('socket.io-client');
+  const url = await ensureServerListening();
+  const agent = request.agent(app);
+  const response = await register(agent, 'cursor-upsert-test');
+  const csrfToken = await csrf(agent);
+  const secret = Buffer.alloc(32, 22).toString('base64url');
+  const commitment = crypto.createHash('sha256').update(Buffer.from(secret, 'base64url')).digest('base64url');
+  const created = await agent
+    .post('/api/groups/create')
+    .set('X-CSRF-Token', csrfToken)
+    .send({ name: 'Cursor upsert room', code: 'curs02', secret, keyCommitment: commitment })
+    .expect(201);
+  const groupId = created.body.id;
+  const viewerId = response.body.id;
+  const otherId = stmts.findUserByUsername.get('owner-test').id;
+  const m1 = crypto.randomUUID();
+  const m2 = crypto.randomUUID();
+  stmts.insertV2Message.run(m1, groupId, otherId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null, null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null, '2026-03-01T00:00:00.000Z');
+  stmts.insertV2Message.run(m2, groupId, otherId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null, null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null, '2026-03-01T00:00:01.000Z');
+
+  const cookie = response.headers['set-cookie'][0].split(';')[0];
+  const sock = socketClient(url, { transports: ['polling'], extraHeaders: { Cookie: cookie } });
+  await new Promise((resolve) => sock.on('connect', resolve));
+
+  const cursorRows = () => stmts.getChannelReadCursor.all(groupId, viewerId, null).length;
+
+  // First #main cursor event inserts exactly ONE row.
+  sock.emit('mark_channel_read', { groupId, tagIndex: null, createdAt: '2026-03-01T00:00:00.000Z', messageId: m1 });
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.equal(cursorRows(), 1, 'first #main cursor event must insert exactly one row (C2)');
+  assert.equal(stmts.getChannelReadCursor.get(groupId, viewerId, null).last_read_id, m1);
+
+  // A NEWER cursor event UPDATES the same row (no duplicate).
+  sock.emit('mark_channel_read', { groupId, tagIndex: null, createdAt: '2026-03-01T00:00:01.000Z', messageId: m2 });
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.equal(cursorRows(), 1, 'a newer #main cursor event must update the existing row (C2)');
+  assert.equal(stmts.getChannelReadCursor.get(groupId, viewerId, null).last_read_id, m2);
+
+  // An OLDER cursor event must NOT regress the stored cursor (H1).
+  sock.emit('mark_channel_read', { groupId, tagIndex: null, createdAt: '2026-03-01T00:00:00.000Z', messageId: m1 });
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.equal(cursorRows(), 1, 'stale cursor events must not add rows');
+  assert.equal(stmts.getChannelReadCursor.get(groupId, viewerId, null).last_read_id, m2, 'stale cursor events must not regress the cursor (H1)');
+
+  sock.close();
+});
+
+test('H4: negative message limit is clamped to a bounded page', async () => {
+  const agent = request.agent(app);
+  await register(agent, 'limit-clamp-test');
+  const csrfToken = await csrf(agent);
+  const secret = Buffer.alloc(32, 23).toString('base64url');
+  const commitment = crypto.createHash('sha256').update(Buffer.from(secret, 'base64url')).digest('base64url');
+  const created = await agent
+    .post('/api/groups/create')
+    .set('X-CSRF-Token', csrfToken)
+    .send({ name: 'Limit clamp room', code: 'limi01', secret, keyCommitment: commitment })
+    .expect(201);
+  const groupId = created.body.id;
+  const otherId = stmts.findUserByUsername.get('owner-test').id;
+
+  // Seed 120 messages so a negative limit would expose the whole history.
+  for (let i = 0; i < 120; i += 1) {
+    const id = crypto.randomUUID();
+    const createdAt = `2026-04-01T00:00:${String(i).padStart(2, '0')}.000Z`;
+    stmts.insertV2Message.run(id, groupId, otherId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null, null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null, createdAt);
+  }
+
+  const negative = await agent.get(`/api/groups/${groupId}/messages?limit=-1`).expect(200);
+  assert.ok(Array.isArray(negative.body));
+  assert.ok(negative.body.length <= 100, `negative limit must be clamped (got ${negative.body.length})`);
+
+  const huge = await agent.get(`/api/groups/${groupId}/messages?limit=999999`).expect(200);
+  assert.ok(huge.body.length <= 100, 'huge limits must be clamped to 100');
+});
+
+test('H6: login regenerates the session so the pre-auth session id dies', async () => {
+  await register(request.agent(app), 'session-regen-test');
+  const bare = request.agent(app);
+  // Create a pre-auth session (the CSRF fetch issues one).
+  const csrfRes = await bare.get('/api/auth/csrf').expect(200);
+  const preAuthSid = csrfRes.headers['set-cookie'][0].split(';')[0];
+  assert.ok(preAuthSid, 'pre-auth session cookie exists');
+
+  const loginRes = await bare
+    .post('/api/auth/login')
+    .send({ username: 'session-regen-test', password: 'secure-password-123', rememberMe: true })
+    .expect(200);
+  const postAuthSid = loginRes.headers['set-cookie'][0].split(';')[0];
+  assert.ok(postAuthSid, 'post-login session cookie exists');
+  assert.notEqual(postAuthSid.split('=')[1], preAuthSid.split('=')[1], 'login must issue a NEW session id (H6)');
+
+  // The OLD session id must no longer be authenticated.
+  const staleAgent = request.agent(app);
+  staleAgent.jar.setCookie(preAuthSid);
+  await staleAgent.get('/api/auth/me').expect(401);
+  // The NEW session id works.
+  await bare.get('/api/auth/me').expect(200);
+});
+
+test('H7: whisper recipient lists are bounded (no event-loop DoS)', async () => {
+  const { io: socketClient } = require('socket.io-client');
+  const url = await ensureServerListening();
+  const agent = request.agent(app);
+  const response = await register(agent, 'whisper-cap-test');
+  const csrfToken = await csrf(agent);
+  const secret = Buffer.alloc(32, 24).toString('base64url');
+  const commitment = crypto.createHash('sha256').update(Buffer.from(secret, 'base64url')).digest('base64url');
+  const created = await agent
+    .post('/api/groups/create')
+    .set('X-CSRF-Token', csrfToken)
+    .send({ name: 'Whisper cap room', code: 'whis01', secret, keyCommitment: commitment })
+    .expect(201);
+  const groupId = created.body.id;
+
+  const cookie = response.headers['set-cookie'][0].split(';')[0];
+  const sock = socketClient(url, { transports: ['polling'], extraHeaders: { Cookie: cookie } });
+  await new Promise((resolve) => sock.on('connect', resolve));
+  const errors = [];
+  sock.on('error', (error) => errors.push(error.message));
+
+  // 5000 fake recipient ids: must be capped, validated in bounded time, and
+  // rejected (they are not members) — never crash or block the server.
+  const manyRecipients = Array.from({ length: 5000 }, (_, i) => `fake-recipient-${i}`);
+  sock.emit('send_whisper', {
+    id: crypto.randomUUID(),
+    groupId,
+    whisperTo: manyRecipients,
+    encryptedContent: Buffer.from('aGVsbG8=', 'base64').toString('base64url'),
+    iv: 'AAAAAAAAAAAAAAAA',
+    encryptedMetadata: 'e30=',
+    metadataIv: 'AAAAAAAAAAAAAAAA',
+    encryptionVersion: 2,
+    keyVersion: 1,
+    revision: 1,
+    tagIndex: null,
+    replyToId: null,
+    isDisappearing: false,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 800));
+
+  const stayedConnected = sock.connected;
+  sock.close();
+  assert.equal(stayedConnected, true, 'socket must survive an oversized whisper recipient list (H7)');
+  assert.ok(errors.some((message) => /recipient/i.test(message)), 'oversized whisper lists are rejected cleanly');
+});

@@ -164,6 +164,15 @@ struct AppState {
     /// v1.3.9: tray double-click delivers Click(Up)+DoubleClick+Click(Up) on
     /// Windows — debounce so one double-click never fires three toggles.
     last_toggle_at: AtomicU64,
+    /// v1.3.14: H8 — the bridge IPC handler only processes messages while the
+    /// webview is on a trusted page (the official hosted app or the offline
+    /// recovery page). An attacker who navigates the window to any other URL
+    /// (data:/about:/file:) is cut off from every bridge command.
+    bridge_allowed: AtomicBool,
+    /// v1.3.14: H8 — set right before `load_html(OFFLINE_HTML)` so the
+    /// navigation handler can recognize the offline data: URL (the only data:
+    /// navigation ever permitted) and reject every other data: URL.
+    offline_page_pending: AtomicBool,
 }
 
 fn now_unix_ms() -> u64 {
@@ -576,26 +585,45 @@ fn main() {
     };
 
     let proxy_ipc = proxy.clone();
+    let nav_state = state.clone();
     let built_webview = WebViewBuilder::new()
         .with_initialization_script(BRIDGE_JS)
         .with_url(OFFICIAL_SERVER_URL)
         .with_ipc_handler(move |message| {
             let _ = proxy_ipc.send_event(UserEvent::Ipc(message.body().to_string()));
         })
-        .with_navigation_handler(|url| {
+        // v1.3.14: H8 — navigation whitelist. Only the official hosted app and
+        // the offline recovery page (loaded via `load_html`, a data: URL, only
+        // ever triggered by our own code path) may load in-window. Any other
+        // data:/about:/file:/http(s) navigation is denied (safe external links
+        // still open in the default browser).
+        .with_navigation_handler(move |url| {
             if let Ok(parsed) = Url::parse(&url) {
-                if is_official_url(&parsed)
-                    || url.starts_with("about:")
-                    || url.starts_with("data:")
-                {
+                if is_official_url(&parsed) {
+                    nav_state.bridge_allowed.store(true, Ordering::Release);
                     return true;
+                }
+                if url == "about:blank" {
+                    // WebView2's initial/blank page — no script origin of its
+                    // own; the bridge itself is gated per-document, so a
+                    // blank page never gains bridge access.
+                    nav_state.bridge_allowed.store(false, Ordering::Release);
+                    return true;
+                }
+                if url.starts_with("data:") {
+                    let is_offline = nav_state.offline_page_pending.swap(false, Ordering::AcqRel);
+                    if is_offline {
+                        nav_state.bridge_allowed.store(true, Ordering::Release);
+                        return true;
+                    }
+                    return false;
                 }
                 if is_safe_external(&parsed) {
                     let _ = open::that(url);
                 }
                 return false;
             }
-            true
+            false
         })
         .with_new_window_req_handler(|url| {
             if let Ok(parsed) = Url::parse(&url) {
@@ -897,6 +925,9 @@ fn show_offline_page(webview: &Rc<RefCell<wry::WebView>>, state: &Arc<AppState>)
             }));
         }
     }
+    // v1.3.14: H8 — mark the upcoming data: navigation as the offline page so
+    // the navigation handler accepts it (and only it).
+    state.offline_page_pending.store(true, Ordering::Release);
     let _ = webview.borrow().load_html(OFFLINE_HTML);
 }
 
@@ -979,6 +1010,13 @@ fn handle_ipc(
     proxy: &EventLoopProxy<UserEvent>,
     tray: &Option<TrayIcon>,
 ) {
+    // v1.3.14: H8 — only process bridge messages while the webview is on a
+    // trusted page (official hosted app or the offline recovery page). Any
+    // other page — data:/about:/file: or a foreign origin — is cut off from
+    // every bridge command (install-update, clear-cache-and-restart, ...).
+    if !state.bridge_allowed.load(Ordering::Acquire) {
+        return;
+    }
     let msg: serde_json::Value = match serde_json::from_str(raw) {
         Ok(v) => v,
         Err(_) => return,

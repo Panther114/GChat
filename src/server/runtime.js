@@ -880,7 +880,27 @@ function getProfilePictureValidationError(parsedPicture) {
 
 function normalizeWhisperRecipients(value) {
   if (!Array.isArray(value)) return [];
-  return [...new Set(value.map((entry) => String(entry || '').trim()).filter(Boolean))];
+  const unique = [...new Set(value.map((entry) => String(entry || '').trim()).filter(Boolean))];
+  // v1.3.14: H7 — bound the recipient list. Every recipient triggers a
+  // synchronous membership query, so an unbounded list was an event-loop DoS.
+  // Legitimate whispers never exceed the member cap (the picker is scoped to
+  // group members), so this is invisible to real usage.
+  return unique.slice(0, MAX_GROUP_MEMBERS);
+}
+
+// v1.3.14: C1 — socket handlers bind client values into better-sqlite3.
+// better-sqlite3 throws on non-string/number/buffer/null bindings, and a throw
+// inside a Socket.IO listener is an uncaughtException (no process handler) —
+// a single malformed packet used to take down the whole server. Every handler
+// that touches the DB normalizes ids through this helper first.
+function normalizeSocketGroupId(value) {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  return value.slice(0, 64);
+}
+
+function normalizeSocketMessageId(value) {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  return value.slice(0, 64);
 }
 
 function normalizeHashtag(value) {
@@ -1147,6 +1167,26 @@ try {
   }
 } catch (err) {
   console.error('Failed to null #main tag indexes:', err);
+}
+
+// v1.3.14: C2 — #main read cursors (tag_index NULL) never conflicted on the
+// PK (SQLite treats NULLs as distinct in unique constraints), so every
+// mark_channel_read inserted a NEW row instead of updating. Dedupe existing
+// NULL rows (keep the newest per group+user) and add a partial unique index so
+// future upserts conflict properly. Idempotent and bounded (indexed scan of
+// NULL-tag cursor rows only; a no-op once deduplicated).
+try {
+  db.exec(`
+    DELETE FROM channel_read_cursors
+    WHERE tag_index IS NULL
+      AND rowid NOT IN (
+        SELECT MAX(rowid) FROM channel_read_cursors WHERE tag_index IS NULL GROUP BY group_id, user_id
+      );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_read_cursors_main
+      ON channel_read_cursors (group_id, user_id) WHERE tag_index IS NULL;
+  `);
+} catch (err) {
+  console.error('Failed to dedupe #main read cursors:', err);
 }
 
 // Ensure a stable session secret persists across restarts even without SESSION_SECRET env var
@@ -1591,6 +1631,22 @@ const stmts = {
   // v1.3.12: per-channel read cursors (unread accounting) + bounded counts.
   // Counts scan newest-first and stop after 1000 unread rows, so a group badge
   // is exact up to the 999 display cap and never scans a full group.
+  // v1.3.14: C2/H1 — two upserts: one for real channels (PK conflict target),
+  // one for #main (partial unique index on NULL tag_index — the PK treats
+  // NULLs as distinct, so a plain upsert inserted a new row every time).
+  // Both only UPDATE when the new cursor is strictly NEWER (a stale cursor
+  // from a replayed viewport-read can never regress unread counts).
+  upsertChannelReadCursorMain: db.prepare(`
+    INSERT INTO channel_read_cursors (group_id, user_id, tag_index, last_read_created_at, last_read_id, updated_at)
+    VALUES (?, ?, NULL, ?, ?, ?)
+    ON CONFLICT(group_id, user_id) WHERE tag_index IS NULL
+    DO UPDATE SET last_read_created_at = excluded.last_read_created_at,
+                  last_read_id = excluded.last_read_id,
+                  updated_at = excluded.updated_at
+    WHERE excluded.last_read_created_at > channel_read_cursors.last_read_created_at
+       OR (excluded.last_read_created_at = channel_read_cursors.last_read_created_at
+           AND excluded.last_read_id > channel_read_cursors.last_read_id)
+  `),
   upsertChannelReadCursor: db.prepare(`
     INSERT INTO channel_read_cursors (group_id, user_id, tag_index, last_read_created_at, last_read_id, updated_at)
     VALUES (?, ?, ?, ?, ?, ?)
@@ -1598,6 +1654,9 @@ const stmts = {
     DO UPDATE SET last_read_created_at = excluded.last_read_created_at,
                   last_read_id = excluded.last_read_id,
                   updated_at = excluded.updated_at
+    WHERE excluded.last_read_created_at > channel_read_cursors.last_read_created_at
+       OR (excluded.last_read_created_at = channel_read_cursors.last_read_created_at
+           AND excluded.last_read_id > channel_read_cursors.last_read_id)
   `),
   getChannelReadCursor: db.prepare(`
     SELECT last_read_created_at, last_read_id
@@ -2546,9 +2605,15 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(500).json({ error: 'Internal server error' });
     }
 
-    req.session.userId = id;
-    req.session.save(() => {
-      res.status(201).json(formatUser(user));
+    req.session.regenerate((regenerateError) => {
+      if (regenerateError) {
+        console.error('Session regenerate error (register):', regenerateError);
+        return res.status(500).json({ error: 'Internal server error' });
+      }
+      req.session.userId = id;
+      req.session.save(() => {
+        res.status(201).json(formatUser(user));
+      });
     });
   } catch (err) {
     console.error('Register error:', err);
@@ -2586,10 +2651,19 @@ app.post('/api/auth/login', async (req, res) => {
 
     clearLoginAttempts(clientIp);
 
-    req.session.userId = user.id;
-    setSessionPersistence(req, rememberMe === true);
-    req.session.save(() => {
-      res.json(formatUser(user));
+    // v1.3.14: H6 — regenerate the session on login so a pre-auth session id
+    // (and its CSRF token) can never be re-used post-login. The old token dies
+    // with the old session; the SPA fetches a fresh token on its next boot.
+    req.session.regenerate((regenerateError) => {
+      if (regenerateError) {
+        console.error('Session regenerate error (login):', regenerateError);
+        return res.status(500).json({ error: 'Internal server error' });
+      }
+      req.session.userId = user.id;
+      setSessionPersistence(req, rememberMe === true);
+      req.session.save(() => {
+        res.json(formatUser(user));
+      });
     });
   } catch (err) {
     console.error('Login error:', err);
@@ -3304,7 +3378,10 @@ app.patch('/api/groups/:groupId/settings', (req, res) => {
 app.get('/api/groups/:groupId/messages', (req, res) => {
   const { groupId } = req.params;
   const userId = req.session.userId;
-  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
+  // v1.3.14: H4 — clamp the limit to [1, 100]. SQLite treats a NEGATIVE LIMIT
+  // as "no limit", so ?limit=-1 used to serialize the entire group history.
+  const requestedLimit = parseInt(req.query.limit, 10);
+  const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 50, 1), 100);
   const before = req.query.before || null;
 
   const member = stmts.isMember.get(groupId, userId);
@@ -4169,30 +4246,44 @@ io.on('connection', (socket) => {
 
   socket.on('attachment_upload_progress', ({ groupId, uploadId, type, filename, totalBytes, loadedBytes }) => {
     if (!groupId || !uploadId) return;
-    const member = stmts.isMember.get(groupId, socket.userId);
-    if (!member) return;
-    io.to(groupId).emit('attachment_upload_progress', {
-      groupId,
-      uploadId: String(uploadId).slice(0, 128),
-      type: type === 'file' ? 'file' : 'image',
-      filename: typeof filename === 'string' ? filename.slice(0, 255) : null,
-      totalBytes: Math.max(1, Number(totalBytes) || 1),
-      loadedBytes: Math.max(0, Number(loadedBytes) || 0),
-      senderId: socket.userId,
-      senderName: socket.username,
-      senderColor: socket.iconColor,
-    });
+    // v1.3.14: C1 — normalize before binding (a non-string groupId used to
+    // crash the whole process via better-sqlite3's strict binding).
+    const normalizedGroupId = normalizeSocketGroupId(groupId);
+    if (!normalizedGroupId) return;
+    try {
+      const member = stmts.isMember.get(normalizedGroupId, socket.userId);
+      if (!member) return;
+      io.to(normalizedGroupId).emit('attachment_upload_progress', {
+        groupId: normalizedGroupId,
+        uploadId: String(uploadId).slice(0, 128),
+        type: type === 'file' ? 'file' : 'image',
+        filename: typeof filename === 'string' ? filename.slice(0, 255) : null,
+        totalBytes: Math.max(1, Number(totalBytes) || 1),
+        loadedBytes: Math.max(0, Number(loadedBytes) || 0),
+        senderId: socket.userId,
+        senderName: socket.username,
+        senderColor: socket.iconColor,
+      });
+    } catch (error) {
+      console.error('attachment_upload_progress failed:', error.message);
+    }
   });
 
   socket.on('attachment_upload_failed', ({ groupId, uploadId }) => {
     if (!groupId || !uploadId) return;
-    const member = stmts.isMember.get(groupId, socket.userId);
-    if (!member) return;
-    io.to(groupId).emit('attachment_upload_failed', {
-      groupId,
-      uploadId: String(uploadId).slice(0, 128),
-      senderId: socket.userId,
-    });
+    const normalizedGroupId = normalizeSocketGroupId(groupId);
+    if (!normalizedGroupId) return;
+    try {
+      const member = stmts.isMember.get(normalizedGroupId, socket.userId);
+      if (!member) return;
+      io.to(normalizedGroupId).emit('attachment_upload_failed', {
+        groupId: normalizedGroupId,
+        uploadId: String(uploadId).slice(0, 128),
+        senderId: socket.userId,
+      });
+    } catch (error) {
+      console.error('attachment_upload_failed failed:', error.message);
+    }
   });
 
   // ── send_message ──────────────────────────────────────────────────────────
@@ -4225,7 +4316,10 @@ io.on('connection', (socket) => {
       fail('Not authenticated');
       return;
     }
-    if (!groupId) {
+    // v1.3.14: C1 — normalize the group id before any DB binding (a non-string
+    // groupId used to throw inside better-sqlite3 and crash the process).
+    const normalizedGroupId = normalizeSocketGroupId(groupId);
+    if (!normalizedGroupId) {
       fail('Group ID is required');
       return;
     }
@@ -4256,7 +4350,7 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const group = stmts.findGroupById.get(groupId);
+    const group = stmts.findGroupById.get(normalizedGroupId);
     if (!group) {
       fail('Group not found');
       return;
@@ -4266,7 +4360,7 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const member = stmts.isMember.get(groupId, socket.userId);
+    const member = stmts.isMember.get(normalizedGroupId, socket.userId);
     if (!member) {
       fail('Not a member of this group');
       return;
@@ -4277,7 +4371,7 @@ io.on('connection', (socket) => {
       // A missing target means the quoted message was deleted; accept the
       // reply anyway so quotes never hard-fail at send time. Only enforce
       // the same-group rule when the target still exists.
-      if (target && target.group_id !== groupId) {
+      if (target && target.group_id !== normalizedGroupId) {
         fail('Reply target not found');
         return;
       }
@@ -4285,12 +4379,12 @@ io.on('connection', (socket) => {
 
     const msgId = id;
     const createdAt = new Date().toISOString();
-    const totalRecipients = Math.max(0, (stmts.countGroupMembers.get(groupId)?.count || 0) - 1);
+    const totalRecipients = Math.max(0, (stmts.countGroupMembers.get(normalizedGroupId)?.count || 0) - 1);
 
     try {
       stmts.insertV2Message.run(
         msgId,
-        groupId,
+        normalizedGroupId,
         socket.userId,
         encryptedContent,
         iv,
@@ -4332,7 +4426,7 @@ io.on('connection', (socket) => {
 
     const messagePayload = {
       id: msgId,
-      groupId,
+      groupId: normalizedGroupId,
       senderId: socket.userId,
       senderName: socket.username,
       senderColor: socket.iconColor,
@@ -4363,11 +4457,11 @@ io.on('connection', (socket) => {
       aiMeta: normalizedAiMeta,
     };
 
-    io.to(groupId).emit('new_message', messagePayload);
+    io.to(normalizedGroupId).emit('new_message', messagePayload);
     queueUnreadPushNotifications(
-      stmts.getOtherGroupMemberIds.all(groupId, socket.userId)
+      stmts.getOtherGroupMemberIds.all(normalizedGroupId, socket.userId)
         .map((row) => row.user_id),
-      { senderName: socket.username, groupName: getGroupNameForPush(groupId) }
+      { senderName: socket.username, groupName: getGroupNameForPush(normalizedGroupId) }
     );
     if (typeof ack === 'function') ack({ ok: true, messageId: msgId });
   });
@@ -4396,12 +4490,14 @@ io.on('connection', (socket) => {
       fail('Not authenticated');
       return;
     }
-    if (!groupId) {
+    // v1.3.14: C1 — normalize the group id before any DB binding.
+    const normalizedGroupId = normalizeSocketGroupId(groupId);
+    if (!normalizedGroupId) {
       fail('Group ID is required');
       return;
     }
 
-    const group = stmts.findGroupById.get(groupId);
+    const group = stmts.findGroupById.get(normalizedGroupId);
     if (!group) {
       fail('Group not found');
       return;
@@ -4411,7 +4507,7 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const member = stmts.isMember.get(groupId, socket.userId);
+    const member = stmts.isMember.get(normalizedGroupId, socket.userId);
     if (!member) {
       fail('Not a member of this group');
       return;
@@ -4423,7 +4519,7 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const replyCheck = normalizeReplyPayload(replyTo, groupId);
+    const replyCheck = normalizeReplyPayload(replyTo, normalizedGroupId);
     if (!replyCheck.ok) {
       fail(replyCheck.error);
       return;
@@ -4438,12 +4534,12 @@ io.on('connection', (socket) => {
 
     const msgId = crypto.randomUUID();
     const createdAt = new Date().toISOString();
-    const totalRecipients = Math.max(0, Number(stmts.countGroupMembers.get(groupId)?.count) || 0);
+    const totalRecipients = Math.max(0, Number(stmts.countGroupMembers.get(normalizedGroupId)?.count) || 0);
 
     try {
       stmts.insertMessage.run(
         msgId,
-        groupId,
+        normalizedGroupId,
         AI_ASSISTANT_USER_ID,
         encryptedContent,
         iv,
@@ -4465,9 +4561,9 @@ io.on('connection', (socket) => {
       return;
     }
 
-    io.to(groupId).emit('new_message', {
+    io.to(normalizedGroupId).emit('new_message', {
       id: msgId,
-      groupId,
+      groupId: normalizedGroupId,
       senderId: AI_ASSISTANT_USER_ID,
       senderName: AI_ASSISTANT_NAME,
       senderColor: AI_ASSISTANT_COLOR,
@@ -4492,8 +4588,8 @@ io.on('connection', (socket) => {
       readCount: 0,
     });
     queueUnreadPushNotifications(
-      stmts.getGroupMemberIds.all(groupId).map((row) => row.user_id),
-      { senderName: socket.username, groupName: getGroupNameForPush(groupId) }
+      stmts.getGroupMemberIds.all(normalizedGroupId).map((row) => row.user_id),
+      { senderName: socket.username, groupName: getGroupNameForPush(normalizedGroupId) }
     );
     if (typeof ack === 'function') ack({ ok: true, messageId: msgId });
   });
@@ -4510,7 +4606,9 @@ io.on('connection', (socket) => {
       socket.emit('error', { message: 'Not authenticated' });
       return;
     }
-    if (!groupId || !Array.isArray(whisperTo)) {
+    // v1.3.14: C1 — normalize the group id before any DB binding.
+    const normalizedGroupId = normalizeSocketGroupId(groupId);
+    if (!normalizedGroupId || !Array.isArray(whisperTo)) {
       socket.emit('error', { message: 'Invalid whisper payload' });
       return;
     }
@@ -4520,7 +4618,7 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const member = stmts.isMember.get(groupId, socket.userId);
+    const member = stmts.isMember.get(normalizedGroupId, socket.userId);
     if (!member) {
       socket.emit('error', { message: 'Not a member of this group' });
       return;
@@ -4540,7 +4638,7 @@ io.on('connection', (socket) => {
       const target = stmts.findMessageById.get(replyToId);
       // Deleted quote targets no longer block the whisper at send time; only
       // enforce the same-group rule when the target still exists.
-      if (target && target.group_id !== groupId) {
+      if (target && target.group_id !== normalizedGroupId) {
         socket.emit('error', { message: 'Reply target not found' });
         return;
       }
@@ -4568,7 +4666,7 @@ io.on('connection', (socket) => {
     // Validate that every whisper recipient is a member of this group
     for (const recipId of recipients) {
       if (recipId === socket.userId) continue;
-      if (!stmts.isMember.get(groupId, String(recipId))) {
+      if (!stmts.isMember.get(normalizedGroupId, String(recipId))) {
         socket.emit('error', { message: 'One or more whisper recipients are not group members.' });
         return;
       }
@@ -4583,7 +4681,7 @@ io.on('connection', (socket) => {
     try {
       stmts.insertV2Message.run(
         msgId,
-        groupId,
+        normalizedGroupId,
         socket.userId,
         encryptedContent,
         iv,
@@ -4613,7 +4711,7 @@ io.on('connection', (socket) => {
 
     const payload = {
       id: msgId,
-      groupId,
+      groupId: normalizedGroupId,
       senderId: socket.userId,
       senderName: socket.username,
       senderColor: socket.iconColor,
@@ -4646,7 +4744,7 @@ io.on('connection', (socket) => {
 
     // Send to sender + recipients only
     const recipientIds = new Set([socket.userId, ...recipients]);
-    const roomSockets = getPresence(groupId);
+    const roomSockets = getPresence(normalizedGroupId);
     for (const sid of roomSockets) {
       const s = io.sockets.sockets.get(sid);
       if (s && recipientIds.has(s.userId)) {
@@ -4655,7 +4753,7 @@ io.on('connection', (socket) => {
     }
     queueUnreadPushNotifications(recipientsExcludingSender, {
       senderName: socket.username,
-      groupName: getGroupNameForPush(groupId),
+      groupName: getGroupNameForPush(normalizedGroupId),
     });
   });
 
@@ -4681,14 +4779,22 @@ io.on('connection', (socket) => {
       const normalizedTag = (tagIndex && typeof tagIndex === 'string') ? tagIndex.slice(0, 64) : null;
       const normalizedAt = String(createdAt).slice(0, 64);
       const normalizedId = String(messageId || '').slice(0, 64);
-      stmts.upsertChannelReadCursor.run(
-        normalizedGroupId,
-        socket.userId,
-        normalizedTag,
-        normalizedAt,
-        normalizedId,
-        new Date().toISOString()
-      );
+      // v1.3.14: H1 — a cursor event older than the current cursor is a stale
+      // replay (e.g. viewport reads re-fired after a reload) — skip it
+      // entirely so unread counts can never regress (no recompute, no
+      // broadcast). The upserts below also carry a monotonic WHERE as a
+      // second line of defense.
+      const existing = stmts.getChannelReadCursor.get(normalizedGroupId, socket.userId, normalizedTag);
+      if (existing && existing.last_read_created_at) {
+        const cmp = String(normalizedAt).localeCompare(String(existing.last_read_created_at));
+        if (cmp < 0 || (cmp === 0 && String(normalizedId) <= String(existing.last_read_id || ''))) return;
+      }
+      const now = new Date().toISOString();
+      if (normalizedTag === null) {
+        stmts.upsertChannelReadCursorMain.run(normalizedGroupId, socket.userId, normalizedAt, normalizedId, now);
+      } else {
+        stmts.upsertChannelReadCursor.run(normalizedGroupId, socket.userId, normalizedTag, normalizedAt, normalizedId, now);
+      }
       const channelRow = stmts.getChannelUnreadCount.get({
         groupId: normalizedGroupId,
         viewerId: socket.userId,
@@ -4729,63 +4835,78 @@ io.on('connection', (socket) => {
   });
 
   socket.on('start_disappearing_timer', ({ groupId, messageId }) => {
-    if (!groupId || !messageId) return;
-    const member = stmts.isMember.get(groupId, socket.userId);
-    if (!member) return;
-    markExpiredDisappearingMessagesHidden(socket.userId);
-    const message = stmts.findMessageById.get(messageId);
-    if (!message || message.group_id !== groupId || !message.is_disappearing) return;
-    if (!canUserAccessMessage(message, socket.userId) || String(message.sender_id) === String(socket.userId)) return;
+    // v1.3.14: C1 — normalize before any DB binding; also wrap the insert in
+    // try/catch so a benign two-device race (UNIQUE constraint) can never
+    // become an uncaughtException.
+    const normalizedGroupId = normalizeSocketGroupId(groupId);
+    const normalizedMessageId = normalizeSocketMessageId(messageId);
+    if (!normalizedGroupId || !normalizedMessageId) return;
+    try {
+      const member = stmts.isMember.get(normalizedGroupId, socket.userId);
+      if (!member) return;
+      markExpiredDisappearingMessagesHidden(socket.userId);
+      const message = stmts.findMessageById.get(normalizedMessageId);
+      if (!message || message.group_id !== normalizedGroupId || !message.is_disappearing) return;
+      if (!canUserAccessMessage(message, socket.userId) || String(message.sender_id) === String(socket.userId)) return;
 
-    let state = stmts.findDisappearingState.get(messageId, socket.userId);
-    if (!state) {
-      const startedAt = new Date().toISOString();
-      const duration = resolveStoredDisappearingDurationMs(message);
-      const expiresAt = new Date(Date.now() + duration).toISOString();
-      stmts.insertDisappearingState.run(messageId, socket.userId, startedAt, expiresAt, null);
-      state = stmts.findDisappearingState.get(messageId, socket.userId);
-    } else if (!state.started_at || !state.expires_at) {
-      const startedAt = new Date().toISOString();
-      const duration = resolveStoredDisappearingDurationMs(message);
-      const expiresAt = new Date(Date.now() + duration).toISOString();
-      stmts.updateDisappearingStateStart.run(startedAt, expiresAt, messageId, socket.userId);
-      state = stmts.findDisappearingState.get(messageId, socket.userId);
+      let state = stmts.findDisappearingState.get(normalizedMessageId, socket.userId);
+      if (!state) {
+        const startedAt = new Date().toISOString();
+        const duration = resolveStoredDisappearingDurationMs(message);
+        const expiresAt = new Date(Date.now() + duration).toISOString();
+        stmts.insertDisappearingState.run(normalizedMessageId, socket.userId, startedAt, expiresAt, null);
+        state = stmts.findDisappearingState.get(normalizedMessageId, socket.userId);
+      } else if (!state.started_at || !state.expires_at) {
+        const startedAt = new Date().toISOString();
+        const duration = resolveStoredDisappearingDurationMs(message);
+        const expiresAt = new Date(Date.now() + duration).toISOString();
+        stmts.updateDisappearingStateStart.run(startedAt, expiresAt, normalizedMessageId, socket.userId);
+        state = stmts.findDisappearingState.get(normalizedMessageId, socket.userId);
+      }
+
+      emitToUser(socket.userId, 'disappearing_state_updated', {
+        groupId: normalizedGroupId,
+        messageId: normalizedMessageId,
+        startedAt: state?.started_at || null,
+        expiresAt: state?.expires_at || null,
+        hiddenAt: state?.hidden_at || null,
+      });
+    } catch (error) {
+      console.error('start_disappearing_timer failed:', error.message);
     }
-
-    emitToUser(socket.userId, 'disappearing_state_updated', {
-      groupId,
-      messageId,
-      startedAt: state?.started_at || null,
-      expiresAt: state?.expires_at || null,
-      hiddenAt: state?.hidden_at || null,
-    });
   });
 
   socket.on('hide_disappearing_message', ({ groupId, messageId }) => {
-    if (!groupId || !messageId) return;
-    const member = stmts.isMember.get(groupId, socket.userId);
-    if (!member) return;
-    const message = stmts.findMessageById.get(messageId);
-    if (!message || message.group_id !== groupId || !message.is_disappearing) return;
-    if (!canUserAccessMessage(message, socket.userId) || String(message.sender_id) === String(socket.userId)) return;
+    const normalizedGroupId = normalizeSocketGroupId(groupId);
+    const normalizedMessageId = normalizeSocketMessageId(messageId);
+    if (!normalizedGroupId || !normalizedMessageId) return;
+    try {
+      const member = stmts.isMember.get(normalizedGroupId, socket.userId);
+      if (!member) return;
+      const message = stmts.findMessageById.get(normalizedMessageId);
+      if (!message || message.group_id !== normalizedGroupId || !message.is_disappearing) return;
+      if (!canUserAccessMessage(message, socket.userId) || String(message.sender_id) === String(socket.userId)) return;
 
-    const hiddenAt = new Date().toISOString();
-    let state = stmts.findDisappearingState.get(messageId, socket.userId);
-    if (!state) {
-      stmts.insertDisappearingState.run(messageId, socket.userId, null, null, hiddenAt);
-      state = stmts.findDisappearingState.get(messageId, socket.userId);
-    } else {
-      stmts.markDisappearingStateHidden.run(hiddenAt, messageId, socket.userId);
-      state = stmts.findDisappearingState.get(messageId, socket.userId);
+      const hiddenAt = new Date().toISOString();
+      let state = stmts.findDisappearingState.get(normalizedMessageId, socket.userId);
+      if (!state) {
+        stmts.insertDisappearingState.run(normalizedMessageId, socket.userId, null, null, hiddenAt);
+        state = stmts.findDisappearingState.get(normalizedMessageId, socket.userId);
+      } else {
+        stmts.markDisappearingStateHidden.run(hiddenAt, normalizedMessageId, socket.userId);
+        state = stmts.findDisappearingState.get(normalizedMessageId, socket.userId);
+      }
+
+      emitToUser(socket.userId, 'disappearing_state_updated', {
+        groupId: normalizedGroupId,
+        messageId: normalizedMessageId,
+        startedAt: state?.started_at || null,
+        expiresAt: state?.expires_at || null,
+        hiddenAt: state?.hidden_at || hiddenAt,
+      });
+    } catch (error) {
+      console.error('hide_disappearing_message failed:', error.message);
     }
-
-    emitToUser(socket.userId, 'disappearing_state_updated', {
-      groupId,
-      messageId,
-      startedAt: state?.started_at || null,
-      expiresAt: state?.expires_at || null,
-      hiddenAt: state?.hidden_at || hiddenAt,
-    });
   });
 
   // ── typing ────────────────────────────────────────────────────────────────

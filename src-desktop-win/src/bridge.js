@@ -1,6 +1,23 @@
 (() => {
   'use strict';
 
+  // v1.3.14: H8 — the bridge only installs itself on trusted documents:
+  // the top frame of the official hosted app, or the offline recovery page
+  // (loaded as a data: URL by the shell — the ONLY data: page the
+  // navigation handler ever permits). Subframes, about:/file: pages, and
+  // any other origin never get the API, so a single XSS cannot escalate to
+  // the desktop bridge (install-update, clear-cache-and-restart, ...).
+  const isTrustedDocument =
+    window.top === window
+    && (
+      window.location.protocol === 'data:'
+      || (
+        window.location.protocol === 'https:'
+        && window.location.hostname === 'gchat.up.railway.app'
+      )
+    );
+  if (!isTrustedDocument) return;
+
   const post = (type, payload) => {
     try {
       window.ipc.postMessage(JSON.stringify({ type, payload: payload || null }));
