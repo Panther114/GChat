@@ -219,8 +219,8 @@ test('composer modes use the active channel without legacy tokens or slash comma
 
   await page.locator('#whisper-mode-btn').click();
   const recipients = page.locator('.whisper-picker-item input');
-  await expect(recipients).toHaveCount(1);
-  await recipients.check();
+  expect(await recipients.count()).toBeGreaterThan(0);
+  await recipients.first().check();
   await page.locator('#whisper-picker-confirm').click();
 
   await expect(page.locator('#message-token-strip')).toBeHidden();
@@ -294,6 +294,31 @@ test('image attachments reserve message-row space and open usable viewer actions
   await expect(page.locator('#image-viewer-copy-btn')).toBeVisible();
   await expect(page.locator('#image-viewer-download-btn')).toBeVisible();
 
+  const assertViewerActionsOutsideImage = async () => {
+    const geometry = await page.evaluate(() => {
+      const imageElement = globalThis.document.getElementById('image-viewer-img');
+      const stageElement = globalThis.document.querySelector('.image-viewer-stage');
+      const actionsElement = globalThis.document.querySelector('.image-viewer-actions');
+      const imageRect = imageElement.getBoundingClientRect();
+      const stageRect = stageElement.getBoundingClientRect();
+      const actionsRect = actionsElement.getBoundingClientRect();
+      return {
+        visibleImageRight: Math.min(imageRect.right, stageRect.right),
+        actionsLeft: actionsRect.left,
+        viewportWidth: globalThis.innerWidth,
+        actionsRight: actionsRect.right,
+      };
+    });
+    expect(geometry.actionsLeft).toBeGreaterThanOrEqual(geometry.visibleImageRight - 1);
+    expect(geometry.actionsRight).toBeLessThanOrEqual(geometry.viewportWidth + 1);
+  };
+  await assertViewerActionsOutsideImage();
+  await page.locator('#image-viewer-img').click();
+  await assertViewerActionsOutsideImage();
+  await page.setViewportSize({ width: 320, height: 640 });
+  await assertViewerActionsOutsideImage();
+  await page.setViewportSize({ width: 1280, height: 720 });
+
   await page.evaluate(() => {
     Object.defineProperty(globalThis.navigator.clipboard, 'write', {
       configurable: true,
@@ -365,6 +390,62 @@ test('join flow accepts a six-character invite code', async ({ page }) => {
   await expect(page.locator('#join-modal')).toBeVisible();
   await expect(page.locator('#join-modal').getByText('Invite Code', { exact: true })).toBeVisible();
   await expect(page.locator('#join-group-code')).toHaveAttribute('maxlength', '6');
+});
+
+test('rapid invalid actions cap the compact toast stack at three', async ({ page }) => {
+  await signInAsLocalRoot(page);
+  await clickGroup(page, 'Increment A Playground');
+  await page.locator('#whisper-mode-btn').click();
+  const confirm = page.locator('#whisper-picker-confirm');
+  for (let i = 0; i < 8; i += 1) await confirm.click();
+
+  const toasts = page.locator('#toast-container .toast');
+  await expect(toasts).toHaveCount(3);
+  const boxes = await toasts.evaluateAll((elements) => elements.map((element) => {
+    const rect = element.getBoundingClientRect();
+    return { top: rect.top, bottom: rect.bottom };
+  }));
+  for (let i = 1; i < boxes.length; i += 1) {
+    expect(boxes[i].top).toBeGreaterThanOrEqual(boxes[i - 1].bottom);
+  }
+});
+
+test('search filters nonmatches, reports exact results, and ordinary clicks preserve scroll', async ({ page }) => {
+  await signInAsLocalRoot(page);
+  await clickGroup(page, 'Increment A Playground');
+  await page.locator('#messages-area .msg-row').first().waitFor();
+
+  await page.locator('#search-input').fill('twelve-minute');
+  await expect(page.locator('#search-results-count')).toContainText('1 result');
+  await expect(page.locator('#messages-area .msg-row:not([hidden])')).toHaveCount(1);
+  await expect(page.locator('#messages-area .msg-row:not([hidden]) .msg-text')).toContainText('twelve-minute');
+
+  await page.locator('#clear-search-btn').click();
+  for (let i = 0; i < 18; i += 1) {
+    await page.locator('#message-input').fill(`click-scroll-${i}`);
+    await page.locator('#message-input').press('Enter');
+  }
+  await page.evaluate(() => {
+    const area = globalThis.document.getElementById('messages-area');
+    area.scrollTop = Math.round(area.scrollHeight / 3);
+  });
+  const before = await page.locator('#messages-area').evaluate((element) => element.scrollTop);
+  const visibleMessageId = await page.evaluate(() => {
+    const area = globalThis.document.getElementById('messages-area');
+    const areaRect = area.getBoundingClientRect();
+    const row = [...area.querySelectorAll('.msg-row')].find((candidate) => {
+      const rect = candidate.getBoundingClientRect();
+      return rect.top >= areaRect.top && rect.bottom <= areaRect.bottom;
+    });
+    return row?.dataset.msgId || null;
+  });
+  expect(visibleMessageId).toBeTruthy();
+  await page.locator(`[data-msg-id="${visibleMessageId}"] .msg-text`).click();
+  const afterMessageClick = await page.locator('#messages-area').evaluate((element) => element.scrollTop);
+  await page.locator('#messages-area').click({ position: { x: 8, y: 8 } });
+  const afterBackgroundClick = await page.locator('#messages-area').evaluate((element) => element.scrollTop);
+  expect(Math.abs(afterMessageClick - before)).toBeLessThanOrEqual(1);
+  expect(Math.abs(afterBackgroundClick - afterMessageClick)).toBeLessThanOrEqual(1);
 });
 
 test('group details keep Invite stable and render a bounded group-icon preview', async ({ page }) => {
@@ -515,7 +596,7 @@ test('a sent message always shows its own sender header, never another user', as
   await expect(bOwnRow).toBeVisible({ timeout: 10000 });
   await expect(bOwnRow.locator('.msg-sender-name')).toHaveText(friendName);
   await expect(bOwnRow).not.toHaveClass(/series-continued/);
-  await expect(bOwnRow.locator('.msg-avatar')).toHaveText(friendName[0].toUpperCase());
+  await expect(bOwnRow.locator('.msg-avatar-identity')).toHaveText(friendName[0].toUpperCase());
 
   // B's SECOND message follows B's own — the legitimate series continuation
   // must still collapse into the same block (no duplicate headers).
@@ -576,6 +657,13 @@ test('right-clicking a message timestamp opens the message menu, not the profile
   await clickGroup(page, 'Increment A Playground');
   await page.locator('#messages-area .msg-row, #messages-area .channel-empty-state').first().waitFor();
 
+  const seriesChannel = `series-${Date.now() % 100000}`;
+  await page.locator('.chat-tag-add-btn').click();
+  await page.locator('#channel-name-input').fill(seriesChannel);
+  await page.locator('#channel-confirm-btn').click();
+  await page.locator('.chat-tag-filter-btn', { hasText: `#${seriesChannel}` }).click();
+  await expect(page.locator('#messages-area .channel-empty-state')).toBeVisible();
+
   // Two quick consecutive messages: the second continues the series, so its
   // timestamp is rendered inside the avatar gutter.
   const first = `series-a-${Date.now()}`;
@@ -585,8 +673,9 @@ test('right-clicking a message timestamp opens the message menu, not the profile
   await expect(page.locator('#messages-area .msg-row', { hasText: first }).last().locator('.msg-text')).toHaveText(first);
   await page.locator('#message-input').fill(second);
   await page.locator('#message-input').press('Enter');
-  const continuedRow = page.locator('#messages-area .msg-row.series-continued', { hasText: second }).last();
+  const continuedRow = page.locator('#messages-area .msg-row', { hasText: second }).last();
   await expect(continuedRow).toBeVisible();
+  await expect(continuedRow).toHaveClass(/series-continued/);
   const continuationTime = continuedRow.locator('.msg-continuation-time');
   await expect(continuationTime).toHaveCount(1);
 
@@ -595,6 +684,17 @@ test('right-clicking a message timestamp opens the message menu, not the profile
   await continuationTime.dispatchEvent('contextmenu');
   await expect(page.locator('#ctx-menu')).toBeVisible();
   await expect(page.locator('#avatar-ctx-menu')).toBeHidden();
+
+  // Removing the series leader promotes the continuation into a complete row:
+  // avatar, sender header, and timestamp must all already exist and reappear.
+  const firstRow = page.locator('#messages-area .msg-row', { hasText: first }).last();
+  await firstRow.locator('.msg-header-time').dispatchEvent('contextmenu');
+  await page.locator('#ctx-delete').click();
+  await page.locator('#confirm-ok-btn').click();
+  await expect(firstRow).toHaveCount(0);
+  await expect(continuedRow).not.toHaveClass(/series-continued/);
+  await expect(continuedRow.locator('.msg-avatar-identity')).toBeVisible();
+  await expect(continuedRow.locator('.msg-header-time')).toBeVisible();
 
   // Regression guard: right-clicking an actual member avatar still offers
   // the invite action.

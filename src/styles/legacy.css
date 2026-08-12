@@ -1110,13 +1110,6 @@ img.gchat-global-icon {
 .msg-edit-save:disabled { opacity: .5; cursor: not-allowed; }
 .msg-edit-cancel { background: rgba(255,255,255,.1); color: var(--text-primary); }
 
-/* Unseen indicator */
-.msg-row.unseen .msg-bubble {
-  background: #ffe9f3;
-  border-color: #f8bfd9;
-  transition: background .2s ease, border-color .2s ease;
-}
-
 /* Search highlight */
 .search-highlight { background: rgba(255,200,0,.3); border-radius: 2px; }
 

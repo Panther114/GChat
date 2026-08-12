@@ -862,7 +862,9 @@
   }
   function sortMessagesChronologically(messages) {
     return [...messages].sort((a, b) => {
-      const timeDiff = String(a.createdAt || "").localeCompare(String(b.createdAt || ""));
+      const aTime = parseMessageDate(a.createdAt).getTime();
+      const bTime = parseMessageDate(b.createdAt).getTime();
+      const timeDiff = (Number.isFinite(aTime) ? aTime : 0) - (Number.isFinite(bTime) ? bTime : 0);
       return timeDiff !== 0 ? timeDiff : String(a.id).localeCompare(String(b.id));
     });
   }
@@ -2900,6 +2902,9 @@
         // members: [], and the next boot read it as loaded, so groups (notably
         // GChat Global) rendered "0 members" forever until a cache reset.
         members: Array.isArray(local?.members) && local.members.length ? local.members : null,
+        // Session-only readiness bit. Cached/durable or realtime messages do not
+        // prove that the newest bounded server window has been fetched.
+        serverWindowLoaded: false,
         oldestMessageId: local?.oldestMessageId || null,
         rowsDirty: !!local?.messages,
         knownChannels: new Set(readKnownChannels(groupId))
@@ -2980,9 +2985,6 @@
         const showSenderName = !shouldContinueSeries(prev, msg);
         const row = await buildMessageRow(msg, groupId, { showSenderName });
         if (row) {
-          if (!prev || !isSameMessageDay(prev.createdAt, msg.createdAt)) {
-            rows.push(createDateDivider(msg.createdAt));
-          }
           rows.push(row);
           if (msg.type !== "system") prev = msg;
         }
@@ -3228,11 +3230,11 @@
     if (groupPreloadPromises.has(groupId)) return groupPreloadPromises.get(groupId);
     const cache = ensureGroupCacheEntry(groupId);
     const preload = (async () => {
-      if (cache.messages && cache.members) {
+      if (cache.serverWindowLoaded && cache.members) {
         return ensureGroupCacheEntry(groupId);
       }
       const pending = [];
-      if (!cache.messages) pending.push(loadMessages(groupId));
+      if (!cache.serverWindowLoaded) pending.push(loadMessages(groupId));
       if (!cache.members) pending.push(loadMembers(groupId));
       const results = await Promise.allSettled(pending);
       for (const result of results) {
@@ -3449,74 +3451,7 @@
         child.hidden = false;
       }
     }
-    let divider = null;
-    let hasVisibleMessageAfterDivider = false;
-    for (const child of rows) {
-      if (child.classList.contains("msg-date-divider")) {
-        if (divider) divider.hidden = !hasVisibleMessageAfterDivider;
-        divider = child;
-        hasVisibleMessageAfterDivider = false;
-        child.hidden = true;
-        continue;
-      }
-      if (child.classList.contains("msg-row") && !child.hidden) {
-        hasVisibleMessageAfterDivider = true;
-        if (divider) divider.hidden = false;
-      }
-    }
-    if (divider) divider.hidden = !hasVisibleMessageAfterDivider;
-    let prevVisible = null;
-    let prevCreatedAt = null;
-    for (const child of rows) {
-      if (!child.classList.contains("msg-row") || child.hidden) continue;
-      const createdAt = child.querySelector("time")?.dateTime || child.querySelector(".msg-header-time")?.dateTime || null;
-      let continueSeries = false;
-      if (prevVisible && prevVisible.dataset.senderId && prevVisible.dataset.senderId === child.dataset.senderId && (prevVisible.dataset.hashtag || DEFAULT_TAG_TOPIC) === (child.dataset.hashtag || DEFAULT_TAG_TOPIC) && prevCreatedAt && createdAt) {
-        const prevTime = parseMessageDate(prevCreatedAt).getTime();
-        const currentTime = parseMessageDate(createdAt).getTime();
-        const gapMinutes = (currentTime - prevTime) / 6e4;
-        continueSeries = gapMinutes >= 0 && gapMinutes <= 7 && isSameMessageDay(prevCreatedAt, createdAt);
-      }
-      child.classList.toggle("series-continued", continueSeries);
-      const header = child.querySelector(".msg-header");
-      if (header) header.hidden = continueSeries;
-      const avatar = child.querySelector(".msg-avatar");
-      if (avatar) {
-        if (continueSeries) {
-          let clock = avatar.querySelector(".msg-continuation-time");
-          if (!clock) {
-            clock = document.createElement("time");
-            clock.className = "msg-continuation-time";
-            if (createdAt) {
-              clock.dateTime = createdAt;
-              clock.textContent = formatTime(createdAt);
-              clock.title = formatFullMessageTime(createdAt);
-            }
-          }
-          avatar.replaceChildren(clock);
-          avatar.style.background = "transparent";
-          avatar.style.color = "transparent";
-        } else {
-          if (header) header.hidden = false;
-          const clock = avatar.querySelector(".msg-continuation-time");
-          if (clock) {
-            const senderId = child.dataset.senderId;
-            const senderNameEl = child.querySelector(".msg-sender-name");
-            const memberProfile = getMemberProfile(currentGroupId, senderId);
-            avatar.style.background = "";
-            avatar.style.color = "";
-            const cachedMessage = (allMessages || []).find((m) => String(m.id) === String(child.dataset.msgId));
-            renderAvatarElement(avatar, {
-              username: memberProfile?.username || senderNameEl && senderNameEl.textContent || "?",
-              iconColor: memberProfile?.iconColor || cachedMessage?.senderColor || null,
-              profilePicture: memberProfile?.profilePicture || null
-            });
-          }
-        }
-      }
-      prevVisible = child;
-      prevCreatedAt = createdAt;
-    }
+    reconcileTranscriptStructure(area, currentGroupId);
     for (const child of rows) {
       if (child.classList.contains("msg-row")) {
         syncViewportTrackingForRow(child, isRowVisibleInMessagesViewport(child));
@@ -3572,6 +3507,7 @@
       fragment.appendChild(row);
     }
     area.replaceChildren(fragment);
+    reconcileTranscriptStructure(area, currentGroupId);
   }
   function captureViewportAnchor(area) {
     if (!area) return null;
@@ -3616,6 +3552,7 @@
     const firstMsgRow = memo.rows.find((r) => r && r.dataset?.msgId);
     memo.firstMsgId = firstMsgRow ? firstMsgRow.dataset.msgId : null;
     if (!memo.rows.length) memo.lastMsgId = null;
+    if (area && memo.rows.some((row) => row?.isConnected)) reconcileTranscriptStructure(area, currentGroupId);
     restoreViewportAnchor(area, anchor);
   }
   function evictChannelRowBack(memo, keep = CHANNEL_RENDER_WINDOW * 2) {
@@ -3640,6 +3577,7 @@
     const lastMsgRow = memo.rows.length ? Array.from(memo.rows).reverse().find((r) => r && r.dataset?.msgId) : null;
     memo.lastMsgId = lastMsgRow ? lastMsgRow.dataset.msgId : null;
     if (!memo.rows.length) memo.firstMsgId = null;
+    if (area && memo.rows.some((row) => row?.isConnected)) reconcileTranscriptStructure(area, currentGroupId);
   }
   function restoreOrScrollToBottom() {
     const area = messagesArea();
@@ -3694,11 +3632,7 @@
     const lastWindowId = String(windowMsgs[windowMsgs.length - 1].id);
     if (memo.rows.length > 0 && memo.lastMsgId === lastWindowId) {
       const cacheIds = new Set(all.map((m) => String(m.id)));
-      const valid = memo.rows.filter((row) => {
-        if (!row) return false;
-        if (!row.dataset?.msgId) return true;
-        return cacheIds.has(String(row.dataset.msgId));
-      });
+      const valid = memo.rows.filter((row) => !!row?.dataset?.msgId && cacheIds.has(String(row.dataset.msgId)));
       if (valid.length !== memo.rows.length) {
         memo.rows = valid;
         memo.byId = new Map(valid.filter((row) => row?.dataset?.msgId).map((row) => [String(row.dataset.msgId), row]));
@@ -3764,7 +3698,7 @@
   function selectTagChannel(topic, { focusComposer = true } = {}) {
     const next = ensureActiveTag(topic);
     rememberChannel(currentGroupId, next);
-    clearActiveSearch();
+    clearActiveSearch({ restoreTranscript: false });
     clearHashtagToken();
     clearWhisperToken();
     whisperRecipients = [];
@@ -4825,6 +4759,7 @@
           cache.members = Array.isArray(group.preloaded.members) && group.preloaded.members.length ? group.preloaded.members : null;
           cache.messageRows = null;
           cache.rowsDirty = true;
+          cache.serverWindowLoaded = true;
           writeLocalGroupCache(group.id, cache);
           if (preloadedMessages.length) {
             void persistHistoryMessages(group.id, preloadedMessages);
@@ -5247,6 +5182,7 @@
   var channelUnreadCounts = {};
   var channelUnreadLoadedForGroup = null;
   var channelUnreadTagIndexByTopic = /* @__PURE__ */ new Map();
+  var channelUnreadTopicByTagIndex = /* @__PURE__ */ new Map();
   async function fetchChannelUnreadCounts(groupId) {
     if (String(groupId) !== String(currentGroupId)) return;
     try {
@@ -5276,6 +5212,7 @@
       if (String(currentGroupId) !== String(groupId)) return;
       channelUnreadCounts = data.counts || {};
       channelUnreadTagIndexByTopic = topicByTagIndex;
+      channelUnreadTopicByTagIndex = new Map([...topicByTagIndex].map(([tagIndex, topic]) => [String(tagIndex), topic]));
       channelUnreadLoadedForGroup = String(groupId);
       renderTagFilters();
       updateFirstUnreadButton();
@@ -5351,7 +5288,7 @@
     if (!normalizedGroupId) return;
     currentGroupId = normalizedGroupId;
     currentGroupData = groups.find((g) => String(g.id) === normalizedGroupId) || null;
-    clearActiveSearch();
+    clearActiveSearch({ restoreTranscript: false });
     writeStoredLastGroupId(normalizedGroupId);
     replyingTo = null;
     pendingAttachmentRows.clear();
@@ -5409,9 +5346,9 @@
       cache.messages = mergeMessagesIntoCache(normalizedGroupId, window2, { persist: false });
       cache.rowsDirty = true;
     }
-    const hadCompleteCache = !!(cache.messages && cache.members);
-    if (!cache.messages || !cache.members) {
-      messagesArea().replaceChildren(createChannelLoadingIndicator());
+    const hadCompleteCache = !!(cache.serverWindowLoaded && cache.members);
+    if (!cache.serverWindowLoaded || !cache.members) {
+      if (!cache.messages) messagesArea().replaceChildren(createChannelLoadingIndicator());
       members = [];
       renderMembersList();
       renderWhisperPicker();
@@ -5469,6 +5406,7 @@
         const merged = mergeMessagesIntoCache(groupId, msgs);
         cache.messageRows = null;
         cache.rowsDirty = true;
+        cache.serverWindowLoaded = true;
         cache.oldestMessageId = merged.length ? merged[0].id : null;
         writeLocalGroupCache(groupId, cache);
         await updateGroupPreviewFromMessage(groupId, merged.length ? merged[merged.length - 1] : null);
@@ -5667,38 +5605,40 @@
     if (!isReadByMe) row.classList.add("unseen");
     const av = document.createElement("div");
     av.className = "msg-avatar";
+    const avatarIdentity = document.createElement("div");
+    avatarIdentity.className = "msg-avatar-identity";
     const memberProfile = getMemberProfile(groupId, msg.senderId);
-    renderAvatarElement(av, {
+    renderAvatarElement(avatarIdentity, {
       username: memberProfile?.username || msg.senderName,
       iconColor: memberProfile?.iconColor || msg.senderColor,
       profilePicture: isAiAssistant ? getAiAssistantProfilePicture(msg.aiMeta?.model) : memberProfile?.profilePicture || msg.profilePicture || null
     });
+    const continuationTime = document.createElement("time");
+    continuationTime.className = "msg-continuation-time";
+    continuationTime.dateTime = msg.createdAt;
+    continuationTime.textContent = formatTime(msg.createdAt);
+    continuationTime.title = formatFullMessageTime(msg.createdAt);
+    continuationTime.hidden = showSenderName;
+    avatarIdentity.hidden = !showSenderName;
+    av.append(avatarIdentity, continuationTime);
     const content = document.createElement("div");
     content.className = "msg-content";
-    if (showSenderName) {
-      const nameEl = document.createElement("span");
-      nameEl.className = "msg-sender-name";
-      nameEl.textContent = memberProfile?.username || msg.senderName || "Unknown";
-      const nameColor = memberProfile?.iconColor || msg.senderColor || null;
-      if (nameColor) nameEl.style.color = nameColor;
-      const headerTime = document.createElement("time");
-      headerTime.className = "msg-header-time";
-      headerTime.dateTime = msg.createdAt;
-      headerTime.textContent = formatTime(msg.createdAt);
-      headerTime.title = formatFullMessageTime(msg.createdAt);
-      const header = document.createElement("div");
-      header.className = "msg-header";
-      header.append(nameEl, headerTime);
-      content.appendChild(header);
-    } else {
-      row.classList.add("series-continued");
-      const continuationTime = document.createElement("time");
-      continuationTime.className = "msg-continuation-time";
-      continuationTime.dateTime = msg.createdAt;
-      continuationTime.textContent = formatTime(msg.createdAt);
-      continuationTime.title = formatFullMessageTime(msg.createdAt);
-      av.replaceChildren(continuationTime);
-    }
+    const nameEl = document.createElement("span");
+    nameEl.className = "msg-sender-name";
+    nameEl.textContent = memberProfile?.username || msg.senderName || "Unknown";
+    const nameColor = memberProfile?.iconColor || msg.senderColor || null;
+    if (nameColor) nameEl.style.color = nameColor;
+    const headerTime = document.createElement("time");
+    headerTime.className = "msg-header-time";
+    headerTime.dateTime = msg.createdAt;
+    headerTime.textContent = formatTime(msg.createdAt);
+    headerTime.title = formatFullMessageTime(msg.createdAt);
+    const header = document.createElement("div");
+    header.className = "msg-header";
+    header.hidden = !showSenderName;
+    header.append(nameEl, headerTime);
+    content.appendChild(header);
+    row.classList.toggle("series-continued", !showSenderName);
     const bubble = document.createElement("div");
     bubble.className = "msg-bubble";
     bubble.dataset.encContent = msg.encryptedContent || "";
@@ -6031,16 +5971,11 @@
     if (groupId !== currentGroupId || !messageMatchesActiveTag(msg)) return row;
     if (!area) return row;
     area.querySelector(".channel-empty-state")?.remove();
-    let appendedDivider = null;
-    if (!previousInChannel || !isSameMessageDay(previousInChannel.createdAt, msg.createdAt)) {
-      appendedDivider = createDateDivider(msg.createdAt);
-      area.appendChild(appendedDivider);
-    }
     row.hidden = false;
     area.appendChild(row);
+    reconcileTranscriptStructure(area, groupId);
     observeMessageForRead(row, msg);
     const memo = getChannelRowMemo(cache, channel);
-    if (appendedDivider) memo.rows.push(appendedDivider);
     memo.rows.push(row);
     memo.byId.set(String(msg.id), row);
     memo.lastMsgId = String(msg.id);
@@ -6743,14 +6678,14 @@
     }
   }
   function showToast(msg, type = "info") {
-    const existing = document.querySelectorAll(".toast");
-    const offset = existing.length * 52;
+    const container = $("toast-container");
+    if (!container || container.querySelectorAll(".toast:not(.hiding)").length >= 3) return;
     const el = document.createElement("div");
     el.className = "toast toast-" + type;
     el.textContent = msg;
-    el.style.bottom = 24 + offset + "px";
-    document.body.appendChild(el);
+    container.appendChild(el);
     const remove = () => {
+      if (!el.isConnected || el.classList.contains("hiding")) return;
       el.classList.add("hiding");
       setTimeout(() => el.remove(), 320);
     };
@@ -7361,9 +7296,6 @@
           const prevMsg = cache.messages && cache.messages.length > 1 ? cache.messages[cache.messages.length - 2] : null;
           const row = await buildMessageRow(msg, msg.groupId, { showSenderName: !shouldContinueSeries(prevMsg, msg) });
           if (row) {
-            if (!prevMsg || !isSameMessageDay(prevMsg.createdAt, msg.createdAt)) {
-              cache.messageRows.push(createDateDivider(msg.createdAt));
-            }
             cache.messageRows.push(row);
           }
         }
@@ -7383,22 +7315,28 @@
         return;
       }
       applyCurrentUserReadState(msg);
+      await hydrateMessageChannel(msg, msg.groupId);
+      const incomingTopic = resolveMessageTagTopic(msg);
+      const incomingIsActiveChannel = incomingTopic === getActiveTagTopic();
+      const activeChannelWasPinned = incomingIsActiveChannel && isNearBottom();
       await appendMessageBubble(msg, true, msg.groupId);
       if (msg.clientUploadId) removePendingAttachment(msg.clientUploadId);
       if (msg.senderId !== currentUser.id) {
         observeCurrentGroupRowsForRead();
-        if (isNearBottom()) {
+        if (incomingIsActiveChannel && activeChannelWasPinned) {
           markChannelReadAt(msg.groupId, msg);
         } else {
           unreadCounts[msg.groupId] = Math.max(0, (unreadCounts[msg.groupId] || 0) + 1);
           updateUnreadBadge(msg.groupId, unreadCounts[msg.groupId]);
           if (channelUnreadLoadedForGroup === String(msg.groupId)) {
-            const topic = resolveMessageTagTopic(msg);
-            const tagIndex = topic === DEFAULT_TAG_TOPIC ? "" : channelUnreadTagIndexByTopic.get(topic);
-            if (tagIndex !== void 0 && tagIndex !== null) {
-              channelUnreadCounts[String(tagIndex)] = Math.max(0, (channelUnreadCounts[String(tagIndex)] || 0) + 1);
-              renderTagFilters();
+            let tagIndex = incomingTopic === DEFAULT_TAG_TOPIC ? "" : channelUnreadTagIndexByTopic.get(incomingTopic);
+            if (tagIndex == null && incomingTopic !== DEFAULT_TAG_TOPIC) {
+              tagIndex = await channelTagIndex(incomingTopic, msg.groupId);
+              channelUnreadTagIndexByTopic.set(incomingTopic, String(tagIndex));
+              channelUnreadTopicByTagIndex.set(String(tagIndex), incomingTopic);
             }
+            channelUnreadCounts[String(tagIndex)] = Math.max(0, (channelUnreadCounts[String(tagIndex)] || 0) + 1);
+            renderTagFilters();
           }
         }
       }
@@ -7422,8 +7360,8 @@
       if (!groupId) return;
       const groupKey = String(groupId);
       const tagKey = tagIndex == null || tagIndex === "" ? "" : String(tagIndex);
-      if (createdAt) {
-        const topic = tagKey === "" ? DEFAULT_TAG_TOPIC : channelUnreadTagIndexByTopic.get(tagKey) || null;
+      if (createdAt && (tagKey === "" || String(currentGroupId) === groupKey && channelUnreadLoadedForGroup === groupKey)) {
+        const topic = tagKey === "" ? DEFAULT_TAG_TOPIC : channelUnreadTopicByTagIndex.get(tagKey) || null;
         if (topic) setLocalReadCursor(groupKey, topic, { at: createdAt, id: messageId || "" });
       }
       unreadCounts[groupKey] = Math.max(0, Number(groupUnreadCount) || 0);
@@ -7449,6 +7387,7 @@
         readObserver?.unobserve(row);
         revokeBlobUrlsIn(row);
         row.remove();
+        reconcileTranscriptStructure(messagesArea(), currentGroupId);
       }
       pendingReadMessageIds.delete(messageId);
       for (const [groupId, cache] of groupDataCache.entries()) {
@@ -7550,6 +7489,7 @@
         channelUnreadCounts = {};
         channelUnreadLoadedForGroup = null;
         channelUnreadTagIndexByTopic = /* @__PURE__ */ new Map();
+        channelUnreadTopicByTagIndex = /* @__PURE__ */ new Map();
       }
       writeLocalGroupCache(groupId, cache);
       if (historyDbSupported) void clearGroupHistoryStore(groupId);
@@ -8040,52 +7980,95 @@
   }
   var activeSearchTerm = "";
   var searchDebounceTimer = 0;
+  var searchSessionId = 0;
+  var searchAbortController = null;
+  var searchHistoryExhausted = false;
+  var searchReturnAnchor = null;
+  var SEARCH_PAGE_LIMIT = 100;
+  var SEARCH_AUTO_PAGE_BATCH = 5;
   function syncSearchClearButton() {
     const btn = $("clear-search-btn");
     const input = $("search-input");
     if (!btn) return;
     btn.hidden = !input || input.value.length === 0;
   }
-  function clearActiveSearch() {
+  function clearActiveSearch({ restoreTranscript = true } = {}) {
     if (searchDebounceTimer) {
       clearTimeout(searchDebounceTimer);
       searchDebounceTimer = 0;
     }
+    const hadSearch = !!activeSearchTerm;
+    searchSessionId += 1;
+    searchAbortController?.abort();
+    searchAbortController = null;
     const input = $("search-input");
     if (input && input.value) input.value = "";
     activeSearchTerm = "";
+    searchHistoryExhausted = false;
     syncSearchClearButton();
-    searchMessages("");
+    $("search-results-count").textContent = "";
+    syncSearchHistoryStatus();
+    if (hadSearch && restoreTranscript && currentGroupId) {
+      const anchor = searchReturnAnchor;
+      searchReturnAnchor = null;
+      void renderActiveChannelStream({ restoreScroll: false }).then(() => {
+        if (anchor) restoreViewportAnchor(messagesArea(), anchor);
+      });
+    }
+  }
+  function reconcileTranscriptStructure(area = messagesArea(), groupId = currentGroupId) {
+    if (!area || !groupId) return;
+    for (const divider of area.querySelectorAll(":scope > .msg-date-divider")) divider.remove();
+    const cache = ensureGroupCacheEntry(groupId);
+    const byId = new Map((cache.messages || []).map((msg) => [String(msg.id), msg]));
+    let previousMessage = null;
+    let previousDay = "";
+    for (const row of Array.from(area.querySelectorAll(":scope > .msg-row[data-msg-id]"))) {
+      if (row.hidden) continue;
+      const msg = byId.get(String(row.dataset.msgId));
+      if (!msg) continue;
+      const day = getLocalDayKey(msg.createdAt);
+      if (day && day !== previousDay) area.insertBefore(createDateDivider(msg.createdAt), row);
+      const continued = shouldContinueSeries(previousMessage, msg);
+      row.classList.toggle("series-continued", continued);
+      const header = row.querySelector(".msg-header");
+      const identity = row.querySelector(".msg-avatar-identity");
+      const continuationTime = row.querySelector(".msg-continuation-time");
+      if (header) header.hidden = continued;
+      if (identity) identity.hidden = continued;
+      if (continuationTime) continuationTime.hidden = !continued;
+      previousMessage = msg;
+      previousDay = day;
+    }
+  }
+  function syncSearchHistoryStatus(text = "") {
+    const wrap = $("search-history-status");
+    const label = $("search-history-status-text");
+    const more = $("search-older-btn");
+    if (!wrap || !label || !more) return;
+    label.textContent = text;
+    more.hidden = !activeSearchTerm || searchHistoryExhausted || !text;
+    wrap.hidden = !activeSearchTerm || !text && more.hidden;
   }
   function applySearchVisibility() {
     const area = messagesArea();
     if (!area || !currentGroupId) return;
     const normalizedTerm = activeSearchTerm ? activeSearchTerm.toLowerCase() : "";
-    let pendingDivider = null;
     for (const el of Array.from(area.children)) {
-      if (el.classList.contains("msg-date-divider")) {
-        pendingDivider = el;
-        continue;
-      }
+      if (el.classList.contains("msg-date-divider")) continue;
       if (!el.classList.contains("msg-row") && !el.classList.contains("msg-system")) continue;
       if (!normalizedTerm) {
-        el.style.display = "";
-        if (pendingDivider) {
-          pendingDivider.style.display = "";
-          pendingDivider = null;
-        }
+        el.hidden = false;
         continue;
       }
       const textEl = el.querySelector(".msg-text");
       const content = textEl ? textEl.textContent : el.textContent;
       const match = (content || "").toLowerCase().includes(normalizedTerm);
-      el.style.display = match ? "" : "none";
-      if (pendingDivider) {
-        pendingDivider.style.display = match ? "" : "none";
-        pendingDivider = null;
-      }
+      el.hidden = !match;
     }
-    $("search-results-count").textContent = normalizedTerm ? countVisibleChannelMessages() + " result" + (countVisibleChannelMessages() !== 1 ? "s" : "") : "";
+    reconcileTranscriptStructure(area, currentGroupId);
+    const count = normalizedTerm ? countVisibleChannelMessages() : 0;
+    $("search-results-count").textContent = normalizedTerm ? count + " result" + (count !== 1 ? "s" : "") : "";
   }
   function highlightText(el, term) {
     el.textContent = el.textContent;
@@ -8106,32 +8089,105 @@
     }
     if (idx < text.length) el.appendChild(document.createTextNode(text.slice(idx)));
   }
-  function searchMessages(term) {
-    activeSearchTerm = term ? String(term) : "";
-    syncSearchClearButton();
+  async function getSearchableMessageText(msg, groupId) {
+    if (!msg) return "";
+    if (msg.type === "system") return String(msg.encryptedContent || "");
+    if (msg.type === "image" || msg.type === "file") return String(msg.filename || "");
+    if (msg._decryptedText != null) return String(msg._decryptedText);
+    const key = getGroupKey(groupId);
+    if (!key) return "";
+    const plaintext = await decryptMessageText(msg, key, groupId).catch(() => null);
+    if (plaintext != null) msg._decryptedText = plaintext;
+    return plaintext == null ? "" : String(plaintext);
+  }
+  async function renderSearchMatches(matches, groupId, sessionId) {
+    if (sessionId !== searchSessionId || String(groupId) !== String(currentGroupId)) return;
     const area = messagesArea();
     if (!area) return;
-    const rows = area.querySelectorAll(".msg-row");
-    for (const row of rows) {
-      if (!row.dataset.searchHighlighted) continue;
-      delete row.dataset.searchHighlighted;
-      const textEl = row.querySelector(".msg-text");
-      if (!textEl) continue;
-      const markdownSource = textEl.dataset.markdownSource;
-      if (markdownSource != null) renderMarkdown(textEl, markdownSource);
-      else renderPlainText(textEl, textEl.textContent);
+    const rows = await buildMessageRows(matches.slice(-CHANNEL_RENDER_WINDOW), groupId);
+    if (sessionId !== searchSessionId || String(groupId) !== String(currentGroupId)) return;
+    const fragment = document.createDocumentFragment();
+    for (const row of rows) fragment.appendChild(row);
+    area.replaceChildren(fragment);
+    reconcileTranscriptStructure(area, groupId);
+    if (!matches.length) {
+      const empty = document.createElement("div");
+      empty.className = "channel-empty-state search-empty-state";
+      empty.textContent = "No matching messages";
+      area.appendChild(empty);
     }
-    applySearchVisibility();
-    if (!activeSearchTerm) return;
-    for (const row of rows) {
-      if (row.style.display === "none" || row.dataset.searchHighlighted) continue;
-      const textEl = row.querySelector(".msg-text");
-      if (!textEl) continue;
-      const markdownSource = textEl.dataset.markdownSource;
-      if (markdownSource != null) renderMarkdown(textEl, markdownSource);
-      else renderPlainText(textEl, textEl.textContent);
-      highlightText(textEl, activeSearchTerm);
-      row.dataset.searchHighlighted = "1";
+    area.scrollTop = 0;
+    observeCurrentGroupRowsForRead();
+  }
+  async function searchMessages(term, { pageBatch = SEARCH_AUTO_PAGE_BATCH } = {}) {
+    const nextTerm = term ? String(term).trim() : "";
+    if (!nextTerm) {
+      clearActiveSearch();
+      return;
+    }
+    const startingSearch = !activeSearchTerm;
+    activeSearchTerm = nextTerm;
+    syncSearchClearButton();
+    if (startingSearch) searchReturnAnchor = captureViewportAnchor(messagesArea());
+    searchAbortController?.abort();
+    const controller = new AbortController();
+    searchAbortController = controller;
+    const sessionId = ++searchSessionId;
+    const groupId = currentGroupId;
+    const channel = getActiveTagTopic();
+    searchHistoryExhausted = false;
+    syncSearchHistoryStatus("Searching cached and older messages\u2026");
+    const cache = ensureGroupCacheEntry(groupId);
+    let cursor = cache.messages?.length ? cache.messages[0].id : null;
+    let fetchedRows = 0;
+    let requests = 0;
+    try {
+      while (cursor && requests < pageBatch && !controller.signal.aborted) {
+        const res = await fetch(
+          `/api/groups/${groupId}/messages?before=${encodeURIComponent(cursor)}&limit=${SEARCH_PAGE_LIMIT}`,
+          { cache: "no-store", signal: controller.signal }
+        );
+        if (!res.ok) throw new Error(`Search history request failed (${res.status})`);
+        const raw = await res.json();
+        requests += 1;
+        fetchedRows += raw.length;
+        if (!raw.length) {
+          searchHistoryExhausted = true;
+          break;
+        }
+        const visible = filterMessagesVisibleToCurrentUser(raw);
+        await mapWithConcurrency(visible, 12, (msg) => hydrateMessageChannel(msg, groupId));
+        mergeMessagesIntoCache(groupId, visible);
+        cursor = raw[0].id;
+        if (raw.length < SEARCH_PAGE_LIMIT) searchHistoryExhausted = true;
+      }
+      if (!cursor) searchHistoryExhausted = true;
+      if (sessionId !== searchSessionId || controller.signal.aborted) return;
+      const candidates = (ensureGroupCacheEntry(groupId).messages || []).filter((msg) => resolveMessageTagTopic(msg) === channel).filter((msg) => !isMessageHiddenForCurrentUser(msg));
+      const texts = await mapWithConcurrency(candidates, 12, (msg) => getSearchableMessageText(msg, groupId));
+      if (sessionId !== searchSessionId || controller.signal.aborted) return;
+      const normalized = nextTerm.toLowerCase();
+      const matches = candidates.filter((msg, index) => texts[index].toLowerCase().includes(normalized));
+      await renderSearchMatches(matches, groupId, sessionId);
+      if (sessionId !== searchSessionId) return;
+      $("search-results-count").textContent = `${matches.length} result${matches.length === 1 ? "" : "s"}`;
+      syncSearchHistoryStatus(
+        searchHistoryExhausted ? `Searched all available history (${fetchedRows} older messages loaded).` : `Loaded ${fetchedRows} older messages in ${requests} bounded request${requests === 1 ? "" : "s"}.`
+      );
+      for (const row of messagesArea().querySelectorAll(".msg-row")) {
+        if (row.dataset.searchHighlighted) continue;
+        const textEl = row.querySelector(".msg-text");
+        if (!textEl) continue;
+        const markdownSource = textEl.dataset.markdownSource;
+        if (markdownSource != null) renderMarkdown(textEl, markdownSource);
+        else renderPlainText(textEl, textEl.textContent);
+        highlightText(textEl, nextTerm);
+        row.dataset.searchHighlighted = "1";
+      }
+    } catch (err) {
+      if (err?.name === "AbortError" || sessionId !== searchSessionId) return;
+      console.warn("Search history failed:", err);
+      syncSearchHistoryStatus("Older history could not be loaded. Current cached results are unchanged.");
     }
   }
   async function exportChat() {
@@ -9913,6 +9969,10 @@
     $("clear-search-btn").addEventListener("click", () => {
       clearActiveSearch();
     });
+    $("search-older-btn").addEventListener("click", () => {
+      if (!activeSearchTerm || searchHistoryExhausted) return;
+      void searchMessages(activeSearchTerm, { pageBatch: SEARCH_AUTO_PAGE_BATCH });
+    });
     $("unread-jump-btn").addEventListener("click", () => {
       const first = messagesArea().querySelector(".msg-row.unseen");
       if (first) first.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -9996,6 +10056,7 @@
       } else {
         area.appendChild(fragment);
       }
+      reconcileTranscriptStructure(area, currentGroupId);
       allMessages = mergeMessagesIntoCache(currentGroupId, msgs, { persist: true });
       oldestMessageId = rawMsgs[0].id;
       const cache = ensureGroupCacheEntry(currentGroupId);
@@ -10058,6 +10119,7 @@
     const oldFirst = area.querySelector(".msg-row, .msg-system");
     if (oldFirst) area.insertBefore(fragment, oldFirst);
     else area.appendChild(fragment);
+    reconcileTranscriptStructure(area, groupId);
     allMessages = mergeMessagesIntoCache(groupId, take, { persist: false });
     oldestMessageId = take[0].id;
     const entry = ensureGroupCacheEntry(groupId);

@@ -185,6 +185,10 @@
           <button class="btn-icon btn-clear-search" id="clear-search-btn" type="button" aria-label="Clear search" data-icon="x" data-icon-only="true" hidden></button>
         </div>
         <span class="search-results-count" id="search-results-count"></span>
+        <div class="search-history-status" id="search-history-status" hidden>
+          <span id="search-history-status-text"></span>
+          <button class="btn-secondary btn-sm" id="search-older-btn" type="button" hidden>Search older</button>
+        </div>
       </section>
 
       <section class="panel-section panel-section-members">
@@ -491,13 +495,17 @@
   <div class="image-viewer-modal" id="image-viewer-modal" hidden>
     <div class="image-viewer-overlay" id="image-viewer-overlay"></div>
     <div class="image-viewer-container">
-      <img class="image-viewer-img" id="image-viewer-img" src="" alt="Full size image" />
+      <div class="image-viewer-stage">
+        <img class="image-viewer-img" id="image-viewer-img" src="" alt="Full size image" />
+      </div>
       <div class="image-viewer-actions">
         <button class="btn-secondary btn-sm" id="image-viewer-copy-btn" type="button" data-icon="copy">Copy</button>
         <button class="btn-primary btn-sm" id="image-viewer-download-btn" type="button" data-icon="download">Download</button>
       </div>
     </div>
   </div>
+
+  <div class="toast-container" id="toast-container" aria-live="polite" aria-atomic="false"></div>
 
   <div class="modal-overlay" id="wallpaper-modal" hidden>
     <div class="modal">

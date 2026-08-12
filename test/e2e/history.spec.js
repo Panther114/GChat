@@ -76,6 +76,50 @@ test('opening channels marks them read: no unseen rows, badge clears once every 
   await expect(badge).toBeHidden({ timeout: 10_000 });
 });
 
+test('an inactive-channel arrival stays unread until that channel is opened', async ({ browser }) => {
+  const rootContext = await browser.newContext();
+  const friendContext = await browser.newContext();
+  const rootPage = await rootContext.newPage();
+  const friendPage = await friendContext.newPage();
+  await signInAsRoot(rootPage);
+  await openGroup(rootPage);
+  await rootPage.locator('.chat-tag-filter-btn', { hasText: '#visual-qa' }).click();
+  await expect(rootPage.locator('#messages-area .msg-row.unseen')).toHaveCount(0, { timeout: 10_000 });
+  await rootPage.locator('.chat-tag-filter-btn', { hasText: '#main' }).click();
+  await expect(rootPage.locator('.chat-tag-filter-btn', { hasText: '#main' })).toHaveClass(/active/);
+
+  await friendPage.goto('/');
+  await friendPage.locator('.auth-tab[data-tab=signup]').click();
+  const friendName = `unread${Date.now() % 100000}`;
+  await friendPage.locator('#signup-username').fill(friendName);
+  await friendPage.locator('#signup-password').fill('probe-pass');
+  await friendPage.locator('#signup-confirm').fill('probe-pass');
+  await friendPage.locator('#signup-btn').click();
+  await friendPage.locator('#group-list').first().waitFor({ timeout: 15_000 });
+  await friendPage.locator('#join-group-btn').click();
+  await friendPage.locator('#join-group-code').fill('inca01');
+  await friendPage.locator('#join-confirm-btn').click();
+  await friendPage.waitForTimeout(800);
+  await openGroup(friendPage);
+  await friendPage.locator('.chat-tag-filter-btn', { hasText: '#visual-qa' }).click();
+
+  const marker = `inactive-unread-${Date.now()}`;
+  await friendPage.locator('#message-input').fill(marker);
+  await friendPage.locator('#message-input').press('Enter');
+  await expect(friendPage.locator('#messages-area .msg-row', { hasText: marker })).toBeVisible();
+
+  const visualChip = rootPage.locator('.chat-tag-filter-btn', { hasText: '#visual-qa' });
+  await expect(visualChip).toHaveClass(/has-unread/, { timeout: 10_000 });
+  await expect(rootPage.locator('#messages-area .msg-row', { hasText: marker })).toHaveCount(0);
+  await visualChip.click();
+  await expect(rootPage.locator('#messages-area .msg-row', { hasText: marker })).toBeVisible({ timeout: 10_000 });
+  await expect(rootPage.locator('#messages-area .msg-row.unseen')).toHaveCount(0, { timeout: 10_000 });
+  await expect(visualChip).not.toHaveClass(/has-unread/, { timeout: 10_000 });
+
+  await rootContext.close();
+  await friendContext.close();
+});
+
 test('channel switches are instant and never blank the transcript', async ({ page }) => {
   await signInAsRoot(page);
   await openGroup(page);
