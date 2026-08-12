@@ -643,7 +643,7 @@ dependencies = [
 
 [[package]]
 name = "gchat-desktop-win"
-version = "1.4.0"
+version = "1.4.5"
 dependencies = [
  "arboard",
  "base64",

@@ -6,6 +6,7 @@
 'use strict';
 
 const express = require('express');
+const compression = require('compression');
 const http = require('http');
 const { Server } = require('socket.io');
 const session = require('express-session');
@@ -21,13 +22,22 @@ const { decryptEscrowPayload, encryptEscrowPayload, isValidGroupSecret, keyCommi
 const { validateEditEnvelope, validateV2MessageEnvelope } = require('./message-contract');
 const { createSqliteSessionStore } = require('./sqlite-session-store');
 const { nullMainTagIndexes } = require('./main-tag-index-migration');
+const { createMediaStore } = require('./media-store');
+const {
+  GROUP_CLEAR_CHANNEL,
+  MAIN_CHANNEL,
+  SYNC_PROTOCOL_VERSION,
+  createSyncService,
+  initializeSyncBaselines,
+  normalizeChannelKey,
+} = require('./sync-v2');
 
 const packageJson = require('../../package.json');
 const PROJECT_ROOT = path.resolve(__dirname, '../..');
 const APP_CONFIG = readConfig();
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const MAX_JSON_BODY_BYTES = 16 * 1024 * 1024; // total JSON payload budget for wallpaper base64 overhead + other API bodies
+const MAX_JSON_BODY_BYTES = 256 * 1024;
 const MAX_WALLPAPER_BYTES = 10 * 1024 * 1024;
 const MAX_WALLPAPER_BLUR = 24;
 const MAX_WALLPAPER_TRANSPARENCY = 100;
@@ -207,22 +217,14 @@ const io = new Server(server, {
   // timers while hidden, which used to kill the transport mid-heartbeat and
   // trigger a visible "Reconnecting, transport closed" on every return.
   pingTimeout: 60000,
-  connectionStateRecovery: {
-    maxDisconnectionDuration: 2 * 60 * 1000,
-    // v1.3.12 (no version bump): recovery must RE-RUN the auth middleware.
-    // With skipMiddlewares: true, a recovered socket kept its rooms (so the
-    // user still received messages) but lost socket.userId, and sends were
-    // rejected with "Not a member of this group". Rooms and missed packets
-    // are still restored — only the middleware chain now re-validates.
-    skipMiddlewares: false,
-  },
+  perMessageDeflate: false,
 });
 
 // ── Content Security Policy + HSTS ───────────────────────────────────────────
 app.use((req, res, next) => {
   res.setHeader(
     'Content-Security-Policy',
-    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self' ws: wss:;"
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self' ws: wss: https://storage.railway.app https://*.storage.railway.app;"
   );
   // Only send HSTS over HTTPS (production / Railway)
   if (process.env.NODE_ENV === 'production' || process.env.RAILWAY_ENVIRONMENT != null) {
@@ -1067,6 +1069,9 @@ const db = new Database(DB_PATH);
 
 // Enable WAL mode for better concurrent performance
 db.pragma('journal_mode = WAL');
+db.pragma('wal_autocheckpoint = 1000');
+db.pragma('cache_size = -8192');
+db.pragma('foreign_keys = ON');
 
 // Create tables on startup
 db.exec(`
@@ -1212,6 +1217,15 @@ const migrations = [
 for (const sql of migrations) {
   try { db.exec(sql); } catch { /* column/table already exists */ }
 }
+
+const syncSchemaPresent = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'group_sync_state'").get();
+const isHostedProduction = process.env.NODE_ENV === 'production' || process.env.RAILWAY_ENVIRONMENT != null;
+if (isHostedProduction && !syncSchemaPresent) {
+  throw new Error('GChat v1.4.5 requires the explicit sync-v2 migration. Run npm run migrate:sync-v2 -- --apply during maintenance.');
+}
+const syncService = createSyncService(db, { install: !syncSchemaPresent });
+initializeSyncBaselines(db);
+const mediaStore = createMediaStore();
 
 try {
   db.prepare('INSERT OR IGNORE INTO _config (key, value) VALUES (?, ?)')
@@ -1560,6 +1574,7 @@ const stmts = {
       LEFT JOIN disappearing_message_states dms
         ON dms.message_id = m.id AND dms.user_id = @viewerId
      WHERE m.group_id = @groupId
+       AND m.deleted_at IS NULL
        AND (
          m.type != 'whisper'
          OR m.sender_id = @viewerId
@@ -1623,6 +1638,7 @@ const stmts = {
        ON dms.message_id = m.id AND dms.user_id = @viewerId
     CROSS JOIN ref
      WHERE m.group_id = @groupId
+       AND m.deleted_at IS NULL
        AND (
          m.type != 'whisper'
          OR m.sender_id = @viewerId
@@ -1664,6 +1680,7 @@ const stmts = {
      LEFT JOIN disappearing_message_states dms
        ON dms.message_id = m.id AND dms.user_id = @viewerId
      WHERE m.group_id = @groupId
+       AND m.deleted_at IS NULL
        -- v1.3.12: composite (created_at, id) cursor. A time-only cursor could
        -- silently skip every message that shared a millisecond with the cursor
        -- boundary (each device permanently missing different messages), because
@@ -1706,6 +1723,7 @@ const stmts = {
     LEFT JOIN disappearing_message_states dms
       ON dms.message_id = m.id AND dms.user_id = @viewerId
     WHERE m.id = @messageId
+      AND m.deleted_at IS NULL
       AND m.group_id = @groupId
       AND (
         m.type != 'whisper'
@@ -1891,12 +1909,6 @@ const stmts = {
   // Utility: all group IDs a user belongs to (for scoped broadcasts)
   getUserGroupIds: db.prepare('SELECT group_id FROM group_members WHERE user_id = ?'),
 };
-
-const deleteMessageTx = db.transaction((messageId) => {
-  stmts.deleteMessageReadsByMessage.run(messageId);
-  stmts.deleteDisappearingStatesByMessage.run(messageId);
-  return stmts.deleteMessage.run(messageId);
-});
 
 const createEscrowedGroupTx = db.transaction((group, ownerId) => {
   stmts.insertEscrowedGroup.run(
@@ -2138,6 +2150,7 @@ const sessionMiddleware = session({
 });
 
 // ── Express Middleware ────────────────────────────────────────────────────────
+app.use(compression({ threshold: 1024 }));
 app.use(express.static(path.join(PROJECT_ROOT, 'public'), {
   etag: true,
   lastModified: true,
@@ -2159,8 +2172,20 @@ app.use(express.static(path.join(PROJECT_ROOT, 'public'), {
     res.setHeader('Cache-Control', 'public, max-age=86400');
   },
 }));
+// Legacy inline profile/wallpaper writes stay readable during the phased bucket
+// cutover. Keep their exceptional parsers exact and bounded; every other JSON
+// route uses the 256 KB process-wide budget below.
+app.use('/api/auth/profile', express.json({ limit: 3 * 1024 * 1024, strict: true }));
+app.use('/api/auth/settings', express.json({ limit: 14 * 1024 * 1024, strict: true }));
+app.use('/api/groups/:groupId/settings', express.json({ limit: 3 * 1024 * 1024, strict: true }));
 app.use(express.json({ limit: MAX_JSON_BODY_BYTES, strict: true }));
 app.use(sessionMiddleware);
+app.use('/api/groups', (req, res, next) => {
+  if (isHostedProduction && req.method !== 'GET' && req.headers['x-gchat-sync-protocol'] !== String(SYNC_PROTOCOL_VERSION)) {
+    return res.status(426).json({ error: 'protocol_upgrade_required', requiredProtocol: SYNC_PROTOCOL_VERSION });
+  }
+  return next();
+});
 app.use('/api/auth', (_req, res, next) => {
   res.setHeader('Cache-Control', 'no-store');
   next();
@@ -2327,7 +2352,7 @@ function findExistingMessageIds(ids) {
   const uniqueIds = [...new Set(ids.map(String).filter(Boolean))];
   if (!uniqueIds.length) return new Set();
   const placeholders = uniqueIds.map(() => '?').join(',');
-  const rows = db.prepare(`SELECT id FROM messages WHERE id IN (${placeholders})`).all(...uniqueIds);
+  const rows = db.prepare(`SELECT id FROM messages WHERE deleted_at IS NULL AND id IN (${placeholders})`).all(...uniqueIds);
   return new Set(rows.map((row) => row.id));
 }
 
@@ -2346,6 +2371,7 @@ function decorateReplyTargetState(rows) {
 function formatMessage(m) {
   const isAiAssistantMessage = m.sender_id === AI_ASSISTANT_USER_ID;
   const aiMeta = parseStoredAiMessageMeta(m.ai_meta);
+  const isDirectAttachment = !!m.attachment_object_key;
   return {
     id: m.id,
     groupId: m.group_id,
@@ -2353,7 +2379,7 @@ function formatMessage(m) {
     senderName: m.sender_name || (isAiAssistantMessage ? AI_ASSISTANT_NAME : 'Unknown'),
     senderColor: m.sender_color || (isAiAssistantMessage ? AI_ASSISTANT_COLOR : '#4A90D9'),
     profilePicture: isAiAssistantMessage ? getAiAssistantProfilePicture(aiMeta?.model) : null,
-    encryptedContent: m.encrypted_content,
+    encryptedContent: isDirectAttachment ? null : m.encrypted_content,
     iv: m.iv,
     encryptionVersion: Math.max(1, Number(m.encryption_version) || 1),
     keyVersion: Math.max(1, Number(m.key_version) || 1),
@@ -2379,6 +2405,12 @@ function formatMessage(m) {
     totalRecipients: Math.max(0, Number(m.total_recipients) || 0),
     readCount: Math.max(0, Number(m.read_count) || 0),
     hasRead: !!m.has_read,
+    deletedAt: m.deleted_at || null,
+    attachment: isDirectAttachment ? {
+      storage: 'bucket',
+      size: Math.max(0, Number(m.attachment_size) || 0),
+      sha256: m.attachment_sha256 || null,
+    } : null,
   };
 }
 
@@ -3214,12 +3246,28 @@ app.post('/api/groups/join', (req, res) => {
     return res.status(409).json({ error: `This group has reached its ${MAX_GROUP_MEMBERS}-member limit` });
   }
 
-  const joined = stmts.insertMember.run(group.id, userId);
+  let joined = { changes: 0 };
+  let membershipCommit = null;
+  if (!existingMembership) {
+    const clientMutationId = String(req.body.clientMutationId || crypto.randomUUID()).slice(0, 128);
+    membershipCommit = syncService.commit({
+      groupId: group.id,
+      userId,
+      eventType: 'member.joined',
+      entityId: userId,
+      clientMutationId,
+      membershipChange: true,
+      auxiliary: { userId },
+      apply: () => {
+        joined = stmts.insertMember.run(group.id, userId);
+        if (joined.changes > 0) bumpGroupDeliveryTotals(group.id);
+        return joined;
+      },
+    });
+  }
 
   // Emit member_joined to the group room
   if (joined.changes > 0) {
-    // v1.3.12: every previous message gains a delivery tick.
-    bumpGroupDeliveryTotals(group.id);
     const user = stmts.findUserById.get(userId);
     io.to(group.id).emit('member_joined', {
       userId,
@@ -3228,6 +3276,7 @@ app.post('/api/groups/join', (req, res) => {
       profilePicture: user.profile_picture || null,
       groupId: group.id,
     });
+    emitSyncCommit(group.id, userId, membershipCommit, 'member.joined', null, { userId });
   }
 
   let escrowPayload;
@@ -3246,6 +3295,8 @@ app.post('/api/groups/join', (req, res) => {
   res.json({
     ...buildGroupPayload(group, existingMembership),
     alreadyJoined: joined.changes === 0,
+    epoch: membershipCommit?.epoch,
+    seq: membershipCommit?.seq,
     secret: escrowPayload.secret,
   });
 });
@@ -3277,6 +3328,110 @@ app.get('/api/groups/mine', (req, res) => {
   res.json(
     groups.map((g) => buildGroupPayload(g, { is_admin: g.is_admin }, g.unread_count))
   );
+});
+
+// v1.4.5 protocol 2 bootstrap: summaries and durable sequence watermarks only.
+app.get('/api/sync/bootstrap', (req, res) => {
+  const userId = req.session.userId;
+  const groups = stmts.getUserGroups.all(userId);
+  const stateRows = db.prepare(`
+    SELECT s.group_id, s.epoch, s.next_seq, s.min_retained_seq, s.membership_revision
+    FROM group_sync_state s
+    JOIN group_members gm ON gm.group_id = s.group_id
+    WHERE gm.user_id = ?
+    LIMIT ?
+  `).all(userId, MAX_GROUPS_PER_USER + 1);
+  const states = new Map(stateRows.map((row) => [String(row.group_id), row]));
+  const payload = groups.map((groupRow) => {
+    const state = states.get(String(groupRow.id)) || syncService.ensureState(groupRow.id);
+    const summary = buildGroupPayload(
+      groupRow,
+      { is_admin: groupRow.is_admin },
+      groupRow.unread_count
+    );
+    delete summary.groupIcon;
+    return {
+      ...summary,
+      epoch: Number(state.epoch) || 1,
+      latestSeq: Number(state.next_seq) || 0,
+      minRetainedSeq: Number(state.min_retained_seq) || 0,
+      membershipRevision: Number(state.membership_revision) || 0,
+    };
+  });
+  const etag = syncService.etagForBootstrap(payload);
+  res.setHeader('ETag', etag);
+  res.setHeader('Cache-Control', 'private, no-cache');
+  res.setHeader('X-GChat-Sync-Protocol', String(SYNC_PROTOCOL_VERSION));
+  if (req.headers['if-none-match'] === etag) return res.status(304).end();
+  return res.json({ protocol: SYNC_PROTOCOL_VERSION, groups: payload });
+});
+
+app.get('/api/groups/:groupId/sync', (req, res) => {
+  const { groupId } = req.params;
+  const userId = req.session.userId;
+  if (!stmts.isMember.get(groupId, userId)) {
+    return res.status(403).json({ error: 'Not a member of this group' });
+  }
+  const result = syncService.getEvents(groupId, req.query.epoch, req.query.after, req.query.limit);
+  if (result.resetRequired) {
+    return res.status(409).json({
+      resetRequired: true,
+      reason: result.reason,
+      epoch: result.state.epoch,
+      latestSeq: result.state.next_seq,
+      minRetainedSeq: result.state.min_retained_seq,
+    });
+  }
+  const messageIds = result.events
+    .filter((event) => event.type === 'message.created' || event.type === 'message.edited')
+    .map((event) => event.entityId);
+  const messages = syncService.getMessagesByIds(groupId, messageIds);
+  const events = result.events.map((event) => {
+    const row = messages.get(String(event.entityId));
+    const message = row && canUserAccessMessage(row, userId) ? formatMessage(row) : null;
+    return message ? { ...event, message } : event;
+  });
+  return res.json({
+    protocol: SYNC_PROTOCOL_VERSION,
+    resetRequired: false,
+    epoch: result.state.epoch,
+    latestSeq: result.state.next_seq,
+    minRetainedSeq: result.state.min_retained_seq,
+    events,
+    hasMore: events.length > 0 && events[events.length - 1].seq < result.state.next_seq,
+  });
+});
+
+app.post('/api/groups/keys/resolve', (req, res) => {
+  const requests = Array.isArray(req.body?.keys) ? req.body.keys.slice(0, 100) : [];
+  const ids = [...new Set(requests
+    .map((entry) => String(entry?.groupId || '').slice(0, 64))
+    .filter(Boolean))];
+  if (!ids.length) return res.json({ keys: [] });
+  const placeholders = ids.map(() => '?').join(',');
+  const rows = db.prepare(`
+    SELECT g.id, g.key_escrow_ciphertext, g.key_escrow_iv, g.key_escrow_version
+    FROM group_chats g
+    JOIN group_members gm ON gm.group_id = g.id
+    WHERE gm.user_id = ? AND g.id IN (${placeholders})
+    LIMIT 100
+  `).all(req.session.userId, ...ids);
+  try {
+    const keys = rows.map((row) => ({
+      groupId: row.id,
+      keyVersion: 1,
+      ...decryptEscrowPayload(APP_CONFIG.groupKeyEscrowMasterKey, row.id, {
+        ciphertext: row.key_escrow_ciphertext,
+        iv: row.key_escrow_iv,
+        version: row.key_escrow_version,
+      }),
+    }));
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ keys });
+  } catch (error) {
+    console.error('Selective group key recovery error:', error.message);
+    return res.status(500).json({ error: 'Failed to recover group keys' });
+  }
 });
 
 app.get('/api/groups/preload', (req, res) => {
@@ -3378,11 +3533,23 @@ app.post('/api/groups/:groupId/invite', (req, res) => {
     return res.status(409).json({ error: `This group has reached its ${MAX_GROUP_MEMBERS}-member limit` });
   }
 
-  const joined = stmts.insertMember.run(groupId, targetUserId);
+  let joined = { changes: 0 };
+  const clientMutationId = String(req.body.clientMutationId || crypto.randomUUID()).slice(0, 128);
+  const commit = syncService.commit({
+    groupId,
+    userId,
+    eventType: 'member.joined',
+    entityId: targetUserId,
+    clientMutationId,
+    membershipChange: true,
+    auxiliary: { userId: targetUserId },
+    apply: () => {
+      joined = stmts.insertMember.run(groupId, targetUserId);
+      if (joined.changes > 0) bumpGroupDeliveryTotals(groupId);
+      return joined;
+    },
+  });
   if (joined.changes > 0) {
-    // v1.3.12: every previous message gains a delivery tick; "joined" is only
-    // announced for genuinely new memberships.
-    bumpGroupDeliveryTotals(groupId);
     io.to(groupId).emit('member_joined', {
       userId: targetUserId,
       username: target.username,
@@ -3390,6 +3557,7 @@ app.post('/api/groups/:groupId/invite', (req, res) => {
       profilePicture: target.profile_picture || null,
       groupId,
     });
+    emitSyncCommit(groupId, userId, commit, 'member.joined', null, { userId: targetUserId });
   }
 
   // Give the invitee everything needed to render the new chat immediately,
@@ -3410,7 +3578,7 @@ app.post('/api/groups/:groupId/invite', (req, res) => {
     secret,
   });
 
-  res.json({ ok: true });
+  res.json({ ok: true, epoch: commit.epoch, seq: commit.seq, clientMutationId });
 });
 
 // PATCH /api/groups/:groupId/name — rename group (all members)
@@ -3520,6 +3688,30 @@ app.get('/api/groups/:groupId/messages', (req, res) => {
   }
 
   markExpiredDisappearingMessagesHidden(userId);
+
+  // Protocol 2 history is channel-scoped and uses an opaque stable cursor.
+  if (req.query.channel !== undefined) {
+    try {
+      const history = syncService.getChannelHistory({
+        groupId,
+        viewerId: userId,
+        channelKey: req.query.channel,
+        before: req.query.before,
+        limit: Math.min(limit, 50),
+      });
+      const state = syncService.ensureState(groupId);
+      return res.json({
+        protocol: SYNC_PROTOCOL_VERSION,
+        epoch: Number(state.epoch) || 1,
+        latestSeq: Number(state.next_seq) || 0,
+        channelKey: normalizeChannelKey(req.query.channel),
+        messages: decorateReplyTargetState(history.rows.map(formatMessage)),
+        nextCursor: history.nextCursor,
+      });
+    } catch (error) {
+      return res.status(400).json({ error: error.message });
+    }
+  }
 
   let rows;
   if (before) {
@@ -3645,9 +3837,27 @@ app.delete('/api/groups/:groupId/messages', (req, res) => {
     return res.status(403).json({ error: 'Only the group owner can clear chat history' });
   }
 
-  stmts.deleteGroupMessages.run(groupId);
-  io.to(groupId).emit('chat_cleared', { groupId });
-  res.json({ ok: true });
+  const clearedAt = new Date().toISOString();
+  const clientMutationId = String(req.headers['x-client-mutation-id'] || req.body?.clientMutationId || crypto.randomUUID()).slice(0, 128);
+  const commit = syncService.commit({
+    groupId,
+    userId,
+    eventType: 'history.cleared',
+    channelKey: GROUP_CLEAR_CHANNEL,
+    clientMutationId,
+    createdAt: clearedAt,
+    auxiliary: { channelKey: GROUP_CLEAR_CHANNEL, clearedAt },
+    apply: ({ seq }) => db.prepare(`
+      INSERT INTO group_history_boundaries (group_id, channel_key, cleared_at, cleared_seq, cleared_by)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(group_id, channel_key) DO UPDATE SET
+        cleared_at = excluded.cleared_at,
+        cleared_seq = excluded.cleared_seq,
+        cleared_by = excluded.cleared_by
+    `).run(groupId, GROUP_CLEAR_CHANNEL, clearedAt, seq, userId),
+  });
+  emitSyncCommit(groupId, userId, commit, 'history.cleared', null, { channelKey: GROUP_CLEAR_CHANNEL, clearedAt });
+  res.json({ ok: true, epoch: commit.epoch, seq: commit.seq, clientMutationId });
 });
 
 // DELETE /api/groups/:groupId/tags/:tagIndex/messages — clear one channel.
@@ -3671,9 +3881,27 @@ app.delete('/api/groups/:groupId/tags/:tagIndex/messages', (req, res) => {
     return res.status(403).json({ error: 'Only the group owner can clear this hashtag' });
   }
 
-  stmts.deleteMessagesByTagIndex.run(groupId, tagIndex);
-  io.to(groupId).emit('tag_cleared', { groupId, tagIndex });
-  res.json({ ok: true });
+  const clearedAt = new Date().toISOString();
+  const clientMutationId = String(req.headers['x-client-mutation-id'] || req.body?.clientMutationId || crypto.randomUUID()).slice(0, 128);
+  const commit = syncService.commit({
+    groupId,
+    userId,
+    eventType: 'history.cleared',
+    channelKey: tagIndex,
+    clientMutationId,
+    createdAt: clearedAt,
+    auxiliary: { channelKey: tagIndex, clearedAt },
+    apply: ({ seq }) => db.prepare(`
+      INSERT INTO group_history_boundaries (group_id, channel_key, cleared_at, cleared_seq, cleared_by)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(group_id, channel_key) DO UPDATE SET
+        cleared_at = excluded.cleared_at,
+        cleared_seq = excluded.cleared_seq,
+        cleared_by = excluded.cleared_by
+    `).run(groupId, tagIndex, clearedAt, seq, userId),
+  });
+  emitSyncCommit(groupId, userId, commit, 'history.cleared', null, { channelKey: tagIndex, clearedAt });
+  res.json({ ok: true, epoch: commit.epoch, seq: commit.seq, clientMutationId });
 });
 
 app.delete('/api/groups/:groupId/messages/:messageId', (req, res) => {
@@ -3683,7 +3911,7 @@ app.delete('/api/groups/:groupId/messages/:messageId', (req, res) => {
     return res.status(403).json({ error: 'Not a member of this group' });
   }
   const message = stmts.findMessageById.get(messageId);
-  if (!message || message.group_id !== groupId) {
+  if (!message || message.group_id !== groupId || message.deleted_at) {
     return res.status(404).json({ error: 'Message not found' });
   }
   // In GChat Global any member may delete any message.
@@ -3694,9 +3922,28 @@ app.delete('/api/groups/:groupId/messages/:messageId', (req, res) => {
   if (message.is_disappearing) {
     return res.status(403).json({ error: 'Disappearing messages cannot be deleted' });
   }
-  deleteMessageTx(messageId);
-  io.to(groupId).emit('message_deleted', { groupId, messageId });
-  return res.json({ ok: true, messageId });
+  const deletedAt = new Date().toISOString();
+  const clientMutationId = String(req.headers['x-client-mutation-id'] || req.body?.clientMutationId || `delete-${messageId}`).slice(0, 128);
+  const nextRevision = Math.max(1, Number(message.revision) || 1) + 1;
+  const commit = syncService.commit({
+    groupId,
+    userId,
+    eventType: 'message.deleted',
+    entityId: messageId,
+    channelKey: message.tag_index || MAIN_CHANNEL,
+    revision: nextRevision,
+    clientMutationId,
+    createdAt: deletedAt,
+    auxiliary: { messageId, deletedAt, revision: nextRevision, channelKey: message.tag_index || MAIN_CHANNEL },
+    apply: () => db.prepare(`
+      UPDATE messages SET deleted_at = ?, deleted_by = ?, revision = ?
+      WHERE id = ? AND deleted_at IS NULL
+    `).run(deletedAt, userId, nextRevision, messageId),
+  });
+  emitSyncCommit(groupId, userId, commit, 'message.deleted', null, {
+    messageId, deletedAt, revision: nextRevision, channelKey: message.tag_index || MAIN_CHANNEL,
+  });
+  return res.json({ ok: true, messageId, epoch: commit.epoch, seq: commit.seq, revision: nextRevision, clientMutationId });
 });
 
 app.patch('/api/groups/:groupId/messages/:messageId', (req, res) => {
@@ -3706,7 +3953,7 @@ app.patch('/api/groups/:groupId/messages/:messageId', (req, res) => {
     return res.status(403).json({ error: 'Not a member of this group' });
   }
   const current = stmts.findMessageById.get(messageId);
-  if (!current || current.group_id !== groupId) {
+  if (!current || current.group_id !== groupId || current.deleted_at) {
     return res.status(404).json({ error: 'Message not found' });
   }
   if (current.sender_id !== userId) {
@@ -3735,25 +3982,44 @@ app.patch('/api/groups/:groupId/messages/:messageId', (req, res) => {
   });
   if (!indexEnvelope.ok) return res.status(400).json({ error: indexEnvelope.error });
   const editedAt = new Date().toISOString();
-  const result = stmts.updateV2Message.run(
-    req.body.encryptedContent,
-    req.body.iv,
-    req.body.encryptedMetadata,
-    req.body.metadataIv,
-    req.body.tagIndex || null,
-    req.body.spamSignature || null,
-    envelope.revision,
-    editedAt,
-    messageId,
-    Number(req.body.expectedRevision)
-  );
-  if (!result.changes) {
-    const latest = stmts.findMessageById.get(messageId);
-    return res.status(409).json({ error: 'Message was edited elsewhere', latest: formatMessage(latest) });
+  const clientMutationId = String(req.body.clientMutationId || `edit-${messageId}-${envelope.revision}`).slice(0, 128);
+  let commit;
+  try {
+    commit = syncService.commit({
+      groupId,
+      userId,
+      eventType: 'message.edited',
+      entityId: messageId,
+      channelKey: current.tag_index || MAIN_CHANNEL,
+      revision: envelope.revision,
+      clientMutationId,
+      createdAt: editedAt,
+      apply: () => {
+        const result = stmts.updateV2Message.run(
+          req.body.encryptedContent,
+          req.body.iv,
+          req.body.encryptedMetadata,
+          req.body.metadataIv,
+          current.tag_index || null,
+          req.body.spamSignature || null,
+          envelope.revision,
+          editedAt,
+          messageId,
+          Number(req.body.expectedRevision)
+        );
+        if (!result.changes) throw new Error('EDIT_CONFLICT');
+      },
+    });
+  } catch (error) {
+    if (error.message === 'EDIT_CONFLICT') {
+      const latest = stmts.findMessageById.get(messageId);
+      return res.status(409).json({ error: 'Message was edited elsewhere', latest: formatMessage(latest) });
+    }
+    throw error;
   }
   const updated = formatMessage(stmts.findMessageById.get(messageId));
-  io.to(groupId).emit('message_edited', updated);
-  return res.json(updated);
+  emitSyncCommit(groupId, userId, commit, 'message.edited', updated);
+  return res.json({ ...updated, epoch: commit.epoch, seq: commit.seq, clientMutationId });
 });
 
 // DELETE /api/groups/:groupId/leave — leave group (non-owner)
@@ -3775,9 +4041,21 @@ app.delete('/api/groups/:groupId/leave', (req, res) => {
     return res.status(400).json({ error: 'Group owner cannot leave. Disband the group instead.' });
   }
 
-  stmts.deleteMember.run(groupId, userId);
-  // v1.3.12: a departing member's per-channel read cursors are gone with them.
-  stmts.deleteChannelReadCursorsForGroupUser.run(groupId, userId);
+  const clientMutationId = String(req.headers['x-client-mutation-id'] || crypto.randomUUID()).slice(0, 128);
+  const commit = syncService.commit({
+    groupId,
+    userId,
+    eventType: 'member.left',
+    entityId: userId,
+    clientMutationId,
+    membershipChange: true,
+    auxiliary: { userId },
+    apply: () => {
+      const result = stmts.deleteMember.run(groupId, userId);
+      stmts.deleteChannelReadCursorsForGroupUser.run(groupId, userId);
+      return result;
+    },
+  });
 
   const user = stmts.findUserById.get(userId);
   io.to(groupId).emit('member_left', {
@@ -3785,8 +4063,9 @@ app.delete('/api/groups/:groupId/leave', (req, res) => {
     username: user ? user.username : 'Unknown',
     groupId,
   });
+  emitSyncCommit(groupId, userId, commit, 'member.left', null, { userId });
 
-  res.json({ ok: true });
+  res.json({ ok: true, epoch: commit.epoch, seq: commit.seq, clientMutationId });
 });
 
 // GET /api/groups/:groupId/members — list group members
@@ -3827,9 +4106,20 @@ app.patch('/api/groups/:groupId/members/:userId/administrator', (req, res) => {
   if (!targetMember) return res.status(404).json({ error: 'Member not found' });
 
   const isAdministrator = req.body.isAdministrator === true;
-  stmts.updateMemberAdmin.run(isAdministrator ? 1 : 0, groupId, targetUserId);
+  const clientMutationId = String(req.body.clientMutationId || crypto.randomUUID()).slice(0, 128);
+  const commit = syncService.commit({
+    groupId,
+    userId,
+    eventType: 'member.role_updated',
+    entityId: targetUserId,
+    clientMutationId,
+    membershipChange: true,
+    auxiliary: { userId: targetUserId, isAdministrator },
+    apply: () => stmts.updateMemberAdmin.run(isAdministrator ? 1 : 0, groupId, targetUserId),
+  });
   io.to(groupId).emit('member_role_updated', { groupId, userId: targetUserId, isAdministrator });
-  res.json({ ok: true, isAdministrator });
+  emitSyncCommit(groupId, userId, commit, 'member.role_updated', null, { userId: targetUserId, isAdministrator });
+  res.json({ ok: true, isAdministrator, epoch: commit.epoch, seq: commit.seq, clientMutationId });
 });
 
 // POST /api/groups/:groupId/upload — upload encrypted file or image
@@ -3915,28 +4205,46 @@ app.post('/api/groups/:groupId/upload', uploadRawBodyParser, (req, res) => {
     normalizedReplyToId = replyToId;
   }
 
+  const clientMutationId = typeof clientUploadId === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(clientUploadId)
+    ? clientUploadId
+    : msgId;
+  let commit;
   try {
-    stmts.insertV2Message.run(
-      msgId,
+    commit = syncService.commit({
       groupId,
       userId,
-      encryptedContent,
-      iv,
-      msgType,
-      normalizedReplyToId,
-      null,
-      0,
-      null,
-      totalRecipients,
-      2,
-      1,
-      1,
-      encryptedMetadata,
-      metadataIv,
-      tagIndex || null,
-      null,
-      createdAt
-    );
+      eventType: 'message.created',
+      entityId: msgId,
+      channelKey: tagIndex || MAIN_CHANNEL,
+      revision: 1,
+      clientMutationId,
+      createdAt,
+      updateChannel: { keyVersion: 1 },
+      apply: ({ seq }) => {
+        stmts.insertV2Message.run(
+          msgId,
+          groupId,
+          userId,
+          encryptedContent,
+          iv,
+          msgType,
+          normalizedReplyToId,
+          null,
+          0,
+          null,
+          totalRecipients,
+          2,
+          1,
+          1,
+          encryptedMetadata,
+          metadataIv,
+          tagIndex || null,
+          null,
+          createdAt
+        );
+        db.prepare('UPDATE messages SET created_seq = ? WHERE id = ?').run(seq, msgId);
+      },
+    });
   } catch (err) {
     console.error('DB insert file error:', err);
     return res.status(500).json({ error: 'Failed to save file' });
@@ -3976,13 +4284,212 @@ app.post('/api/groups/:groupId/upload', uploadRawBodyParser, (req, res) => {
     clientUploadId: typeof clientUploadId === 'string' ? clientUploadId.slice(0, 128) : null,
   };
 
-  io.to(groupId).emit('new_message', payload);
-  queueUnreadPushNotifications(
-    stmts.getOtherGroupMemberIds.all(groupId, userId)
-      .map((row) => row.user_id),
-    { senderName: user.username, groupName: getGroupNameForPush(groupId) }
-  );
-  res.json({ messageId: msgId });
+  emitSyncCommit(groupId, userId, commit, 'message.created', payload);
+  if (!commit.duplicate) {
+    queueUnreadPushNotifications(
+      stmts.getOtherGroupMemberIds.all(groupId, userId)
+        .map((row) => row.user_id),
+      { senderName: user.username, groupName: getGroupNameForPush(groupId) }
+    );
+  }
+  res.json({
+    messageId: commit.entityId || msgId,
+    epoch: commit.epoch,
+    seq: commit.seq,
+    revision: 1,
+    clientMutationId,
+    duplicate: commit.duplicate,
+  });
+});
+
+// v1.4.5 direct encrypted media: the app authorizes metadata while ciphertext
+// travels directly between the client and Railway's bucket.
+app.post('/api/groups/:groupId/attachments/prepare', async (req, res) => {
+  const { groupId } = req.params;
+  const userId = req.session.userId;
+  if (!mediaStore.enabled) return res.status(503).json({ error: 'Direct media storage is disabled' });
+  if (!stmts.isMember.get(groupId, userId)) {
+    return res.status(403).json({ error: 'Not a member of this group' });
+  }
+  const {
+    messageId, type, expectedSize, expectedSha256, encryptedMetadata, metadataIv,
+    iv, tagIndex, encryptionVersion, keyVersion, clientMutationId, replyToId,
+  } = req.body || {};
+  const envelope = validateV2MessageEnvelope({
+    id: messageId,
+    encryptionVersion,
+    keyVersion,
+    revision: 1,
+    tagIndex,
+  });
+  if (!envelope.ok) return res.status(400).json({ error: envelope.error });
+  const metadataCheck = validateEncryptedTextPayload(encryptedMetadata, metadataIv);
+  if (!metadataCheck.ok) return res.status(400).json({ error: `Metadata: ${metadataCheck.error}` });
+  if (!isValidIv(iv)) return res.status(400).json({ error: 'Invalid attachment IV' });
+  if (!['image', 'file'].includes(type)) return res.status(400).json({ error: 'Invalid upload type' });
+  const size = Number(expectedSize);
+  if (!Number.isInteger(size) || size < 1 || size > MAX_ATTACHMENT_BYTES) {
+    return res.status(413).json({ error: 'Attachment too large (max 15MB)' });
+  }
+  const sha256 = String(expectedSha256 || '').toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(sha256)) return res.status(400).json({ error: 'Invalid attachment SHA-256' });
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(String(clientMutationId || ''))) {
+    return res.status(400).json({ error: 'clientMutationId is required' });
+  }
+  if (replyToId) {
+    const target = stmts.findMessageById.get(String(replyToId).slice(0, 64));
+    if (target && target.group_id !== groupId) return res.status(400).json({ error: 'Reply target not found' });
+  }
+
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + 5 * 60 * 1000).toISOString();
+  const uploadId = crypto.randomUUID();
+  const objectKey = `groups/${groupId}/${messageId}`;
+  const preparedEnvelope = JSON.stringify({
+    iv, type, encryptedMetadata, metadataIv, tagIndex: tagIndex || null,
+    encryptionVersion, keyVersion, clientMutationId, replyToId: replyToId || null,
+  });
+
+  const expired = db.prepare(`
+    SELECT id, object_key FROM pending_uploads
+    WHERE completed_at IS NULL AND expires_at <= ? ORDER BY expires_at ASC LIMIT 5
+  `).all(now.toISOString());
+  db.prepare(`DELETE FROM pending_uploads WHERE completed_at IS NULL AND expires_at <= ? AND id IN (${expired.map(() => '?').join(',') || "''"})`)
+    .run(now.toISOString(), ...expired.map((entry) => entry.id));
+  await Promise.allSettled(expired.map((entry) => mediaStore.remove(entry.object_key)));
+
+  try {
+    db.prepare(`
+      INSERT INTO pending_uploads (
+        id, group_id, user_id, message_id, object_key, type, expected_size,
+        expected_sha256, envelope_json, expires_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(uploadId, groupId, userId, messageId, objectKey, type, size, sha256, preparedEnvelope, expiresAt, now.toISOString());
+    const uploadUrl = await mediaStore.signedPut(objectKey, { sha256, expiresIn: 300 });
+    return res.status(201).json({
+      uploadId,
+      uploadUrl,
+      expiresAt,
+      requiredHeaders: {
+        'Content-Type': 'application/octet-stream',
+        'x-amz-meta-sha256': sha256,
+        'x-amz-checksum-sha256': Buffer.from(sha256, 'hex').toString('base64'),
+      },
+    });
+  } catch (error) {
+    db.prepare('DELETE FROM pending_uploads WHERE id = ? AND completed_at IS NULL').run(uploadId);
+    console.error('Direct attachment prepare failed:', error.message);
+    return res.status(500).json({ error: 'Failed to prepare attachment upload' });
+  }
+});
+
+app.post('/api/groups/:groupId/attachments/complete', async (req, res) => {
+  const { groupId } = req.params;
+  const userId = req.session.userId;
+  if (!mediaStore.enabled) return res.status(503).json({ error: 'Direct media storage is disabled' });
+  if (!stmts.isMember.get(groupId, userId)) {
+    return res.status(403).json({ error: 'Not a member of this group' });
+  }
+  const uploadId = String(req.body?.uploadId || '').slice(0, 64);
+  const pending = db.prepare(`
+    SELECT * FROM pending_uploads WHERE id = ? AND group_id = ? AND user_id = ?
+  `).get(uploadId, groupId, userId);
+  if (!pending) return res.status(404).json({ error: 'Pending attachment not found' });
+  if (pending.completed_at) {
+    const completedEnvelope = JSON.parse(pending.envelope_json);
+    const mutation = db.prepare(`
+      SELECT epoch, seq, entity_id FROM client_mutations
+      WHERE group_id = ? AND user_id = ? AND client_mutation_id = ?
+    `).get(groupId, userId, completedEnvelope.clientMutationId);
+    return res.json({
+      ok: true,
+      messageId: mutation?.entity_id || pending.message_id,
+      epoch: mutation?.epoch || syncService.ensureState(groupId).epoch,
+      seq: mutation?.seq || syncService.ensureState(groupId).next_seq,
+      duplicate: true,
+      clientMutationId: completedEnvelope.clientMutationId,
+    });
+  }
+  if (pending.expires_at <= new Date().toISOString()) return res.status(410).json({ error: 'Upload expired' });
+  let object;
+  try {
+    object = await mediaStore.head(pending.object_key);
+  } catch {
+    return res.status(409).json({ error: 'Uploaded object is not available yet' });
+  }
+  const expectedChecksum = Buffer.from(pending.expected_sha256, 'hex').toString('base64');
+  if (Number(object.ContentLength) !== Number(pending.expected_size)
+      || String(object.Metadata?.sha256 || '').toLowerCase() !== pending.expected_sha256
+      || String(object.ChecksumSHA256 || '') !== expectedChecksum) {
+    await mediaStore.remove(pending.object_key).catch(() => {});
+    db.prepare('DELETE FROM pending_uploads WHERE id = ?').run(uploadId);
+    return res.status(409).json({ error: 'Uploaded object failed size or hash verification' });
+  }
+  const envelope = JSON.parse(pending.envelope_json);
+  const createdAt = new Date().toISOString();
+  const totalRecipients = Math.max(0, (stmts.countGroupMembers.get(groupId)?.count || 0) - 1);
+  let commit;
+  try {
+    commit = syncService.commit({
+      groupId,
+      userId,
+      eventType: 'message.created',
+      entityId: pending.message_id,
+      channelKey: envelope.tagIndex || MAIN_CHANNEL,
+      revision: 1,
+      clientMutationId: envelope.clientMutationId,
+      createdAt,
+      updateChannel: { keyVersion: envelope.keyVersion },
+      apply: ({ seq }) => {
+        stmts.insertV2Message.run(
+          pending.message_id, groupId, userId, '', envelope.iv, pending.type,
+          envelope.replyToId, null, 0, null, totalRecipients,
+          envelope.encryptionVersion, envelope.keyVersion, 1,
+          envelope.encryptedMetadata, envelope.metadataIv, envelope.tagIndex, null, createdAt
+        );
+        db.prepare(`
+          UPDATE messages SET created_seq = ?, attachment_object_key = ?, attachment_size = ?, attachment_sha256 = ?
+          WHERE id = ?
+        `).run(seq, pending.object_key, pending.expected_size, pending.expected_sha256, pending.message_id);
+        db.prepare('UPDATE pending_uploads SET completed_at = ? WHERE id = ?').run(createdAt, uploadId);
+      },
+    });
+  } catch (error) {
+    console.error('Direct attachment completion failed:', error.message);
+    return res.status(500).json({ error: 'Failed to commit attachment' });
+  }
+  const message = formatMessage(stmts.findMessageById.get(pending.message_id));
+  emitSyncCommit(groupId, userId, commit, 'message.created', message);
+  return res.json({
+    ok: true,
+    messageId: commit.entityId || pending.message_id,
+    epoch: commit.epoch,
+    seq: commit.seq,
+    revision: 1,
+    clientMutationId: envelope.clientMutationId,
+    duplicate: commit.duplicate,
+  });
+});
+
+app.get('/api/groups/:groupId/attachments/:messageId/url', async (req, res) => {
+  const { groupId, messageId } = req.params;
+  const userId = req.session.userId;
+  if (!stmts.isMember.get(groupId, userId)) {
+    return res.status(403).json({ error: 'Not a member of this group' });
+  }
+  const message = stmts.findMessageById.get(messageId);
+  if (!message || message.group_id !== groupId || message.deleted_at || !canUserAccessMessage(message, userId)) {
+    return res.status(404).json({ error: 'Attachment not found' });
+  }
+  if (!message.attachment_object_key) {
+    return res.json({ storage: 'legacy', encryptedContent: message.encrypted_content, iv: message.iv });
+  }
+  try {
+    const url = await mediaStore.signedGet(message.attachment_object_key, 60);
+    return res.json({ storage: 'bucket', url, expiresIn: 60, size: message.attachment_size, sha256: message.attachment_sha256 });
+  } catch {
+    return res.status(503).json({ error: 'Attachment storage is unavailable' });
+  }
 });
 
 // Keep backward-compat alias
@@ -4027,12 +4534,25 @@ app.delete('/api/groups/:groupId/members/:userId', (req, res) => {
     return res.status(403).json({ error: 'Administrators cannot remove other administrators' });
   }
 
-  stmts.deleteMember.run(groupId, targetUserId);
-  // v1.3.12: a removed member's read cursors are gone with them.
-  stmts.deleteChannelReadCursorsForGroupUser.run(groupId, targetUserId);
+  const clientMutationId = String(req.headers['x-client-mutation-id'] || crypto.randomUUID()).slice(0, 128);
+  const commit = syncService.commit({
+    groupId,
+    userId,
+    eventType: 'member.kicked',
+    entityId: targetUserId,
+    clientMutationId,
+    membershipChange: true,
+    auxiliary: { userId: targetUserId },
+    apply: () => {
+      const result = stmts.deleteMember.run(groupId, targetUserId);
+      stmts.deleteChannelReadCursorsForGroupUser.run(groupId, targetUserId);
+      return result;
+    },
+  });
   detachUserFromGroupRoom(groupId, targetUserId);
   io.to(groupId).emit('member_kicked', { userId: targetUserId, groupId });
-  res.json({ ok: true });
+  emitSyncCommit(groupId, userId, commit, 'member.kicked', null, { userId: targetUserId });
+  res.json({ ok: true, epoch: commit.epoch, seq: commit.seq, clientMutationId });
 });
 
 // DELETE /api/groups/:groupId — disband group (owner only)
@@ -4330,23 +4850,8 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
 
 // ── Socket.IO ─────────────────────────────────────────────────────────────────
 
-// Per-room presence tracking: groupId -> Set<socketId>
-const roomPresence = new Map();
-
-function addPresence(groupId, socketId) {
-  if (!roomPresence.has(groupId)) roomPresence.set(groupId, new Set());
-  roomPresence.get(groupId).add(socketId);
-}
-
-function removePresence(groupId, socketId) {
-  if (roomPresence.has(groupId)) {
-    roomPresence.get(groupId).delete(socketId);
-    if (roomPresence.get(groupId).size === 0) roomPresence.delete(groupId);
-  }
-}
-
 function getPresence(groupId) {
-  return roomPresence.has(groupId) ? [...roomPresence.get(groupId)] : [];
+  return [...(io.sockets.adapter.rooms.get(String(groupId)) || [])];
 }
 
 function emitPresenceUpdate(groupId) {
@@ -4364,12 +4869,12 @@ function emitPresenceUpdate(groupId) {
 
 /** Drop a user from a group room + presence (kick / leave / disband). */
 function detachUserFromGroupRoom(groupId, userId) {
-  for (const socket of io.sockets.sockets.values()) {
-    if (String(socket.userId) !== String(userId)) continue;
-    if (socket.joinedRooms instanceof Set) socket.joinedRooms.delete(groupId);
+  const userSocketIds = io.sockets.adapter.rooms.get(`user:${userId}`) || [];
+  for (const socketId of userSocketIds) {
+    const socket = io.sockets.sockets.get(socketId);
+    if (!socket) continue;
     if (socket.currentRoom === groupId) socket.currentRoom = null;
     if (socket.rooms.has(groupId)) {
-      removePresence(groupId, socket.id);
       socket.leave(groupId);
     }
   }
@@ -4377,8 +4882,60 @@ function detachUserFromGroupRoom(groupId, userId) {
 }
 
 function emitToUser(userId, event, payload) {
-  for (const socket of io.sockets.sockets.values()) {
-    if (socket.userId === userId) socket.emit(event, payload);
+  io.to(`user:${userId}`).emit(event, payload);
+}
+
+function emitSyncCommit(groupId, actorUserId, commit, eventType, message = null, auxiliary = null) {
+  if (!commit || commit.duplicate) return;
+  const channelKey = message?.tagIndex || auxiliary?.channelKey || MAIN_CHANNEL;
+  const event = {
+    protocol: SYNC_PROTOCOL_VERSION,
+    groupId,
+    epoch: commit.epoch,
+    seq: commit.seq,
+    type: eventType,
+    entityId: commit.entityId || message?.id || auxiliary?.messageId || null,
+    channelKey,
+    revision: Math.max(1, Number(message?.revision || auxiliary?.revision) || 1),
+    message,
+    auxiliary,
+  };
+  io.to(groupId).emit('sync_event', event);
+  const memberIds = stmts.getGroupMemberIds.all(groupId);
+  const hint = { groupId, epoch: commit.epoch, latestSeq: commit.seq, unreadDelta: eventType === 'message.created' ? 1 : 0 };
+  for (const row of memberIds) io.to(`user:${row.user_id}`).emit('sync_hint', hint);
+}
+
+function emitPrivateSyncCommit(groupId, actorUserId, recipientUserIds, commit, eventType, message) {
+  if (!commit || commit.duplicate) return;
+  const authorized = new Set([String(actorUserId), ...recipientUserIds.map(String)]);
+  const event = {
+    protocol: SYNC_PROTOCOL_VERSION,
+    groupId,
+    epoch: commit.epoch,
+    seq: commit.seq,
+    type: eventType,
+    entityId: commit.entityId || message?.id || null,
+    channelKey: message?.tagIndex || MAIN_CHANNEL,
+    revision: Math.max(1, Number(message?.revision) || 1),
+    message,
+    auxiliary: null,
+  };
+  for (const row of stmts.getGroupMemberIds.all(groupId)) {
+    const memberId = String(row.user_id);
+    const userRoom = `user:${memberId}`;
+    if (authorized.has(memberId)) {
+      for (const socketId of io.sockets.adapter.rooms.get(userRoom) || []) {
+        const target = io.sockets.sockets.get(socketId);
+        if (target?.currentRoom === groupId) target.emit('sync_event', event);
+      }
+    }
+    io.to(userRoom).emit('sync_hint', {
+      groupId,
+      epoch: commit.epoch,
+      latestSeq: commit.seq,
+      unreadDelta: authorized.has(memberId) && memberId !== String(actorUserId) ? 1 : 0,
+    });
   }
 }
 
@@ -4432,6 +4989,9 @@ io.use((socket, next) => {
 
 // Authenticate socket connections
 io.use((socket, next) => {
+  if (isHostedProduction && Number(socket.handshake.auth?.protocol) !== SYNC_PROTOCOL_VERSION) {
+    return next(new Error('protocol_upgrade_required'));
+  }
   const userId = socket.request.session && socket.request.session.userId;
   if (!userId) {
     return next(new Error('Not authenticated'));
@@ -4485,16 +5045,15 @@ io.on('connection', (socket) => {
 
     markExpiredDisappearingMessagesHidden(socket.userId);
 
-    // Multi-room presence: stay joined to every group the client has opened.
-    // Switching chats must not drop presence (or realtime) in other groups.
-    if (!socket.joinedRooms) socket.joinedRooms = new Set();
+    const previousRoom = socket.currentRoom;
+    if (previousRoom && previousRoom !== normalizedGroupId) {
+      socket.leave(previousRoom);
+      emitPresenceUpdate(previousRoom);
+    }
     socket.currentRoom = normalizedGroupId;
     if (!socket.rooms.has(normalizedGroupId)) {
       socket.join(normalizedGroupId);
     }
-    socket.joinedRooms.add(normalizedGroupId);
-    addPresence(normalizedGroupId, socket.id);
-
     const presenceSockets = getPresence(normalizedGroupId);
     const onlineUserIds = new Set();
     for (const sid of presenceSockets) {
@@ -4662,47 +5221,55 @@ io.on('connection', (socket) => {
     const createdAt = new Date().toISOString();
     const totalRecipients = Math.max(0, (stmts.countGroupMembers.get(normalizedGroupId)?.count || 0) - 1);
 
-    try {
-      stmts.insertV2Message.run(
-        msgId,
-        normalizedGroupId,
-        socket.userId,
-        encryptedContent,
-        iv,
-        'text',
-        replyToId || null,
-        null,
-        normalizedIsDisappearing ? 1 : 0,
-        normalizedDisappearingDuration,
-        totalRecipients,
-        encryptionVersion,
-        keyVersion,
-        revision,
-        encryptedMetadata,
-        metadataIv,
-        tagIndex || null,
-        spamSignature || null,
-        createdAt
-      );
-    } catch (err) {
-      console.error('DB insert message error:', err);
-      fail('Failed to save message');
-      return;
-    }
-
-    // v1.3.9: persist AI-prompt markers (Ask AI prompt messages) — previously
-    // aiMention/aiMeta were silently dropped and prompts lost their AI chips.
     const normalizedAiMeta = sanitizeAiMessageMeta(aiMeta);
-    if (normalizedAiMeta || aiMention) {
-      try {
+    let commit;
+    try {
+      commit = syncService.commit({
+        groupId: normalizedGroupId,
+        userId: socket.userId,
+        eventType: 'message.created',
+        entityId: msgId,
+        channelKey: tagIndex || MAIN_CHANNEL,
+        revision,
+        clientMutationId: payload.clientMutationId || msgId,
+        createdAt,
+        updateChannel: { keyVersion },
+        apply: ({ seq }) => {
+          stmts.insertV2Message.run(
+            msgId,
+            normalizedGroupId,
+            socket.userId,
+            encryptedContent,
+            iv,
+            'text',
+            replyToId || null,
+            null,
+            normalizedIsDisappearing ? 1 : 0,
+            normalizedDisappearingDuration,
+            totalRecipients,
+            encryptionVersion,
+            keyVersion,
+            revision,
+            encryptedMetadata,
+            metadataIv,
+            tagIndex || null,
+            spamSignature || null,
+            createdAt
+          );
+          db.prepare('UPDATE messages SET created_seq = ? WHERE id = ?').run(seq, msgId);
+          if (normalizedAiMeta || aiMention) {
         stmts.setAiMessageMeta.run(
           normalizedAiMeta ? JSON.stringify(normalizedAiMeta) : null,
           aiMention ? 1 : 0,
           msgId
         );
-      } catch (err) {
-        console.error('DB update AI meta error:', err);
-      }
+          }
+        },
+      });
+    } catch (err) {
+      console.error('DB insert message error:', err);
+      fail('Failed to save message');
+      return;
     }
 
     const messagePayload = {
@@ -4738,13 +5305,21 @@ io.on('connection', (socket) => {
       aiMeta: normalizedAiMeta,
     };
 
-    io.to(normalizedGroupId).emit('new_message', messagePayload);
-    queueUnreadPushNotifications(
+    emitSyncCommit(normalizedGroupId, socket.userId, commit, 'message.created', messagePayload);
+    if (!commit.duplicate) queueUnreadPushNotifications(
       stmts.getOtherGroupMemberIds.all(normalizedGroupId, socket.userId)
         .map((row) => row.user_id),
       { senderName: socket.username, groupName: getGroupNameForPush(normalizedGroupId) }
     );
-    if (typeof ack === 'function') ack({ ok: true, messageId: msgId });
+    if (typeof ack === 'function') ack({
+      ok: true,
+      messageId: commit.entityId || msgId,
+      epoch: commit.epoch,
+      seq: commit.seq,
+      revision,
+      clientMutationId: payload.clientMutationId || msgId,
+      duplicate: commit.duplicate,
+    });
   });
 
   socket.on('send_ai_message', (payload = {}, ack) => {
@@ -4760,6 +5335,7 @@ io.on('connection', (socket) => {
       iv,
       replyTo,
       hashtag,
+      tagIndex,
       aiMeta,
     } = payload;
     const fail = (message) => {
@@ -4811,38 +5387,60 @@ io.on('connection', (socket) => {
       fail('Invalid hashtag');
       return;
     }
+    const normalizedTagIndex = tagIndex == null ? null : String(tagIndex);
+    if (normalizedHashtag && !/^[A-Za-z0-9_-]{43}$/.test(normalizedTagIndex || '')) {
+      fail('Invalid channel identity');
+      return;
+    }
     const normalizedAiMeta = sanitizeAiMessageMeta(aiMeta);
 
     const msgId = crypto.randomUUID();
     const createdAt = new Date().toISOString();
     const totalRecipients = Math.max(0, Number(stmts.countGroupMembers.get(normalizedGroupId)?.count) || 0);
 
+    let commit;
     try {
-      stmts.insertMessage.run(
-        msgId,
-        normalizedGroupId,
-        AI_ASSISTANT_USER_ID,
-        encryptedContent,
-        iv,
-        'text',
-        replyCheck.value,
-        null,
-        null,
-        normalizedHashtag,
-        0,
-        null,
-        totalRecipients,
-        normalizedAiMeta ? JSON.stringify(normalizedAiMeta) : null,
-        0,
-        createdAt
-      );
+      commit = syncService.commit({
+        groupId: normalizedGroupId,
+        userId: socket.userId,
+        eventType: 'message.created',
+        entityId: msgId,
+        channelKey: normalizedTagIndex || MAIN_CHANNEL,
+        revision: 1,
+        clientMutationId: String(payload.clientMutationId || msgId).slice(0, 128),
+        createdAt,
+        apply: () => {
+          const result = stmts.insertMessage.run(
+          msgId,
+          normalizedGroupId,
+          AI_ASSISTANT_USER_ID,
+          encryptedContent,
+          iv,
+          'text',
+          replyCheck.value,
+          null,
+          null,
+          normalizedHashtag,
+          0,
+          null,
+          totalRecipients,
+          normalizedAiMeta ? JSON.stringify(normalizedAiMeta) : null,
+          0,
+            createdAt
+          );
+          if (normalizedTagIndex) {
+            db.prepare('UPDATE messages SET tag_index = ? WHERE id = ?').run(normalizedTagIndex, msgId);
+          }
+          return result;
+        },
+      });
     } catch (err) {
       console.error('DB insert AI message error:', err);
       fail('Failed to save AI message');
       return;
     }
 
-    io.to(normalizedGroupId).emit('new_message', {
+    const aiMessage = {
       id: msgId,
       groupId: normalizedGroupId,
       senderId: AI_ASSISTANT_USER_ID,
@@ -4856,6 +5454,7 @@ io.on('connection', (socket) => {
       filename: null,
       whisperTo: null,
       hashtag: normalizedHashtag,
+      tagIndex: normalizedTagIndex,
       aiMeta: normalizedAiMeta,
       aiMention: false,
       isDisappearing: false,
@@ -4867,16 +5466,25 @@ io.on('connection', (socket) => {
       editedAt: null,
       totalRecipients,
       readCount: 0,
-    });
+    };
+    emitSyncCommit(normalizedGroupId, socket.userId, commit, 'message.created', aiMessage);
     queueUnreadPushNotifications(
       stmts.getGroupMemberIds.all(normalizedGroupId).map((row) => row.user_id),
       { senderName: socket.username, groupName: getGroupNameForPush(normalizedGroupId) }
     );
-    if (typeof ack === 'function') ack({ ok: true, messageId: msgId });
+    if (typeof ack === 'function') ack({
+      ok: true,
+      messageId: commit.entityId || msgId,
+      epoch: commit.epoch,
+      seq: commit.seq,
+      revision: 1,
+      clientMutationId: payload.clientMutationId || msgId,
+      duplicate: commit.duplicate,
+    });
   });
 
   // ── send_whisper ──────────────────────────────────────────────────────────
-  socket.on('send_whisper', (whisperPayload = {}) => {
+  socket.on('send_whisper', (whisperPayload = {}, ack) => {
     const {
       id, groupId, encryptedContent, iv, encryptedMetadata, metadataIv,
       whisperTo, replyToId, tagIndex, isDisappearing, disappearingDurationMs,
@@ -4959,31 +5567,43 @@ io.on('connection', (socket) => {
     // Store whisper recipients as JSON array for safety
     const whisperToStr = JSON.stringify(recipientsExcludingSender);
 
+    let commit;
     try {
-      stmts.insertV2Message.run(
-        msgId,
-        normalizedGroupId,
-        socket.userId,
-        encryptedContent,
-        iv,
-        'whisper',
-        replyToId || null,
-        whisperToStr,
-        normalizedIsDisappearing ? 1 : 0,
-        normalizedDisappearingDuration,
-        totalRecipients,
-        encryptionVersion,
-        keyVersion,
+      commit = syncService.commit({
+        groupId: normalizedGroupId,
+        userId: socket.userId,
+        eventType: 'message.created',
+        entityId: msgId,
+        channelKey: tagIndex || MAIN_CHANNEL,
         revision,
-        encryptedMetadata,
-        metadataIv,
-        // v1.3.9: persist the client-computed tag index for whispers so channel
-        // clears remove them from the DB too (previously always NULL → whispers
-        // survived tag clears and resurrected after a resync).
-        tagIndex || null,
-        spamSignature || null,
-        createdAt
-      );
+        clientMutationId: whisperPayload.clientMutationId || msgId,
+        createdAt,
+        updateChannel: { keyVersion },
+        apply: ({ seq }) => {
+          stmts.insertV2Message.run(
+            msgId,
+            normalizedGroupId,
+            socket.userId,
+            encryptedContent,
+            iv,
+            'whisper',
+            replyToId || null,
+            whisperToStr,
+            normalizedIsDisappearing ? 1 : 0,
+            normalizedDisappearingDuration,
+            totalRecipients,
+            encryptionVersion,
+            keyVersion,
+            revision,
+            encryptedMetadata,
+            metadataIv,
+            tagIndex || null,
+            spamSignature || null,
+            createdAt
+          );
+          db.prepare('UPDATE messages SET created_seq = ? WHERE id = ?').run(seq, msgId);
+        },
+      });
     } catch (err) {
       console.error('DB insert whisper error:', err);
       socket.emit('error', { message: 'Failed to save whisper' });
@@ -5023,18 +5643,21 @@ io.on('connection', (socket) => {
       readCount: 0,
     };
 
-    // Send to sender + recipients only
-    const recipientIds = new Set([socket.userId, ...recipients]);
-    const roomSockets = getPresence(normalizedGroupId);
-    for (const sid of roomSockets) {
-      const s = io.sockets.sockets.get(sid);
-      if (s && recipientIds.has(s.userId)) {
-        s.emit('new_message', payload);
-      }
+    emitPrivateSyncCommit(normalizedGroupId, socket.userId, recipientsExcludingSender, commit, 'message.created', payload);
+    if (!commit.duplicate) {
+      queueUnreadPushNotifications(recipientsExcludingSender, {
+        senderName: socket.username,
+        groupName: getGroupNameForPush(normalizedGroupId),
+      });
     }
-    queueUnreadPushNotifications(recipientsExcludingSender, {
-      senderName: socket.username,
-      groupName: getGroupNameForPush(normalizedGroupId),
+    if (typeof ack === 'function') ack({
+      ok: true,
+      messageId: commit.entityId || msgId,
+      epoch: commit.epoch,
+      seq: commit.seq,
+      revision,
+      clientMutationId: whisperPayload.clientMutationId || msgId,
+      duplicate: commit.duplicate,
     });
   });
 
@@ -5208,24 +5831,7 @@ io.on('connection', (socket) => {
   // ── disconnect ────────────────────────────────────────────────────────────
   socket.on('disconnect', () => {
     console.log(`Socket disconnected: ${socket.username}`);
-
-    const rooms = socket.joinedRooms instanceof Set
-      ? [...socket.joinedRooms]
-      : (socket.currentRoom ? [socket.currentRoom] : []);
-
-    for (const roomId of rooms) {
-      removePresence(roomId, socket.id);
-      const presenceSockets = getPresence(roomId);
-      const onlineUserIds = new Set();
-      for (const sid of presenceSockets) {
-        const s = io.sockets.sockets.get(sid);
-        if (s) onlineUserIds.add(s.userId);
-      }
-      io.to(roomId).emit('presence_update', {
-        groupId: roomId,
-        onlineUserIds: [...onlineUserIds],
-      });
-    }
+    if (socket.currentRoom) emitPresenceUpdate(socket.currentRoom);
   });
 });
 

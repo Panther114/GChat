@@ -1,6 +1,6 @@
 [package]
 name = "gchat-desktop"
-version = "1.4.0"
+version = "1.4.5"
 description = "Lightweight desktop shell for the hosted Gchat application"
 authors = ["Gchat"]
 edition = "2021"

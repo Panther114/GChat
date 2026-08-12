@@ -240,8 +240,6 @@
   var aiFeatureEnabled = false;
   var hostedAppUpdateTimer = null;
   var hostedAppReloadPending = false;
-  var HOSTED_APP_UPDATE_CHECK_INTERVAL_MS = 10 * 60 * 1e3;
-  var SOCKET_RECOVERY_WINDOW_MS = 2 * 60 * 1e3;
   var MIN_DISAPPEARING_DURATION_MS = 3e3;
   var DISAPPEARING_DURATION_PER_CHAR_MS = 90;
   var MAX_DISAPPEARING_DURATION_MS = 22500;
@@ -257,7 +255,7 @@
     }
   }
   function apiHeaders(options = {}) {
-    const h = {};
+    const h = { "X-GChat-Sync-Protocol": "2" };
     if (options.json !== false) h["Content-Type"] = "application/json";
     if (csrfToken) h["X-CSRF-Token"] = csrfToken;
     return h;
@@ -286,8 +284,15 @@
       const normalizedEntry = { ...entry, groupId: String(group.id) };
       groupKeyVaultCache.set(String(group.id), normalizedEntry);
     }
+    const missing = groups.filter((group) => !groupKeyVaultCache.has(String(group.id)));
+    if (!missing.length) return;
     try {
-      const response = await fetch("/api/groups/keys", { cache: "no-store" });
+      const response = await fetch("/api/groups/keys/resolve", {
+        method: "POST",
+        cache: "no-store",
+        headers: apiHeaders(),
+        body: JSON.stringify({ keys: missing.slice(0, 100).map((group) => ({ groupId: group.id, keyVersion: 1 })) })
+      });
       if (!response.ok) return;
       const payload = await response.json();
       const recoveredEntries = Array.isArray(payload?.keys) ? payload.keys : [];
@@ -354,6 +359,17 @@
     }
   }
   async function decryptAttachmentBytes(msg, secret, groupId) {
+    if (!msg.encryptedContent && msg.attachment?.storage === "bucket") {
+      const response = await fetch(`/api/groups/${encodeURIComponent(groupId)}/attachments/${encodeURIComponent(msg.id)}/url`, { cache: "no-store" });
+      if (!response.ok) return null;
+      const reference = await response.json();
+      const encryptedResponse = reference.storage === "bucket" ? await fetch(reference.url) : null;
+      if (reference.storage === "legacy") msg.encryptedContent = reference.encryptedContent;
+      else if (encryptedResponse?.ok) {
+        const encryptedBytes = new Uint8Array(await encryptedResponse.arrayBuffer());
+        return decryptBytes(encryptedBytes, msg.iv, secret, groupId, v2Aad({ ...msg, groupId }));
+      } else return null;
+    }
     const version = Number(msg.encryptionVersion);
     if (version === 2) {
       try {
@@ -558,9 +574,30 @@
   var PUSH_NOTIFICATION_TAG = "gchat-unread";
   var APP_BADGE_UNSUPPORTED = Symbol("app-badge-unsupported");
   var PRESERVED_COOKIE_NAMES = /* @__PURE__ */ new Set(["connect.sid", "__Host-connect.sid", "__Secure-connect.sid"]);
+  var REPLICA_UI_PREFIX = "gchat:replica-ui-v2:";
+  var BOOTSTRAP_CACHE_PREFIX = "gchat:sync-bootstrap-v2:";
+  function replicaUiKey(groupId) {
+    return `${REPLICA_UI_PREFIX}${currentUser?.id || "anonymous"}:${String(groupId)}`;
+  }
+  function readBootstrapCache() {
+    try {
+      const raw = localStorage.getItem(`${BOOTSTRAP_CACHE_PREFIX}${currentUser?.id || ""}`);
+      const parsed = raw ? JSON.parse(raw) : null;
+      return parsed?.etag && Array.isArray(parsed?.payload?.groups) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+  function writeBootstrapCache(etag, payload) {
+    if (!etag || !Array.isArray(payload?.groups)) return;
+    try {
+      localStorage.setItem(`${BOOTSTRAP_CACHE_PREFIX}${currentUser?.id || ""}`, JSON.stringify({ etag, payload }));
+    } catch {
+    }
+  }
   function readLocalGroupCache(groupId) {
     try {
-      const raw = localStorage.getItem(LOCAL_CACHE_PREFIX + groupId);
+      const raw = localStorage.getItem(replicaUiKey(groupId));
       if (!raw) return null;
       return JSON.parse(raw);
     } catch {
@@ -569,14 +606,11 @@
   }
   function writeLocalGroupCache(groupId, cache) {
     try {
-      localStorage.setItem(LOCAL_CACHE_PREFIX + groupId, JSON.stringify({
-        // Bound the localStorage mirror to the newest window; full history lives
-        // in the IndexedDB history store (historyStore* helpers below).
-        messages: getCacheableMessages(cache.messages || []).slice(-MAX_CACHED_MESSAGES_PER_GROUP),
-        // v1.3.13: never persist an empty member list — a write that races the
-        // members fetch would poison the mirror and show "0 members" after reload.
-        members: Array.isArray(cache.members) && cache.members.length ? cache.members : null,
+      localStorage.setItem(replicaUiKey(groupId), JSON.stringify({
+        // Transcript/member state belongs only to IndexedDB/server. This record
+        // is intentionally limited to non-authoritative view metadata.
         oldestMessageId: cache.oldestMessageId || null,
+        channelCursors: cache.channelCursors || null,
         channelAnchors: cache.channelAnchors || null,
         updatedAt: Date.now()
       }));
@@ -657,14 +691,73 @@
       return null;
     }
   }
-  var HISTORY_DB_NAME = "gchat-history-v1";
+  var HISTORY_DB_NAME = "gchat-replica-v2";
   var HISTORY_DB_VERSION = 1;
   var HISTORY_MESSAGES_STORE = "messages";
   var HISTORY_META_STORE = "meta";
+  var HISTORY_OUTBOX_STORE = "outbox";
   var HISTORY_MAX_MESSAGES_PER_GROUP = 5e3;
+  var HISTORY_MAX_MESSAGES_GLOBAL = 25e3;
   var HISTORY_RENDER_WINDOW = 800;
   var historyDbPromise = null;
   var historyDbSupported = typeof indexedDB !== "undefined";
+  function replicaUserId() {
+    return String(currentUser?.id || "anonymous");
+  }
+  function replicaGroupKey(groupId) {
+    return `${replicaUserId()}\0${String(groupId)}`;
+  }
+  function replicaMessageKey(groupId, messageId) {
+    return `${replicaGroupKey(groupId)}\0${String(messageId)}`;
+  }
+  function putOutboxMutation(groupId, clientMutationId, payload) {
+    return runHistoryStore(HISTORY_OUTBOX_STORE, "readwrite", (store) => store.put({
+      key: replicaMessageKey(groupId, clientMutationId),
+      groupKey: replicaGroupKey(groupId),
+      clientMutationId: String(clientMutationId),
+      payload,
+      createdAt: Date.now()
+    }));
+  }
+  function deleteOutboxMutation(groupId, clientMutationId) {
+    return runHistoryStore(HISTORY_OUTBOX_STORE, "readwrite", (store) => store.delete(replicaMessageKey(groupId, clientMutationId)));
+  }
+  function readOutboxMutations(limit = 25) {
+    const prefix = `${replicaUserId()}\0`;
+    const range = IDBKeyRange.bound(prefix, `${prefix}\uFFFF`);
+    return runHistoryStore(HISTORY_OUTBOX_STORE, "readonly", (store) => {
+      const request = store.getAll(range, Math.min(Math.max(Number(limit) || 25, 1), 25));
+      request.onsuccess = () => {
+        request._rows = request.result || [];
+      };
+      return request;
+    }).then((request) => request?._rows || []);
+  }
+  var outboxFlushRunning = false;
+  async function flushOutboxMutations() {
+    if (outboxFlushRunning || !socket?.connected) return;
+    outboxFlushRunning = true;
+    try {
+      const rows = await readOutboxMutations(25);
+      for (const row of rows) {
+        if (!socket?.connected) break;
+        const payload = row?.payload;
+        const groupId = String(payload?.groupId || "");
+        if (!groupId || !payload?.clientMutationId) continue;
+        const eventName = payload.type === "whisper" ? "send_whisper" : "send_message";
+        const ack = await new Promise((resolve) => {
+          const timeout = setTimeout(() => resolve({ ok: false }), 1e4);
+          socket.emit(eventName, payload, (result = {}) => {
+            clearTimeout(timeout);
+            resolve(result);
+          });
+        });
+        if (ack.ok) await deleteOutboxMutation(groupId, payload.clientMutationId);
+      }
+    } finally {
+      outboxFlushRunning = false;
+    }
+  }
   function openHistoryDb() {
     if (!historyDbSupported) return Promise.resolve(null);
     if (historyDbPromise) return historyDbPromise;
@@ -680,11 +773,17 @@
       request.onupgradeneeded = () => {
         const db = request.result;
         if (!db.objectStoreNames.contains(HISTORY_MESSAGES_STORE)) {
-          const store = db.createObjectStore(HISTORY_MESSAGES_STORE, { keyPath: "id" });
-          store.createIndex("groupId", "groupId", { unique: false });
+          const store = db.createObjectStore(HISTORY_MESSAGES_STORE, { keyPath: "key" });
+          store.createIndex("groupKey", "groupKey", { unique: false });
+          store.createIndex("channelKey", ["groupKey", "channelKey"], { unique: false });
+          store.createIndex("lastAccessedAt", "lastAccessedAt", { unique: false });
         }
         if (!db.objectStoreNames.contains(HISTORY_META_STORE)) {
-          db.createObjectStore(HISTORY_META_STORE, { keyPath: "groupId" });
+          db.createObjectStore(HISTORY_META_STORE, { keyPath: "key" });
+        }
+        if (!db.objectStoreNames.contains(HISTORY_OUTBOX_STORE)) {
+          const outbox = db.createObjectStore(HISTORY_OUTBOX_STORE, { keyPath: "key" });
+          outbox.createIndex("groupKey", "groupKey", { unique: false });
         }
       };
       request.onsuccess = () => resolve(request.result);
@@ -744,7 +843,14 @@
       invalidateHistoryReadMemo(groupId);
       await runHistoryStore(HISTORY_MESSAGES_STORE, "readwrite", (store) => {
         for (const msg of hydrated) {
-          store.put({ id: String(msg.id), groupId: String(groupId), createdAt: msg.createdAt || "", msg });
+          store.put({
+            key: replicaMessageKey(groupId, msg.id),
+            groupKey: replicaGroupKey(groupId),
+            channelKey: msg.tagIndex || "main",
+            createdAt: msg.createdAt || "",
+            lastAccessedAt: Date.now(),
+            msg
+          });
         }
       });
       await pruneHistoryMessages(groupId);
@@ -755,22 +861,26 @@
     const key = String(groupId);
     try {
       const countRequest = await runHistoryStore(HISTORY_MESSAGES_STORE, "readonly", (store) => {
-        const request = store.index("groupId").count(key);
+        const request = store.index("groupKey").count(replicaGroupKey(key));
         request.onsuccess = () => {
           request._count = request.result;
         };
         return request;
       });
       if (!countRequest || !Number.isFinite(countRequest._count)) return;
-      if (countRequest._count <= HISTORY_MAX_MESSAGES_PER_GROUP) return;
+      if (countRequest._count <= HISTORY_MAX_MESSAGES_PER_GROUP) {
+        await pruneGlobalHistoryMessages();
+        return;
+      }
       const messages = await readHistoryMessages(groupId);
       const excess = messages.length - HISTORY_MAX_MESSAGES_PER_GROUP;
       if (excess <= 0) return;
-      const excessIds = messages.slice(0, excess).map((m) => String(m.id));
+      const excessIds = messages.slice(0, excess).map((m) => replicaMessageKey(groupId, m.id));
       await runHistoryStore(HISTORY_MESSAGES_STORE, "readwrite", (store) => {
         for (const id of excessIds) store.delete(id);
       });
       invalidateHistoryReadMemo(key);
+      await pruneGlobalHistoryMessages();
     } catch {
     }
   }
@@ -783,7 +893,7 @@
     const memoized = historyReadMemo.get(key);
     if (memoized) return Promise.resolve(memoized);
     return runHistoryStore(HISTORY_MESSAGES_STORE, "readonly", (store) => {
-      const request = store.index("groupId").getAll(key);
+      const request = store.index("groupKey").getAll(replicaGroupKey(key));
       request.onsuccess = () => {
         const rows = request.result || [];
         const messages = rows.map((row) => row.msg).filter(Boolean).sort((a, b) => {
@@ -805,25 +915,46 @@
   }
   function readHistoryCursor(groupId) {
     return runHistoryStore(HISTORY_META_STORE, "readonly", (store) => {
-      const request = store.get(String(groupId));
+      const request = store.get(replicaGroupKey(groupId));
       request.onsuccess = () => {
         const row = request.result;
-        request._cursor = row?.lastSyncedAt ? { at: String(row.lastSyncedAt), id: String(row.lastSyncedId || "") } : null;
+        request._cursor = row?.epoch != null ? { epoch: Number(row.epoch), seq: Number(row.seq) || 0 } : null;
       };
     }).then((request) => request && request._cursor ? request._cursor : null);
   }
   function writeHistoryCursor(groupId, cursor) {
-    const at = cursor && (cursor.at || cursor);
-    const id = cursor && cursor.id || "";
-    if (!at) return Promise.resolve();
+    if (!cursor || cursor.epoch == null) return Promise.resolve();
     return runHistoryStore(HISTORY_META_STORE, "readwrite", (store) => {
-      store.put({ groupId: String(groupId), lastSyncedAt: String(at), lastSyncedId: String(id), updatedAt: Date.now() });
+      store.put({ key: replicaGroupKey(groupId), groupId: String(groupId), epoch: Number(cursor.epoch), seq: Number(cursor.seq) || 0, updatedAt: Date.now() });
+    });
+  }
+  async function pruneGlobalHistoryMessages() {
+    const countRequest = await runHistoryStore(HISTORY_MESSAGES_STORE, "readonly", (store) => {
+      const request = store.count();
+      request.onsuccess = () => {
+        request._count = request.result;
+      };
+      return request;
+    });
+    if (!countRequest || countRequest._count <= HISTORY_MAX_MESSAGES_GLOBAL) return;
+    const protectedGroup = currentGroupId ? replicaGroupKey(currentGroupId) : null;
+    const rowsRequest = await runHistoryStore(HISTORY_MESSAGES_STORE, "readonly", (store) => {
+      const request = store.index("lastAccessedAt").getAll();
+      request.onsuccess = () => {
+        request._rows = request.result || [];
+      };
+      return request;
+    });
+    const victims = (rowsRequest?._rows || []).filter((row) => row.groupKey !== protectedGroup).slice(0, countRequest._count - HISTORY_MAX_MESSAGES_GLOBAL);
+    if (!victims.length) return;
+    await runHistoryStore(HISTORY_MESSAGES_STORE, "readwrite", (store) => {
+      for (const row of victims) store.delete(row.key);
     });
   }
   function clearGroupHistoryStore(groupId) {
     invalidateHistoryReadMemo(groupId);
     const messageClear = runHistoryStore(HISTORY_MESSAGES_STORE, "readwrite", (store) => {
-      const request = store.index("groupId").openKeyCursor(String(groupId));
+      const request = store.index("groupKey").openKeyCursor(replicaGroupKey(groupId));
       request.onsuccess = () => {
         const cursor = request.result;
         if (!cursor) return;
@@ -831,34 +962,23 @@
         cursor.continue();
       };
     });
-    const metaClear = runHistoryStore(HISTORY_META_STORE, "readwrite", (store) => store.delete(String(groupId)));
+    const metaClear = runHistoryStore(HISTORY_META_STORE, "readwrite", (store) => store.delete(replicaGroupKey(groupId)));
     return Promise.all([messageClear, metaClear]).then(() => null);
   }
   function deleteHistoryMessage(groupId, messageId) {
     if (!groupId || !messageId) return Promise.resolve();
     invalidateHistoryReadMemo(groupId);
-    return runHistoryStore(HISTORY_MESSAGES_STORE, "readwrite", (store) => store.delete(String(messageId)));
+    return runHistoryStore(HISTORY_MESSAGES_STORE, "readwrite", (store) => store.delete(replicaMessageKey(groupId, messageId)));
   }
   var historyMigrationStarted = false;
   async function migrateLocalCachesToHistory() {
     if (historyMigrationStarted || !historyDbSupported) return;
     historyMigrationStarted = true;
-    const db = await openHistoryDb();
-    if (!db) return;
-    const tasks = [];
-    for (let i = 0; i < localStorage.length; i += 1) {
-      const key = localStorage.key(i);
-      if (!key || !key.startsWith(LOCAL_CACHE_PREFIX)) continue;
-      const groupId = key.slice(LOCAL_CACHE_PREFIX.length);
-      try {
-        const parsed = JSON.parse(localStorage.getItem(key) || "null");
-        if (parsed && Array.isArray(parsed.messages) && parsed.messages.length) {
-          tasks.push(persistHistoryMessages(groupId, parsed.messages));
-        }
-      } catch {
-      }
+    await openHistoryDb();
+    for (let index = localStorage.length - 1; index >= 0; index -= 1) {
+      const key = localStorage.key(index);
+      if (key?.startsWith(LOCAL_CACHE_PREFIX)) localStorage.removeItem(key);
     }
-    await Promise.allSettled(tasks);
   }
   function sortMessagesChronologically(messages) {
     return [...messages].sort((a, b) => {
@@ -1031,8 +1151,13 @@
     autoResetScheduled = true;
     writeLastSeenDeploy(newVer, newFp);
     const jitterMs = 1500 + Math.floor(Math.random() * 8e3);
-    setTimeout(() => {
-      void clearCacheAndRestartApp();
+    setTimeout(async () => {
+      try {
+        const registration = await navigator.serviceWorker?.getRegistration();
+        await registration?.update();
+      } catch {
+      }
+      await reloadAppShell();
     }, jitterMs);
   }
   async function fetchAppVersionInfo() {
@@ -1059,10 +1184,7 @@
   }
   function startHostedAppUpdatePolling() {
     if (hostedAppUpdateTimer) clearInterval(hostedAppUpdateTimer);
-    hostedAppUpdateTimer = setInterval(() => {
-      if (document.hidden) return;
-      void checkForHostedAppUpdate();
-    }, HOSTED_APP_UPDATE_CHECK_INTERVAL_MS);
+    hostedAppUpdateTimer = null;
   }
   function createUploadId() {
     if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
@@ -1856,6 +1978,7 @@
     return String(value || "");
   }
   var DEFAULT_TAG_TOPIC = "main";
+  var UNAVAILABLE_CHANNEL_PREFIX = "__unavailable__:";
   var MAX_TAG_TOPIC_LENGTH = 12;
   var CHANNEL_PREF_KEY_PREFIX = "gchat:active-channel:";
   var GLOBAL_GROUP_ID = "gchat-global";
@@ -1940,7 +2063,10 @@
     return normalizeHashtagTopic(activeTagFilter) || DEFAULT_TAG_TOPIC;
   }
   function resolveMessageTagTopic(msg) {
-    return getMessageHashtagKey(msg) || DEFAULT_TAG_TOPIC;
+    const topic = getMessageHashtagKey(msg);
+    if (topic) return topic;
+    if (msg?.tagIndex) return `${UNAVAILABLE_CHANNEL_PREFIX}${String(msg.tagIndex)}`;
+    return DEFAULT_TAG_TOPIC;
   }
   async function hydrateMessageChannel(msg, groupId = msg?.groupId || currentGroupId) {
     if (!msg) return DEFAULT_TAG_TOPIC;
@@ -1966,6 +2092,11 @@
       }
     }
     const topic = resolveMessageTagTopic(msg);
+    if (topic.startsWith(UNAVAILABLE_CHANNEL_PREFIX)) {
+      msg._channelUnknown = true;
+      delete msg.hashtag;
+      return topic;
+    }
     msg.hashtag = topic;
     if (groupId) rememberChannel(groupId, topic);
     if (!msg.tagIndex && groupId && topic && topic !== DEFAULT_TAG_TOPIC) {
@@ -2700,6 +2831,8 @@
   }
   var currentUser = null;
   var currentGroupId = null;
+  var viewGeneration = 0;
+  var viewAbortController = null;
   var currentGroupData = null;
   var groups = [];
   var members = [];
@@ -2849,7 +2982,6 @@
       for (const msg of cache.messages || []) {
         if (msg.tagIndex) byIndex.set(String(msg.tagIndex), msg);
       }
-      let changed = false;
       for (const entry of channels) {
         const tagIndex = String(entry.tagIndex || "");
         if (!tagIndex) continue;
@@ -2882,31 +3014,27 @@
           const known = getKnownChannels(groupId);
           if (!known.has(topic)) {
             rememberChannel(groupId, topic);
-            changed = true;
           }
         }
       }
-      if (changed && String(groupId) === String(currentGroupId)) renderTagFilters();
+      if (String(groupId) === String(currentGroupId)) renderTagFilters();
     } catch {
     }
   }
   function ensureGroupCacheEntry(groupId) {
     if (!groupDataCache.has(groupId)) {
       const local = readLocalGroupCache(groupId);
-      const localMessages = filterMessagesVisibleToCurrentUser(local?.messages || []);
       groupDataCache.set(groupId, {
-        messages: localMessages.length ? localMessages : local?.messages ? [] : null,
+        messages: null,
         messageRows: null,
-        // v1.3.13: an EMPTY cached member list is treated as "not loaded" — a
-        // mirror write that ran before members arrived used to persist
-        // members: [], and the next boot read it as loaded, so groups (notably
-        // GChat Global) rendered "0 members" forever until a cache reset.
-        members: Array.isArray(local?.members) && local.members.length ? local.members : null,
+        members: null,
         // Session-only readiness bit. Cached/durable or realtime messages do not
         // prove that the newest bounded server window has been fetched.
         serverWindowLoaded: false,
         oldestMessageId: local?.oldestMessageId || null,
-        rowsDirty: !!local?.messages,
+        rowsDirty: false,
+        channelCursors: local?.channelCursors || {},
+        loadedChannels: /* @__PURE__ */ new Set(),
         knownChannels: new Set(readKnownChannels(groupId))
       });
     }
@@ -2914,6 +3042,7 @@
     if (!(entry.knownChannels instanceof Set)) {
       entry.knownChannels = new Set(readKnownChannels(groupId));
     }
+    if (!(entry.loadedChannels instanceof Set)) entry.loadedChannels = /* @__PURE__ */ new Set();
     return entry;
   }
   function getMemberProfile(groupId, userId) {
@@ -3058,173 +3187,223 @@
     cache.rowsDirty = true;
     cache.oldestMessageId = cache.messages.length ? cache.messages[0].id : null;
   }
-  var joinedRoomIds = /* @__PURE__ */ new Set();
   function joinAllGroupRooms() {
-    if (!socket) return;
-    const next = new Set(joinedRoomIds);
-    for (const group of groups) {
-      const id = String(group.id || "");
-      if (!id || next.has(id)) continue;
-      next.add(id);
-      socket.emit("join_room", id);
-    }
-    joinedRoomIds = next;
-  }
-  function trackJoinedRoom(groupId) {
-    const id = String(groupId || "");
-    if (!id) return;
-    joinedRoomIds.add(id);
+    if (socket && currentGroupId) socket.emit("join_room", String(currentGroupId));
   }
   var MAX_SYNC_PAGES_PER_EVENT = 5;
-  var SYNC_PAGE_LIMIT = 100;
-  async function refreshCurrentGroupFromServer() {
-    const groupId = currentGroupId;
-    if (!groupId) return;
-    try {
-      const cache = ensureGroupCacheEntry(groupId);
-      const hasCached = Array.isArray(cache.messages) && cache.messages.length > 0;
-      let cursor = await readHistoryCursor(groupId);
-      if (!cursor && hasCached) {
-        const last = cache.messages[cache.messages.length - 1];
-        cursor = { at: last.createdAt, id: last.id };
-      }
-      if (!cursor) {
-        await loadMessages(groupId);
-        return;
-      }
-      const byId = new Map(cache.messages.map((m) => [String(m.id), m]));
-      const additions = [];
-      const edits = [];
-      for (let page = 0; page < MAX_SYNC_PAGES_PER_EVENT; page += 1) {
-        const url = `/api/groups/${groupId}/messages?since=${encodeURIComponent(cursor.at)}&sinceId=${encodeURIComponent(cursor.id)}&limit=${SYNC_PAGE_LIMIT}`;
-        const res = await fetch(url, { cache: "no-store" });
-        if (!res.ok) break;
-        const rawMsgs = await res.json();
-        if (String(currentGroupId) !== groupId) return;
-        if (!rawMsgs.length) break;
-        const msgs = filterMessagesVisibleToCurrentUser(rawMsgs);
-        for (const msg of msgs) {
-          const known = byId.get(String(msg.id));
-          if (!known) {
-            byId.set(String(msg.id), msg);
-            additions.push(msg);
-          } else if ((known.editedAt || null) !== (msg.editedAt || null) || Number(known.revision || 0) !== Number(msg.revision || 0)) {
-            byId.set(String(msg.id), msg);
-            edits.push(msg);
-          }
-        }
-        const lastFetched = rawMsgs[rawMsgs.length - 1];
-        cursor = { at: lastFetched.createdAt, id: lastFetched.id };
-        void writeHistoryCursor(groupId, cursor);
-        if (rawMsgs.length < SYNC_PAGE_LIMIT) break;
-        if (page < MAX_SYNC_PAGES_PER_EVENT - 1) {
-          await new Promise((resolve) => setTimeout(resolve, 30));
+  var syncEventChains = /* @__PURE__ */ new Map();
+  var appliedSocketUnreadEvents = /* @__PURE__ */ new Set();
+  var MAX_APPLIED_SOCKET_UNREAD_EVENTS = 1e3;
+  async function persistSyncBatch(groupId, events, cursor) {
+    const db = await openHistoryDb();
+    if (!db) return;
+    const groupKey = replicaGroupKey(groupId);
+    await new Promise((resolve, reject) => {
+      const transaction = db.transaction([HISTORY_MESSAGES_STORE, HISTORY_META_STORE], "readwrite");
+      const messagesStore = transaction.objectStore(HISTORY_MESSAGES_STORE);
+      const metaStore = transaction.objectStore(HISTORY_META_STORE);
+      for (const event of events) {
+        if ((event.type === "message.created" || event.type === "message.edited") && event.message) {
+          const msg = event.message;
+          messagesStore.put({
+            key: replicaMessageKey(groupId, msg.id),
+            groupKey,
+            channelKey: event.channelKey || msg.tagIndex || "main",
+            createdAt: msg.createdAt || "",
+            lastAccessedAt: Date.now(),
+            msg
+          });
+        } else if (event.type === "message.deleted" && event.entityId) {
+          messagesStore.delete(replicaMessageKey(groupId, event.entityId));
+        } else if (event.type === "history.cleared") {
+          const channelKey = event.auxiliary?.channelKey || event.channelKey;
+          const request = messagesStore.index("groupKey").openCursor(IDBKeyRange.only(groupKey));
+          request.onsuccess = () => {
+            const rowCursor = request.result;
+            if (!rowCursor) return;
+            if (channelKey === "*" || rowCursor.value.channelKey === channelKey) rowCursor.delete();
+            rowCursor.continue();
+          };
         }
       }
-      if (!additions.length && !edits.length) return;
-      if (edits.length) {
-        mergeMessagesIntoCache(groupId, edits);
-        const entry = ensureGroupCacheEntry(groupId);
-        if (entry.channelRows) {
-          const editedIds = new Set(edits.map((m) => String(m.id)));
-          for (const memo of Object.values(entry.channelRows)) {
-            const kept = memo.rows.filter((row) => !editedIds.has(String(row?.dataset?.msgId)));
-            if (kept.length !== memo.rows.length) {
-              memo.rows = kept;
-              for (const id of editedIds) memo.byId.delete(id);
-              memo.firstMsgId = memo.rows.length ? memo.rows[0].dataset?.msgId || null : null;
-              memo.lastMsgId = memo.rows.length ? memo.rows[memo.rows.length - 1].dataset?.msgId || null : null;
-            }
-          }
-        }
+      metaStore.put({ key: groupKey, groupId: String(groupId), epoch: cursor.epoch, seq: cursor.seq, updatedAt: Date.now() });
+      transaction.oncomplete = resolve;
+      transaction.onerror = () => reject(transaction.error || new Error("Replica sync transaction failed"));
+      transaction.onabort = () => reject(transaction.error || new Error("Replica sync transaction aborted"));
+    });
+    invalidateHistoryReadMemo(groupId);
+  }
+  async function applySyncEvents(groupId, events, cursor, { render = true } = {}) {
+    const ordered = [...events].sort((a, b) => Number(a.seq) - Number(b.seq));
+    for (const event of ordered) {
+      if (!event.message) continue;
+      await hydrateMessageChannel(event.message, groupId);
+      if (event.message.type !== "image" && event.message.type !== "file") {
+        const key = getGroupKey(groupId);
+        if (key) event.message._decryptedText = await decryptMessageText(event.message, key, groupId).catch(() => null);
       }
-      if (!additions.length) return;
-      mergeMessagesIntoCache(groupId, additions);
-      if (String(currentGroupId) !== groupId) return;
-      allMessages = ensureGroupCacheEntry(groupId).messages || [];
-      void updateGroupPreviewFromMessage(groupId, allMessages.length ? allMessages[allMessages.length - 1] : null);
+    }
+    await persistSyncBatch(groupId, ordered, cursor);
+    const cache = ensureGroupCacheEntry(groupId);
+    let nextMessages = [...cache.messages || []];
+    for (const event of ordered) {
+      if ((event.type === "message.created" || event.type === "message.edited") && event.message) {
+        const byId = new Map(nextMessages.map((message) => [String(message.id), message]));
+        byId.set(String(event.message.id), event.message);
+        nextMessages = sortMessagesChronologically([...byId.values()]);
+      } else if (event.type === "message.deleted") {
+        nextMessages = nextMessages.filter((message) => String(message.id) !== String(event.entityId));
+      } else if (event.type === "history.cleared") {
+        const channelKey = event.auxiliary?.channelKey || event.channelKey;
+        nextMessages = channelKey === "*" ? [] : nextMessages.filter((message) => (message.tagIndex || "main") !== channelKey);
+      }
+    }
+    cache.messages = nextMessages;
+    cache.rowsDirty = true;
+    cache.messageRows = null;
+    cache.channelRows = null;
+    cache.oldestMessageId = nextMessages.length ? cache.oldestMessageId : null;
+    writeLocalGroupCache(groupId, cache);
+    if (render && String(currentGroupId) === String(groupId)) {
+      allMessages = nextMessages;
+      if (ordered.some((event) => String(event.type || "").startsWith("member."))) {
+        await loadMembers(groupId);
+        members = ensureGroupCacheEntry(groupId).members || [];
+        renderMembersList();
+        renderWhisperPicker();
+        $("chat-member-count").textContent = members.length + " member" + (members.length !== 1 ? "s" : "");
+        refreshVisibleDeliveryTicks(groupId);
+      }
+      await renderActiveChannelStream({ restoreScroll: true });
       renderTagFilters();
-      const nearBottom = isNearBottom();
-      const area = messagesArea();
-      if (!area) return;
-      const channel = getActiveTagTopic();
-      const channelAdditions = [];
-      await mapWithConcurrency(additions, 12, async (msg) => {
-        await hydrateMessageChannel(msg, groupId);
-        if (resolveMessageTagTopic(msg) === channel) channelAdditions.push(msg);
-      });
-      if (channelAdditions.length && !edits.length) {
-        const lastVisible = getLastRenderedChannelMessage();
-        const additionsAreNewer = !lastVisible || channelAdditions.every((msg) => {
-          const cmp = String(msg.createdAt || "").localeCompare(String(lastVisible.createdAt || ""));
-          return cmp > 0 || cmp === 0 && String(msg.id) > String(lastVisible.id);
-        });
-        if (additionsAreNewer) {
-          const renderedIds = /* @__PURE__ */ new Set();
-          for (const existing of area.querySelectorAll(".msg-row[data-msg-id]")) {
-            renderedIds.add(String(existing.dataset.msgId));
-          }
-          const pendingAdditions = channelAdditions.filter((m) => !renderedIds.has(String(m.id)));
-          if (pendingAdditions.length) {
-            const rows = await buildMessageRows(pendingAdditions, groupId, { prevMessage: lastVisible });
-            const fragment = document.createDocumentFragment();
-            for (const row of rows) {
-              if (!row) continue;
-              if (row.classList?.contains("msg-row")) {
-                const srcMsg = pendingAdditions.find((m) => String(m.id) === String(row.dataset.msgId));
-                if (srcMsg) observeMessageForRead(row, srcMsg);
-              }
-              fragment.appendChild(row);
-            }
-            if (nearBottom) {
-              area.appendChild(fragment);
-              scrollToBottom(true);
-            } else {
-              area.appendChild(fragment);
-            }
-            const memo = getChannelRowMemo(ensureGroupCacheEntry(groupId), channel);
-            for (const row of rows) {
-              if (!row?.classList?.contains("msg-row")) continue;
-              memo.rows.push(row);
-              memo.byId.set(String(row.dataset.msgId), row);
-            }
-            memo.lastMsgId = memo.rows.length ? memo.rows[memo.rows.length - 1].dataset?.msgId || memo.lastMsgId : memo.lastMsgId;
-            evictChannelRowFront(memo);
-          }
-          if (nearBottom && pendingAdditions.length) {
-            markChannelReadAt(groupId, pendingAdditions[pendingAdditions.length - 1]);
-          }
-          updateFirstUnreadButton();
-          renderTagFilters();
-          syncChannelEmptyState();
-          observeCurrentGroupRowsForRead();
-          applySearchVisibility();
-          return;
-        }
-      }
-      if (edits.length || nearBottom || area.scrollTop <= 0) {
-        const anchor = captureViewportAnchor(area);
-        await renderActiveChannelStream({ restoreScroll: false });
-        restoreViewportAnchor(area, anchor);
-        observeCurrentGroupRowsForRead();
-        if (nearBottom && channelAdditions.length) {
-          markChannelReadAt(groupId, channelAdditions[channelAdditions.length - 1]);
-        }
-      }
-    } catch (err) {
-      console.warn("refreshCurrentGroupFromServer failed:", err);
     }
   }
-  function getLastRenderedChannelMessage() {
-    const area = messagesArea();
-    if (!area) return null;
-    const rows = area.querySelectorAll(".msg-row");
-    if (!rows.length) return null;
-    const lastRow = rows[rows.length - 1];
-    const msgId = lastRow && lastRow.dataset.msgId;
-    if (!msgId) return null;
-    const cache = ensureGroupCacheEntry(currentGroupId);
-    return (cache.messages || []).find((m) => String(m.id) === String(msgId)) || null;
+  async function applySocketUnreadEvent(event) {
+    if (event.type !== "message.created" || !event.message || !currentUser) return;
+    if (String(event.message.senderId) === String(currentUser.id)) return;
+    const eventKey = `${event.groupId}:${event.epoch}:${event.seq}`;
+    if (appliedSocketUnreadEvents.has(eventKey)) return;
+    appliedSocketUnreadEvents.add(eventKey);
+    if (appliedSocketUnreadEvents.size > MAX_APPLIED_SOCKET_UNREAD_EVENTS) {
+      appliedSocketUnreadEvents.delete(appliedSocketUnreadEvents.values().next().value);
+    }
+    const groupId = String(event.groupId);
+    unreadCounts[groupId] = Math.max(0, Number(unreadCounts[groupId]) || 0) + 1;
+    updateUnreadBadge(groupId, unreadCounts[groupId]);
+    if (groupId !== String(currentGroupId)) {
+      playNotifSound();
+      return;
+    }
+    await hydrateMessageChannel(event.message, groupId);
+    const eventTopic = resolveMessageTagTopic(event.message);
+    const isVisibleAndPinned = eventTopic === getActiveTagTopic() && isNearBottom();
+    if (isVisibleAndPinned) return;
+    if (channelUnreadLoadedForGroup !== groupId) {
+      await fetchChannelUnreadCounts(groupId);
+      return;
+    }
+    const unreadKey = event.channelKey === "main" ? "" : String(event.channelKey || "");
+    if (eventTopic !== DEFAULT_TAG_TOPIC && unreadKey) {
+      channelUnreadTagIndexByTopic.set(eventTopic, unreadKey);
+      channelUnreadTopicByTagIndex.set(unreadKey, eventTopic);
+    }
+    channelUnreadStateVersion += 1;
+    channelUnreadCounts[unreadKey] = Math.max(0, Number(channelUnreadCounts[unreadKey]) || 0) + 1;
+    renderTagFilters();
+  }
+  async function refreshCurrentGroupFromServer() {
+    const groupId = String(currentGroupId || "");
+    if (!groupId) return;
+    const generation = viewGeneration;
+    const group = groups.find((entry) => String(entry.id) === groupId);
+    let cursor = await readHistoryCursor(groupId);
+    if (!cursor) {
+      cursor = { epoch: Number(group?.epoch) || 1, seq: 0 };
+      await writeHistoryCursor(groupId, cursor);
+    } else if (Number(cursor.epoch) !== Number(group?.epoch)) {
+      await loadMessages(groupId);
+      if (generation !== viewGeneration || groupId !== String(currentGroupId)) return;
+      cursor = { epoch: Number(group?.epoch) || 1, seq: Number(group?.latestSeq) || 0 };
+      await writeHistoryCursor(groupId, cursor);
+      return;
+    }
+    for (let page = 0; page < MAX_SYNC_PAGES_PER_EVENT; page += 1) {
+      const params = new URLSearchParams({ epoch: String(cursor.epoch), after: String(cursor.seq), limit: "200" });
+      const response = await fetch(`/api/groups/${encodeURIComponent(groupId)}/sync?${params}`, {
+        cache: "no-store",
+        signal: viewAbortController?.signal
+      });
+      if (response.status === 409) {
+        await clearGroupHistoryStore(groupId);
+        const cache = ensureGroupCacheEntry(groupId);
+        cache.messages = [];
+        cache.channelRows = null;
+        cache.serverWindowLoaded = false;
+        await loadMessages(groupId);
+        const reset = await response.json().catch(() => ({}));
+        cursor = { epoch: Number(reset.epoch) || Number(group?.epoch) || 1, seq: Number(reset.latestSeq) || 0 };
+        await writeHistoryCursor(groupId, cursor);
+        return;
+      }
+      if (!response.ok) return;
+      const payload = await response.json();
+      const events = Array.isArray(payload.events) ? payload.events : [];
+      if (events.length) {
+        const expected = cursor.seq + 1;
+        if (Number(events[0].seq) !== expected) throw new Error("Sync sequence gap");
+        cursor = { epoch: Number(payload.epoch), seq: Number(events[events.length - 1].seq) };
+        await applySyncEvents(groupId, events, cursor, { render: generation === viewGeneration && groupId === String(currentGroupId) });
+      }
+      if (!payload.hasMore || !events.length) {
+        if (!events.length && Number(payload.latestSeq) > cursor.seq) throw new Error("Sync stalled before latest sequence");
+        return;
+      }
+    }
+  }
+  async function processSyncEvent(event = {}) {
+    if (Number(event.protocol) !== 2 || !event.groupId || !Number.isInteger(Number(event.seq))) return;
+    const groupId = String(event.groupId);
+    const eventSeq = Number(event.seq);
+    const eventEpoch = Number(event.epoch);
+    await applySocketUnreadEvent(event);
+    let cursor = await readHistoryCursor(groupId);
+    if (!cursor && eventSeq === 1) {
+      cursor = { epoch: eventEpoch, seq: 0 };
+      await writeHistoryCursor(groupId, cursor);
+    }
+    if (cursor && Number(cursor.epoch) === eventEpoch && eventSeq <= Number(cursor.seq)) {
+      if (eventSeq === Number(cursor.seq) && (event.message || event.type === "message.deleted" || event.type === "history.cleared")) {
+        await applySyncEvents(groupId, [event], cursor, {
+          render: groupId === String(currentGroupId)
+        });
+      }
+      const group2 = groups.find((entry) => String(entry.id) === groupId);
+      if (group2) group2.latestSeq = Math.max(Number(group2.latestSeq) || 0, eventSeq);
+      return;
+    }
+    if (!cursor || Number(cursor.epoch) !== eventEpoch || eventSeq !== Number(cursor.seq) + 1) {
+      if (groupId === String(currentGroupId)) {
+        await refreshCurrentGroupFromServer();
+        await fetchChannelUnreadCounts(groupId);
+      }
+      return;
+    }
+    await applySyncEvents(groupId, [event], { epoch: eventEpoch, seq: eventSeq }, {
+      render: groupId === String(currentGroupId)
+    });
+    const group = groups.find((entry) => String(entry.id) === groupId);
+    if (group) group.latestSeq = Math.max(Number(group.latestSeq) || 0, eventSeq);
+  }
+  function enqueueSyncEvent(event) {
+    const groupId = String(event?.groupId || "");
+    if (!groupId) return Promise.resolve();
+    const previous = syncEventChains.get(groupId) || Promise.resolve();
+    const next = previous.catch(() => {
+    }).then(() => processSyncEvent(event)).catch((error) => console.warn("sync_event reconciliation failed:", error)).finally(() => {
+      if (syncEventChains.get(groupId) === next) syncEventChains.delete(groupId);
+    });
+    syncEventChains.set(groupId, next);
+    return next;
   }
   async function ensureGroupDataPreloaded(groupId) {
     if (groupPreloadPromises.has(groupId)) return groupPreloadPromises.get(groupId);
@@ -3470,6 +3649,7 @@
     const cache = ensureGroupCacheEntry(groupId);
     for (const msg of cache.messages || []) {
       const topic = resolveMessageTagTopic(msg);
+      if (topic.startsWith(UNAVAILABLE_CHANNEL_PREFIX)) continue;
       if (!topic || knownTopics.has(topic)) continue;
       knownTopics.add(topic);
       rememberChannel(groupId, topic);
@@ -3489,6 +3669,7 @@
   }
   var CHANNEL_RENDER_WINDOW = 300;
   var transcriptRebuilding = false;
+  var transcriptRenderRevision = 0;
   function getChannelRowMemo(cache, topic) {
     if (!cache.channelRows) cache.channelRows = {};
     let memo = cache.channelRows[topic];
@@ -3600,12 +3781,17 @@
   async function renderActiveChannelStream({ restoreScroll = true } = {}) {
     const area = messagesArea();
     if (!area || !currentGroupId) return;
-    const cache = ensureGroupCacheEntry(currentGroupId);
-    oldestMessageId = cache.messages && cache.messages.length ? cache.messages[0].id : null;
+    const renderRevision = ++transcriptRenderRevision;
+    const renderGroupId = String(currentGroupId);
+    const renderGeneration = viewGeneration;
     const channel = getActiveTagTopic();
+    const isCurrentRender = () => renderGeneration === viewGeneration && renderRevision === transcriptRenderRevision && renderGroupId === String(currentGroupId) && channel === getActiveTagTopic();
+    const cache = ensureGroupCacheEntry(renderGroupId);
+    oldestMessageId = cache.messages && cache.messages.length ? cache.messages[0].id : null;
     const all = cache.messages || [];
-    await mapWithConcurrency(all, 12, (msg) => hydrateMessageChannel(msg, currentGroupId));
-    writeLocalGroupCache(currentGroupId, cache);
+    await mapWithConcurrency(all, 12, (msg) => hydrateMessageChannel(msg, renderGroupId));
+    if (!isCurrentRender()) return;
+    writeLocalGroupCache(renderGroupId, cache);
     const channelMsgs = all.filter((msg) => resolveMessageTagTopic(msg) === channel);
     const windowMsgs = channelMsgs.slice(-CHANNEL_RENDER_WINDOW);
     if (!windowMsgs.length) {
@@ -3614,6 +3800,7 @@
       memo2.byId = /* @__PURE__ */ new Map();
       memo2.firstMsgId = null;
       memo2.lastMsgId = null;
+      if (!cache.loadedChannels.has(channel)) return;
       if (!Array.isArray(cache.messages)) {
         area.replaceChildren(createChannelLoadingIndicator());
         return;
@@ -3657,7 +3844,8 @@
       const rows = [];
       for (let i = 0; i < windowMsgs.length; i += CHUNK_SIZE) {
         const slice = windowMsgs.slice(i, i + CHUNK_SIZE);
-        const built = await buildMessageRows(slice, currentGroupId, { prevMessage: prev });
+        const built = await buildMessageRows(slice, renderGroupId, { prevMessage: prev });
+        if (!isCurrentRender()) return;
         if (!built.length) continue;
         for (const row of built) {
           if (!row) continue;
@@ -3676,6 +3864,7 @@
           }
         }
         await new Promise((resolve) => setTimeout(resolve, 0));
+        if (!isCurrentRender()) return;
       }
       memo.rows = rows;
       memo.byId = new Map(rows.filter((row) => row?.dataset?.msgId).map((row) => [String(row.dataset.msgId), row]));
@@ -3688,8 +3877,9 @@
       if (restoreScroll) restoreOrScrollToBottom();
       observeCurrentGroupRowsForRead();
     } finally {
-      transcriptRebuilding = false;
+      if (renderRevision === transcriptRenderRevision) transcriptRebuilding = false;
     }
+    void persistHistoryMessages(renderGroupId, windowMsgs);
     cache.rowsDirty = true;
     syncChannelEmptyState();
     updateFirstUnreadButton();
@@ -3697,6 +3887,9 @@
   }
   function selectTagChannel(topic, { focusComposer = true } = {}) {
     const next = ensureActiveTag(topic);
+    viewGeneration += 1;
+    viewAbortController?.abort();
+    viewAbortController = new AbortController();
     rememberChannel(currentGroupId, next);
     clearActiveSearch({ restoreTranscript: false });
     clearHashtagToken();
@@ -3712,7 +3905,9 @@
     syncComposerTokens();
     renderTagFilters();
     void markChannelReadOnOpen(currentGroupId);
-    void renderActiveChannelStream().then(() => {
+    const cache = ensureGroupCacheEntry(currentGroupId);
+    const renderPromise = cache.loadedChannels.has(next) ? renderActiveChannelStream().then(() => loadMessages(currentGroupId)) : loadMessages(currentGroupId);
+    void renderPromise.then(() => {
       updateKeyState();
       if (focusComposer) {
         const input = $("message-input");
@@ -3809,6 +4004,7 @@
     }
     closeChannelCreateModal();
     rememberChannel(currentGroupId, topic);
+    ensureGroupCacheEntry(currentGroupId).loadedChannels.add(topic);
     announceChannelChange(currentGroupId, topic, "add");
     selectTagChannel(topic);
   }
@@ -4658,12 +4854,12 @@
       await refreshAiUsageSummary();
       void loadAndRenderAiTones();
     }
+    await migrateLocalCachesToHistory();
     await loadGroups();
     const lastGroupId = readStoredLastGroupId();
     if (lastGroupId && groups.some((g) => String(g.id) === String(lastGroupId))) {
       void selectGroup(lastGroupId);
     }
-    void migrateLocalCachesToHistory();
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.addEventListener("message", (event) => {
         if (event.data?.type !== "push-unread-count") return;
@@ -4735,15 +4931,22 @@
       renderGroupList();
     });
   });
-  async function loadGroups({ withBackendPreload = false } = {}) {
+  async function loadGroups() {
     try {
+      const cachedBootstrap = readBootstrapCache();
       const previousPreviewByGroupId = new Map(
         groups.map((group) => [group.id, { text: group._lastPreviewText, time: group._lastPreviewTime }])
       );
-      const endpoint = withBackendPreload ? "/api/groups/preload?limit=50" : "/api/groups/mine";
-      const res = await fetch(endpoint);
-      if (!res.ok) return false;
-      groups = await res.json();
+      if (!groups.length && cachedBootstrap) {
+        groups = cachedBootstrap.payload.groups;
+        renderGroupList();
+      }
+      const headers = cachedBootstrap ? { "If-None-Match": cachedBootstrap.etag } : void 0;
+      const res = await fetch("/api/sync/bootstrap", { cache: "no-store", headers });
+      if (res.status !== 304 && !res.ok) return false;
+      const bootstrap = res.status === 304 ? cachedBootstrap.payload : await res.json();
+      if (res.status !== 304) writeBootstrapCache(res.headers.get("ETag"), bootstrap);
+      groups = Array.isArray(bootstrap?.groups) ? bootstrap.groups : [];
       unreadCounts = {};
       for (const group of groups) {
         unreadCounts[group.id] = Math.max(0, Number(group.unreadCount) || 0);
@@ -4751,21 +4954,6 @@
         if (previousPreview) {
           group._lastPreviewText = previousPreview.text;
           group._lastPreviewTime = previousPreview.time;
-        }
-        if (group.preloaded && typeof group.preloaded === "object") {
-          const cache = ensureGroupCacheEntry(group.id);
-          const preloadedMessages = Array.isArray(group.preloaded.messages) ? filterMessagesVisibleToCurrentUser(group.preloaded.messages) : [];
-          mergeMessagesIntoCache(group.id, preloadedMessages, { persist: false });
-          cache.members = Array.isArray(group.preloaded.members) && group.preloaded.members.length ? group.preloaded.members : null;
-          cache.messageRows = null;
-          cache.rowsDirty = true;
-          cache.serverWindowLoaded = true;
-          writeLocalGroupCache(group.id, cache);
-          if (preloadedMessages.length) {
-            void persistHistoryMessages(group.id, preloadedMessages);
-            const last = preloadedMessages[preloadedMessages.length - 1];
-            void writeHistoryCursor(group.id, { at: last.createdAt, id: last.id });
-          }
         }
         if (!group._lastPreviewText) {
           const cache = ensureGroupCacheEntry(group.id);
@@ -5183,9 +5371,13 @@
   var channelUnreadLoadedForGroup = null;
   var channelUnreadTagIndexByTopic = /* @__PURE__ */ new Map();
   var channelUnreadTopicByTagIndex = /* @__PURE__ */ new Map();
+  var channelUnreadStateVersion = 0;
+  var channelUnreadRequestId = 0;
   async function fetchChannelUnreadCounts(groupId) {
     if (String(groupId) !== String(currentGroupId)) return;
     try {
+      const requestId = ++channelUnreadRequestId;
+      const stateVersionAtStart = channelUnreadStateVersion;
       const cache = ensureGroupCacheEntry(groupId);
       const topics = getAvailableGroupTags(groupId).map((tag) => tag.topic);
       const key = getGroupKey(groupId);
@@ -5210,7 +5402,10 @@
       if (!res.ok) return;
       const data = await res.json();
       if (String(currentGroupId) !== String(groupId)) return;
-      channelUnreadCounts = data.counts || {};
+      if (requestId !== channelUnreadRequestId) return;
+      if (channelUnreadStateVersion === stateVersionAtStart) {
+        channelUnreadCounts = data.counts || {};
+      }
       channelUnreadTagIndexByTopic = topicByTagIndex;
       channelUnreadTopicByTagIndex = new Map([...topicByTagIndex].map(([tagIndex, topic]) => [String(tagIndex), topic]));
       channelUnreadLoadedForGroup = String(groupId);
@@ -5223,6 +5418,7 @@
   function markChannelReadAt(groupId, msg) {
     if (!msg || !socket || !currentUser) return;
     const topic = resolveMessageTagTopic(msg);
+    if (String(groupId) !== String(currentGroupId) || topic !== getActiveTagTopic()) return;
     if (String(msg.senderId) === String(currentUser.id)) return;
     const current = getLocalReadCursor(groupId, topic);
     if (current && current.at && !isCursorNewerThan(msg.createdAt, msg.id, current.at, current.id)) {
@@ -5232,6 +5428,7 @@
     if (String(groupId) === String(currentGroupId)) refreshUnseenRowClasses();
     void (async () => {
       const tagIndex = await channelTagIndex(topic, groupId);
+      if (String(groupId) !== String(currentGroupId) || topic !== getActiveTagTopic()) return;
       socket.emit("mark_channel_read", {
         groupId: String(groupId),
         tagIndex,
@@ -5286,6 +5483,9 @@
   async function selectGroup(groupId) {
     const normalizedGroupId = String(groupId || "");
     if (!normalizedGroupId) return;
+    viewGeneration += 1;
+    viewAbortController?.abort();
+    viewAbortController = new AbortController();
     currentGroupId = normalizedGroupId;
     currentGroupData = groups.find((g) => String(g.id) === normalizedGroupId) || null;
     clearActiveSearch({ restoreTranscript: false });
@@ -5337,7 +5537,6 @@
     updateKeyState();
     if (socket) {
       socket.emit("join_room", normalizedGroupId);
-      trackJoinedRoom(normalizedGroupId);
     }
     const cache = ensureGroupCacheEntry(normalizedGroupId);
     const history = await readHistoryMessages(normalizedGroupId);
@@ -5388,10 +5587,20 @@
     }
   }
   async function loadMessages(groupId, before) {
+    const capturedGeneration = viewGeneration;
+    const capturedGroupId = String(groupId);
+    const capturedTopic = capturedGroupId === String(currentGroupId) ? getActiveTagTopic() : DEFAULT_TAG_TOPIC;
+    const tagIndex = capturedTopic === DEFAULT_TAG_TOPIC ? null : await channelTagIndex(capturedTopic, capturedGroupId);
+    if (capturedTopic !== DEFAULT_TAG_TOPIC && !tagIndex) return;
+    const channelKey = tagIndex || DEFAULT_TAG_TOPIC;
+    const signal = capturedGroupId === String(currentGroupId) ? viewAbortController?.signal : void 0;
+    const isCapturedView = () => capturedGeneration === viewGeneration && capturedGroupId === String(currentGroupId) && capturedTopic === getActiveTagTopic();
     if (!before && groupId === currentGroupId) loadingOlder = true;
     try {
-      const url = `/api/groups/${groupId}/messages` + (before ? `?before=${before}&limit=50` : "?limit=50");
-      const res = await fetch(url);
+      const params = new URLSearchParams({ channel: channelKey, limit: "50" });
+      if (before) params.set("before", before);
+      const url = `/api/groups/${encodeURIComponent(groupId)}/messages?${params}`;
+      const res = await fetch(url, { signal });
       if (!res.ok) {
         if (res.status === 401) {
           handleSessionExpired();
@@ -5399,22 +5608,23 @@
         }
         return;
       }
-      const rawMsgs = await res.json();
+      const page = await res.json();
+      const rawMsgs = Array.isArray(page?.messages) ? page.messages : [];
       const msgs = filterMessagesVisibleToCurrentUser(rawMsgs);
       if (!before) {
         const cache = ensureGroupCacheEntry(groupId);
+        cache.loadedChannels.add(capturedTopic);
         const merged = mergeMessagesIntoCache(groupId, msgs);
         cache.messageRows = null;
         cache.rowsDirty = true;
         cache.serverWindowLoaded = true;
-        cache.oldestMessageId = merged.length ? merged[0].id : null;
+        cache.channelCursors = cache.channelCursors || {};
+        cache.channelCursors[capturedTopic] = page.nextCursor || null;
+        cache.oldestMessageId = page.nextCursor || null;
         writeLocalGroupCache(groupId, cache);
         await updateGroupPreviewFromMessage(groupId, merged.length ? merged[merged.length - 1] : null);
-        if (msgs.length) {
-          const last = msgs[msgs.length - 1];
-          void writeHistoryCursor(groupId, { at: last.createdAt, id: last.id });
-        }
       } else {
+        if (!isCapturedView()) return;
         const area = messagesArea();
         const viewportAnchor = captureViewportAnchor(area);
         const rows = await buildMessageRows(msgs, groupId);
@@ -5434,7 +5644,9 @@
         const cache = ensureGroupCacheEntry(groupId);
         cache.messages = mergeMessagesIntoCache(groupId, msgs, { persist: true });
         cache.messageRows = [...rows, ...cache.messageRows || []];
-        cache.oldestMessageId = rawMsgs[0].id;
+        cache.channelCursors = cache.channelCursors || {};
+        cache.channelCursors[capturedTopic] = page.nextCursor || null;
+        cache.oldestMessageId = page.nextCursor || null;
         cache.rowsDirty = false;
         writeLocalGroupCache(groupId, cache);
         const memo = getChannelRowMemo(cache, getActiveTagTopic());
@@ -5448,18 +5660,21 @@
         restoreViewportAnchor(area, viewportAnchor);
         applySearchVisibility();
       }
-      if (groupId === currentGroupId) {
+      if (isCapturedView()) {
         allMessages = ensureGroupCacheEntry(groupId).messages || allMessages;
       }
-      if (!before && groupId === currentGroupId && rawMsgs.length > 0) {
-        oldestMessageId = rawMsgs[0].id;
+      if (!before && isCapturedView()) {
+        oldestMessageId = page.nextCursor || null;
       }
-      if (groupId === currentGroupId) {
+      if (!before && isCapturedView()) {
+        await renderActiveChannelStream({ restoreScroll: true });
+        void markChannelReadOnOpen(groupId);
+      } else if (isCapturedView()) {
         renderTagFilters();
         applyActiveTagFilterToRenderedMessages();
       }
     } catch (err) {
-      console.error("loadMessages error:", err);
+      if (err?.name !== "AbortError") console.error("loadMessages error:", err);
     } finally {
       if (!before && groupId === currentGroupId) loadingOlder = false;
     }
@@ -6276,7 +6491,7 @@
         const res = await fetch(`/api/groups/${encodeURIComponent(group.id)}/invite`, {
           method: "POST",
           headers: apiHeaders(),
-          body: JSON.stringify({ userId: targetUserId })
+          body: JSON.stringify({ userId: targetUserId, clientMutationId: crypto.randomUUID() })
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
@@ -6558,6 +6773,19 @@
           editSave.disabled = false;
           return;
         }
+        const acknowledgement = await res.json();
+        await enqueueSyncEvent({
+          protocol: 2,
+          groupId: String(currentGroupId),
+          epoch: Number(acknowledgement.epoch),
+          seq: Number(acknowledgement.seq),
+          type: "message.edited",
+          entityId: acknowledgement.id || msg.id,
+          channelKey: acknowledgement.tagIndex || DEFAULT_TAG_TOPIC,
+          revision: Number(acknowledgement.revision) || nextRevision,
+          message: acknowledgement,
+          auxiliary: null
+        });
         cancelEdit();
       } catch (err) {
         console.error("Edit error:", err);
@@ -6581,7 +6809,9 @@
   async function doSend(text) {
     if (!currentGroupId || !socket) return;
     if (aiTonePickOpen) return;
-    const key = getGroupKey(currentGroupId);
+    const sendGroupId = String(currentGroupId);
+    const sendReply = replyingTo ? { ...replyingTo } : null;
+    const key = getGroupKey(sendGroupId);
     if (!key) {
       showToast("Chat content is not ready yet", "error");
       return;
@@ -6601,7 +6831,7 @@
       const type = parsedMessage.whisperRecipientIds?.length ? "whisper" : "text";
       const messageIdentity = {
         id: messageId,
-        groupId: currentGroupId,
+        groupId: sendGroupId,
         senderId: currentUser.id,
         type,
         encryptionVersion: 2,
@@ -6610,7 +6840,7 @@
       };
       const metadata = {
         hashtag: parsedMessage.hashtag || null,
-        replyPreview: replyingTo ? { senderName: replyingTo.senderName, preview: replyingTo.preview } : null
+        replyPreview: sendReply ? { senderName: sendReply.senderName, preview: sendReply.preview } : null
       };
       const encrypted = await encryptV2Message(messageText, metadata, messageIdentity, key);
       const { encryptedContent, iv, encryptedMetadata, metadataIv } = encrypted;
@@ -6619,10 +6849,11 @@
         return;
       }
       const hashtag = parsedMessage.hashtag || null;
-      const tagIndex = hashtag && hashtag !== DEFAULT_TAG_TOPIC ? await blindIndex(hashtag, key, currentGroupId, "tag-index") : null;
-      const replyToId = replyingTo?.id || null;
+      const tagIndex = hashtag && hashtag !== DEFAULT_TAG_TOPIC ? await blindIndex(hashtag, key, sendGroupId, "tag-index") : null;
+      const replyToId = sendReply?.id || null;
       const envelope = {
         ...messageIdentity,
+        clientMutationId: messageId,
         encryptedContent,
         iv,
         encryptedMetadata,
@@ -6633,16 +6864,23 @@
         disappearingDurationMs: parsedMessage.disappearingDurationMs
       };
       if (parsedMessage.whisperRecipientIds && parsedMessage.whisperRecipientIds.length > 0) {
-        socket.emit("send_whisper", {
+        const whisperEnvelope = {
           ...envelope,
           whisperTo: parsedMessage.whisperRecipientIds
+        };
+        await putOutboxMutation(sendGroupId, messageId, whisperEnvelope);
+        socket.emit("send_whisper", whisperEnvelope, (ack = {}) => {
+          if (ack.ok) void deleteOutboxMutation(sendGroupId, messageId);
         });
       } else {
-        socket.emit("send_message", envelope);
+        await putOutboxMutation(sendGroupId, messageId, envelope);
+        socket.emit("send_message", envelope, (ack = {}) => {
+          if (ack.ok) void deleteOutboxMutation(sendGroupId, messageId);
+        });
       }
       appendOptimisticOwnMessage({
         id: messageId,
-        groupId: currentGroupId,
+        groupId: sendGroupId,
         senderId: currentUser.id,
         senderName: currentUser.username,
         senderColor: currentUser.iconColor,
@@ -6920,11 +7158,18 @@
         clientUploadId: uploadId,
         replyToId: replyingTo?.id || null
       };
-      const res = await uploadEncryptedAttachment(currentGroupId, body, (loaded, total) => {
+      let res = await uploadDirectEncryptedAttachment(currentGroupId, body, (loaded, total) => {
         updatePendingAttachmentProgress(uploadId, loaded, total);
         setPendingAttachmentStatus(uploadId, "Uploading\u2026");
         emitProgress(loaded, total || totalBytes);
       });
+      if (res.status === 503) {
+        res = await uploadEncryptedAttachment(currentGroupId, body, (loaded, total) => {
+          updatePendingAttachmentProgress(uploadId, loaded, total);
+          setPendingAttachmentStatus(uploadId, "Uploading\u2026");
+          emitProgress(loaded, total || totalBytes);
+        });
+      }
       if (!res.ok) {
         removePendingAttachment(uploadId);
         socket.emit("attachment_upload_failed", { groupId: currentGroupId, uploadId });
@@ -7108,31 +7353,6 @@
   function closeDiagnosticsModal() {
     $("diagnostics-modal").hidden = true;
   }
-  var socketHasConnectedOnce = false;
-  async function refreshCurrentGroupAfterReconnect({ fullSync = false } = {}) {
-    try {
-      await loadGroups({ withBackendPreload: fullSync });
-      if (!currentGroupId) return;
-      const cacheBefore = ensureGroupCacheEntry(currentGroupId);
-      const fingerprintBefore = cacheFingerprint(cacheBefore.messages);
-      await Promise.all([loadMessages(currentGroupId), loadMembers(currentGroupId)]);
-      if (!currentGroupId) return;
-      const cacheAfter = ensureGroupCacheEntry(currentGroupId);
-      const fingerprintAfter = cacheFingerprint(cacheAfter.messages);
-      if (fingerprintBefore !== fingerprintAfter) {
-        renderGroupFromCache(currentGroupId, { restoreScroll: false });
-      }
-      observeCurrentGroupRowsForRead();
-      if (composerNearBottomBeforeFocus || isNearBottom()) scrollToBottom(true);
-    } catch (err) {
-      console.warn("Failed to refresh current group after reconnect:", err);
-    }
-  }
-  function cacheFingerprint(messages) {
-    if (!Array.isArray(messages) || !messages.length) return "0:";
-    const last = messages[messages.length - 1];
-    return `${messages.length}:${last.id}`;
-  }
   var lastFocusStateSyncAt = 0;
   function syncStateOnFocus() {
     const now = Date.now();
@@ -7172,6 +7392,7 @@
   }
   function initSocket() {
     socket = io({
+      auth: { protocol: 2 },
       transports: ["polling", "websocket"],
       reconnection: true,
       reconnectionAttempts: Infinity,
@@ -7197,22 +7418,14 @@
         transport: socketDiagnostics.socketTransport
       });
       if (currentGroupId) socket.emit("join_room", currentGroupId);
-      joinAllGroupRooms();
       flushMarkReadEmits();
-      if (socketHasConnectedOnce) {
-        const downMs = socketDiagnostics.lastDisconnectAt ? Date.now() - new Date(socketDiagnostics.lastDisconnectAt).getTime() : Number.POSITIVE_INFINITY;
-        const needFullResync = downMs > SOCKET_RECOVERY_WINDOW_MS;
-        void refreshCurrentGroupAfterReconnect({ fullSync: needFullResync });
-      } else {
-        socketHasConnectedOnce = true;
-        void refreshCurrentGroupAfterReconnect();
-      }
+      void flushOutboxMutations();
+      void loadGroups().then(() => refreshCurrentGroupFromServer());
       renderDiagnosticsPanel();
     });
     socket.on("disconnect", (reason) => {
       socketDiagnostics.lastDisconnectReason = reason || "unknown";
       socketDiagnostics.lastDisconnectAt = (/* @__PURE__ */ new Date()).toISOString();
-      joinedRoomIds = /* @__PURE__ */ new Set();
       updateConnectionTransport();
       clearTimeout(disconnectStatusTimer);
       disconnectStatusTimer = setTimeout(() => {
@@ -7367,6 +7580,7 @@
       unreadCounts[groupKey] = Math.max(0, Number(groupUnreadCount) || 0);
       updateUnreadBadge(groupKey, unreadCounts[groupKey]);
       if (String(currentGroupId) === groupKey && channelUnreadLoadedForGroup === groupKey) {
+        channelUnreadStateVersion += 1;
         channelUnreadCounts[tagKey] = Math.max(0, Number(channelUnreadCount) || 0);
         renderTagFilters();
       }
@@ -7938,7 +8152,7 @@
     showConfirm("Kick Member", "Remove " + username + " from this group?", async () => {
       const res = await fetch("/api/groups/" + currentGroupId + "/members/" + userId, {
         method: "DELETE",
-        headers: apiHeaders()
+        headers: { ...apiHeaders(), "X-Client-Mutation-Id": crypto.randomUUID() }
       });
       if (res.ok) {
         showToast("Kicked " + username, "success");
@@ -7956,7 +8170,7 @@
       const res = await fetch(`/api/groups/${currentGroupId}/members/${member.id}/administrator`, {
         method: "PATCH",
         headers: apiHeaders(),
-        body: JSON.stringify({ isAdministrator })
+        body: JSON.stringify({ isAdministrator, clientMutationId: crypto.randomUUID() })
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -8015,6 +8229,51 @@
         if (anchor) restoreViewportAnchor(messagesArea(), anchor);
       });
     }
+  }
+  async function sha256BytesHex(bytes) {
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
+  }
+  async function uploadDirectEncryptedAttachment(groupId, body, onProgress) {
+    const expectedSha256 = await sha256BytesHex(body.encryptedBytes);
+    const prepareResponse = await fetch(`/api/groups/${encodeURIComponent(groupId)}/attachments/prepare`, {
+      method: "POST",
+      headers: apiHeaders(),
+      body: JSON.stringify({
+        messageId: body.id,
+        type: body.type,
+        expectedSize: body.encryptedBytes.byteLength,
+        expectedSha256,
+        iv: body.iv,
+        encryptedMetadata: body.encryptedMetadata,
+        metadataIv: body.metadataIv,
+        tagIndex: body.tagIndex,
+        encryptionVersion: 2,
+        keyVersion: 1,
+        clientMutationId: body.clientUploadId,
+        replyToId: body.replyToId
+      })
+    });
+    const prepared = await prepareResponse.json().catch(() => ({}));
+    if (!prepareResponse.ok) return { ok: false, status: prepareResponse.status, data: prepared };
+    const uploaded = await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("PUT", prepared.uploadUrl);
+      for (const [name, value] of Object.entries(prepared.requiredHeaders || {})) xhr.setRequestHeader(name, value);
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) onProgress?.(event.loaded, event.total);
+      };
+      xhr.onerror = () => reject(new Error("Direct upload failed"));
+      xhr.onload = () => resolve(xhr.status >= 200 && xhr.status < 300);
+      xhr.send(body.encryptedBytes);
+    });
+    if (!uploaded) return { ok: false, status: 502, data: { error: "Direct upload failed" } };
+    const completeResponse = await fetch(`/api/groups/${encodeURIComponent(groupId)}/attachments/complete`, {
+      method: "POST",
+      headers: apiHeaders(),
+      body: JSON.stringify({ uploadId: prepared.uploadId })
+    });
+    return { ok: completeResponse.ok, status: completeResponse.status, data: await completeResponse.json().catch(() => ({})) };
   }
   function reconcileTranscriptStructure(area = messagesArea(), groupId = currentGroupId) {
     if (!area || !groupId) return;
@@ -8666,12 +8925,15 @@
       if (estimateBase64Bytes(encryptedContent) > MAX_TEXT_MESSAGE_BYTES) {
         throw new Error("AI response is too large to send");
       }
+      const tagIndex = request.hashtag ? await blindIndex(request.hashtag, request.key, request.groupId, "tag-index") : null;
       await emitSocketWithAck("send_ai_message", {
         groupId: request.groupId,
+        clientMutationId: crypto.randomUUID(),
         encryptedContent,
         iv,
         replyTo: request.replyToData,
         hashtag: request.hashtag || null,
+        tagIndex,
         aiMeta: result.aiMeta
       });
       showToast("AI reply sent", "success");
@@ -9327,7 +9589,7 @@
         const res = await fetch("/api/groups/join", {
           method: "POST",
           headers: apiHeaders(),
-          body: JSON.stringify({ code })
+          body: JSON.stringify({ code, clientMutationId: crypto.randomUUID() })
         });
         const d = await res.json();
         if (!res.ok) {
@@ -9630,7 +9892,7 @@
       showConfirm("Leave Group", "Are you sure you want to leave this group?", async () => {
         const res = await fetch("/api/groups/" + currentGroupId + "/leave", {
           method: "DELETE",
-          headers: apiHeaders()
+          headers: { ...apiHeaders(), "X-Client-Mutation-Id": crypto.randomUUID() }
         });
         if (res.ok) {
           delete unreadCounts[currentGroupId];
@@ -9722,7 +9984,25 @@
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
           showToast(data.error || "Delete failed", "error");
+          return;
         }
+        const acknowledgement = await res.json();
+        await enqueueSyncEvent({
+          protocol: 2,
+          groupId: String(msg.groupId || currentGroupId),
+          epoch: Number(acknowledgement.epoch),
+          seq: Number(acknowledgement.seq),
+          type: "message.deleted",
+          entityId: acknowledgement.messageId || msg.id,
+          channelKey: msg.tagIndex || DEFAULT_TAG_TOPIC,
+          revision: Number(acknowledgement.revision) || Number(msg.revision || 1) + 1,
+          message: null,
+          auxiliary: {
+            messageId: acknowledgement.messageId || msg.id,
+            revision: Number(acknowledgement.revision) || Number(msg.revision || 1) + 1,
+            channelKey: msg.tagIndex || DEFAULT_TAG_TOPIC
+          }
+        });
       }, { destructive: true });
     });
     $("ctx-copy").addEventListener("click", () => {
@@ -9969,6 +10249,20 @@
     $("clear-search-btn").addEventListener("click", () => {
       clearActiveSearch();
     });
+    socket.on("sync_hint", (hint = {}) => {
+      const group = groups.find((entry) => String(entry.id) === String(hint.groupId));
+      if (group) {
+        group.epoch = Number(hint.epoch) || group.epoch;
+        group.latestSeq = Math.max(Number(group.latestSeq) || 0, Number(hint.latestSeq) || 0);
+      }
+      if (String(hint.groupId) !== String(currentGroupId)) {
+        unreadCounts[hint.groupId] = Math.max(0, Number(unreadCounts[hint.groupId]) || 0) + Math.max(0, Number(hint.unreadDelta) || 0);
+        updateUnreadBadge(hint.groupId, unreadCounts[hint.groupId]);
+      }
+    });
+    socket.on("sync_event", (event = {}) => {
+      void enqueueSyncEvent(event);
+    });
     $("search-older-btn").addEventListener("click", () => {
       if (!activeSearchTerm || searchHistoryExhausted) return;
       void searchMessages(activeSearchTerm, { pageBatch: SEARCH_AUTO_PAGE_BATCH });
@@ -10005,8 +10299,16 @@
     });
   }
   async function loadOlderMessages(cursorOverride = null, retried = false) {
-    const cursor = cursorOverride || oldestMessageId;
-    if (loadingOlder || !cursor || !currentGroupId) return;
+    const capturedGroupId = String(currentGroupId || "");
+    const capturedTopic = getActiveTagTopic();
+    const capturedGeneration = viewGeneration;
+    const capturedCache = ensureGroupCacheEntry(capturedGroupId);
+    capturedCache.channelCursors = capturedCache.channelCursors || {};
+    const cursor = cursorOverride || capturedCache.channelCursors[capturedTopic] || oldestMessageId;
+    const tagIndex = capturedTopic === DEFAULT_TAG_TOPIC ? null : await channelTagIndex(capturedTopic, capturedGroupId);
+    const channelKey = tagIndex || DEFAULT_TAG_TOPIC;
+    const isCapturedView = () => capturedGeneration === viewGeneration && capturedGroupId === String(currentGroupId) && capturedTopic === getActiveTagTopic();
+    if (loadingOlder || !cursor || !capturedGroupId || capturedTopic !== DEFAULT_TAG_TOPIC && !tagIndex) return;
     loadingOlder = true;
     const indicator = $("load-more-indicator");
     if (indicator) indicator.hidden = false;
@@ -10015,13 +10317,16 @@
         const served = await prependHistoryMessagesOlderThan(cursor);
         if (served) return;
       }
-      const url = `/api/groups/${currentGroupId}/messages?before=${cursor}&limit=50`;
-      const res = await fetch(url);
+      const params = new URLSearchParams({ channel: channelKey, before: cursor, limit: "50" });
+      const url = `/api/groups/${encodeURIComponent(capturedGroupId)}/messages?${params}`;
+      const res = await fetch(url, { signal: viewAbortController?.signal });
       if (!res.ok) return;
-      const rawMsgs = await res.json();
+      const page = await res.json();
+      const rawMsgs = Array.isArray(page?.messages) ? page.messages : [];
+      if (!isCapturedView()) return;
       if (!rawMsgs.length) {
         if (!retried) {
-          const cache2 = ensureGroupCacheEntry(currentGroupId);
+          const cache2 = ensureGroupCacheEntry(capturedGroupId);
           const fallback = (cache2.messages || []).find((m) => String(m.id) !== String(cursor));
           if (fallback) {
             oldestMessageId = fallback.id;
@@ -10032,14 +10337,15 @@
         return;
       }
       const msgs = filterMessagesVisibleToCurrentUser(rawMsgs);
-      for (const msg of msgs) await hydrateMessageChannel(msg, currentGroupId);
-      const channel = getActiveTagTopic();
+      for (const msg of msgs) await hydrateMessageChannel(msg, capturedGroupId);
+      if (!isCapturedView()) return;
+      const channel = capturedTopic;
       const channelMsgs = msgs.filter((msg) => resolveMessageTagTopic(msg) === channel);
-      const knownIds = new Set((ensureGroupCacheEntry(currentGroupId).messages || []).map((m) => String(m.id)));
+      const knownIds = new Set((ensureGroupCacheEntry(capturedGroupId).messages || []).map((m) => String(m.id)));
       const freshChannelMsgs = channelMsgs.filter((m) => !knownIds.has(String(m.id)));
       const area = messagesArea();
       const viewportAnchor = captureViewportAnchor(area);
-      const rows = freshChannelMsgs.length ? await buildMessageRows(freshChannelMsgs, currentGroupId) : [];
+      const rows = freshChannelMsgs.length ? await buildMessageRows(freshChannelMsgs, capturedGroupId) : [];
       const fragment = document.createDocumentFragment();
       for (const row of rows) {
         if (!row) continue;
@@ -10056,17 +10362,19 @@
       } else {
         area.appendChild(fragment);
       }
-      reconcileTranscriptStructure(area, currentGroupId);
-      allMessages = mergeMessagesIntoCache(currentGroupId, msgs, { persist: true });
-      oldestMessageId = rawMsgs[0].id;
-      const cache = ensureGroupCacheEntry(currentGroupId);
+      reconcileTranscriptStructure(area, capturedGroupId);
+      allMessages = mergeMessagesIntoCache(capturedGroupId, msgs, { persist: true });
+      oldestMessageId = page.nextCursor || null;
+      const cache = ensureGroupCacheEntry(capturedGroupId);
       cache.messages = allMessages;
       cache.messageRows = rows.concat(cache.messageRows || []);
       cache.oldestMessageId = oldestMessageId;
+      cache.channelCursors = cache.channelCursors || {};
+      cache.channelCursors[capturedTopic] = page.nextCursor || null;
       cache.rowsDirty = false;
       writeLocalGroupCache(currentGroupId, cache);
       if (rows.length) {
-        const memo = getChannelRowMemo(cache, getActiveTagTopic());
+        const memo = getChannelRowMemo(cache, capturedTopic);
         memo.rows = [...rows, ...memo.rows];
         for (const row of rows) {
           const msgId = row?.dataset?.msgId;
@@ -10077,7 +10385,7 @@
       }
       restoreViewportAnchor(area, viewportAnchor);
     } catch (err) {
-      console.error("loadOlderMessages error:", err);
+      if (err?.name !== "AbortError") console.error("loadOlderMessages error:", err);
     } finally {
       loadingOlder = false;
       if (indicator) indicator.hidden = true;

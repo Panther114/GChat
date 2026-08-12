@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_CACHE = 'gchat-pwa-v12';
+const APP_CACHE = 'gchat-pwa-v145';
 const APP_SHELL_ASSETS = [
   '/',
   '/index.html',
@@ -66,7 +66,6 @@ self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(APP_CACHE)
       .then((cache) => cache.addAll(APP_SHELL_ASSETS))
-      .then(() => self.skipWaiting())
   );
 });
 

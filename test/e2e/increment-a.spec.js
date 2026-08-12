@@ -374,12 +374,12 @@ test('startup fetches bounded group metadata without eager transcript hydration'
   const apiPaths = [];
   page.on('request', (request) => {
     const url = new URL(request.url());
-    if (url.pathname.startsWith('/api/groups/')) apiPaths.push(url.pathname);
+    if (url.pathname.startsWith('/api/groups/') || url.pathname.startsWith('/api/sync/')) apiPaths.push(url.pathname);
   });
   await signInAsLocalRoot(page);
   await expect(page.getByText('Increment A Playground')).toBeVisible();
-  expect(apiPaths).toContain('/api/groups/mine');
-  expect(apiPaths).toContain('/api/groups/keys');
+  expect(apiPaths).toContain('/api/sync/bootstrap');
+  expect(apiPaths).toContain('/api/groups/keys/resolve');
   expect(apiPaths).not.toContain('/api/groups/preload');
   expect(apiPaths.some((path) => /\/messages$|\/members$/.test(path))).toBe(false);
 });

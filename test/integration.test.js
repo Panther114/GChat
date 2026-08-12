@@ -80,6 +80,21 @@ test('group API never returns the plaintext join code and stores only its HMAC',
   assert.match(stored.code, /^[a-f0-9]{64}$/);
 });
 
+test('sync-v2 bootstrap is summary-only, bounded, and conditionally cacheable', async () => {
+  const response = await owner.get('/api/sync/bootstrap').expect(200);
+  assert.equal(response.body.protocol, 2);
+  const summary = response.body.groups.find((entry) => entry.id === group.id);
+  assert.ok(summary);
+  assert.equal(summary.epoch, 1);
+  assert.ok(summary.latestSeq >= 1);
+  assert.ok(summary.membershipRevision >= 1);
+  assert.equal(summary.messages, undefined);
+  assert.equal(summary.members, undefined);
+  assert.ok(response.headers.etag);
+  assert.ok(Buffer.byteLength(JSON.stringify(response.body)) < 64 * 1024);
+  await owner.get('/api/sync/bootstrap').set('If-None-Match', response.headers.etag).expect(304);
+});
+
 test('group key recovery is membership-scoped and escrow data is not stored in plaintext', async () => {
   const ownerKeys = await owner.get('/api/groups/keys').expect(200);
   const keysByGroupId = Object.fromEntries(ownerKeys.body.keys.map((key) => [key.groupId, key]));
@@ -134,11 +149,14 @@ test('only owners manage administrator roles and administrators receive bounded 
     .expect(403);
 
   const ownerCsrf = await csrf(owner);
-  await owner
+  const roleResponse = await owner
     .patch(`/api/groups/${group.id}/members/${group.memberId}/administrator`)
     .set('X-CSRF-Token', ownerCsrf)
     .send({ isAdministrator: true })
-    .expect(200, { ok: true, isAdministrator: true });
+    .expect(200);
+  assert.equal(roleResponse.body.ok, true);
+  assert.equal(roleResponse.body.isAdministrator, true);
+  assert.ok(roleResponse.body.seq > 0);
 
   const memberList = await member.get(`/api/groups/${group.id}/members`).expect(200);
   assert.equal(memberList.body.find((entry) => entry.id === group.memberId).isAdministrator, true);
@@ -170,11 +188,16 @@ test('only owners manage administrator roles and administrators receive bounded 
     .set('X-CSRF-Token', memberCsrf)
     .expect(403, { error: 'Administrators cannot remove other administrators' });
 
-  await owner
+  const demoteResponse = await owner
     .patch(`/api/groups/${group.id}/members/${group.memberId}/administrator`)
     .set('X-CSRF-Token', ownerCsrf)
     .send({ isAdministrator: false })
-    .expect(200, { ok: true, isAdministrator: false });
+    .expect(200);
+  assert.equal(demoteResponse.body.ok, true);
+  assert.equal(demoteResponse.body.isAdministrator, false);
+  assert.equal(demoteResponse.body.epoch, 1);
+  assert.equal(Number.isInteger(demoteResponse.body.seq), true);
+  assert.equal(typeof demoteResponse.body.clientMutationId, 'string');
   await member
     .patch(`/api/groups/${group.id}/settings`)
     .set('X-CSRF-Token', memberCsrf)
@@ -329,7 +352,7 @@ test('v1.4.3 AI assistant messages serialize with the GChat AI display name', as
   assert.equal(res.body.senderName, 'GChat AI');
 });
 
-test('message deletion is author-only and transactionally removes dependent state', async () => {
+test('message deletion is author-only and creates a recoverable tombstone event', async () => {
   const messageId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
   stmts.insertV2Message.run(
     messageId, group.id, group.ownerId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null,
@@ -349,8 +372,15 @@ test('message deletion is author-only and transactionally removes dependent stat
     .delete(`/api/groups/${group.id}/messages/${messageId}`)
     .set('X-CSRF-Token', ownerCsrf)
     .expect(200);
-  assert.equal(stmts.findMessageById.get(messageId), undefined);
-  assert.equal(stmts.getMessageReadCount.get(messageId).count, 0);
+  const deleted = stmts.findMessageById.get(messageId);
+  assert.ok(deleted.deleted_at);
+  assert.equal(deleted.deleted_by, group.ownerId);
+  assert.equal(deleted.revision, 2);
+  await owner.get(`/api/groups/${group.id}/messages/${messageId}`).expect(404);
+  const delta = await owner.get(`/api/groups/${group.id}/sync?epoch=1&after=0&limit=200`).expect(200);
+  const deletedEvent = delta.body.events.find((event) => event.entityId === messageId);
+  assert.equal(deletedEvent.type, 'message.deleted');
+  assert.equal(deletedEvent.revision, 2);
 });
 
 test('incremental since-cursor sync returns only newer messages in ascending order', async () => {
@@ -445,7 +475,9 @@ test('real-send created_at is ISO and the broadcast cursor drives the since-sync
   await new Promise((resolve) => setTimeout(resolve, 300));
 
   const received = [];
-  sock.on('new_message', (msg) => received.push(msg));
+  sock.on('sync_event', (event) => {
+    if (event.type === 'message.created' && event.message) received.push(event.message);
+  });
 
   const sendOne = (id) => new Promise((resolve) => {
     sock.emit('send_message', {
@@ -459,12 +491,14 @@ test('real-send created_at is ISO and the broadcast cursor drives the since-sync
 
   const idA = crypto.randomUUID();
   const ackA = await sendOne(idA);
-  assert.deepEqual(ackA, { ok: true, messageId: idA });
+  assert.equal(ackA.ok, true);
+  assert.equal(ackA.messageId, idA);
   // Let the broadcast settle so the cursor message is captured before sending B.
   await new Promise((resolve) => setTimeout(resolve, 50));
   const idB = crypto.randomUUID();
   const ackB = await sendOne(idB);
-  assert.deepEqual(ackB, { ok: true, messageId: idB });
+  assert.equal(ackB.ok, true);
+  assert.equal(ackB.messageId, idB);
   await new Promise((resolve) => setTimeout(resolve, 50));
 
   // The broadcast createdAt must be ISO (T separator + Z suffix)…
@@ -621,7 +655,7 @@ test('any GChat Global member can delete any message and set memberships stay bo
     .delete('/api/groups/gchat-global/messages/' + messageId)
     .set('X-CSRF-Token', memberBCsrf)
     .expect(200);
-  assert.equal(stmts.findMessageById.get(messageId), undefined);
+  assert.ok(stmts.findMessageById.get(messageId).deleted_at);
   // The phantom sentinel owner must never appear as a member.
   const memberIds = stmts.getGroupMemberIds.all('gchat-global').map((row) => row.user_id);
   assert.ok(!memberIds.includes('__gchat_global_owner__'));
@@ -650,11 +684,13 @@ test('invite permission defaults on, admin-only when disabled, and enforces caps
   assert.ok(candidates.body.some((group) => group.id === inviteRoomId));
   assert.ok(!candidates.body.some((group) => group.id === 'gchat-global'));
 
-  await inviter
+  const inviteResponse = await inviter
     .post(`/api/groups/${inviteRoomId}/invite`)
     .set('X-CSRF-Token', inviterCsrf)
     .send({ userId: targetResponse.body.id })
-    .expect(200, { ok: true });
+    .expect(200);
+  assert.equal(inviteResponse.body.ok, true);
+  assert.ok(inviteResponse.body.seq > 0);
   assert.ok(stmts.isMember.get(inviteRoomId, targetResponse.body.id));
   await inviter
     .post(`/api/groups/${inviteRoomId}/invite`)
@@ -732,7 +768,10 @@ test('socket sends: legit members send, non-members are rejected, and batched re
     }, resolve);
     setTimeout(() => resolve('NO_ACK'), 4000);
   });
-  assert.deepEqual(sendAck, { ok: true, messageId: msgId });
+  assert.equal(sendAck.ok, true);
+  assert.equal(sendAck.messageId, msgId);
+  assert.equal(sendAck.epoch, 1);
+  assert.equal(sendAck.seq, 1);
   assert.ok(stmts.findMessageById.get(msgId));
 
   // Batched read receipts tolerate malformed/missing ids without throwing
@@ -771,7 +810,7 @@ test('socket sends: legit members send, non-members are rejected, and batched re
   outsiderSocket.close();
 });
 
-test('socket connection-state recovery re-authenticates: a quick reconnect keeps sending working', async () => {
+test('socket reconnect re-authenticates and durable sequences replace packet recovery', async () => {
   const { io: socketServer } = require('../server');
   const { io: socketClient } = require('socket.io-client');
   const url = await ensureServerListening();
@@ -815,9 +854,10 @@ test('socket connection-state recovery re-authenticates: a quick reconnect keeps
 
   const recovered = socketServer.sockets.sockets.get(memberSocket.id);
   assert.ok(recovered, 'socket should be reconnected');
-  assert.equal(recovered.recovered, true, 'expected a connection-state-recovered socket');
+  assert.equal(recovered.recovered, false, 'v1.4.5 intentionally disables in-memory packet recovery');
   assert.ok(recovered.userId, 'recovered socket must be re-authenticated (userId set)');
   assert.equal(recovered.username, 'recovery-member-test');
+  memberSocket.emit('join_room', groupId);
 
   const msgId = crypto.randomUUID();
   const sendAck = await new Promise((resolve) => {
@@ -829,7 +869,9 @@ test('socket connection-state recovery re-authenticates: a quick reconnect keeps
     }, resolve);
     setTimeout(() => resolve('NO_ACK'), 4000);
   });
-  assert.deepEqual(sendAck, { ok: true, messageId: msgId });
+  assert.equal(sendAck.ok, true);
+  assert.equal(sendAck.messageId, msgId);
+  assert.ok(Number(sendAck.seq) >= 1);
   assert.ok(stmts.findMessageById.get(msgId));
 
   memberSocket.close();
@@ -1115,14 +1157,14 @@ test('Furina can clear GChat Global history and delete channels; other members c
     .delete(`/api/groups/gchat-global/tags/${encodeURIComponent(globalTag)}/messages`)
     .set('X-CSRF-Token', furinaCsrf)
     .expect(200);
-  assert.equal(stmts.findMessageById.get(globalTagId), undefined, 'Furina must be able to delete a Global channel');
+  assert.ok(stmts.findMessageById.get(globalTagId), 'Global channel clear must preserve recoverable ciphertext');
 
   // …and clear the full Global history.
   await furina
     .delete('/api/groups/gchat-global/messages')
     .set('X-CSRF-Token', furinaCsrf)
     .expect(200);
-  assert.equal(stmts.findMessageById.get(globalMainId), undefined, 'Furina must be able to clear Global history');
+  assert.ok(stmts.findMessageById.get(globalMainId), 'Global clear must preserve recoverable ciphertext');
   assert.ok(furinaId, 'Furina is a registered member of GChat Global');
 });
 

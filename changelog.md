@@ -4,6 +4,13 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## v1.4.5 — Local-first synchronization
+
+- Added SQLite-backed epoch/sequence synchronization with recoverable tombstones and clear boundaries.
+- Added a user-scoped IndexedDB v2 projection, persistent mutation outbox, channel-scoped history, and navigation race guards.
+- Reduced Railway RAM and egress by removing Socket.IO packet recovery, subscribing sockets only to the active group, compressing HTTP responses, and moving new encrypted attachments to presigned Railway Bucket transfers.
+- Added an explicit, verified `migrate:sync-v2` maintenance command. Existing ciphertext is never rewritten.
+
 ## v1.4.3 — AI message mode, tone picker, replies, channel consistency
 
 ### The AI entry point is now a message MODE (blue)

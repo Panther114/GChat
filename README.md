@@ -4,7 +4,7 @@ Gchat is a client-side encrypted group chat application built with Node.js, Expr
 
 The hosted web app is the primary product. The desktop app is a native system-webview shell that loads the hosted Railway deployment.
 
-Current version: **v1.3.12** (Windows: thin WebView2 shell; macOS: Tauri/WKWebView)
+Current version: **v1.4.5** (local-first sync protocol v2; Windows: thin WebView2 shell; macOS: Tauri/WKWebView)
 
 ---
 
@@ -119,7 +119,7 @@ Important limitations:
 - Metadata such as usernames, group membership, timestamps, and message ownership is still visible to the server.
 - Disappearing-message metadata, timers, and per-user hidden-state records are also visible to the server so the app can keep access state consistent across reloads.
 - Repetitive-message and hashtag equality within a group are visible through group-keyed blind indexes.
-- **Client-side caching**: to make history load instantly, the app caches *decrypted* message text and metadata in the browser's local storage (IndexedDB/localStorage) — the same trust domain as the group keys themselves. This data never leaves the device; the server still only ever receives ciphertext.
+- **Client-side caching**: to make history load instantly, the app caches *decrypted* message text and metadata in its user-scoped IndexedDB replica — the same trust domain as the group keys themselves. Transcript data is no longer mirrored into localStorage. It never leaves the device; the server still only ever receives ciphertext.
 - AI routes and active client controls are disabled by default in Increment A.
 - This is application-layer encryption, not a replacement for audited secure messaging infrastructure.
 
@@ -132,6 +132,10 @@ Important limitations:
 | `SESSION_SECRET` | Yes | Secret used to sign session cookies. Use a long random value in production. |
 | `PORT` | No | Server port. Railway provides this automatically. |
 | `DB_PATH` | Recommended | SQLite database path. Use `/data/gchat.db` with a Railway volume for persistence. |
+| `GCHAT_MEDIA_DIRECT` | Recommended | Set to `1` only after the private Railway media bucket is configured and validated. Keep `0` during the first database cutover. |
+| `BUCKET_ENDPOINT` / `BUCKET_NAME` | Media | Railway S3-compatible bucket endpoint and API bucket name. |
+| `BUCKET_ACCESS_KEY_ID` / `BUCKET_SECRET_ACCESS_KEY` | Media | Server-only credentials used only to issue short-lived presigned URLs. |
+| `BUCKET_REGION` | Media | Bucket region (`auto` for Railway-provided credentials). |
 | `GROUP_CODE_PEPPER` | Recommended | At least 32 characters; used to HMAC normalized join codes. Falls back to the stable `SESSION_SECRET` during the v1.3.0 cutover. |
 | `GROUP_KEY_ESCROW_MASTER_KEY` | Yes | Canonical base64url-encoded 32-byte server-only key that encrypts group secrets and join codes at rest. Store it only in deployment secrets. |
 | `AI_ENABLED` | No | Set to `1` to enable the v1.4 Ask-AI agent. Without it all `/api/ai/*` routes return 404 and AI sends are rejected. |
@@ -234,6 +238,19 @@ The Ask-AI agent is a single-model, tool-using assistant built on **DeepSeek V4 
 ---
 
 ## Railway Deployment
+
+### v1.4.5 sync-v2 maintenance cutover
+
+Before deploying v1.4.5 to a hosted environment, rehearse against a backup and apply the explicit additive migration during maintenance:
+
+```bash
+DB_PATH=/path/to/backup.db npm run migrate:sync-v2 -- --dry-run
+DB_PATH=/path/to/backup.db npm run migrate:sync-v2 -- --verify
+DB_PATH=/data/gchat.db npm run migrate:sync-v2 -- --apply
+DB_PATH=/data/gchat.db npm run migrate:sync-v2 -- --verify
+```
+
+The hosted server refuses to start v1.4.5 without the migrated schema. The migration preserves message counts and sampled ciphertext hashes, enforces an eight-minute runtime budget, and does not decrypt or re-encrypt history. Create the private Singapore Railway bucket separately, configure exact-origin CORS for `PUT`, `GET`, and `HEAD`, allow the `Content-Type`, `x-amz-meta-sha256`, and `x-amz-checksum-sha256` request headers, and expose `ETag`. Enable `GCHAT_MEDIA_DIRECT=1` only after the database-only cutover has remained stable for 24 hours.
 
 1. Create a Railway project from the GitHub repository.
 2. Set the required environment variables.
