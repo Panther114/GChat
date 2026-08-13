@@ -32,10 +32,11 @@ gchat                                    # interactive TUI
 
 In the TUI:
 
-- Hover a message for a gray outline and `(r)eply (e)dit (d)elete` (colored letters)
-- Click an image/file card to reveal it; paste an image (or a path) to auto-upload
-- Tab / Shift+Tab cycles channels; a sending message stays gray with `sending...`
-- Click empty sidebar space to deselect a group (pulsing bird)
+- Hover outlines a message; click to select. Then `r` reply, `e` edit, `d` delete, `c` clear, `p` preview
+- Icons (`↩` `✎` `×`) stay on the selected/hovered message; click a gap to deselect
+- Paste an image (or a path) to auto-upload; `p` opens Quick Look on macOS
+- Tab / Shift+Tab cycles channels; `+` creates a channel
+- Enter sends; Ctrl+J inserts a newline in the composer
 - `:q` or Ctrl+C to quit
 
 ## Config & data

@@ -619,8 +619,10 @@ test('chat frame: sidebar, channels, composer, and messages', () => {
   assert.ok(plain.includes('ada'));
   assert.ok(plain.includes('ship it tonight'));
   assert.ok(plain.includes('on it'));
-  assert.ok(plain.includes('photo.jpg'), 'attachment card filename');
+  assert.ok(plain.includes('[Image]'), 'image messages use the [Image] effect');
   assert.ok(plain.includes('message'), 'composer placeholder');
+  assert.ok(plain.includes('╭') && plain.includes('╰'), 'composer is a rounded box');
+  assert.ok(frame.hits.some((h) => h.type === 'create-channel'), '+ create channel chip');
   assert.ok(!plain.includes('team  #main'), 'group/channel status line is gone');
   assert.ok(frame.regions.sidebar.w > 0);
   assert.ok(frame.hits.some((h) => h.type === 'group'));
@@ -631,31 +633,27 @@ test('chat frame: sidebar, channels, composer, and messages', () => {
   assert.ok(frame.hits.some((h) => h.type === 'scrollbar'));
 });
 
-test('chat hover: gray fill, gap outline, and (r)eply (e)dit (d)elete', () => {
+test('chat hover outlines without fill and does not show input shortcuts', () => {
   const idle = chatLayout.buildChatFrame(80, 24, chatState());
   const idlePlain = idle.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(!idlePlain.includes('(r)eply'), 'action hint hidden until hover');
-  assert.ok(!idle.lines.join('').includes(ansi.bg(chatLayout.PALETTE.hoverBg)), 'no hover bg when idle');
+  assert.ok(!idlePlain.includes('reply'), 'shortcuts hidden until select');
 
   const hovered = chatLayout.buildChatFrame(80, 24, chatState({ hoverMessageId: 'm2' }));
-  const hoverPlain = hovered.lines.map((l) => ansi.stripAnsi(l));
-  const hint = hoverPlain.find((l) => l.includes('(r)eply'));
-  assert.ok(hint, 'hover hint uses (r)eply');
-  assert.ok(hint.includes('(e)dit'), 'edit in the hint for own message');
-  assert.ok(hint.includes('(d)elete'), 'delete in the hint for own message');
-  const painted = hovered.lines.filter((l) => l.includes(ansi.bg(chatLayout.PALETTE.hoverBg)));
-  assert.ok(painted.length >= 2, 'entire message (meta + body) gets the gray hover fill');
-  assert.ok(hoverPlain.some((l) => /─{4,}/.test(l)), 'gap line becomes the hover outline');
+  const hoverPlain = hovered.lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.ok(!hoverPlain.includes('delete'), 'hover does not put delete on the input hint');
+  assert.ok(hoverPlain.includes('╭') && hoverPlain.includes('╰'), 'hover uses a rounded outline');
+  assert.ok(!hovered.lines.join('').includes(ansi.bg('#2d333b')), 'hover does not fill a background');
 
-  const other = chatLayout.buildChatFrame(80, 24, chatState({ hoverMessageId: 'm1' }));
-  const otherHint = other.lines.map((l) => ansi.stripAnsi(l)).find((l) => l.includes('(r)eply'));
-  assert.ok(otherHint, 'reply still shown on someone else\'s message');
-  assert.ok(!otherHint.includes('(e)dit'), 'edit is own-only');
-  assert.ok(!otherHint.includes('(d)elete'), 'delete is own-only');
+  const selected = chatLayout.buildChatFrame(80, 24, chatState({ selectedMessageId: 'm2' }));
+  const selPlain = selected.lines.map((l) => ansi.stripAnsi(l));
+  const hint = selPlain.find((l) => l.includes('reply') && l.includes('edit'));
+  assert.ok(hint, 'selection shows reply/edit/delete/clear on the hint row');
+  assert.ok(hint.includes('clear'));
+  assert.ok(selPlain.join('\n').includes('↩'), 'selected own message keeps icons on the right');
 });
 
-test('chat hover: action and card hits sit on the hovered message', () => {
-  const frame = chatLayout.buildChatFrame(80, 24, chatState({ hoverMessageId: 'm2' }));
+test('chat hover: action and card hits sit on the selected message', () => {
+  const frame = chatLayout.buildChatFrame(80, 24, chatState({ selectedMessageId: 'm2' }));
   const reply = frame.hits.find((h) => h.type === 'action' && h.action === 'reply' && h.id === 'm2');
   const edit = frame.hits.find((h) => h.type === 'action' && h.action === 'edit' && h.id === 'm2');
   assert.ok(reply && edit, 'own message exposes reply + edit hits');
@@ -734,17 +732,32 @@ test('channel transition hides the transcript behind the bird', () => {
   assert.ok(!plain.includes('ship it tonight'), 'old transcript is not shown mid-switch');
 });
 
-test('chat overlay: buttons win hit-testing over the modal backdrop', () => {
+test('delete confirm dims everything except the selected message', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState({
-    overlay: { type: 'reveal', filename: 'photo.jpg', kind: 'image', size: '234 KB', opened: true },
+    selectedMessageId: 'm2',
+    overlay: { type: 'delete', messageId: 'm2' },
+    animFrame: 0,
   }));
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('photo.jpg'));
-  assert.ok(plain.includes('[open]'));
-  const open = frame.hits.find((h) => h.type === 'overlay-button' && h.action === 'open');
-  const backdrop = frame.hits.find((h) => h.type === 'overlay');
-  assert.ok(open && backdrop);
-  const hit = chatLayout.hitTest(frame.hits, open.x, open.y);
-  assert.equal(hit.type, 'overlay-button');
-  assert.equal(hit.action, 'open');
+  assert.ok(plain.includes('confirm deletion?'));
+  assert.ok(plain.includes('on it'));
+  assert.ok(frame.hits.some((h) => h.type === 'confirm-delete'));
+});
+
+test('channel chips are three lines tall and include +', () => {
+  const frame = chatLayout.buildChatFrame(80, 24, chatState({ hoverChannel: 'design' }));
+  assert.equal(frame.regions.channels.h, 3);
+  const create = frame.hits.find((h) => h.type === 'create-channel');
+  assert.ok(create && create.h === 3);
+  const ch = frame.hits.find((h) => h.type === 'channel' && h.name === 'design');
+  assert.ok(ch && ch.h === 3);
+});
+
+test('clampScrollForMessage keeps a short message on screen', () => {
+  const bounds = { start: 10, end: 13 };
+  const clamped = chatLayout.clampScrollForMessage(80, bounds, 40, 20);
+  const min = Math.min(40 - 20 - 10, 40 - 13);
+  const max = Math.max(40 - 20 - 10, 40 - 13);
+  assert.ok(clamped >= Math.max(0, min));
+  assert.ok(clamped <= Math.max(0, max));
 });

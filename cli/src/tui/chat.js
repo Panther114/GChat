@@ -3,9 +3,8 @@
 /**
  * Mini GChat screen: groups | channels | transcript | composer.
  *
- * Hover lights the whole message and reveals Unicode actions on the right
- * (↩ reply, ✎ edit, × delete). A click on an attachment card decrypts it
- * and opens a reveal overlay (open / save).
+ * Hover outlines a message. Click selects it; r/e/d/c/p then act.
+ * Icons sit on the right. Delete dims everything but the message.
  */
 
 const fs = require('node:fs');
@@ -18,11 +17,11 @@ const {
   buildChatFrame,
   composeChatFrame,
   hitTest,
-  formatBytes,
   TRANSITION_MS,
   scrollOffsetFromY,
+  clampScrollForMessage,
+  WHEEL_LINES,
 } = require('./chat-layout');
-const { clampScroll } = require('./landing');
 const { looksLikeImagePath, readClipboardImage } = require('./clipboard-image');
 const {
   decryptServerMessage,
@@ -36,6 +35,7 @@ const {
   listChannels,
   rememberChannel,
   savePrefs,
+  normalizeChannel,
 } = require('../store/prefs');
 
 const MAX_COMPOSER = 2000;
@@ -93,6 +93,8 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
     if (!state.activeGroupId) return true;
     if (state.transition) return true;
     if (state.typing) return true;
+    if (state.overlay && state.overlay.type === 'delete') return true;
+    if ((state.messages || []).some((item) => item.msg?.type === 'image')) return true;
     return (state.messages || []).some((item) => item.sending);
   }
 
@@ -172,6 +174,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
   }
 
   async function loadGroup(group) {
+    if (state.overlay && state.overlay.type === 'delete') return;
     if (!group) {
       state.activeGroupId = null;
       state.messages = [];
@@ -189,6 +192,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
     state.messages = [];
     state.hoverMessageId = null;
     state.hoverAction = null;
+    state.selectedMessageId = null;
     state.scrollOffset = 0;
     client.setActiveGroup(group.id);
     beginTransition();
@@ -215,23 +219,41 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
   }
 
   async function switchChannel(name) {
+    if (state.overlay && state.overlay.type === 'delete') return;
     if (!state.activeGroupId) return;
     const next = client.switchChannel(state.activeGroupId, name);
     if (next === state.activeChannel && !state.transition) return;
     state.activeChannel = next;
     state.scrollOffset = 0;
     state.hoverMessageId = null;
+    state.selectedMessageId = null;
     beginTransition();
     draw();
     await waitTransition();
   }
 
   function cycleChannel(delta) {
+    if (state.overlay && state.overlay.type === 'delete') return Promise.resolve();
     const list = state.channels && state.channels.length ? state.channels : ['main'];
     const current = state.activeChannel || 'main';
     const idx = Math.max(0, list.indexOf(current));
     const next = list[(idx + delta + list.length) % list.length];
     return switchChannel(next);
+  }
+
+  function applyScroll(delta) {
+    if (!lastFrame) lastFrame = buildChatFrame(size().cols, size().rows, state);
+    let next = (state.scrollOffset || 0) + delta;
+    next = Math.max(0, Math.min(lastFrame.maxScroll, next));
+    if (state.overlay && state.overlay.type === 'delete') {
+      next = clampScrollForMessage(
+        next,
+        lastFrame.messageBounds,
+        lastFrame.totalLines,
+        lastFrame.regions.transcript.h
+      );
+    }
+    state.scrollOffset = next;
   }
 
   async function refreshGroups() {
@@ -371,16 +393,36 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
   }
 
   function applyHover(hit) {
+    if (state.overlay && state.overlay.type === 'delete') return false;
     const nextId = hit && (hit.type === 'message' || hit.type === 'action' || hit.type === 'card')
       ? String(hit.id)
       : null;
     const nextAction = hit && hit.type === 'action' ? hit.action : null;
-    const key = `${nextId || ''}:${nextAction || ''}`;
+    const nextChannel = hit && (hit.type === 'channel' || hit.type === 'create-channel')
+      ? String(hit.name || '+')
+      : null;
+    const key = `${nextId || ''}:${nextAction || ''}:${nextChannel || ''}`;
     if (key === lastHoverKey) return false;
     lastHoverKey = key;
     state.hoverMessageId = nextId;
     state.hoverAction = nextAction;
+    state.hoverChannel = nextChannel;
     return true;
+  }
+
+  function clearSelection() {
+    state.selectedMessageId = null;
+    state.hoverAction = null;
+    if (state.overlay && state.overlay.type === 'delete') state.overlay = null;
+  }
+
+  function selectMessage(item) {
+    if (!item) return;
+    state.selectedMessageId = String(item.msg.id);
+  }
+
+  function shortcutsArmed() {
+    return !!(state.selectedMessageId && !state.composer && !state.editingId && !state.creatingChannel && !state.overlay);
   }
 
   async function beginReply(item) {
@@ -448,6 +490,19 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
     return entry;
   }
 
+  function previewPath(target) {
+    const plat = process.platform;
+    try {
+      if (plat === 'darwin') {
+        spawn('qlmanage', ['-p', target], { detached: true, stdio: 'ignore' }).unref();
+        return true;
+      }
+      return openPath(target);
+    } catch {
+      return false;
+    }
+  }
+
   function openPath(target) {
     const plat = process.platform;
     try {
@@ -460,28 +515,14 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
     }
   }
 
-  async function revealAttachment(item) {
-    state.overlay = {
-      type: 'reveal',
-      messageId: item.msg.id,
-      filename: item.attach?.filename || (item.msg.type === 'image' ? 'image' : 'file'),
-      kind: item.msg.type === 'image' ? 'image' : 'file',
-      size: item.attach?.size != null ? formatBytes(item.attach.size) : '',
-      opened: false,
-      error: null,
-    };
-    draw();
+  async function previewAttachment(item) {
+    if (!item) return;
     try {
       const entry = await materializeAttachment(item);
-      state.overlay.filename = entry.filename;
-      state.overlay.size = formatBytes(entry.size);
-      state.overlay.kind = item.msg.type === 'image' ? 'image' : 'file';
-      state.overlay.opened = openPath(entry.path);
-      if (!state.overlay.opened) state.overlay.error = 'could not open';
+      if (!previewPath(entry.path)) setError('could not preview');
     } catch (err) {
-      state.overlay.error = err.message || String(err);
+      setError(err.message || String(err));
     }
-    draw();
   }
 
   async function saveAttachmentTo(item, dest) {
@@ -564,7 +605,10 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
   }
 
   async function confirmDelete(item) {
+    if (!item) return;
+    state.selectedMessageId = String(item.msg.id);
     state.overlay = { type: 'delete', messageId: item.msg.id };
+    startPulse();
   }
 
   async function performDelete(messageId) {
@@ -572,6 +616,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
       await client.deleteMessage(state.activeGroupId, messageId);
       state.messages = state.messages.filter((m) => String(m.msg.id) !== String(messageId));
       closeOverlay();
+      clearSelection();
     } catch (err) {
       state.overlay = { type: 'error', message: err.message || String(err) };
     }
@@ -671,68 +716,55 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
     state.composerCaret = 0;
   }
 
-  async function handleOverlayButton(action) {
-    const overlay = state.overlay;
-    if (!overlay) return;
-    if (action === 'cancel') {
-      closeOverlay();
+  async function runAction(action, item) {
+    if (action === 'clear') {
+      clearSelection();
       return;
     }
-    if (overlay.type === 'delete' && action === 'confirm') {
-      await performDelete(overlay.messageId);
+    if (!item) return;
+    if (action === 'reply') await beginReply(item);
+    else if (action === 'edit') beginEdit(item);
+    else if (action === 'delete') await confirmDelete(item);
+    else if (action === 'preview') await previewAttachment(item);
+  }
+
+  async function createChannel(name) {
+    const normalized = normalizeChannel(name);
+    if (!normalized || !state.activeGroupId) {
+      state.creatingChannel = false;
+      state.channelDraft = '';
       return;
     }
-    if (overlay.type === 'reveal') {
-      const item = findMessage(overlay.messageId);
-      if (!item) return;
-      if (action === 'open') {
-        await revealAttachment(item);
-        return;
+    try {
+      await client.connectSocket();
+      client.announceChannel(state.activeGroupId, normalized, 'create');
+      state.channels = listChannels(state.activeGroupId, paths);
+      if (!state.channels.includes(normalized)) {
+        const prefs = loadPrefs(paths);
+        rememberChannel(state.activeGroupId, normalized, prefs);
+        savePrefs(prefs, paths);
+        state.channels = listChannels(state.activeGroupId, paths);
       }
-      if (action === 'save') {
-        const filename = item.attach?.filename || overlay.filename || 'file';
-        const home = os.homedir();
-        const downloads = path.join(home, 'Downloads');
-        const dir = fs.existsSync(downloads) ? downloads : home;
-        state.overlay = {
-          type: 'save',
-          messageId: item.msg.id,
-          filename,
-          value: path.join(dir, filename),
-          caret: path.join(dir, filename).length,
-        };
-      }
-      return;
+      await switchChannel(normalized);
+    } catch (err) {
+      setError(err.message || String(err));
     }
-    if (overlay.type === 'save' && action === 'confirm') {
-      const item = findMessage(overlay.messageId);
-      if (!item) return;
-      try {
-        const dest = await saveAttachmentTo(item, overlay.value || overlay.filename);
-        state.overlay = {
-          type: 'reveal',
-          messageId: item.msg.id,
-          filename: path.basename(dest),
-          kind: item.msg.type === 'image' ? 'image' : 'file',
-          size: item.attach?.size != null ? formatBytes(item.attach.size) : '',
-          opened: false,
-          error: `saved ${dest}`,
-        };
-      } catch (err) {
-        state.overlay = { type: 'error', message: err.message || String(err) };
-      }
-    }
+    state.creatingChannel = false;
+    state.channelDraft = '';
   }
 
   async function handleClick(hit) {
-    if (!hit) return;
-    if (hit.type === 'overlay-button') {
-      await handleOverlayButton(hit.action);
+    if (!hit) {
+      if (state.overlay && state.overlay.type === 'delete') closeOverlay();
       return;
     }
-    if (hit.type === 'overlay') return;
-    if (state.overlay) {
-      closeOverlay();
+    if (state.overlay && state.overlay.type === 'delete') {
+      if (hit.type === 'confirm-delete') {
+        await performDelete(state.overlay.messageId);
+        clearSelection();
+      } else if (hit.type !== 'message' || String(hit.id) !== String(state.overlay.messageId)) {
+        closeOverlay();
+      }
       return;
     }
     if (hit.type === 'group') {
@@ -748,23 +780,34 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
       await switchChannel(hit.name);
       return;
     }
+    if (hit.type === 'create-channel') {
+      state.creatingChannel = true;
+      state.channelDraft = '';
+      return;
+    }
     if (hit.type === 'scrollbar') {
       if (!lastFrame) return;
       state.scrollOffset = scrollOffsetFromY(hit._y, lastFrame.regions.scrollbar, lastFrame.maxScroll);
       draggingScroll = true;
       return;
     }
-    if (hit.type === 'action') {
-      const item = findMessage(hit.id);
-      if (!item) return;
-      if (hit.action === 'reply') await beginReply(item);
-      else if (hit.action === 'edit') beginEdit(item);
-      else if (hit.action === 'delete') await confirmDelete(item);
+    if (hit.type === 'gap') {
+      clearSelection();
       return;
     }
-    if (hit.type === 'card') {
+    if (hit.type === 'action') {
+      const item = findMessage(hit.id) || findMessage(state.selectedMessageId);
+      await runAction(hit.action, item);
+      return;
+    }
+    if (hit.type === 'card' || hit.type === 'message') {
       const item = findMessage(hit.id);
-      if (item) await revealAttachment(item);
+      if (!item) return;
+      if (hit.type === 'card' && String(state.selectedMessageId) === String(item.msg.id)) {
+        await previewAttachment(item);
+        return;
+      }
+      selectMessage(item);
     }
   }
 
@@ -776,14 +819,12 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
     if (hit && hit.type === 'scrollbar') hit._y = y;
 
     if (mouse.kind === 'wheel') {
-      if (state.overlay) return false;
       const region = lastFrame.regions.transcript;
       const bar = lastFrame.regions.scrollbar;
       const over = (region && x >= region.x && x < region.x + region.w && y >= region.y && y < region.y + region.h)
         || (bar && x >= bar.x && x < bar.x + bar.w && y >= bar.y && y < bar.y + bar.h);
       if (over) {
-        const next = (state.scrollOffset || 0) + (mouse.wheel < 0 ? 1 : -1);
-        state.scrollOffset = Math.max(0, Math.min(lastFrame.maxScroll, next));
+        applyScroll(mouse.wheel < 0 ? WHEEL_LINES : -WHEEL_LINES);
         return true;
       }
       return false;
@@ -798,11 +839,19 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
       && x >= lastFrame.regions.scrollbar.x))) {
       draggingScroll = true;
       state.scrollOffset = scrollOffsetFromY(y, lastFrame.regions.scrollbar, lastFrame.maxScroll);
+      if (state.overlay && state.overlay.type === 'delete') {
+        state.scrollOffset = clampScrollForMessage(
+          state.scrollOffset,
+          lastFrame.messageBounds,
+          lastFrame.totalLines,
+          lastFrame.regions.transcript.h
+        );
+      }
       return true;
     }
 
     if (mouse.kind === 'move') {
-      if (state.overlay) return false;
+      if (state.overlay && state.overlay.type === 'delete') return false;
       return applyHover(hit);
     }
 
@@ -825,9 +874,6 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
     const at = state.composerCaret;
     state.composer = state.composer.slice(0, at) + ch + state.composer.slice(at);
     state.composerCaret = at + 1;
-    const { cols } = size();
-    const mainW = Math.max(1, cols - (lastFrame ? lastFrame.regions.transcript.x : 0));
-    state.composerScroll = clampScroll(state.composerScroll, state.composerCaret, state.composer.length, mainW);
   }
 
   function backspaceComposer() {
@@ -845,6 +891,20 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
       state.composer = state.composer.slice(0, at - 1) + state.composer.slice(at);
       state.composerCaret = at - 1;
     }
+  }
+
+  function applyScroll(delta) {
+    if (!lastFrame) lastFrame = buildChatFrame(size().cols, size().rows, state);
+    let next = Math.max(0, Math.min(lastFrame.maxScroll, (state.scrollOffset || 0) + delta));
+    if (state.overlay && state.overlay.type === 'delete' && lastFrame.messageBounds) {
+      next = clampScrollForMessage(
+        next,
+        lastFrame.messageBounds,
+        lastFrame.totalLines,
+        lastFrame.regions.transcript.h
+      );
+    }
+    state.scrollOffset = next;
   }
 
   function moveComposer(delta) {
@@ -874,9 +934,10 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
         if (motion[2] === 'D') moveComposer(-count);
         else if (motion[2] === 'C') moveComposer(count);
         else if (motion[2] === 'A') {
-          state.scrollOffset = Math.min((lastFrame?.maxScroll || 0), (state.scrollOffset || 0) + 1);
+          if (state.creatingChannel) { /* ignore */ }
+          else applyScroll(1);
         } else if (motion[2] === 'B') {
-          state.scrollOffset = Math.max(0, (state.scrollOffset || 0) - 1);
+          applyScroll(-1);
         }
         draw();
       } else if (seq === '\u001b[H') {
@@ -886,13 +947,15 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
         state.composerCaret = state.composer.length;
         draw();
       } else if (seq === '\u001b[5~') {
-        state.scrollOffset = Math.min((lastFrame?.maxScroll || 0), (state.scrollOffset || 0) + 10);
+        applyScroll(10);
         draw();
       } else if (seq === '\u001b[6~') {
-        state.scrollOffset = Math.max(0, (state.scrollOffset || 0) - 10);
+        applyScroll(-10);
         draw();
       } else if (seq === '\u001b[Z') {
-        cycleChannel(-1).then(() => draw()).catch(() => draw());
+        if (!(state.overlay && state.overlay.type === 'delete')) {
+          cycleChannel(-1).then(() => draw()).catch(() => draw());
+        }
       }
     }
     return seq.length;
@@ -905,31 +968,59 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
         draw();
         return;
       }
+      if (state.creatingChannel) {
+        state.creatingChannel = false;
+        state.channelDraft = '';
+        draw();
+        return;
+      }
       if (state.replyTo || state.editingId) {
         cancelComposeMode();
-        if (state.editingId) {
-          /* already cleared */
-        }
-        state.editingId = null;
+        draw();
+        return;
+      }
+      if (state.selectedMessageId) {
+        clearSelection();
         draw();
       }
       return;
     }
-    if (ch === '\r' || ch === '\n') {
-      if (state.overlay) {
-        if (state.overlay.type === 'delete') performDelete(state.overlay.messageId).then(() => draw()).catch(() => draw());
-        else if (state.overlay.type === 'save') handleOverlayButton('confirm').then(() => draw()).catch(() => draw());
-        else closeOverlay();
+    if (state.overlay && state.overlay.type === 'delete') {
+      if (ch === '\r' || ch === '\n') {
+        performDelete(state.overlay.messageId).then(() => draw()).catch(() => draw());
+      }
+      return;
+    }
+    if (state.creatingChannel) {
+      if (ch === '\r' || ch === '\n') {
+        createChannel(state.channelDraft).then(() => draw()).catch(() => draw());
+        return;
+      }
+      if (ch === '\u007f' || ch === '\b') {
+        state.channelDraft = state.channelDraft.slice(0, -1);
         draw();
         return;
       }
+      if (ch >= ' ' && state.channelDraft.length < 12) {
+        state.channelDraft += ch;
+        draw();
+      }
+      return;
+    }
+    if (ch === '\r') {
       submitComposer().then(() => draw()).catch((err) => {
         setError(err.message || String(err));
         draw();
       });
       return;
     }
+    if (ch === '\n') {
+      insertComposer('\n');
+      draw();
+      return;
+    }
     if (ch === '\t') {
+      if (state.overlay && state.overlay.type === 'delete') return;
       cycleChannel(1).then(() => draw()).catch(() => draw());
       return;
     }
@@ -943,6 +1034,14 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
       return;
     }
     if (ch < ' ') return;
+    if (shortcutsArmed()) {
+      const item = findMessage(state.selectedMessageId);
+      if (ch === 'r') { runAction('reply', item).then(() => draw()); return; }
+      if (ch === 'e') { runAction('edit', item).then(() => draw()); return; }
+      if (ch === 'd') { runAction('delete', item).then(() => draw()); return; }
+      if (ch === 'c') { clearSelection(); draw(); return; }
+      if (ch === 'p') { runAction('preview', item).then(() => draw()); return; }
+    }
     pokeTyping();
     insertComposer(ch);
     draw();
@@ -1010,7 +1109,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
     switchChannel,
     beginReply,
     beginEdit,
-    revealAttachment,
+    previewAttachment,
     findMessage,
   };
 }
