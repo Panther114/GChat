@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Mini GChat screen: groups | channels | transcript | composer.
+ * GChat CLI screen: groups | channels | transcript | composer.
  *
  * Hover outlines a message. Click selects it; r/e/d/c/p then act.
  * Icons sit on the right. Delete dims everything but the message.
@@ -59,6 +59,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
   let lastFrame = null;
   let lastHoverKey = '';
   let inputBuffer = '';
+  let escTimer = null;
   let running = false;
   let pulseTimer = null;
   let draggingScroll = null;
@@ -95,12 +96,14 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
   }
 
   function needsPulse() {
-    if (!state.activeGroupId) return true;
     if (state.transition) return true;
     if (state.loadingGroup) return true;
     if (state.typing) return true;
     if (state.overlay && state.overlay.type === 'delete') return true;
-    if (state.channelMenu && (state.channelExpandFrame || 0) < CHANNEL_EXPAND_FRAMES) return true;
+    if (state.channelClosing && (state.channelExpandFrame || 0) > 0) return true;
+    if (state.channelMenu && !state.channelClosing && (state.channelExpandFrame || 0) < CHANNEL_EXPAND_FRAMES) {
+      return true;
+    }
     return (state.messages || []).some((item) => item.sending);
   }
 
@@ -114,10 +117,14 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
       if (state.typing && state.typing.until && Date.now() >= state.typing.until) {
         state.typing = null;
       }
-      if (state.channelMenu && (state.channelExpandFrame || 0) < CHANNEL_EXPAND_FRAMES) {
+      if (state.channelClosing) {
+        if ((state.channelExpandFrame || 0) > 0) {
+          state.channelExpandFrame -= 1;
+        } else {
+          snapCloseChannelMenu();
+        }
+      } else if (state.channelMenu && (state.channelExpandFrame || 0) < CHANNEL_EXPAND_FRAMES) {
         state.channelExpandFrame = (state.channelExpandFrame || 0) + 1;
-      } else if (!state.channelMenu && state.channelExpandFrame) {
-        state.channelExpandFrame = 0;
       }
       if (!needsPulse()) {
         clearInterval(pulseTimer);
@@ -228,7 +235,6 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
       const prefs = loadPrefs(paths);
       prefs.activeGroupId = null;
       savePrefs(prefs, paths);
-      startPulse();
       return;
     }
     state.activeGroupId = group.id;
@@ -363,11 +369,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
       state.connected = false;
       setError(err.message || 'socket failed');
     }
-    const prefs = loadPrefs(paths);
-    const wanted = prefs.activeGroupId
-      ? state.groups.find((g) => String(g.id) === String(prefs.activeGroupId))
-      : state.groups[0];
-    await loadGroup(wanted || null);
+    await loadGroup(null);
     if (needsPulse()) startPulse();
     draw();
   }
@@ -377,6 +379,10 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
     if (pulseTimer) {
       clearInterval(pulseTimer);
       pulseTimer = null;
+    }
+    if (escTimer) {
+      clearTimeout(escTimer);
+      escTimer = null;
     }
     if (typingTimer) {
       clearTimeout(typingTimer);
@@ -525,7 +531,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
 
   async function beginReply(item) {
     if (!item) return;
-    state.editingId = null;
+    if (state.editingId) cancelComposeMode();
     state.replyTo = {
       id: item.msg.id,
       name: item.msg.senderName || item.msg.senderId || 'reply',
@@ -536,6 +542,12 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
   function beginEdit(item) {
     if (!item || isAttach(item)) return;
     state.replyTo = null;
+    if (!state.editingId) {
+      state.composerBeforeEdit = {
+        text: state.composer || '',
+        caret: state.composerCaret || 0,
+      };
+    }
     state.editingId = item.msg.id;
     state.composer = item.text || '';
     state.composerCaret = state.composer.length;
@@ -546,6 +558,12 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
   }
 
   function cancelComposeMode() {
+    if (state.editingId) {
+      const prev = state.composerBeforeEdit;
+      state.composer = prev ? prev.text : '';
+      state.composerCaret = prev ? prev.caret : 0;
+    }
+    state.composerBeforeEdit = null;
     state.replyTo = null;
     state.editingId = null;
   }
@@ -736,9 +754,11 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
         await client.editMessage(state.activeGroupId, state.editingId, text);
         const item = findMessage(state.editingId);
         if (item) item.text = text;
-        state.composer = '';
-        state.composerCaret = 0;
         state.editingId = null;
+        const prev = state.composerBeforeEdit;
+        state.composer = prev ? prev.text : '';
+        state.composerCaret = prev ? prev.caret : 0;
+        state.composerBeforeEdit = null;
         return;
       }
       const replyTo = state.replyTo;
@@ -826,6 +846,38 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
     else if (action === 'preview') await previewAttachment(item);
   }
 
+  function snapCloseChannelMenu() {
+    state.channelMenu = null;
+    state.channelClosing = false;
+    state.channelExpandFrame = CHANNEL_EXPAND_FRAMES;
+    state.renamingChannel = null;
+  }
+
+  function beginChannelClose() {
+    if (!state.channelMenu) return;
+    if (state.renamingChannel) {
+      state.renamingChannel = null;
+      state.channelDraft = '';
+      state.channelDraftCaret = 0;
+    }
+    state.channelClosing = true;
+    if ((state.channelExpandFrame || 0) > CHANNEL_EXPAND_FRAMES) {
+      state.channelExpandFrame = CHANNEL_EXPAND_FRAMES;
+    }
+    if ((state.channelExpandFrame || 0) <= 0) {
+      snapCloseChannelMenu();
+      return;
+    }
+    startPulse();
+  }
+
+  function openChannelMenu(name) {
+    state.channelMenu = name;
+    state.channelClosing = false;
+    state.channelExpandFrame = 0;
+    startPulse();
+  }
+
   function startChannelRename(name) {
     if (!name || name === 'main') {
       setError('cannot rename #main');
@@ -833,7 +885,10 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
     }
     state.renamingChannel = name;
     state.channelMenu = name;
+    state.channelClosing = false;
+    state.channelExpandFrame = CHANNEL_EXPAND_FRAMES;
     state.channelDraft = name;
+    state.channelDraftCaret = name.length;
   }
 
   async function finishChannelRename() {
@@ -842,7 +897,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
     state.renamingChannel = null;
     state.channelDraft = '';
     if (!from || !to || to === from || !state.activeGroupId) {
-      state.channelMenu = null;
+      beginChannelClose();
       return;
     }
     const next = state.channels.map((c) => (c === from ? to : c));
@@ -852,7 +907,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
       client.announceChannel(state.activeGroupId, to, 'create');
     } catch { /* local rename still applies */ }
     if (state.activeChannel === from) await switchChannel(to);
-    state.channelMenu = null;
+    snapCloseChannelMenu();
   }
 
   async function deleteChannel(name) {
@@ -870,7 +925,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
       state.channels.filter((c) => c !== name),
       paths
     );
-    state.channelMenu = null;
+    snapCloseChannelMenu();
     if (state.activeChannel === name) await switchChannel('main');
   }
 
@@ -948,30 +1003,28 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
     }
     if (hit.type === 'channel') {
       if (hit.name === state.activeChannel) {
-        if (state.channelMenu === hit.name) {
-          state.channelMenu = null;
-          state.channelExpandFrame = 0;
+        if (state.channelMenu === hit.name && !state.channelClosing) {
+          beginChannelClose();
         } else {
-          state.channelMenu = hit.name;
-          state.channelExpandFrame = 0;
-          startPulse();
+          openChannelMenu(hit.name);
         }
         clearSelection();
         return;
       }
-      state.channelMenu = null;
-      state.channelExpandFrame = 0;
+      snapCloseChannelMenu();
       await switchChannel(hit.name);
       return;
     }
     if (hit.type === 'create-channel') {
       state.creatingChannel = true;
       state.channelDraft = '';
+      state.channelDraftCaret = 0;
       return;
     }
     if (hit.type === 'cancel-create') {
       state.creatingChannel = false;
       state.channelDraft = '';
+      state.channelDraftCaret = 0;
       return;
     }
     if (hit.type === 'scrollbar') {
@@ -984,8 +1037,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
     }
     if (hit.type === 'gap') {
       clearSelection();
-      state.channelMenu = null;
-      state.channelExpandFrame = 0;
+      beginChannelClose();
       return;
     }
     if (hit.type === 'action') {
@@ -999,8 +1051,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
       }
       if (hit.action === 'clear') {
         clearSelection();
-        state.channelMenu = null;
-        state.channelExpandFrame = 0;
+        beginChannelClose();
         return;
       }
       const item = findMessage(hit.id) || findMessage(state.selectedMessageId);
@@ -1014,8 +1065,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
         clearSelection();
         return;
       }
-      state.channelMenu = null;
-      state.channelExpandFrame = 0;
+      snapCloseChannelMenu();
       selectMessage(item);
     }
   }
@@ -1143,10 +1193,65 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
     state.composerCaret = Math.max(0, Math.min(state.composer.length, state.composerCaret + delta));
   }
 
+  function channelDraftEditing() {
+    return !!(state.creatingChannel || state.renamingChannel);
+  }
+
+  function moveChannelDraft(delta) {
+    const len = (state.channelDraft || '').length;
+    state.channelDraftCaret = Math.max(0, Math.min(len, (state.channelDraftCaret || 0) + delta));
+  }
+
+  function insertChannelDraft(ch) {
+    const draft = state.channelDraft || '';
+    if (draft.length >= 12) return;
+    const at = Math.max(0, Math.min(state.channelDraftCaret || 0, draft.length));
+    state.channelDraft = draft.slice(0, at) + ch + draft.slice(at);
+    state.channelDraftCaret = at + 1;
+  }
+
+  function backspaceChannelDraft() {
+    const draft = state.channelDraft || '';
+    const at = Math.max(0, Math.min(state.channelDraftCaret || 0, draft.length));
+    if (at > 0) {
+      state.channelDraft = draft.slice(0, at - 1) + draft.slice(at);
+      state.channelDraftCaret = at - 1;
+    }
+  }
+
+  function deleteWordIn(text, at) {
+    let i = Math.max(0, Math.min(at, text.length));
+    while (i > 0 && /\s/.test(text[i - 1])) i -= 1;
+    while (i > 0 && !/\s/.test(text[i - 1])) i -= 1;
+    return { text: text.slice(0, i) + text.slice(at), caret: i };
+  }
+
+  function deleteWord() {
+    if (channelDraftEditing()) {
+      const next = deleteWordIn(state.channelDraft || '', state.channelDraftCaret || 0);
+      state.channelDraft = next.text;
+      state.channelDraftCaret = next.caret;
+      return;
+    }
+    const next = deleteWordIn(state.composer || '', state.composerCaret || 0);
+    state.composer = next.text;
+    state.composerCaret = next.caret;
+  }
+
+  function insertNewline() {
+    if (channelDraftEditing()) return;
+    insertComposer('\n');
+  }
+
   function consumeEscape(sequence) {
     if (sequence.startsWith('\u001b[200~') || sequence.startsWith('\u001b[201~')) return 0;
-    if (sequence.startsWith('\u001b\r') || sequence.startsWith('\u001b\n')) {
-      insertComposer('\n');
+    if (ansi.isAltEnter(sequence.slice(0, 2)) || sequence.startsWith('\u001b\r') || sequence.startsWith('\u001b\n')) {
+      insertNewline();
+      draw();
+      return 2;
+    }
+    if (sequence.startsWith('\u001b\u007f') || sequence.startsWith('\u001b\b')) {
+      deleteWord();
       draw();
       return 2;
     }
@@ -1159,30 +1264,39 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
         const changed = handleMouse(mouse);
         if (changed) draw();
       }
-    } else if (ansi.isShiftEnter(seq)) {
-      insertComposer('\n');
+    } else if (ansi.isAltEnter(seq)) {
+      insertNewline();
+      draw();
+    } else if (ansi.isAltBackspace(seq)) {
+      deleteWord();
       draw();
     } else {
       const motion = seq.match(/^\u001b\[(\d*)([ABCD])$/);
       if (motion) {
         const count = motion[1] ? Number(motion[1]) : 1;
-        if (motion[2] === 'D') moveComposer(-count);
-        else if (motion[2] === 'C') moveComposer(count);
-        else if (motion[2] === 'A') {
-          if (state.creatingChannel || state.renamingChannel) { /* ignore */ }
+        if (motion[2] === 'D') {
+          if (channelDraftEditing()) moveChannelDraft(-count);
+          else moveComposer(-count);
+        } else if (motion[2] === 'C') {
+          if (channelDraftEditing()) moveChannelDraft(count);
+          else moveComposer(count);
+        } else if (motion[2] === 'A') {
+          if (channelDraftEditing()) { /* stay in the chip */ }
           else if (state.selectedMessageId && !state.overlay) moveSelection(-1);
           else applyScroll(1);
         } else if (motion[2] === 'B') {
-          if (state.creatingChannel || state.renamingChannel) { /* ignore */ }
+          if (channelDraftEditing()) { /* stay in the chip */ }
           else if (state.selectedMessageId && !state.overlay) moveSelection(1);
           else applyScroll(-1);
         }
         draw();
       } else if (seq === '\u001b[H') {
-        state.composerCaret = 0;
+        if (channelDraftEditing()) state.channelDraftCaret = 0;
+        else state.composerCaret = 0;
         draw();
       } else if (seq === '\u001b[F') {
-        state.composerCaret = state.composer.length;
+        if (channelDraftEditing()) state.channelDraftCaret = (state.channelDraft || '').length;
+        else state.composerCaret = state.composer.length;
         draw();
       } else if (seq === '\u001b[5~') {
         applyScroll(10);
@@ -1209,18 +1323,20 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
       if (state.renamingChannel) {
         state.renamingChannel = null;
         state.channelDraft = '';
-        state.channelMenu = null;
+        state.channelDraftCaret = 0;
+        beginChannelClose();
         draw();
         return;
       }
       if (state.creatingChannel) {
         state.creatingChannel = false;
         state.channelDraft = '';
+        state.channelDraftCaret = 0;
         draw();
         return;
       }
       if (state.channelMenu) {
-        state.channelMenu = null;
+        beginChannelClose();
         draw();
         return;
       }
@@ -1251,12 +1367,12 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
         return;
       }
       if (ch === '\u007f' || ch === '\b') {
-        state.channelDraft = state.channelDraft.slice(0, -1);
+        backspaceChannelDraft();
         draw();
         return;
       }
-      if (ch >= ' ' && state.channelDraft.length < 12) {
-        state.channelDraft += ch;
+      if (ch >= ' ') {
+        insertChannelDraft(ch);
         draw();
       }
       return;
@@ -1271,12 +1387,12 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
         return;
       }
       if (ch === '\u007f' || ch === '\b') {
-        state.channelDraft = state.channelDraft.slice(0, -1);
+        backspaceChannelDraft();
         draw();
         return;
       }
-      if (ch >= ' ' && state.channelDraft.length < 12) {
-        state.channelDraft += ch;
+      if (ch >= ' ') {
+        insertChannelDraft(ch);
         draw();
       }
       return;
@@ -1286,11 +1402,6 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
         setError(err.message || String(err));
         draw();
       });
-      return;
-    }
-    if (ch === '\n') {
-      insertComposer('\n');
-      draw();
       return;
     }
     if (ch === '\t') {
@@ -1320,7 +1431,23 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
     draw();
   }
 
+  function armEscFlush() {
+    if (escTimer) clearTimeout(escTimer);
+    escTimer = setTimeout(() => {
+      escTimer = null;
+      if (inputBuffer === '\u001b') {
+        inputBuffer = '';
+        handleKey('\u001b');
+        draw();
+      }
+    }, 30);
+  }
+
   function pushInput(str) {
+    if (escTimer) {
+      clearTimeout(escTimer);
+      escTimer = null;
+    }
     let rest = inputBuffer + String(str).replace(/\r\n/g, '\r');
     inputBuffer = '';
     const pasteOpen = rest.indexOf('\u001b[200~');
@@ -1355,7 +1482,8 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
         continue;
       }
       if (rest === '\u001b') {
-        handleKey('\u001b');
+        inputBuffer = '\u001b';
+        armEscFlush();
         return;
       }
       if (rest.startsWith('\u001b[200~')) {
@@ -1364,6 +1492,11 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
       }
       const consumed = consumeEscape(rest);
       if (consumed === 0) {
+        if (rest.startsWith('\u001b') && rest.length > 1 && rest[1] !== '[') {
+          handleKey('\u001b');
+          rest = rest.slice(1);
+          continue;
+        }
         inputBuffer = rest.slice(0, 64);
         return;
       }
@@ -1381,6 +1514,9 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
     handleClick,
     handleKey,
     moveSelection,
+    cancelComposeMode,
+    deleteWord,
+    beginChannelClose,
     loadGroup,
     switchChannel,
     beginReply,

@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * GChat CLI TUI entry — landing page, then Mini GChat.
+ * GChat CLI TUI entry — landing page, then the chat screen.
  *
  * Handles terminal lifecycle (alternate screen, raw mode, resize, exit),
  * drives the pure frame builder in landing.js, and submits credentials to

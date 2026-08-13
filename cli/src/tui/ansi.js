@@ -110,7 +110,11 @@ function modifyOtherKeysDisable() {
   return `${ESC}>4;0m`;
 }
 
-/** Shift+Enter as sent by xterm modifyOtherKeys, CSI 27, and Kitty CSI u. */
+/**
+ * Shift+Enter encodings when the terminal implements modifyOtherKeys or
+ * Kitty CSI u. macOS Terminal.app does not: Shift+Enter is identical to
+ * Enter (`\r`), so it cannot be used as a reliable newline shortcut there.
+ */
 function isShiftEnter(sequence) {
   const seq = String(sequence);
   return seq === '\u001b[13;2~'
@@ -118,6 +122,27 @@ function isShiftEnter(sequence) {
     || seq === '\u001b[13;2u'
     || seq === '\u001b[13;2;13~'
     || seq === '\u001b[13;2;13u';
+}
+
+/** Alt+Enter: ESC+CR/LF in raw mode, plus xterm/Kitty modified-key forms. */
+function isAltEnter(sequence) {
+  const seq = String(sequence);
+  return seq === '\u001b\r'
+    || seq === '\u001b\n'
+    || seq === '\u001b[13;3~'
+    || seq === '\u001b[27;3;13~'
+    || seq === '\u001b[13;3u'
+    || seq === '\u001b[13;3;13~';
+}
+
+/** Alt+Backspace: ESC+DEL/BS, plus xterm/Kitty modified-key forms. */
+function isAltBackspace(sequence) {
+  const seq = String(sequence);
+  return seq === '\u001b\u007f'
+    || seq === '\u001b\b'
+    || seq === '\u001b[127;3u'
+    || seq === '\u001b[27;3;127~'
+    || seq === '\u001b[127;3~';
 }
 
 // ---------------------------------------------------------------------------
@@ -328,6 +353,8 @@ module.exports = {
   modifyOtherKeysDisable,
   parseSgrMouse,
   isShiftEnter,
+  isAltEnter,
+  isAltBackspace,
   bold,
   dim,
   italic,

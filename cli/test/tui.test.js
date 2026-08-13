@@ -719,19 +719,23 @@ test('sending messages are grayed and labeled', () => {
   assert.ok(plain.includes('sending'));
 });
 
-test('empty group selection paints the pulsing bird instead of messages', () => {
-  const state = chatState({ activeGroupId: null, animFrame: 3 });
-  const frame = chatLayout.buildChatFrame(80, 24, state);
-  const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
+test('empty group selection paints a static bird and hides the composer', () => {
+  const a = chatLayout.buildChatFrame(80, 24, chatState({ activeGroupId: null, animFrame: 0 }));
+  const b = chatLayout.buildChatFrame(80, 24, chatState({ activeGroupId: null, animFrame: 9 }));
+  const plain = a.lines.map((l) => ansi.stripAnsi(l)).join('\n');
   assert.ok(!plain.includes('ship it tonight'), 'messages hidden when no group is selected');
   assert.ok(plain.includes('⠉') || plain.includes('⣦'), 'landing bird art is reused');
+  assert.ok(!a.hits.some((h) => h.type === 'composer'), 'composer is hidden while idle');
+  assert.equal(a.lines.join(''), b.lines.join(''), 'idle bird does not shimmer');
 });
 
 test('channel transition hides the transcript behind the bird', () => {
-  const state = chatState({ transition: { until: Date.now() + 400 }, animFrame: 2 });
-  const plain = chatLayout.buildChatFrame(80, 24, state).lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  const state = chatState({ transition: { until: Date.now() + 400, kind: 'channel' }, animFrame: 2 });
+  const frame = chatLayout.buildChatFrame(80, 24, state);
+  const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
   assert.ok(plain.includes('#design'), 'channel strip still updates');
   assert.ok(!plain.includes('ship it tonight'), 'old transcript is not shown mid-switch');
+  assert.ok(!frame.hits.some((h) => h.type === 'composer'), 'composer hides during a channel switch');
 });
 
 test('delete confirm dims everything except the selected message', () => {
@@ -880,7 +884,7 @@ test('message timestamps sit on the name row; actions sit on the content row', (
   assert.ok(content.includes('✓') || content.includes('·'), 'ticks sit on the content row');
 });
 
-test('action slots stay aligned across messages with a uniform tick gutter', () => {
+test('actions pack to the right of the content; ticks sit on the far right', () => {
   const state = chatState({
     selectedMessageId: 'm2',
     memberCount: 4,
@@ -906,14 +910,18 @@ test('action slots stay aligned across messages with a uniform tick gutter', () 
   });
   const textFrame = chatLayout.buildChatFrame(80, 24, { ...state, selectedMessageId: 'm2', hoverMessageId: 'm2' });
   const imageFrame = chatLayout.buildChatFrame(80, 24, { ...state, selectedMessageId: 'm3', hoverMessageId: 'm3' });
-  const replyText = textFrame.hits.find((h) => h.type === 'action' && h.action === 'reply' && h.id === 'm2');
-  const replyImage = imageFrame.hits.find((h) => h.type === 'action' && h.action === 'reply' && h.id === 'm3');
-  assert.ok(replyText && replyImage);
-  assert.equal(replyText.x, replyImage.x, 'reply slot is at the same column on every message');
-  const delText = textFrame.hits.find((h) => h.type === 'action' && h.action === 'delete' && h.id === 'm2');
-  const delImage = imageFrame.hits.find((h) => h.type === 'action' && h.action === 'delete' && h.id === 'm3');
-  assert.ok(delText && delImage);
-  assert.equal(delText.x, delImage.x, 'delete slot stays put even when preview is present');
+  const reply = textFrame.hits.find((h) => h.type === 'action' && h.action === 'reply' && h.id === 'm2');
+  const edit = textFrame.hits.find((h) => h.type === 'action' && h.action === 'edit' && h.id === 'm2');
+  const del = textFrame.hits.find((h) => h.type === 'action' && h.action === 'delete' && h.id === 'm2');
+  assert.ok(reply && edit && del);
+  assert.equal(edit.x, reply.x + 3, 'packed actions have no missing slot in the middle');
+  assert.equal(del.x, edit.x + 3);
+  const row = textFrame.lines.map((l) => ansi.stripAnsi(l)).find((l) => l.includes('short') && l.includes('↩'));
+  assert.ok(row.lastIndexOf('✓') > row.lastIndexOf('×'), 'ticks sit to the right of the tools');
+  const imgReply = imageFrame.hits.find((h) => h.type === 'action' && h.action === 'reply' && h.id === 'm3');
+  const imgPrev = imageFrame.hits.find((h) => h.type === 'action' && h.action === 'preview' && h.id === 'm3');
+  assert.ok(imgReply && imgPrev);
+  assert.equal(imgPrev.x, imgReply.x + 3);
 });
 
 test('selected image highlight continues after the sender name', () => {
@@ -1017,10 +1025,13 @@ test('group load hides the channel bar behind the bird', () => {
   assert.ok(chatLayout.hideChannelBar({ activeGroupId: 'g1', loadingGroup: true }));
 });
 
-test('isShiftEnter recognizes common Shift+Enter encodings', () => {
+test('isAltEnter and isShiftEnter recognize modified Enter encodings', () => {
+  assert.equal(ansi.isAltEnter('\u001b\r'), true);
+  assert.equal(ansi.isAltEnter('\u001b[13;3u'), true);
+  assert.equal(ansi.isAltEnter('\u001b[A'), false);
   assert.equal(ansi.isShiftEnter('\u001b[13;2u'), true);
   assert.equal(ansi.isShiftEnter('\u001b[27;2;13~'), true);
-  assert.equal(ansi.isShiftEnter('\u001b[A'), false);
+  assert.equal(ansi.isAltBackspace('\u001b\u007f'), true);
 });
 
 const { createChatController } = require('../src/tui/chat');
@@ -1072,14 +1083,59 @@ test('up and down move the selection by a whole message', () => {
   assert.equal(chat.state.selectedMessageId, 'm3');
 });
 
-test('Shift+Enter and bare LF insert a newline; Enter submits later', () => {
+test('Alt+Enter inserts a newline; Shift+Enter CSI is ignored', () => {
   const chat = makeController();
   chat.handleKey('h');
-  chat.handleKey('\n');
+  chat.pushInput('\u001b\r');
   chat.handleKey('i');
   assert.equal(chat.state.composer, 'h\ni');
-  chat.pushInput('\u001b[13;2u');
+  chat.pushInput('\u001b[13;3u');
   assert.equal(chat.state.composer, 'h\ni\n');
+  chat.pushInput('\u001b[13;2u');
+  assert.equal(chat.state.composer, 'h\ni\n', 'Shift+Enter is not bound to newline');
+});
+
+test('Alt+Backspace deletes the current word', () => {
+  const chat = makeController({ composer: 'hello world', composerCaret: 11 });
+  chat.deleteWord();
+  assert.equal(chat.state.composer, 'hello ');
+  assert.equal(chat.state.composerCaret, 6);
+  chat.pushInput('\u001b\u007f');
+  assert.equal(chat.state.composer, '');
+});
+
+test('canceling an edit restores the previous composer draft', () => {
+  const chat = makeController({ composer: 'draft', composerCaret: 5 });
+  chat.beginEdit(chat.state.messages[1]);
+  assert.equal(chat.state.composer, 'on it');
+  chat.cancelComposeMode();
+  assert.equal(chat.state.composer, 'draft');
+  assert.equal(chat.state.composerCaret, 5);
+  assert.equal(chat.state.editingId, null);
+});
+
+test('startup does not open the first group', async () => {
+  const chat = makeController({ activeGroupId: null, groups: [{ id: 'g1', name: 'team' }] });
+  chat.state.activeGroupId = 'g1';
+  await chat.start();
+  assert.equal(chat.state.activeGroupId, null);
+  assert.ok(!chat.draw().hits.some((h) => h.type === 'composer'));
+});
+
+test('closing a channel chip retracts instead of snapping shut', () => {
+  const open = chatLayout.buildChatFrame(80, 24, chatState({
+    activeChannel: 'design',
+    channelMenu: 'design',
+    channelExpandFrame: chatLayout.CHANNEL_EXPAND_FRAMES,
+  }));
+  const mid = chatLayout.buildChatFrame(80, 24, chatState({
+    activeChannel: 'design',
+    channelMenu: 'design',
+    channelClosing: true,
+    channelExpandFrame: 3,
+  }));
+  const wOf = (frame) => frame.hits.find((h) => h.type === 'channel' && h.name === 'design').w;
+  assert.ok(wOf(mid) < wOf(open), 'chip shrinks while retracting');
 });
 
 test('clicking the scrollbar starts a drag and does not jump the offset', () => {

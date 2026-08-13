@@ -35,11 +35,11 @@ In the TUI:
 - Hover outlines a message; click to select (click again to deselect). Then `r` reply, `e` edit, `d` delete, Esc clear, `p` preview
 - Esc with nothing selected leaves the chat for the idle bird
 - Click a selected channel again to rename (`r`) or delete (`d`); drag chips to reorder
-- Icons (`↩` `✎` `×`) sit on the content row; ticks show who has read the message
+- Icons (`↩` `✎` `×`) sit packed to the right of the content; ticks sit on the far right
 - Up / down moves to the previous / next message while one is selected
 - Paste an image (or a path) to auto-upload; `p` opens Quick Look on macOS
 - Tab / Shift+Tab cycles channels; `+ Create` adds a channel
-- Enter sends; Shift+Enter (or Ctrl+J) inserts a newline in the composer
+- Enter sends; Alt+Enter inserts a newline; Alt+Backspace deletes the current word
 - `:q` or Ctrl+C to quit
 
 ## Config & data

@@ -1,10 +1,10 @@
 'use strict';
 
 /**
- * Pure Mini GChat frame builder.
+ * Pure GChat CLI frame builder.
  *
  * Hover outlines a message (no fill). Click selects it. Timestamps sit on
- * the name row's right edge; ticks + a fixed action-slot gutter sit on the
+ * the name row's right edge; packed actions then read ticks sit on the
  * first content row. The hint row above the composer keeps typing on the
  * left and action labels on the right.
  */
@@ -38,7 +38,10 @@ const PALETTE = {
   keyP: '#7ee787',
   track: '#30363d',
   thumb: '#8b93a0',
+  faint: '#484f58',
 };
+
+const CARET_LETTER = '#161b22';
 
 const TEXT = '\uFE0E';
 
@@ -94,6 +97,9 @@ const DEFAULT_CHAT = {
   channelMenu: null,
   renamingChannel: null,
   channelExpandFrame: CHANNEL_EXPAND_FRAMES,
+  channelClosing: false,
+  channelDraftCaret: 0,
+  composerBeforeEdit: null,
   memberCount: 0,
   now: null,
 };
@@ -317,31 +323,40 @@ function groupRecipientCount(state) {
   return max;
 }
 
+function faintStyle() {
+  return `${ansi.dim()}${ansi.fg(PALETTE.muted)}`;
+}
+
 function tickStrip(item, totalOverride) {
   const total = Math.max(0, Number(totalOverride) || Number(item?.msg?.totalRecipients) || 0);
   const read = Math.max(0, Math.min(total, Number(item?.msg?.readCount) || 0));
   if (total <= 0) return ''.padEnd(TICK_GUTTER, ' ');
-  if (total > 6) return padCells(`${read}/${total}`, TICK_GUTTER);
-  return padCells(`${'✓'.repeat(read)}${'·'.repeat(total - read)}`, TICK_GUTTER);
+  if (total > 6) {
+    return padCells(`${ansi.fg(PALETTE.muted)}${read}/${total}${ansi.reset()}`, TICK_GUTTER);
+  }
+  const marked = `${ansi.fg(PALETTE.muted)}${'✓'.repeat(read)}${ansi.reset()}`;
+  const open = `${faintStyle()}${'·'.repeat(total - read)}${ansi.reset()}`;
+  return padCells(`${marked}${open}`, TICK_GUTTER);
 }
 
-function slotStrip(enabledIds) {
-  const enabled = new Set(enabledIds);
-  return ACTION_SLOTS.map((id) => {
-    const action = ACTIONS[id];
-    return enabled.has(id) ? action.glyph : ' ';
-  }).join(' '.repeat(ACTION_GAP));
+function visibleActions(actions) {
+  return (actions || []).filter((action) => action && action.glyph);
 }
 
-function iconHits(enabledIds, originX, originY, rowWidth) {
-  const enabled = new Set(enabledIds);
-  const startX = originX + rowWidth - ACTION_GUTTER;
+function packedActionWidth(actions) {
+  const n = visibleActions(actions).length;
+  if (n <= 0) return 0;
+  return n * ACTION_SLOT_W + (n - 1) * ACTION_GAP;
+}
+
+function iconHits(actions, originX, originY, rowWidth) {
+  const list = visibleActions(actions);
+  const stripW = packedActionWidth(list);
+  const startX = originX + rowWidth - TICK_GUTTER - (stripW ? 1 + stripW : 0);
   const hits = [];
   let x = startX;
-  for (const id of ACTION_SLOTS) {
-    if (enabled.has(id)) {
-      hits.push({ type: 'action', action: id, x, y: originY, w: 1, h: 1 });
-    }
+  for (const action of list) {
+    hits.push({ type: 'action', action: action.id, x, y: originY, w: 1, h: 1 });
     x += ACTION_SLOT_W + ACTION_GAP;
   }
   return hits;
@@ -500,17 +515,18 @@ function paintMessageRow(plain, width, {
     body = cut + ' '.repeat(Math.max(0, room - ansi.width(cut))) + label;
   }
   const bodyFg = isImageRow ? PALETTE.image : (sending ? PALETTE.muted : PALETTE.text);
-  const bodyStyled = `${bgOn}${ansi.fg(bodyFg)}${padCells(isImageRow ? '[Image]' : body, bodyW)}${ansi.reset()}`;
-  const tickText = isIconRow ? padCells(ticks || '', TICK_GUTTER) : ''.padEnd(TICK_GUTTER, ' ');
-  let gutterStyled = `${bgOn}${ansi.fg(PALETTE.muted)}${tickText}${ansi.reset()}${bgOn} `;
-  const slots = ACTION_SLOTS.map((id) => {
-    const action = ACTIONS[id];
-    const on = !!(isIconRow && showIcons && (actions || []).some((a) => a.id === id));
-    if (!on) return `${bgOn} `;
+  const shown = isIconRow && showIcons ? visibleActions(actions) : [];
+  const actionW = packedActionWidth(shown);
+  const actionStyled = shown.map((action) => {
     const hot = hoverAction === action.id;
     return `${bgOn}${hot ? ansi.bold() : ''}${ansi.fg(action.color)}${action.glyph}${ansi.reset()}`;
-  });
-  gutterStyled += slots.join(`${bgOn}${' '.repeat(ACTION_GAP)}`);
+  }).join(`${bgOn}${' '.repeat(ACTION_GAP)}`);
+  const tickText = isIconRow ? padCells(ticks || '', TICK_GUTTER) : ''.padEnd(TICK_GUTTER, ' ');
+  const midW = Math.max(0, gutterW - (actionW ? actionW + 1 : 0) - TICK_GUTTER);
+  const bodyStyled = `${bgOn}${ansi.fg(bodyFg)}${padCells(isImageRow ? '[Image]' : body, bodyW)}${ansi.reset()}`;
+  const gutterStyled = `${bgOn}${' '.repeat(midW)}`
+    + (actionW ? `${actionStyled}${bgOn} ` : '')
+    + `${tickText}${ansi.reset()}`;
   return withBg(bodyStyled + gutterStyled, bg);
 }
 
@@ -607,10 +623,10 @@ function channelExpandProgress(state, name) {
   return Math.min(1, Math.max(0, frame / frames));
 }
 
-function paintBoxChip(innerStyled, w, color, { bold = false } = {}) {
+function paintBoxChip(innerStyled, w, color, { bold = false, dim = false } = {}) {
   const innerW = Math.max(1, w - 2);
   const inner = padCells(innerStyled, innerW);
-  const fg = ansi.fg(color);
+  const fg = `${dim ? ansi.dim() : ''}${ansi.fg(color)}`;
   const reset = ansi.reset();
   return {
     top: `${fg}╭${'─'.repeat(innerW)}╮${reset}`,
@@ -618,6 +634,31 @@ function paintBoxChip(innerStyled, w, color, { bold = false } = {}) {
     bot: `${fg}╰${'─'.repeat(innerW)}╯${reset}`,
     innerW,
   };
+}
+
+function paintLineWithCaret(text, width, { caret = -1, fg }) {
+  const max = Math.max(1, width);
+  const visual = [];
+  for (const ch of String(text || '')) {
+    const w = ansi.charWidth(ch);
+    if (w <= 0) {
+      if (visual.length) visual[visual.length - 1] += ch;
+      continue;
+    }
+    visual.push(ch);
+  }
+  while (visual.length < max) visual.push(' ');
+  if (visual.length > max) visual.length = max;
+  let out = '';
+  for (let i = 0; i < visual.length; i += 1) {
+    const ch = visual[i];
+    if (i === caret) {
+      out += `${ansi.bg(fg)}${ansi.fg(CARET_LETTER)}${ch === ' ' ? FIELD_CARET : ch}${ansi.reset()}`;
+    } else {
+      out += `${ansi.fg(fg)}${ch}${ansi.reset()}`;
+    }
+  }
+  return out;
 }
 
 function buildChannelBar(state, width, originX, originY) {
@@ -641,12 +682,11 @@ function buildChannelBar(state, width, originX, originY) {
     const expandedLabel = `#${name}  ${expandPlain}`;
     const progress = channelExpandProgress(state, name);
     const eased = 1 - (1 - progress) * (1 - progress);
-    let label = collapsedLabel;
-    if (renaming) label = `#${state.channelDraft || ''}${FIELD_CARET}`;
+    const renameText = `#${state.channelDraft || ''}`;
     const collapsedW = chipWidth(collapsedLabel);
     const expandedW = chipWidth(expandedLabel);
     const w = renaming
-      ? Math.max(expandedW, chipWidth(label))
+      ? Math.max(expandedW, chipWidth(renameText) + 1)
       : Math.round(collapsedW + (expandedW - collapsedW) * eased);
     if (x + w > width - PAD - 6) break;
     const active = name === (state.activeChannel || 'main');
@@ -654,7 +694,7 @@ function buildChannelBar(state, width, originX, originY) {
     chips.push({
       type: 'channel',
       name,
-      label,
+      label: renaming ? renameText : collapsedLabel,
       x,
       w,
       active: active || expanding || renaming,
@@ -665,8 +705,8 @@ function buildChannelBar(state, width, originX, originY) {
     x += w + 1;
   }
   if (state.creatingChannel) {
-    const draft = `#${state.channelDraft || ''}${FIELD_CARET}  ×`;
-    const w = Math.max(10, chipWidth(draft));
+    const draft = `#${state.channelDraft || ''}  ×`;
+    const w = Math.max(10, chipWidth(draft) + 1);
     if (x + w <= width - PAD) {
       chips.push({
         type: 'channel-draft',
@@ -708,11 +748,18 @@ function buildChannelBar(state, width, originX, originY) {
   padTo(PAD);
   for (const chip of chips) {
     padTo(chip.x);
-    const color = chip.active ? PALETTE.title : (chip.hover ? PALETTE.channelHover : PALETTE.muted);
+    const isCreate = chip.type === 'create-channel';
+    const color = isCreate
+      ? (chip.hover ? PALETTE.channelHover : PALETTE.muted)
+      : (chip.active ? PALETTE.title : (chip.hover ? PALETTE.channelHover : PALETTE.muted));
     const innerW = Math.max(1, chip.w - 2);
     let inner = padCells(chip.label, innerW);
     let iconsVisible = false;
-    if (chip.expanding && !chip.renaming) {
+    const draftCaret = Math.max(0, Number(state.channelDraftCaret) || 0);
+    if (chip.renaming) {
+      const caret = 1 + Math.min(draftCaret, (state.channelDraft || '').length);
+      inner = paintLineWithCaret(chip.label, innerW, { caret, fg: color });
+    } else if (chip.expanding && !chip.renaming) {
       const base = `#${chip.name}`;
       const baseW = ansi.width(base);
       const expandedInner = Math.max(baseW + 1 + expandIconW, chipWidth(`#${chip.name}  ${expandPlain}`) - 2);
@@ -720,14 +767,14 @@ function buildChannelBar(state, width, originX, originY) {
       inner = ansi.width(full) > innerW ? ansi.truncate(full, innerW) : padCells(full, innerW);
       iconsVisible = innerW >= baseW + 1 + expandIconW;
     } else if (chip.cancel) {
-      const base = `#${state.channelDraft || ''}${FIELD_CARET}`;
+      const base = `#${state.channelDraft || ''}`;
+      const caret = 1 + Math.min(draftCaret, (state.channelDraft || '').length);
       const cross = `${ansi.fg(PALETTE.keyD)}×${ansi.reset()}`;
-      const room = innerW - ansi.width(base);
-      inner = room >= 1
-        ? padCells(`${base}${' '.repeat(Math.max(0, room - 1))}${cross}`, innerW)
-        : padCells(base, innerW);
+      const room = Math.max(1, innerW - 1);
+      const left = paintLineWithCaret(base, room, { caret, fg: color });
+      inner = padCells(left, room) + cross;
     }
-    const box = paintBoxChip(inner, chip.w, color, { bold: chip.active });
+    const box = paintBoxChip(inner, chip.w, color, { bold: chip.active && !isCreate, dim: isCreate && !chip.hover });
     styled[0] += box.top;
     styled[1] += box.mid;
     styled[2] += box.bot;
@@ -917,14 +964,23 @@ function composerMetrics(state, boxWidth) {
       const next = i + 1 < wrapped.length ? wrapped[i + 1].start : raw.length + 1;
       if (at >= start && at < next) {
         caretLine = i;
-        caretCol = at - start;
+        caretCol = ansi.width((wrapped[i].text || '').slice(0, at - start));
         break;
       }
       if (at === raw.length && i === wrapped.length - 1) {
         caretLine = i;
-        caretCol = wrapped[i].text.length;
+        caretCol = ansi.width(wrapped[i].text || '');
       }
     }
+    if (caretCol >= textW) {
+      if (caretLine === wrapped.length - 1) {
+        wrapped.push({ start: raw.length, text: '' });
+      }
+      caretLine += 1;
+      caretCol = 0;
+    }
+  } else {
+    caretCol = 0;
   }
   let lineScroll = state.composerScroll || 0;
   if (caretLine < lineScroll) lineScroll = caretLine;
@@ -954,25 +1010,16 @@ function buildComposerBox(state, width, metrics) {
   while (shown.length < metrics.innerH) shown.push({ start: 0, text: '' });
   shown.forEach((entry, i) => {
     const absLine = metrics.lineScroll + i;
-    let text = metrics.usingPlaceholder ? metrics.placeholder : entry.text;
+    const text = metrics.usingPlaceholder ? metrics.placeholder : entry.text;
+    const colorFg = metrics.usingPlaceholder ? PALETTE.placeholder : PALETTE.text;
     let caretCell = -1;
     if (metrics.usingPlaceholder && i === 0) caretCell = 0;
     else if (!metrics.usingPlaceholder && absLine === metrics.caretLine) caretCell = metrics.caretCol;
-    let painted = '';
-    const colorFg = metrics.usingPlaceholder ? PALETTE.placeholder : PALETTE.text;
-    const display = padCells(text, metrics.textW);
-    for (let c = 0; c < display.length; c += 1) {
-      const ch = display[c];
-      if (c === caretCell) {
-        painted += `${ansi.bg(colorFg)}${ansi.fg('#161b22')}${ch === ' ' ? FIELD_CARET : ch}${ansi.reset()}`;
-      } else {
-        painted += `${ansi.fg(colorFg)}${ch}${ansi.reset()}`;
-      }
-    }
+    const painted = paintLineWithCaret(text, metrics.textW, { caret: caretCell, fg: colorFg });
     const thumb = metrics.overflow
       ? (bar[i] === '█' ? `${ansi.fg(PALETTE.thumb)}█${ansi.reset()}` : `${ansi.fg(PALETTE.track)}│${ansi.reset()}`)
       : ' ';
-    lines.push(boxRow(padCells(painted, metrics.textW) + thumb, width, color));
+    lines.push(boxRow(painted + thumb, width, color));
   });
   lines.push(boxBottom(width, color));
   return lines;
@@ -980,6 +1027,14 @@ function buildComposerBox(state, width, metrics) {
 
 function showBird(state) {
   return !state.activeGroupId || !!state.transition || !!state.loadingGroup;
+}
+
+function birdAnimated(state) {
+  return !!(state.transition || state.loadingGroup);
+}
+
+function showComposer(state) {
+  return !!(state.activeGroupId && !state.transition && !state.loadingGroup);
 }
 
 function outlineColor(hover) {
@@ -997,10 +1052,18 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
   const contentW = Math.max(1, mainW - SCROLLBAR_W);
   const boxW = Math.max(8, contentW - PAD);
   const textW = Math.max(1, boxW - 2);
-  const metrics = composerMetrics(state, boxW);
+  const hideComp = !showComposer(state);
+  const metrics = hideComp
+    ? {
+      innerW: 1, textW: 1, wrapped: [], total: 0, innerH: 0, overflow: false,
+      caretLine: 0, caretCol: 0, lineScroll: 0, usingPlaceholder: true,
+      placeholder: '', chrome: 0,
+    }
+    : composerMetrics(state, boxW);
   const composerH = metrics.chrome;
-  const transcriptY = CHANNEL_ROWS;
-  const transcriptH = Math.max(1, height - CHANNEL_ROWS - composerH);
+  const hideBar = hideChannelBar(state);
+  const transcriptY = hideBar ? 0 : CHANNEL_ROWS;
+  const transcriptH = Math.max(1, height - transcriptY - composerH);
   const composerY = height - composerH;
 
   const regions = {
@@ -1015,7 +1078,6 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
 
   const hits = [];
   const lines = Array.from({ length: height }, () => ' '.repeat(width));
-  const hideBar = hideChannelBar(state);
   const recipients = groupRecipientCount(state);
 
   const side = buildSidebar(state, sideW, height);
@@ -1052,7 +1114,9 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
   const selectedBounds = selectedId ? findMessageBounds(flat, selectedId) : null;
   const bird = showBird(state);
   const birdH = hideBar && bird ? composerY : transcriptH;
-  const birdLines = bird ? buildBirdLines(contentW, birdH, state.animFrame || 0) : null;
+  const birdLines = bird
+    ? buildBirdLines(contentW, birdH, birdAnimated(state) ? (state.animFrame || 0) : 0)
+    : null;
   const bar = scrollbarGlyphs(transcriptH, bird ? 0 : totalLines, transcriptH, offset);
   const protectedRows = new Set();
   const confirmHits = [];
@@ -1167,12 +1231,7 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
     });
 
     if (showIcons && entry.rowInBlock === entry.layout.iconRow) {
-      for (const hit of iconHits(
-        (entry.layout.actions || []).map((a) => a.id),
-        mainX + PAD + 1,
-        screenY,
-        textW
-      )) {
+      for (const hit of iconHits(entry.layout.actions, mainX + PAD + 1, screenY, textW)) {
         hits.push({ ...hit, id: entry.item.msg.id });
       }
     }
@@ -1201,45 +1260,45 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
   const sideAt = (y) => (sideW > 0 ? (side.lines[y] || fillRow('', sideW, {})) : '');
   const withBar = (y, mid, barGlyph = ' ') => join(sideAt(y), mid, barGlyph);
 
-  for (let i = 0; i < CHANNEL_ROWS; i += 1) {
-    if (bird && hideBar) {
-      lines[i] = withBar(i, birdLines[i] || fillRow('', contentW, {}));
-    } else {
+  if (!hideBar) {
+    for (let i = 0; i < CHANNEL_ROWS; i += 1) {
       lines[i] = withBar(i, channels.lines[i] || fillRow('', contentW, {}));
     }
   }
 
-  const hint = buildComposerHint(state, contentW);
-  const boxLines = buildComposerBox(state, boxW, metrics);
-  lines[composerY] = withBar(composerY, hint.line);
-  boxLines.forEach((row, i) => {
-    lines[composerY + 1 + i] = withBar(composerY + 1 + i, `${' '.repeat(PAD)}${row}`);
-  });
-  const padY = composerY + 1 + boxLines.length;
-  if (padY < height) lines[padY] = withBar(padY, fillRow('', contentW, {}));
+  if (!hideComp) {
+    const hint = buildComposerHint(state, contentW);
+    const boxLines = buildComposerBox(state, boxW, metrics);
+    lines[composerY] = withBar(composerY, hint.line);
+    boxLines.forEach((row, i) => {
+      lines[composerY + 1 + i] = withBar(composerY + 1 + i, `${' '.repeat(PAD)}${row}`);
+    });
+    const padY = composerY + 1 + boxLines.length;
+    if (padY < height) lines[padY] = withBar(padY, fillRow('', contentW, {}));
 
-  if (hint.rightActions.length && !(state.overlay && state.overlay.type === 'delete')) {
-    const hintId = state.selectedMessageId || state.channelMenu || null;
-    for (const hit of hintHits(hint.rightActions, mainX, composerY, contentW)) {
-      hits.push({ ...hit, id: hintId });
+    if (hint.rightActions.length && !(state.overlay && state.overlay.type === 'delete')) {
+      const hintId = state.selectedMessageId || state.channelMenu || null;
+      for (const hit of hintHits(hint.rightActions, mainX, composerY, contentW)) {
+        hits.push({ ...hit, id: hintId });
+      }
     }
-  }
 
-  hits.push({
-    type: 'composer',
-    x: mainX + PAD,
-    y: composerY + 2,
-    w: boxW,
-    h: metrics.innerH,
-  });
-  if (metrics.overflow) {
     hits.push({
-      type: 'composer-scrollbar',
-      x: mainX + PAD + boxW - 1,
+      type: 'composer',
+      x: mainX + PAD,
       y: composerY + 2,
-      w: 1,
+      w: boxW,
       h: metrics.innerH,
     });
+    if (metrics.overflow) {
+      hits.push({
+        type: 'composer-scrollbar',
+        x: mainX + PAD + boxW - 1,
+        y: composerY + 2,
+        w: 1,
+        h: metrics.innerH,
+      });
+    }
   }
   if (state.overlay && state.overlay.type === 'delete') {
     for (let y = 0; y < height; y += 1) {
@@ -1327,8 +1386,12 @@ module.exports = {
   scrollOffsetFromY,
   scrollOffsetFromDrag,
   hideChannelBar,
+  showComposer,
+  birdAnimated,
   groupRecipientCount,
   tickStrip,
+  paintLineWithCaret,
+  CARET_LETTER,
   findMessageBounds,
   clampScrollForMessage,
   buildComposerHint,
