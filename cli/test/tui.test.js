@@ -648,7 +648,9 @@ test('chat hover outlines without fill and does not show input shortcuts', () =>
   const selPlain = selected.lines.map((l) => ansi.stripAnsi(l));
   const hint = selPlain.find((l) => l.includes('reply') && l.includes('edit'));
   assert.ok(hint, 'selection shows reply/edit/delete/clear on the hint row');
-  assert.ok(hint.includes('clear'));
+  assert.ok(hint.includes('clear (esc)'));
+  assert.ok(hint.includes('delete'));
+  assert.ok(selected.lines.join('').includes(ansi.bg(chatLayout.PALETTE.selectedBg)), 'selected uses a raised background');
   assert.ok(selPlain.join('\n').includes('↩'), 'selected own message keeps icons on the right');
 });
 
@@ -751,6 +753,44 @@ test('channel chips are three lines tall and include +', () => {
   assert.ok(create && create.h === 3);
   const ch = frame.hits.find((h) => h.type === 'channel' && h.name === 'design');
   assert.ok(ch && ch.h === 3);
+});
+
+test('hovered first and last messages keep their rounded caps', () => {
+  const frame = chatLayout.buildChatFrame(80, 24, chatState({ hoverMessageId: 'm1' }));
+  const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.ok(plain.includes('╭') && plain.includes('╰'), 'top message outline is not clipped');
+});
+
+test('nameColor prefers senderColor and hashes otherwise', () => {
+  assert.equal(chatLayout.nameColor({ msg: { senderColor: '#ff00aa', senderName: 'ada' } }), '#ff00aa');
+  const a = chatLayout.hashNameColor('ada');
+  const b = chatLayout.hashNameColor('ada');
+  const c = chatLayout.hashNameColor('will');
+  assert.equal(a, b);
+  assert.notEqual(a, c);
+});
+
+test('WHEEL_LINES is a single line step', () => {
+  assert.equal(chatLayout.WHEEL_LINES, 1);
+});
+
+test('sidebar groups are rounded boxes with unread badges', () => {
+  const frame = chatLayout.buildChatFrame(80, 24, chatState({
+    groups: [{ id: 'g1', name: 'team', unreadCount: 3 }],
+  }));
+  const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.ok(plain.includes('[3]'));
+  const group = frame.hits.find((h) => h.type === 'group' && h.id === 'g1');
+  assert.ok(group && group.h === 3);
+});
+
+test('expanded channel chip exposes rename and delete actions', () => {
+  const frame = chatLayout.buildChatFrame(80, 24, chatState({
+    activeChannel: 'design',
+    channelMenu: 'design',
+  }));
+  assert.ok(frame.hits.some((h) => h.type === 'channel-action' && h.action === 'rename'));
+  assert.ok(frame.hits.some((h) => h.type === 'channel-action' && h.action === 'delete'));
 });
 
 test('clampScrollForMessage keeps a short message on screen', () => {

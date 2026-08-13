@@ -18,8 +18,11 @@ const PALETTE = {
   muted: '#6e7681',
   hoverFg: '#e6edf3',
   outline: '#6e7681',
-  outlineStrong: '#c9d1d9',
+  outlineStrong: '#8b93a0',
+  selectedBg: '#2a3139',
   channelHover: '#b1bac4',
+  composerOutline: '#3d444d',
+  image: '#e3b341',
   action: '#e6edf3',
   activeBg: '#21262d',
   border: '#30363d',
@@ -44,7 +47,7 @@ const ACTIONS = {
   edit: { id: 'edit', key: 'e', glyph: `${'✎'}${TEXT}`, label: 'edit', color: PALETTE.keyE },
   delete: { id: 'delete', key: 'd', glyph: '×', label: 'delete', color: PALETTE.keyD },
   preview: { id: 'preview', key: 'p', glyph: '▣', label: 'preview', color: PALETTE.keyP },
-  clear: { id: 'clear', key: 'c', glyph: null, label: 'clear', color: PALETTE.muted },
+  clear: { id: 'clear', key: 'Escape', glyph: null, label: 'clear (esc)', color: PALETTE.muted },
 };
 
 const SIDEBAR_MIN = 20;
@@ -54,7 +57,7 @@ const CHANNEL_ROWS = 3;
 const COMPOSER_MIN_INNER = 1;
 const COMPOSER_MAX_INNER = 4;
 const SCROLLBAR_W = 1;
-const WHEEL_LINES = 3;
+const WHEEL_LINES = 1;
 const FIELD_CARET = '█';
 const TRANSITION_MS = 480;
 
@@ -86,6 +89,8 @@ const DEFAULT_CHAT = {
   typing: null,
   creatingChannel: false,
   channelDraft: '',
+  channelMenu: null,
+  renamingChannel: null,
 };
 
 function sidebarWidth(cols) {
@@ -313,8 +318,7 @@ function styleWord(word, color) {
 
 function styleHint(actions) {
   return actions.map((action) => {
-    const color = action.id === 'delete' ? PALETTE.muted : action.color;
-    let word = styleWord(action.label, color);
+    let word = styleWord(action.label, action.color);
     if (action.id === 'preview') {
       word += ` ${ansi.fg(PALETTE.keyP)}${ACTIONS.preview.glyph}${ansi.reset()}`;
     }
@@ -355,16 +359,27 @@ function replyLine(item) {
   return `↩  ${name}${preview ? `: ${preview}` : ''}`;
 }
 
-function styleImageLabel(frame) {
-  const word = '[Image]';
-  let out = '';
-  for (let i = 0; i < word.length; i += 1) {
-    const hot = landing.isHot(0, i, frame || 0, { speed: 0.5, width: 3, period: 16 });
-    out += hot
-      ? `${ansi.bold()}${ansi.fg(PALETTE.title)}${word[i]}${ansi.reset()}`
-      : `${ansi.fg(PALETTE.card)}${word[i]}${ansi.reset()}`;
-  }
-  return out;
+const NAME_COLORS = [
+  '#79c0ff', '#d2a8ff', '#7ee787', '#ffa657',
+  '#ff7b72', '#a5d6ff', '#f778ba', '#e3b341',
+];
+
+function hashNameColor(name) {
+  let hash = 0;
+  for (const ch of String(name || '?')) hash = (hash * 33 + ch.charCodeAt(0)) >>> 0;
+  return NAME_COLORS[hash % NAME_COLORS.length];
+}
+
+function nameColor(item) {
+  const raw = item?.msg?.senderColor || item?.msg?.iconColor || '';
+  const hex = String(raw).trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(hex)) return hex;
+  if (/^[0-9a-fA-F]{6}$/.test(hex)) return `#${hex}`;
+  return hashNameColor(item?.msg?.senderName || item?.msg?.senderId || '?');
+}
+
+function styleImageLabel() {
+  return `${ansi.fg(PALETTE.image)}[Image]${ansi.reset()}`;
 }
 
 function layoutMessage(item, width, userId) {
@@ -398,7 +413,7 @@ function sendingLabel(frame) {
 }
 
 function paintMessageRow(plain, width, {
-  outlined, isMeta, isReply, showIcons, hoverAction, actions, sending, animFrame, isImageRow,
+  outlined, raised, isMeta, isReply, showIcons, hoverAction, actions, sending, animFrame, isImageRow, nameTint,
 }) {
   let content = isImageRow ? '' : plain;
   if (showIcons && isMeta) content = overlayIcons(plain, actions, width);
@@ -412,11 +427,25 @@ function paintMessageRow(plain, width, {
     content = body + ' '.repeat(Math.max(0, width - ansi.width(body) - labelW)) + label;
   }
   const fg = isReply || sending ? PALETTE.muted : (isMeta ? PALETTE.muted : PALETTE.text);
+  const bg = raised ? PALETTE.selectedBg : null;
   let painted;
   if (isImageRow) {
-    painted = padCells(styleImageLabel(animFrame), width);
+    painted = fillRow('[Image]', width, { fg: PALETTE.image, bg });
+  } else if (isMeta && nameTint) {
+    const time = content.slice(0, 5);
+    const rest = content.slice(5);
+    const nameMatch = rest.match(/^(\s+)(\S+)(.*)$/);
+    if (nameMatch) {
+      const colored = `${ansi.fg(PALETTE.muted)}${time}${nameMatch[1]}${ansi.reset()}`
+        + `${ansi.fg(nameTint)}${ansi.bold()}${nameMatch[2]}${ansi.reset()}`
+        + `${ansi.fg(PALETTE.muted)}${nameMatch[3]}${ansi.reset()}`;
+      const pad = ' '.repeat(Math.max(0, width - ansi.width(time + nameMatch[1] + nameMatch[2] + nameMatch[3])));
+      painted = `${bg ? ansi.bg(bg) : ''}${colored}${bg ? ansi.bg(bg) : ''}${pad}${ansi.reset()}`;
+    } else {
+      painted = fillRow(content, width, { fg, dim: !!sending, bg });
+    }
   } else {
-    painted = fillRow(content, width, { fg, dim: !!sending });
+    painted = fillRow(content, width, { fg, dim: !!sending, bg });
   }
   if (showIcons && isMeta) {
     for (const action of actions) {
@@ -473,39 +502,30 @@ function buildSidebar(state, width, height) {
   const lines = [];
   const hits = [];
   if (width <= 0 || height <= 0) return { lines, hits };
-  const inner = Math.max(1, width - PAD);
-  const title = sidebarTitle();
-  lines.push(fillRow(`${' '.repeat(PAD)}${title}`, width, { fg: PALETTE.muted }));
+  lines.push(fillRow(`${' '.repeat(Math.min(1, PAD))}${sidebarTitle()}`, width, { fg: PALETTE.muted }));
   const list = state.groups || [];
-  for (let i = 0; i < height - 1; i += 1) {
+  const boxW = width;
+  let y = 1;
+  for (let i = 0; i < list.length && y + 2 < height; i += 1) {
     const group = list[i];
-    if (!group) {
-      lines.push(fillRow('', width, {}));
-      continue;
-    }
     const active = String(group.id) === String(state.activeGroupId);
-    const name = `${' '.repeat(PAD)}${String(group.name || '?')}`;
-    lines.push(fillRow(padCells(name, inner), width, {
-      bg: active ? PALETTE.activeBg : null,
-      fg: active ? PALETTE.title : PALETTE.text,
-      bold: active,
-    }));
-    hits.push({
-      type: 'group',
-      id: group.id,
-      x: 0,
-      y: 1 + i,
-      w: width,
-      h: 1,
-    });
+    const color = active ? PALETTE.title : PALETTE.muted;
+    const unread = Number(group.unreadCount) || 0;
+    const badge = unread > 0 ? `[${unread > 99 ? '99+' : unread}]` : '';
+    const nameW = Math.max(1, boxW - 2 - (badge ? ansi.width(badge) + 1 : 0));
+    const mid = `${padCells(String(group.name || '?'), nameW)}${badge ? ` ${badge}` : ''}`;
+    lines.push(fillRow(`╭${'─'.repeat(Math.max(0, boxW - 2))}╮`, width, { fg: color }));
+    lines.push(
+      `${ansi.fg(color)}│${ansi.reset()}`
+      + `${ansi.fg(active ? PALETTE.title : PALETTE.text)}${active ? ansi.bold() : ''}${padCells(mid, boxW - 2)}${ansi.reset()}`
+      + `${ansi.fg(color)}│${ansi.reset()}`
+    );
+    lines.push(fillRow(`╰${'─'.repeat(Math.max(0, boxW - 2))}╯`, width, { fg: color }));
+    hits.push({ type: 'group', id: group.id, x: 0, y, w: width, h: 3 });
+    y += 3;
   }
-  hits.unshift({
-    type: 'sidebar-empty',
-    x: 0,
-    y: 0,
-    w: width,
-    h: height,
-  });
+  while (lines.length < height) lines.push(fillRow('', width, {}));
+  hits.unshift({ type: 'sidebar-empty', x: 0, y: 0, w: width, h: height });
   return { lines, hits };
 }
 
@@ -541,7 +561,11 @@ function buildChannelBar(state, width, originX, originY) {
 
   const chips = [];
   for (const name of channels) {
-    const label = `#${name}`;
+    const expanded = state.channelMenu === name && !state.renamingChannel;
+    const renaming = state.renamingChannel === name;
+    let label = `#${name}`;
+    if (renaming) label = `#${state.channelDraft || ''}${FIELD_CARET}`;
+    else if (expanded) label = `#${name}  ✎  ×`;
     const w = chipWidth(label);
     if (x + w > width - PAD - 6) break;
     const active = name === (state.activeChannel || 'main');
@@ -552,8 +576,9 @@ function buildChannelBar(state, width, originX, originY) {
       label,
       x,
       w,
-      active,
+      active: active || expanded || renaming,
       hover,
+      expanded,
     });
     x += w + 1;
   }
@@ -614,7 +639,12 @@ function buildChannelBar(state, width, originX, originY) {
   for (const chip of chips) {
     padTo(chip.x);
     const color = chip.active ? PALETTE.title : (chip.hover ? PALETTE.channelHover : PALETTE.muted);
-    const inner = padCells(chip.label, chip.w - 2);
+    let inner = padCells(chip.label, chip.w - 2);
+    if (chip.expanded) {
+      const base = `#${chip.name}`;
+      const pad = ' '.repeat(Math.max(1, chip.w - 2 - ansi.width(base) - 5));
+      inner = `${base}${pad}${ansi.fg(PALETTE.keyE)}✎${ansi.reset()}${ansi.fg(color)}  ${ansi.fg(PALETTE.keyD)}×${ansi.reset()}`;
+    }
     styled[0] += `${ansi.fg(color)}╭${'─'.repeat(chip.w - 2)}╮${ansi.reset()}`;
     styled[1] += `${ansi.fg(color)}│${ansi.reset()}${ansi.fg(color)}${chip.active ? ansi.bold() : ''}${inner}${ansi.reset()}${ansi.fg(color)}│${ansi.reset()}`;
     styled[2] += `${ansi.fg(color)}╰${'─'.repeat(chip.w - 2)}╯${ansi.reset()}`;
@@ -626,6 +656,27 @@ function buildChannelBar(state, width, originX, originY) {
       w: chip.w,
       h: 3,
     });
+    if (chip.expanded && chip.name !== '+') {
+      const iconStart = chip.x + chip.w - 5;
+      hits.push({
+        type: 'channel-action',
+        action: 'rename',
+        name: chip.name,
+        x: originX + iconStart,
+        y: originY + 1,
+        w: 1,
+        h: 1,
+      });
+      hits.push({
+        type: 'channel-action',
+        action: 'delete',
+        name: chip.name,
+        x: originX + iconStart + 3,
+        y: originY + 1,
+        w: 1,
+        h: 1,
+      });
+    }
     cursor = chip.x + chip.w;
   }
   lines[0] = padCells(styled[0], width);
@@ -779,7 +830,7 @@ function composerMetrics(state, boxWidth) {
 }
 
 function buildComposerBox(state, width, metrics) {
-  const color = PALETTE.outlineStrong;
+  const color = PALETTE.composerOutline;
   const lines = [boxTop(width, color)];
   const bar = scrollbarGlyphs(metrics.innerH, metrics.total, metrics.innerH, metrics.total - metrics.innerH - metrics.lineScroll);
   const shown = metrics.wrapped.slice(metrics.lineScroll, metrics.lineScroll + metrics.innerH);
@@ -814,8 +865,7 @@ function showBird(state) {
   return !state.activeGroupId || !!state.transition;
 }
 
-function outlineColor(hover, selected) {
-  if (selected) return PALETTE.outlineStrong;
+function outlineColor(hover) {
   if (hover) return PALETTE.outline;
   return null;
 }
@@ -860,12 +910,14 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
   }));
 
   const flat = [];
+  if (blocks.length) flat.push({ kind: 'gap', item: null, row: '', rowInBlock: -1, layout: null });
   for (const block of blocks) {
-    if (flat.length) flat.push({ kind: 'gap', item: null, row: '', rowInBlock: -1, layout: null });
+    if (flat.length > 1) flat.push({ kind: 'gap', item: null, row: '', rowInBlock: -1, layout: null });
     block.layout.rows.forEach((row, rowInBlock) => {
       flat.push({ kind: 'row', item: block.item, row, rowInBlock, layout: block.layout });
     });
   }
+  if (blocks.length) flat.push({ kind: 'gap', item: null, row: '', rowInBlock: -1, layout: null });
 
   const totalLines = flat.length;
   let maxScroll = Math.max(0, totalLines - transcriptH);
@@ -909,8 +961,8 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
     if (!entry || entry.kind === 'gap') {
       const nextId = idOf(next);
       const prevId = idOf(prev);
-      const nextColor = outlineColor(nextId && nextId === hoverId, nextId && nextId === selectedId);
-      const prevColor = outlineColor(prevId && prevId === hoverId, prevId && prevId === selectedId);
+      const nextColor = outlineColor(nextId && nextId === hoverId);
+      const prevColor = outlineColor(prevId && prevId === hoverId);
       let mid;
       const deleting = state.overlay && state.overlay.type === 'delete'
         && prevId && String(state.overlay.messageId) === prevId;
@@ -950,10 +1002,11 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
     const id = String(entry.item.msg?.id || '');
     const hover = hoverId !== null && id === hoverId;
     const selected = selectedId !== null && id === selectedId;
-    const color = outlineColor(hover, selected);
+    const color = outlineColor(hover);
     const showIcons = hover || selected;
     const painted = paintMessageRow(entry.row, textW, {
       outlined: !!color,
+      raised: selected,
       isMeta: entry.rowInBlock === entry.layout.metaRow,
       isReply: entry.rowInBlock === entry.layout.replyRow,
       showIcons,
@@ -962,8 +1015,15 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
       sending: !!entry.item.sending,
       animFrame: state.animFrame || 0,
       isImageRow: entry.layout.card && entry.rowInBlock === entry.layout.card.start && isImage(entry.item),
+      nameTint: entry.rowInBlock === entry.layout.metaRow ? nameColor(entry.item) : null,
     });
-    const inner = color ? boxRow(painted, boxW, color) : `${' '.repeat(1)}${painted}${' '.repeat(1)}`;
+    let inner;
+    if (color) inner = boxRow(painted, boxW, color);
+    else if (selected) inner = fillRow(ansi.stripAnsi(painted) && painted, boxW, { bg: PALETTE.selectedBg });
+    else inner = `${' '.repeat(1)}${painted}${' '.repeat(1)}`;
+    if (selected && !color) {
+      inner = `${ansi.bg(PALETTE.selectedBg)}${padCells(painted, boxW)}${ansi.reset()}`;
+    }
     lines[screenY] = join(left, `${' '.repeat(PAD)}${inner}`, bar[i]);
 
     if (selected || (state.overlay && state.overlay.type === 'delete' && String(state.overlay.messageId) === id)) {
@@ -1128,6 +1188,8 @@ module.exports = {
   clampScrollForMessage,
   composerMetrics,
   buildBirdLines,
+  nameColor,
+  hashNameColor,
   buildChatFrame,
   composeChatFrame,
 };

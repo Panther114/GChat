@@ -8,6 +8,7 @@ const { test } = require('node:test');
 const { configPaths } = require('../src/store/paths');
 const { loadSession, saveSession, cookieHeader, storeSetCookieHeaders, clearSession } = require('../src/store/session');
 const { loadConfig, setConfigKey } = require('../src/store/config');
+const { setChannelOrder, listChannels } = require('../src/store/prefs');
 const { putVaultEntry, getVaultEntry, listVaultEntries, removeVaultEntry } = require('../src/store/vault');
 const { HttpClient } = require('../src/client/http');
 const { looksLikeImagePath } = require('../src/tui/clipboard-image');
@@ -122,4 +123,12 @@ test('HttpClient maps 426 protocol_upgrade_required to a versioned error', async
   } finally {
     globalThis.fetch = original;
   }
+});
+
+test('setChannelOrder preserves custom order and keeps main', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-ch-'));
+  const paths = configPaths(dir);
+  const ordered = setChannelOrder('g1', ['design', 'main', 'random'], paths);
+  assert.deepEqual(ordered, ['design', 'main', 'random']);
+  assert.deepEqual(listChannels('g1', paths), ['design', 'main', 'random']);
 });

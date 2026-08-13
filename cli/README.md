@@ -32,7 +32,9 @@ gchat                                    # interactive TUI
 
 In the TUI:
 
-- Hover outlines a message; click to select. Then `r` reply, `e` edit, `d` delete, `c` clear, `p` preview
+- Hover outlines a message; click to select. Then `r` reply, `e` edit, `d` delete, Esc clear, `p` preview
+- Esc with nothing selected leaves the chat for the idle bird
+- Click a selected channel again to rename (`r`) or delete (`d`); drag chips to reorder
 - Icons (`↩` `✎` `×`) stay on the selected/hovered message; click a gap to deselect
 - Paste an image (or a path) to auto-upload; `p` opens Quick Look on macOS
 - Tab / Shift+Tab cycles channels; `+` creates a channel

@@ -50,8 +50,33 @@ function rememberChannel(groupId, channel, prefsIn) {
 function listChannels(groupId, paths) {
   const prefs = loadPrefs(paths);
   const list = prefs.channelLists?.[String(groupId)] || ['main'];
-  const set = new Set(['main', ...list.map((c) => normalizeChannel(c) || 'main')]);
-  return Array.from(set);
+  const unique = [];
+  const seen = new Set();
+  for (const item of list) {
+    const name = normalizeChannel(item) || 'main';
+    if (seen.has(name)) continue;
+    seen.add(name);
+    unique.push(name);
+  }
+  if (!seen.has('main')) unique.unshift('main');
+  return unique;
+}
+
+function setChannelOrder(groupId, ordered, paths) {
+  const prefs = loadPrefs(paths);
+  const unique = [];
+  const seen = new Set();
+  for (const item of ordered || []) {
+    const name = normalizeChannel(item);
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    unique.push(name);
+  }
+  if (!seen.has('main')) unique.unshift('main');
+  prefs.channelLists = prefs.channelLists || {};
+  prefs.channelLists[String(groupId)] = unique;
+  savePrefs(prefs, paths);
+  return unique;
 }
 
 function normalizeChannel(value) {
@@ -69,5 +94,6 @@ module.exports = {
   setActiveChannel,
   listChannels,
   rememberChannel,
+  setChannelOrder,
   normalizeChannel,
 };
