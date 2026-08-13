@@ -185,8 +185,9 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
     try {
       await client.connectSocket();
       state.connected = true;
-    } catch {
+    } catch (err) {
       state.connected = false;
+      setError(err.message || 'socket failed');
     }
     const prefs = loadPrefs(paths);
     const wanted = prefs.activeGroupId
@@ -215,6 +216,12 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
     if (event === 'disconnect') {
       state.connected = false;
       setStatus('disconnected');
+      draw();
+      return;
+    }
+    if (event === 'connect_error') {
+      state.connected = false;
+      setError(payload?.message || String(payload || 'socket error'));
       draw();
       return;
     }

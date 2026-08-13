@@ -2,6 +2,28 @@
 
 const { io } = require('socket.io-client');
 const { cookieHeader } = require('../store/session');
+const { SYNC_PROTOCOL_HEADER, SYNC_PROTOCOL_VERSION } = require('../version');
+
+function socketIoOptions(session) {
+  const cookie = cookieHeader(session);
+  const protocolHeaders = {
+    [SYNC_PROTOCOL_HEADER]: String(SYNC_PROTOCOL_VERSION),
+    ...(cookie ? { Cookie: cookie } : {}),
+  };
+  return {
+    // Prefer polling first so Node cookie headers apply reliably; upgrade optional.
+    transports: ['polling', 'websocket'],
+    withCredentials: true,
+    autoConnect: true,
+    reconnection: true,
+    auth: { protocol: SYNC_PROTOCOL_VERSION },
+    extraHeaders: protocolHeaders,
+    transportOptions: {
+      polling: { extraHeaders: protocolHeaders },
+      websocket: { extraHeaders: protocolHeaders },
+    },
+  };
+}
 
 class SocketClient {
   constructor({ server, session, onEvent } = {}) {
@@ -15,21 +37,7 @@ class SocketClient {
   connect() {
     if (this.socket?.connected) return this.socket;
     if (!this.server) throw new Error('Server URL is required for socket connection');
-    const cookie = cookieHeader(this.session);
-    this.socket = io(this.server, {
-      // Prefer polling first so Node cookie headers apply reliably; upgrade optional.
-      transports: ['polling', 'websocket'],
-      withCredentials: true,
-      autoConnect: true,
-      reconnection: true,
-      extraHeaders: cookie ? { Cookie: cookie } : {},
-      transportOptions: cookie
-        ? {
-          polling: { extraHeaders: { Cookie: cookie } },
-          websocket: { extraHeaders: { Cookie: cookie } },
-        }
-        : undefined,
-    });
+    this.socket = io(this.server, socketIoOptions(this.session));
 
     const forward = (event) => {
       this.socket.on(event, (payload) => this.onEvent(event, payload));
@@ -132,4 +140,5 @@ class SocketClient {
 
 module.exports = {
   SocketClient,
+  socketIoOptions,
 };

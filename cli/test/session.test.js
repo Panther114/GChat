@@ -10,6 +10,8 @@ const { loadSession, saveSession, cookieHeader, storeSetCookieHeaders, clearSess
 const { loadConfig, setConfigKey } = require('../src/store/config');
 const { putVaultEntry, getVaultEntry, listVaultEntries, removeVaultEntry } = require('../src/store/vault');
 const { HttpClient } = require('../src/client/http');
+const { socketIoOptions } = require('../src/client/socket');
+const { SYNC_PROTOCOL_HEADER, SYNC_PROTOCOL_VERSION } = require('../src/version');
 
 test('session cookie jar persists and formats Cookie header', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-sess-'));
@@ -47,4 +49,67 @@ test('HttpClient builds absolute URLs from configured server', () => {
   setConfigKey('server', 'http://example.test/', paths);
   const client = new HttpClient({ paths });
   assert.equal(client.server, 'http://example.test');
+});
+
+test('HttpClient sends X-GChat-Sync-Protocol on every request', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-proto-'));
+  const paths = configPaths(dir);
+  setConfigKey('server', 'http://example.test', paths);
+  const client = new HttpClient({ paths });
+  const seen = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    seen.push({ url: String(url), headers: opts.headers, method: opts.method });
+    return {
+      ok: true,
+      status: 200,
+      headers: { getSetCookie: () => [], get: () => null },
+      text: async () => '{"ok":true}',
+    };
+  };
+  try {
+    await client.post('/api/groups/create', { name: 'x' });
+    await client.get('/api/groups/mine');
+  } finally {
+    globalThis.fetch = original;
+  }
+  assert.equal(seen.length, 2);
+  for (const req of seen) {
+    assert.equal(req.headers[SYNC_PROTOCOL_HEADER], String(SYNC_PROTOCOL_VERSION));
+  }
+});
+
+test('socket handshake advertises sync protocol 2', () => {
+  const opts = socketIoOptions({ cookies: { 'connect.sid': 'abc' } });
+  assert.deepEqual(opts.auth, { protocol: SYNC_PROTOCOL_VERSION });
+  assert.equal(opts.extraHeaders[SYNC_PROTOCOL_HEADER], String(SYNC_PROTOCOL_VERSION));
+  assert.equal(opts.transportOptions.polling.extraHeaders[SYNC_PROTOCOL_HEADER], String(SYNC_PROTOCOL_VERSION));
+  assert.match(opts.extraHeaders.Cookie, /connect\.sid=abc/);
+});
+
+test('HttpClient maps 426 protocol_upgrade_required to a versioned error', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-426-'));
+  const paths = configPaths(dir);
+  setConfigKey('server', 'http://example.test', paths);
+  const client = new HttpClient({ paths });
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 426,
+    headers: { getSetCookie: () => [], get: () => null },
+    text: async () => JSON.stringify({ error: 'protocol_upgrade_required', requiredProtocol: 2 }),
+  });
+  try {
+    await assert.rejects(
+      () => client.post('/api/groups/create', { name: 'x' }),
+      (err) => {
+        assert.equal(err.status, 426);
+        assert.match(err.message, /protocol_upgrade_required/);
+        assert.match(err.message, /need 2/);
+        return true;
+      }
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
 });
