@@ -501,8 +501,9 @@ class GChatClient {
   announceChannel(groupId, channel, action = 'create') {
     const sock = this.ensureSocket();
     sock.joinRoom(groupId);
-    sock.emit('channel_announce', { groupId, channel, action });
-    if (action === 'create') {
+    const nextAction = action === 'delete' || action === 'remove' ? 'remove' : 'add';
+    sock.emit('channel_announce', { groupId, channel, action: nextAction });
+    if (nextAction === 'add') {
       setActiveChannel(groupId, channel, this.paths);
     }
   }

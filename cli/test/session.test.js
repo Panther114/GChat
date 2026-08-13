@@ -8,7 +8,7 @@ const { test } = require('node:test');
 const { configPaths } = require('../src/store/paths');
 const { loadSession, saveSession, cookieHeader, storeSetCookieHeaders, clearSession } = require('../src/store/session');
 const { loadConfig, setConfigKey } = require('../src/store/config');
-const { setChannelOrder, listChannels } = require('../src/store/prefs');
+const { setChannelOrder, listChannels, forgetChannel, rememberChannel, loadPrefs, savePrefs } = require('../src/store/prefs');
 const { putVaultEntry, getVaultEntry, listVaultEntries, removeVaultEntry } = require('../src/store/vault');
 const { HttpClient } = require('../src/client/http');
 const { looksLikeImagePath } = require('../src/tui/clipboard-image');
@@ -129,6 +129,23 @@ test('setChannelOrder preserves custom order and keeps main', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-ch-'));
   const paths = configPaths(dir);
   const ordered = setChannelOrder('g1', ['design', 'main', 'random'], paths);
-  assert.deepEqual(ordered, ['design', 'main', 'random']);
-  assert.deepEqual(listChannels('g1', paths), ['design', 'main', 'random']);
+  assert.deepEqual(ordered, ['main', 'design', 'random']);
+  assert.deepEqual(listChannels('g1', paths), ['main', 'design', 'random']);
+});
+
+test('forgetChannel drops a topic and rememberChannel does not revive it', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-forget-'));
+  const paths = configPaths(dir);
+  setChannelOrder('g1', ['main', 'design'], paths);
+  assert.deepEqual(forgetChannel('g1', 'design', paths), ['main']);
+  const prefs = loadPrefs(paths);
+  rememberChannel('g1', 'design', prefs);
+  savePrefs(prefs, paths);
+  assert.deepEqual(listChannels('g1', paths), ['main']);
+  rememberChannel('g1', 'design', loadPrefs(paths), { force: true });
+  savePrefs(loadPrefs(paths), paths);
+  const forced = loadPrefs(paths);
+  rememberChannel('g1', 'design', forced, { force: true });
+  savePrefs(forced, paths);
+  assert.ok(listChannels('g1', paths).includes('design'));
 });

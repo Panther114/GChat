@@ -65,6 +65,7 @@ class SocketClient {
       'user_stop_typing',
       'presence_update',
       'channel_announce',
+      'channel_announced',
       'message_read_update',
       'group_join_denied',
       'attachment_upload_progress',

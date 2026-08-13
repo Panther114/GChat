@@ -20,6 +20,7 @@ const PALETTE = {
   outline: '#6e7681',
   outlineStrong: '#8b93a0',
   selectedBg: '#2a3139',
+  deleteBg: '#4a1518',
   channelHover: '#b1bac4',
   composerOutline: '#3d444d',
   image: '#e3b341',
@@ -64,6 +65,7 @@ const WHEEL_LINES = 1;
 const FIELD_CARET = '█';
 const TRANSITION_MS = 480;
 const CHANNEL_EXPAND_FRAMES = 8;
+const HISTORY_PAGE = 50;
 
 const DEFAULT_CHAT = {
   groups: [],
@@ -95,11 +97,12 @@ const DEFAULT_CHAT = {
   creatingChannel: false,
   channelDraft: '',
   channelMenu: null,
-  renamingChannel: null,
   channelExpandFrame: CHANNEL_EXPAND_FRAMES,
   channelClosing: false,
   channelDraftCaret: 0,
   composerBeforeEdit: null,
+  hasMoreHistory: false,
+  loadingMore: false,
   memberCount: 0,
   now: null,
 };
@@ -254,6 +257,12 @@ function padCells(str, width) {
   return str + ' '.repeat(width - w);
 }
 
+function padStartCells(str, width) {
+  const w = ansi.width(str);
+  if (w >= width) return ansi.truncate(str, width);
+  return ' '.repeat(width - w) + str;
+}
+
 function fillRow(plain, width, { bg = null, fg = null, bold = false, dim = false } = {}) {
   const clipped = ansi.width(plain) > width ? ansi.stripAnsi(ansi.truncate(plain, width)) : plain;
   const pad = ' '.repeat(Math.max(0, width - ansi.width(clipped)));
@@ -330,13 +339,13 @@ function faintStyle() {
 function tickStrip(item, totalOverride) {
   const total = Math.max(0, Number(totalOverride) || Number(item?.msg?.totalRecipients) || 0);
   const read = Math.max(0, Math.min(total, Number(item?.msg?.readCount) || 0));
-  if (total <= 0) return ''.padEnd(TICK_GUTTER, ' ');
+  if (total <= 0) return ''.padStart(TICK_GUTTER, ' ');
   if (total > 6) {
-    return padCells(`${ansi.fg(PALETTE.muted)}${read}/${total}${ansi.reset()}`, TICK_GUTTER);
+    return padStartCells(`${ansi.fg(PALETTE.muted)}${read}/${total}${ansi.reset()}`, TICK_GUTTER);
   }
   const marked = `${ansi.fg(PALETTE.muted)}${'✓'.repeat(read)}${ansi.reset()}`;
   const open = `${faintStyle()}${'·'.repeat(total - read)}${ansi.reset()}`;
-  return padCells(`${marked}${open}`, TICK_GUTTER);
+  return padStartCells(`${marked}${open}`, TICK_GUTTER);
 }
 
 function visibleActions(actions) {
@@ -396,7 +405,6 @@ function hintHits(actions, originX, originY, rowWidth) {
 function channelHintActions(name) {
   if (name === 'main') return [ACTIONS.clear];
   return [
-    { id: 'rename', key: 'r', glyph: '✎', label: 'rename', color: PALETTE.keyE },
     { id: 'delete-channel', key: 'd', glyph: '×', label: 'delete', color: PALETTE.keyD },
     ACTIONS.clear,
   ];
@@ -482,10 +490,10 @@ function withBg(text, bg) {
 }
 
 function paintMessageRow(plain, width, {
-  raised, isMeta, isReply, isIconRow, showIcons, hoverAction, actions, sending,
+  raised, deleting, isMeta, isReply, isIconRow, showIcons, hoverAction, actions, sending,
   animFrame, isImageRow, nameTint, stamp, ticks,
 }) {
-  const bg = raised ? PALETTE.selectedBg : null;
+  const bg = deleting ? PALETTE.deleteBg : (raised ? PALETTE.selectedBg : null);
   const bgOn = bg ? ansi.bg(bg) : '';
 
   if (isMeta) {
@@ -521,7 +529,7 @@ function paintMessageRow(plain, width, {
     const hot = hoverAction === action.id;
     return `${bgOn}${hot ? ansi.bold() : ''}${ansi.fg(action.color)}${action.glyph}${ansi.reset()}`;
   }).join(`${bgOn}${' '.repeat(ACTION_GAP)}`);
-  const tickText = isIconRow ? padCells(ticks || '', TICK_GUTTER) : ''.padEnd(TICK_GUTTER, ' ');
+  const tickText = isIconRow ? padStartCells(ticks || '', TICK_GUTTER) : ''.padStart(TICK_GUTTER, ' ');
   const midW = Math.max(0, gutterW - (actionW ? actionW + 1 : 0) - TICK_GUTTER);
   const bodyStyled = `${bgOn}${ansi.fg(bodyFg)}${padCells(isImageRow ? '[Image]' : body, bodyW)}${ansi.reset()}`;
   const gutterStyled = `${bgOn}${' '.repeat(midW)}`
@@ -606,13 +614,11 @@ function chipWidth(label) {
 }
 
 function channelExpandIconsPlain() {
-  return `${ACTIONS.edit.glyph}${' '.repeat(CHANNEL_ICON_GAP)}${ACTIONS.delete.glyph}`;
+  return ACTIONS.delete.glyph;
 }
 
 function channelExpandIconsStyled() {
-  return `${ansi.fg(PALETTE.keyE)}${ACTIONS.edit.glyph}${ansi.reset()}`
-    + `${' '.repeat(CHANNEL_ICON_GAP)}`
-    + `${ansi.fg(PALETTE.keyD)}${ACTIONS.delete.glyph}${ansi.reset()}`;
+  return `${ansi.fg(PALETTE.keyD)}${ACTIONS.delete.glyph}${ansi.reset()}`;
 }
 
 function channelExpandProgress(state, name) {
@@ -676,31 +682,26 @@ function buildChannelBar(state, width, originX, originY) {
 
   const chips = [];
   for (const name of channels) {
-    const expanding = state.channelMenu === name;
-    const renaming = state.renamingChannel === name;
+    const expanding = name !== 'main' && state.channelMenu === name;
     const collapsedLabel = `#${name}`;
     const expandedLabel = `#${name}  ${expandPlain}`;
-    const progress = channelExpandProgress(state, name);
+    const progress = expanding ? channelExpandProgress(state, name) : 0;
     const eased = 1 - (1 - progress) * (1 - progress);
-    const renameText = `#${state.channelDraft || ''}`;
     const collapsedW = chipWidth(collapsedLabel);
     const expandedW = chipWidth(expandedLabel);
-    const w = renaming
-      ? Math.max(expandedW, chipWidth(renameText) + 1)
-      : Math.round(collapsedW + (expandedW - collapsedW) * eased);
+    const w = Math.round(collapsedW + (expandedW - collapsedW) * eased);
     if (x + w > width - PAD - 6) break;
     const active = name === (state.activeChannel || 'main');
     const hover = !active && state.hoverChannel === name;
     chips.push({
       type: 'channel',
       name,
-      label: renaming ? renameText : collapsedLabel,
+      label: collapsedLabel,
       x,
       w,
-      active: active || expanding || renaming,
+      active: active || expanding,
       hover,
       expanding,
-      renaming,
     });
     x += w + 1;
   }
@@ -756,10 +757,7 @@ function buildChannelBar(state, width, originX, originY) {
     let inner = padCells(chip.label, innerW);
     let iconsVisible = false;
     const draftCaret = Math.max(0, Number(state.channelDraftCaret) || 0);
-    if (chip.renaming) {
-      const caret = 1 + Math.min(draftCaret, (state.channelDraft || '').length);
-      inner = paintLineWithCaret(chip.label, innerW, { caret, fg: color });
-    } else if (chip.expanding && !chip.renaming) {
+    if (chip.expanding) {
       const base = `#${chip.name}`;
       const baseW = ansi.width(base);
       const expandedInner = Math.max(baseW + 1 + expandIconW, chipWidth(`#${chip.name}  ${expandPlain}`) - 2);
@@ -771,7 +769,14 @@ function buildChannelBar(state, width, originX, originY) {
       const caret = 1 + Math.min(draftCaret, (state.channelDraft || '').length);
       const cross = `${ansi.fg(PALETTE.keyD)}×${ansi.reset()}`;
       const room = Math.max(1, innerW - 1);
-      const left = paintLineWithCaret(base, room, { caret, fg: color });
+      const left = landing.buildField({
+        text: base,
+        placeholder: '#',
+        active: true,
+        width: room,
+        caret,
+        bar: 0,
+      });
       inner = padCells(left, room) + cross;
     }
     const box = paintBoxChip(inner, chip.w, color, { bold: chip.active && !isCreate, dim: isCreate && !chip.hover });
@@ -786,23 +791,12 @@ function buildChannelBar(state, width, originX, originY) {
       w: chip.w,
       h: 3,
     });
-    if (iconsVisible && chip.name !== '+') {
-      const deleteX = chip.x + chip.w - 2;
-      const renameX = deleteX - CHANNEL_ICON_GAP - 1;
-      hits.push({
-        type: 'channel-action',
-        action: 'rename',
-        name: chip.name,
-        x: originX + renameX,
-        y: originY + 1,
-        w: 1,
-        h: 1,
-      });
+    if (iconsVisible && chip.name !== 'main' && chip.name !== '+') {
       hits.push({
         type: 'channel-action',
         action: 'delete',
         name: chip.name,
-        x: originX + deleteX,
+        x: originX + chip.x + chip.w - 2,
         y: originY + 1,
         w: 1,
         h: 1,
@@ -824,7 +818,7 @@ function buildChannelBar(state, width, originX, originY) {
   return { lines, hits };
 }
 
-function buildBirdLines(width, height, frame) {
+function buildBirdLines(width, height, frame, animate = true) {
   const tier = (() => {
     for (const candidate of landing.LOGO_TIERS) {
       const w = Math.max(...candidate.art.map((line) => ansi.width(line)));
@@ -841,7 +835,7 @@ function buildBirdLines(width, height, frame) {
   tier.art.forEach((artLine, row) => {
     const y = top + row;
     if (y < 0 || y >= height) return;
-    const styled = landing.styleArtLine(artLine, row, frame, tier.shimmer);
+    const styled = landing.styleArtLine(artLine, row, frame, animate ? tier.shimmer : false);
     lines[y] = `${' '.repeat(left)}${styled}${' '.repeat(Math.max(0, width - left - ansi.width(artLine)))}`;
   });
   return lines;
@@ -926,8 +920,11 @@ function buildComposerHint(state, width) {
   let right = '';
   let rightActions = [];
   if (state.overlay && state.overlay.type === 'delete') {
-    right = '';
-  } else if (state.channelMenu && !state.renamingChannel) {
+    const on = Math.floor((state.animFrame || 0) / 4) % 2 === 0;
+    const label = 'confirm deletion?';
+    const key = `${on ? ansi.bold() : ''}${ansi.fg(PALETTE.error)}enter${ansi.reset()}`;
+    right = `${on ? ansi.bold() : ''}${ansi.fg(PALETTE.error)}${label}${ansi.reset()}   ${key}`;
+  } else if (state.channelMenu) {
     rightActions = channelHintActions(state.channelMenu);
     right = styleHint(rightActions);
   } else if (state.selectedMessageId) {
@@ -1011,11 +1008,18 @@ function buildComposerBox(state, width, metrics) {
   shown.forEach((entry, i) => {
     const absLine = metrics.lineScroll + i;
     const text = metrics.usingPlaceholder ? metrics.placeholder : entry.text;
-    const colorFg = metrics.usingPlaceholder ? PALETTE.placeholder : PALETTE.text;
     let caretCell = -1;
     if (metrics.usingPlaceholder && i === 0) caretCell = 0;
     else if (!metrics.usingPlaceholder && absLine === metrics.caretLine) caretCell = metrics.caretCol;
-    const painted = paintLineWithCaret(text, metrics.textW, { caret: caretCell, fg: colorFg });
+    const onLine = caretCell >= 0;
+    const painted = landing.buildField({
+      text: metrics.usingPlaceholder ? '' : text,
+      placeholder: metrics.placeholder,
+      active: onLine,
+      width: metrics.textW,
+      caret: onLine ? (metrics.usingPlaceholder ? 0 : metrics.caretCol) : 0,
+      bar: 0,
+    });
     const thumb = metrics.overflow
       ? (bar[i] === '█' ? `${ansi.fg(PALETTE.thumb)}█${ansi.reset()}` : `${ansi.fg(PALETTE.track)}│${ansi.reset()}`)
       : ' ';
@@ -1051,7 +1055,7 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
   const barX = width - SCROLLBAR_W;
   const contentW = Math.max(1, mainW - SCROLLBAR_W);
   const boxW = Math.max(8, contentW - PAD);
-  const textW = Math.max(1, boxW - 2);
+  const textW = Math.max(1, boxW - 1);
   const hideComp = !showComposer(state);
   const metrics = hideComp
     ? {
@@ -1091,6 +1095,10 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
   }));
 
   const flat = [];
+  const showMore = !!(state.hasMoreHistory || state.loadingMore);
+  if (showMore) {
+    flat.push({ kind: 'more', item: null, row: 'Loading more...', rowInBlock: -1, layout: null });
+  }
   if (blocks.length) flat.push({ kind: 'gap', item: null, row: '', rowInBlock: -1, layout: null });
   for (const block of blocks) {
     if (flat.length > 1) flat.push({ kind: 'gap', item: null, row: '', rowInBlock: -1, layout: null });
@@ -1115,7 +1123,12 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
   const bird = showBird(state);
   const birdH = hideBar && bird ? composerY : transcriptH;
   const birdLines = bird
-    ? buildBirdLines(contentW, birdH, birdAnimated(state) ? (state.animFrame || 0) : 0)
+    ? buildBirdLines(
+      contentW,
+      birdH,
+      birdAnimated(state) ? (state.animFrame || 0) : 0,
+      birdAnimated(state)
+    )
     : null;
   const bar = scrollbarGlyphs(transcriptH, bird ? 0 : totalLines, transcriptH, offset);
   const protectedRows = new Set();
@@ -1144,30 +1157,21 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
     const next = abs + 1 < flat.length ? flat[abs + 1] : null;
     const idOf = (node) => (node && node.kind === 'row' ? String(node.item.msg?.id || '') : '');
 
+    if (entry && entry.kind === 'more') {
+      const label = 'Loading more...';
+      const pulsed = pulseText(label, state.animFrame, PALETTE.title, PALETTE.muted);
+      const padL = Math.max(0, Math.floor((contentW - ansi.width(label)) / 2));
+      lines[screenY] = join(left, `${' '.repeat(padL)}${pulsed}`, bar[i]);
+      continue;
+    }
+
     if (!entry || entry.kind === 'gap') {
       const nextId = idOf(next);
       const prevId = idOf(prev);
       const nextColor = outlineColor(nextId && nextId === hoverId);
       const prevColor = outlineColor(prevId && prevId === hoverId);
       let mid;
-      const deleting = state.overlay && state.overlay.type === 'delete'
-        && prevId && String(state.overlay.messageId) === prevId;
-      if (deleting) {
-        const label = ' confirm deletion? ';
-        const pulsed = pulseText(label.trim(), state.animFrame, PALETTE.error, '#7a2d2d');
-        const inner = Math.max(0, boxW - 2);
-        const padL = Math.max(0, Math.floor((inner - ansi.width(label)) / 2));
-        const row = `${ansi.fg(PALETTE.error)}╰${'─'.repeat(padL)}${ansi.reset()}${pulsed}${ansi.fg(PALETTE.error)}${'─'.repeat(Math.max(0, inner - padL - ansi.width(label)))}╯${ansi.reset()}`;
-        mid = `${' '.repeat(PAD)}${row}`;
-        protectedRows.add(screenY);
-        confirmHits.push({
-          type: 'confirm-delete',
-          x: mainX + PAD + 1 + padL,
-          y: screenY,
-          w: ansi.width(label.trim()),
-          h: 1,
-        });
-      } else if (nextColor) {
+      if (nextColor) {
         mid = `${' '.repeat(PAD)}${boxTop(boxW, nextColor)}`;
         if (nextId && (nextId === selectedId || (state.overlay && String(state.overlay.messageId) === nextId))) {
           protectedRows.add(screenY);
@@ -1188,10 +1192,13 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
     const id = String(entry.item.msg?.id || '');
     const hover = hoverId !== null && id === hoverId;
     const selected = selectedId !== null && id === selectedId;
-    const color = outlineColor(hover);
-    const showIcons = hover || selected;
+    const deleting = !!(state.overlay && state.overlay.type === 'delete'
+      && String(state.overlay.messageId) === id);
+    const color = outlineColor(hover && !deleting);
+    const showIcons = (hover || selected) && !deleting;
     const painted = paintMessageRow(entry.row, textW, {
       raised: selected,
+      deleting,
       isMeta: entry.rowInBlock === entry.layout.metaRow,
       isReply: entry.rowInBlock === entry.layout.replyRow,
       isIconRow: entry.rowInBlock === entry.layout.iconRow,
@@ -1211,10 +1218,13 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
     });
     let inner;
     if (color) inner = boxRow(painted, boxW, color);
-    else if (selected) {
+    else if (deleting) {
+      const fill = ansi.bg(PALETTE.deleteBg);
+      inner = `${fill} ${painted}${ansi.reset()}`;
+    } else if (selected) {
       const fill = ansi.bg(PALETTE.selectedBg);
-      inner = `${fill} ${painted}${fill} ${ansi.reset()}`;
-    } else inner = ` ${painted} `;
+      inner = `${fill} ${painted}${ansi.reset()}`;
+    } else inner = ` ${painted}`;
     lines[screenY] = join(left, `${' '.repeat(PAD)}${inner}`, bar[i]);
 
     if (selected || (state.overlay && state.overlay.type === 'delete' && String(state.overlay.messageId) === id)) {
@@ -1300,12 +1310,6 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
       });
     }
   }
-  if (state.overlay && state.overlay.type === 'delete') {
-    for (let y = 0; y < height; y += 1) {
-      if (!protectedRows.has(y)) lines[y] = dimLine(lines[y]);
-    }
-    hits.push({ type: 'dim', x: 0, y: 0, w: width, h: height });
-  }
   hits.push(...confirmHits);
 
   if (state.overlay && state.overlay.type === 'error') {
@@ -1329,6 +1333,12 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
     messageBounds: bounds,
     selectedBounds,
     composerMetrics: metrics,
+    shouldLoadMore: !!(
+      (state.hasMoreHistory || state.loadingMore)
+      && !state.loadingMore
+      && state.hasMoreHistory
+      && visible.some((entry) => entry && entry.kind === 'more')
+    ),
   };
 }
 
@@ -1360,6 +1370,7 @@ module.exports = {
   SIDEBAR_MAX,
   CHANNEL_ROWS,
   CHANNEL_EXPAND_FRAMES,
+  HISTORY_PAGE,
   ACTION_SLOTS,
   ACTION_GUTTER,
   TICK_GUTTER,

@@ -186,9 +186,10 @@ function isHot(row, col, frame, shimmer = DEFAULT_SHIMMER) {
 /** Style one art line at frame `frame` using the tier's shimmer params. */
 function styleArtLine(artLine, row, frame, shimmer = DEFAULT_SHIMMER) {
   let out = '';
+  const animate = shimmer !== false && shimmer != null;
   for (let col = 0; col < artLine.length; col += 1) {
     const ch = artLine[col];
-    const hot = isHot(row, col, frame, shimmer);
+    const hot = animate && isHot(row, col, frame, shimmer);
     out += hot
       ? `${ansi.fg(ART_HOT)}${ansi.bold()}${ch}${ansi.reset()}`
       : `${ansi.fg(ART_IDLE)}${ch}${ansi.reset()}`;
@@ -555,4 +556,9 @@ module.exports = {
   selectTier,
   styleArtLine,
   buildLandingFrame,
+  buildField,
+  renderBox,
+  FIELD_CARET,
+  CARET_LETTER,
+  PLACEHOLDER_COLOR,
 };

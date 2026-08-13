@@ -738,7 +738,7 @@ test('channel transition hides the transcript behind the bird', () => {
   assert.ok(!frame.hits.some((h) => h.type === 'composer'), 'composer hides during a channel switch');
 });
 
-test('delete confirm dims everything except the selected message', () => {
+test('delete confirm flashes a red hint and paints the message red', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState({
     selectedMessageId: 'm2',
     overlay: { type: 'delete', messageId: 'm2' },
@@ -747,7 +747,9 @@ test('delete confirm dims everything except the selected message', () => {
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
   assert.ok(plain.includes('confirm deletion?'));
   assert.ok(plain.includes('on it'));
-  assert.ok(frame.hits.some((h) => h.type === 'confirm-delete'));
+  assert.ok(plain.includes('enter'));
+  assert.ok(frame.lines.join('').includes(ansi.bg(chatLayout.PALETTE.deleteBg)), 'target message uses a red fill');
+  assert.ok(!frame.hits.some((h) => h.type === 'confirm-delete'));
 });
 
 test('channel chips are three lines tall and include +', () => {
@@ -788,13 +790,18 @@ test('sidebar groups are rounded boxes with unread badges', () => {
   assert.ok(group && group.h === 3);
 });
 
-test('expanded channel chip exposes rename and delete actions', () => {
+test('expanded channel chip exposes delete only, never on #main', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState({
     activeChannel: 'design',
     channelMenu: 'design',
   }));
-  assert.ok(frame.hits.some((h) => h.type === 'channel-action' && h.action === 'rename'));
+  assert.ok(!frame.hits.some((h) => h.type === 'channel-action' && h.action === 'rename'));
   assert.ok(frame.hits.some((h) => h.type === 'channel-action' && h.action === 'delete'));
+  const main = chatLayout.buildChatFrame(80, 24, chatState({
+    activeChannel: 'main',
+    channelMenu: 'main',
+  }));
+  assert.ok(!main.hits.some((h) => h.type === 'channel-action'));
 });
 
 test('clampScrollForMessage keeps a short message on screen', () => {
@@ -918,6 +925,7 @@ test('actions pack to the right of the content; ticks sit on the far right', () 
   assert.equal(del.x, edit.x + 3);
   const row = textFrame.lines.map((l) => ansi.stripAnsi(l)).find((l) => l.includes('short') && l.includes('↩'));
   assert.ok(row.lastIndexOf('✓') > row.lastIndexOf('×'), 'ticks sit to the right of the tools');
+  assert.match(row.replace(/[│\s]+$/, ''), /[✓·]\s*$/, 'ticks sit on the right edge of the message row');
   const imgReply = imageFrame.hits.find((h) => h.type === 'action' && h.action === 'reply' && h.id === 'm3');
   const imgPrev = imageFrame.hits.find((h) => h.type === 'action' && h.action === 'preview' && h.id === 'm3');
   assert.ok(imgReply && imgPrev);
@@ -953,10 +961,11 @@ test('composer hints sit on the right; typing stays on the left', () => {
     activeChannel: 'design',
     channelMenu: 'design',
   }));
-  const channelHint = channel.lines.map((l) => ansi.stripAnsi(l)).find((l) => l.includes('rename') && l.includes('delete'));
-  assert.ok(channelHint, 'selecting a channel shows rename/delete/clear hints');
+  const channelHint = channel.lines.map((l) => ansi.stripAnsi(l)).find((l) => l.includes('delete') && l.includes('clear'));
+  assert.ok(channelHint, 'selecting a channel shows delete/clear hints');
+  assert.ok(!channelHint.includes('rename'));
   assert.ok(channelHint.trimEnd().endsWith('clear (esc)'));
-  assert.ok(channelHint.indexOf('rename') > 40, 'channel hints are on the right');
+  assert.ok(channelHint.indexOf('delete') > 40, 'channel hints are on the right');
 });
 
 test('create chip reads + Create and a draft chip has a cancel hit', () => {
@@ -980,7 +989,7 @@ test('expanded channel chip top/mid/bot share one width', () => {
   }));
   const hit = frame.hits.find((h) => h.type === 'channel' && h.name === 'design');
   assert.ok(hit);
-  const localX = hit.x - frame.regions.channels.x;
+  const localX = hit.x;
   const top = sliceByWidth(frame.lines[0], localX, hit.w);
   const mid = sliceByWidth(frame.lines[1], localX, hit.w);
   const bot = sliceByWidth(frame.lines[2], localX, hit.w);
@@ -988,7 +997,7 @@ test('expanded channel chip top/mid/bot share one width', () => {
   assert.equal(ansi.width(mid), hit.w);
   assert.equal(ansi.width(bot), hit.w);
   assert.ok(mid.includes('#'));
-  assert.ok(frame.hits.some((h) => h.type === 'channel-action' && h.action === 'rename'));
+  assert.ok(frame.hits.some((h) => h.type === 'channel-action' && h.action === 'delete'));
 });
 
 test('channel chip width interpolates while expanding', () => {
@@ -1136,6 +1145,47 @@ test('closing a channel chip retracts instead of snapping shut', () => {
   }));
   const wOf = (frame) => frame.hits.find((h) => h.type === 'channel' && h.name === 'design').w;
   assert.ok(wOf(mid) < wOf(open), 'chip shrinks while retracting');
+});
+
+test('idle bird is uniformly dim; loading bird uses a hot stripe', () => {
+  const idle = chatLayout.buildBirdLines(40, 12, 4, false).join('');
+  const loading = chatLayout.buildBirdLines(40, 12, 4, true).join('');
+  assert.ok(!idle.includes(ansi.bold()), 'idle bird has no bright stripe');
+  assert.ok(loading.includes(ansi.bold()), 'loading bird has a bright stripe');
+});
+
+test('older history is advertised with a flashing Loading more row', () => {
+  const frame = chatLayout.buildChatFrame(80, 24, chatState({
+    hasMoreHistory: true,
+    loadingMore: true,
+    animFrame: 2,
+  }));
+  const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.ok(plain.includes('Loading more...'));
+});
+
+test('composer uses the login block caret', () => {
+  const frame = chatLayout.buildChatFrame(80, 24, chatState({
+    composer: 'hi',
+    composerCaret: 2,
+  }));
+  const row = frame.lines.map((l) => ansi.stripAnsi(l)).find((l) => l.includes('hi█'));
+  assert.ok(row, 'end caret is the login block glyph');
+  const mid = chatLayout.buildChatFrame(80, 24, chatState({
+    composer: 'hi',
+    composerCaret: 1,
+  }));
+  assert.ok(mid.lines.join('').includes('\u001b[48'), 'mid-text caret is a colored block');
+});
+
+test('delete confirm is enter/esc only and ignores other keys', () => {
+  const chat = makeController({ selectedMessageId: 'm2' });
+  chat.state.overlay = { type: 'delete', messageId: 'm2' };
+  chat.handleKey('x');
+  assert.equal(chat.state.overlay.type, 'delete');
+  assert.equal(chat.state.composer, '');
+  chat.handleKey('\u001b');
+  assert.equal(chat.state.overlay, null);
 });
 
 test('clicking the scrollbar starts a drag and does not jump the offset', () => {

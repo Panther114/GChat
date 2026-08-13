@@ -457,7 +457,7 @@ async function handleCommand(parsed, ctx) {
       if (!ch) throw new Error('Usage: gchat channel delete <name>');
       if (!(await confirm(ctx, `Delete channel #${ch}?`))) throw new Error('Aborted');
       await ctx.client.connectSocket();
-      ctx.client.announceChannel(group.id, ch, 'delete');
+      ctx.client.announceChannel(group.id, ch, 'remove');
       ctx.client.switchChannel(group.id, 'main');
       return print(ctx, `Deleted #${ch}, now on #main`);
     }
