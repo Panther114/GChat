@@ -24,15 +24,15 @@ const TUI_VERSION = '0.1';
 const LOGO_PADDING = 15;
 
 /**
- * Shimmer band defaults, tuned for the small logo. Each tier carries its own
- * `shimmer` overrides — larger logos get a wider, faster band over a larger
- * period so the sweep still reads across the bigger canvas.
+ * One bird shimmer for landing and the chat pane. Soft edges via shimmerHeat;
+ * speed/width/period match the faded login sweep so every bird feels the same.
  */
-const BAND_SPEED = 0.5; // cells per frame
-const BAND_WIDTH = 5; // cells
-const BAND_PERIOD = 24; // modulus — larger = smoother diagonal
+const BAND_SPEED = 1.2;
+const BAND_WIDTH = 32;
+const BAND_PERIOD = 64;
 
 const DEFAULT_SHIMMER = { speed: BAND_SPEED, width: BAND_WIDTH, period: BAND_PERIOD };
+const BIRD_SHIMMER = DEFAULT_SHIMMER;
 
 /** Frames for the idle → login form morph (~1s at 50ms/frame). */
 const TRANSITION_FRAMES = 10;
@@ -76,7 +76,7 @@ const LOGO_TIERS = [
   {
     name: 'large',
     captions: { 2: 'title', 4: 'option', 12: 'hint' },
-    shimmer: { speed: 1.2, width: 18, period: 64 },
+    shimmer: BIRD_SHIMMER,
     art: [
       '⠈⣦⡀',
       '⠀⢀⠻⣿⣶⣄',
@@ -98,7 +98,7 @@ const LOGO_TIERS = [
   {
     name: 'medium',
     captions: { 1: 'title', 3: 'option', 9: 'hint' },
-    shimmer: { speed: 1, width: 12, period: 48 },
+    shimmer: BIRD_SHIMMER,
     art: [
       '⠉⣦⣀',
       '⠀⢀⠻⣿⣶⣤⡀',
@@ -116,7 +116,7 @@ const LOGO_TIERS = [
   {
     name: 'small',
     captions: { 0: 'title', 2: 'option', 5: 'hint' },
-    shimmer: { speed: BAND_SPEED, width: BAND_WIDTH, period: BAND_PERIOD },
+    shimmer: BIRD_SHIMMER,
     art: [
       '⠉⣦⣀',
       '⠀⠀⠙⢿⣿⣦⣄⢀',
@@ -173,14 +173,36 @@ const MAX_CAPTION_WIDTH = Math.max(
 );
 
 /**
- * Is this art cell part of the animated highlight band at frame `frame`?
+ * Position of this cell inside the repeating shimmer period.
  * Diagonal: (row + col) grows along the diagonal; moving it sweeps a
- * diagonal band across the art. Pure styling — braille glyphs untouched.
+ * diagonal band across the art.
  */
+function shimmerPos(row, col, frame, shimmer = DEFAULT_SHIMMER) {
+  const speed = Number(shimmer?.speed);
+  const period = Number(shimmer?.period);
+  return ((row + col - frame * speed) % period + period) % period;
+}
+
+/**
+ * Soft heat in [0, 1] for this cell. 0 outside the band; 1 on the plateau;
+ * a smoothstep fade on the leading and trailing edges so the stripe is not
+ * a hard block.
+ */
+function shimmerHeat(row, col, frame, shimmer = DEFAULT_SHIMMER) {
+  const width = Number(shimmer?.width);
+  if (!(width > 0)) return 0;
+  const pos = shimmerPos(row, col, frame, shimmer);
+  if (pos >= width) return 0;
+  const edge = Math.min(width / 2, Math.max(1, width * 0.35));
+  const dist = Math.min(pos, width - pos);
+  if (dist >= edge) return 1;
+  const t = dist / edge;
+  return t * t * (3 - 2 * t);
+}
+
+/** True when the cell is inside the shimmer band (including faded edges). */
 function isHot(row, col, frame, shimmer = DEFAULT_SHIMMER) {
-  const { speed, width, period } = shimmer;
-  const pos = ((row + col - frame * speed) % period + period) % period;
-  return pos < width;
+  return shimmerPos(row, col, frame, shimmer) < Number(shimmer?.width);
 }
 
 /** Style one art line at frame `frame` using the tier's shimmer params. */
@@ -189,10 +211,11 @@ function styleArtLine(artLine, row, frame, shimmer = DEFAULT_SHIMMER) {
   const animate = shimmer !== false && shimmer != null;
   for (let col = 0; col < artLine.length; col += 1) {
     const ch = artLine[col];
-    const hot = animate && isHot(row, col, frame, shimmer);
-    out += hot
-      ? `${ansi.fg(ART_HOT)}${ansi.bold()}${ch}${ansi.reset()}`
-      : `${ansi.fg(ART_IDLE)}${ch}${ansi.reset()}`;
+    const heat = animate ? shimmerHeat(row, col, frame, shimmer) : 0;
+    const color = heat > 0 ? lerpHex(ART_IDLE, ART_HOT, heat) : ART_IDLE;
+    out += heat >= 0.55
+      ? `${ansi.fg(color)}${ansi.bold()}${ch}${ansi.reset()}`
+      : `${ansi.fg(color)}${ch}${ansi.reset()}`;
   }
   return out;
 }
@@ -300,13 +323,15 @@ function renderBox(box, barCells, color, dimOn, caretCell = -1) {
   const dim = dimOn ? ansi.dim() : '';
   const base = `${dim}${ansi.fg(color)}`;
   let out = '';
-  for (let i = 0; i < box.length; i += 1) {
+  let i = 0;
+  for (const ch of String(box || '')) {
     const underline = i < barCells ? ansi.underline() : '';
     if (i === caretCell) {
-      out += `${underline}${ansi.bg(color)}${ansi.fg(CARET_LETTER)}${box[i]}${ansi.reset()}`;
+      out += `${underline}${ansi.bg(color)}${ansi.fg(CARET_LETTER)}${ch === ' ' ? FIELD_CARET : ch}${ansi.reset()}`;
     } else {
-      out += underline + base + box[i] + ansi.reset();
+      out += underline + base + ch + ansi.reset();
     }
+    i += 1;
   }
   return out;
 }
@@ -321,21 +346,22 @@ function renderBox(box, barCells, color, dimOn, caretCell = -1) {
  * only when the caret leaves it.
  */
 function buildField({ text, placeholder, active = false, width = 1, align = 'left', caret = 0, muted = false, bar = 1, scroll = 0 }) {
-  const has = text.length > 0;
-  const shown = has || muted ? text : placeholder;
-  const len = shown.length;
+  const has = String(text || '').length > 0;
+  const shown = String(has || muted ? text : placeholder || '');
+  const chars = Array.from(shown);
+  const len = chars.length;
   const color = has && !muted ? PALETTE.label : PLACEHOLDER_COLOR;
   const dimOn = !(has && !muted);
-  const at = active ? Math.max(0, Math.min(caret, has ? len : 0)) : 0;
+  const at = active ? Math.max(0, Math.min(ansi.codePointIndex(shown, caret), has ? len : 0)) : 0;
 
-  let content = shown;
-  let caretCell = -1; // index of the block-caret cell within `content`, -1 when none
+  let cells = chars.slice();
+  let caretCell = -1; // code-point index of the block-caret cell, -1 when none
 
   if (active) {
     const atEnd = at >= len;
     const displayLen = atEnd ? len + 1 : len;
     if (displayLen <= width) {
-      if (atEnd) content = shown + FIELD_CARET;
+      if (atEnd) cells.push(FIELD_CARET);
       else caretCell = at;
     } else {
       const s = clampScroll(scroll, at, len, width);
@@ -343,27 +369,32 @@ function buildField({ text, placeholder, active = false, width = 1, align = 'lef
       const rightEll = s + width < displayLen;
       const start = s + (leftEll ? 1 : 0);
       const end = s + width - (rightEll ? 1 : 0);
-      const display = atEnd ? shown + FIELD_CARET : shown;
-      content = (leftEll ? ELLIPSIS : '') + display.slice(start, end) + (rightEll ? ELLIPSIS : '');
+      const display = atEnd ? chars.concat([FIELD_CARET]) : chars;
+      cells = [];
+      if (leftEll) cells.push(ELLIPSIS);
+      cells.push(...display.slice(start, end));
+      if (rightEll) cells.push(ELLIPSIS);
       if (!atEnd) caretCell = at - s;
     }
-  } else if (ansi.width(content) > width) {
+  } else if (ansi.width(cells.join('')) > width) {
     const visible = Math.max(1, width - 1);
-    let cut = 0;
     let used = 0;
-    for (const ch of content) {
-      const w = ansi.width(ch);
+    const keep = [];
+    for (const ch of cells) {
+      const w = ansi.charWidth(ch);
       if (used + w > visible) break;
+      keep.push(ch);
       used += w;
-      cut += 1;
     }
-    content = content.slice(0, cut) + ELLIPSIS;
+    cells = keep.concat([ELLIPSIS]);
   }
 
+  const content = cells.join('');
   const pad = ' '.repeat(Math.max(0, width - ansi.width(content)));
   const box = (align === 'right' ? pad : '') + content + (align === 'right' ? '' : pad);
   const barCells = Math.max(0, Math.min(width, Math.round(bar * width)));
-  return renderBox(box, barCells, color, dimOn, caretCell);
+  const caretShift = align === 'right' ? Array.from(pad).length : 0;
+  return renderBox(box, barCells, color, dimOn, caretCell < 0 ? -1 : caretCell + caretShift);
 }
 
 /**
@@ -552,7 +583,14 @@ module.exports = {
   ART: LOGO_TIERS[LOGO_TIERS.length - 1].art,
   ART_WIDTH: artWidth(LOGO_TIERS[LOGO_TIERS.length - 1]),
   TEXT_X: artWidth(LOGO_TIERS[LOGO_TIERS.length - 1]) + LOGO_PADDING,
+  BAND_WIDTH,
+  BAND_SPEED,
+  BAND_PERIOD,
+  BIRD_SHIMMER,
+  DEFAULT_SHIMMER,
   isHot,
+  shimmerHeat,
+  lerpHex,
   selectTier,
   styleArtLine,
   buildLandingFrame,

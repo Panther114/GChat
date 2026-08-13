@@ -65,9 +65,12 @@ const WHEEL_LINES = 1;
 const FIELD_CARET = '█';
 const TRANSITION_MS = 480;
 const CHANNEL_EXPAND_FRAMES = 8;
-const PROFILE_FRAMES = 6;
+const PROFILE_FRAMES = 8;
 const HISTORY_PAGE = 50;
 const SCROLL_TWEEN_MS = 220;
+const GLIMMER = { speed: 0.6, width: 4, period: 18 };
+const PROFILE_NAME_OFFSET = 3;
+const PROFILE_LIFT = 3;
 
 const DEFAULT_CHAT = {
   groups: [],
@@ -110,6 +113,7 @@ const DEFAULT_CHAT = {
   profileClosing: false,
   profileExpandFrame: 0,
   hoverLogout: false,
+  hoverReply: false,
   scrollTween: null,
   memberCount: 0,
   now: null,
@@ -436,7 +440,7 @@ function replyPreviewText(item) {
   if (!reply) return '';
   const name = reply.name || 'message';
   const preview = String(reply.preview || '').replace(/\s+/g, ' ');
-  return preview ? `${name}: ${preview}` : name;
+  return preview ? `↩  ${name}: ${preview}` : `↩  ${name}`;
 }
 
 function replyLine(item) {
@@ -447,12 +451,29 @@ function paintReplyPreview(item, width, { hot = false, bg = null } = {}) {
   const reply = item?.replyTo || {};
   const name = reply.name || 'message';
   const color = reply.color || hashNameColor(name);
-  let label = replyPreviewText(item);
-  if (ansi.width(label) > width) {
-    label = `${ansi.stripAnsi(ansi.truncate(label, Math.max(1, width - 1)))}…`;
+  const preview = String(reply.preview || '').replace(/\s+/g, ' ');
+  const symbol = '↩  ';
+  const namePart = preview ? `${name}:` : name;
+  const dim = hot ? '' : ansi.dim();
+  const prefixW = ansi.width(symbol) + ansi.width(namePart) + (preview ? 1 : 0);
+  let previewPart = preview;
+  if (previewPart && prefixW + ansi.width(previewPart) > width) {
+    const room = Math.max(1, width - prefixW - 1);
+    previewPart = `${ansi.stripAnsi(ansi.truncate(previewPart, room))}…`;
   }
-  const style = `${hot ? '' : ansi.dim()}${ansi.italic()}${ansi.fg(color)}`;
-  return withBg(`${style}${padCells(label, width)}`, bg);
+  let nameShown = namePart;
+  const shownPreview = previewPart ? ` ${previewPart}` : '';
+  if (ansi.width(symbol + nameShown + shownPreview) > width) {
+    const room = Math.max(1, width - ansi.width(symbol) - 1);
+    nameShown = `${ansi.stripAnsi(ansi.truncate(nameShown, room))}…`;
+  }
+  const plain = `${symbol}${nameShown}${previewPart && nameShown === namePart ? shownPreview : ''}`;
+  const styled = `${dim}${ansi.fg(PALETTE.muted)}${symbol}${ansi.reset()}`
+    + `${hot ? ansi.bold() : dim}${ansi.fg(color)}${nameShown}${ansi.reset()}`
+    + (previewPart && nameShown === namePart
+      ? `${dim}${ansi.italic()}${ansi.fg(color)}${shownPreview}${ansi.reset()}`
+      : '');
+  return withBg(`${styled}${' '.repeat(Math.max(0, width - ansi.width(plain)))}`, bg);
 }
 
 const NAME_COLORS = [
@@ -577,9 +598,12 @@ function boxRow(inner, width, color) {
 
 function pulseText(text, frame, hotColor, idleColor) {
   let out = '';
-  for (let i = 0; i < text.length; i += 1) {
-    const hot = landing.isHot(0, i, frame || 0, { speed: 0.6, width: 4, period: 18 });
-    out += `${ansi.bold()}${ansi.fg(hot ? hotColor : idleColor)}${text[i]}${ansi.reset()}`;
+  let i = 0;
+  for (const ch of String(text || '')) {
+    const heat = landing.shimmerHeat(0, i, frame || 0, GLIMMER);
+    const color = heat > 0 ? landing.lerpHex(idleColor, hotColor, heat) : idleColor;
+    out += `${ansi.bold()}${ansi.fg(color)}${ch}${ansi.reset()}`;
+    i += 1;
   }
   return out;
 }
@@ -615,7 +639,11 @@ function paintStripeLabel(text, frame, hover, idleColor, hotColor) {
   return pulseText(text, frame, hotColor, idleColor);
 }
 
-function buildSidebar(state, width, height) {
+function profileNameRow(height) {
+  return Math.max(2, (height || 1) - PROFILE_NAME_OFFSET);
+}
+
+function buildSidebar(state, width, height, nameY = null) {
   const lines = [];
   const hits = [];
   if (width <= 0 || height <= 0) return { lines, hits };
@@ -624,10 +652,12 @@ function buildSidebar(state, width, height) {
   const boxW = width;
   const progress = profileProgress(state);
   const eased = 1 - (1 - progress) * (1 - progress);
-  const logoutH = Math.round(3 * eased);
-  const reserved = 3 + logoutH;
+  const extra = Math.round(PROFILE_LIFT * eased);
+  const profileNameY = Math.max(2, Math.min(height - 1, nameY == null ? profileNameRow(height) : nameY));
+  const barY = Math.max(1, profileNameY - 2 - extra);
+  const logoutY = extra >= 2 ? barY + 2 : -1;
   let y = 1;
-  for (let i = 0; i < list.length && y + 2 < height - reserved; i += 1) {
+  for (let i = 0; i < list.length && y + 2 < barY; i += 1) {
     const group = list[i];
     const active = String(group.id) === String(state.activeGroupId);
     const color = active ? PALETTE.title : PALETTE.muted;
@@ -645,40 +675,29 @@ function buildSidebar(state, width, height) {
     hits.push({ type: 'group', id: group.id, x: 0, y, w: width, h: 3 });
     y += 3;
   }
-  while (lines.length < height - reserved) lines.push(fillRow('', width, {}));
-
-  if (logoutH > 0) {
-    const logoutY = height - reserved;
-    const color = PALETTE.error;
-    const label = padCells(' Log out', Math.max(1, boxW - 2));
-    const body = paintStripeLabel(label, state.animFrame || 0, !!state.hoverLogout, PALETTE.error, '#ff7b72');
-    if (logoutH >= 1) lines.push(fillRow(`╭${'─'.repeat(Math.max(0, boxW - 2))}╮`, width, { fg: color }));
-    if (logoutH >= 2) {
-      lines.push(
-        `${ansi.fg(color)}│${ansi.reset()}${body}${ansi.fg(color)}│${ansi.reset()}`
-      );
-    }
-    if (logoutH >= 3) lines.push(fillRow(`╰${'─'.repeat(Math.max(0, boxW - 2))}╯`, width, { fg: color }));
-    while (lines.length < logoutY + logoutH) lines.push(fillRow('', width, {}));
-    if (logoutH >= 2) {
-      hits.push({ type: 'logout', x: 0, y: logoutY, w: width, h: logoutH });
-    }
-  }
+  while (lines.length < height) lines.push(fillRow('', width, {}));
 
   const userColor = state.iconColor && /^#?[0-9a-fA-F]{6}$/.test(state.iconColor)
     ? (String(state.iconColor).startsWith('#') ? state.iconColor : `#${state.iconColor}`)
     : hashNameColor(state.username || '?');
   const uname = String(state.username || 'you');
-  lines.push(fillRow(`╭${'─'.repeat(Math.max(0, boxW - 2))}╮`, width, { fg: userColor }));
-  lines.push(
-    `${ansi.fg(userColor)}│${ansi.reset()}`
-    + `${ansi.fg(userColor)}${ansi.bold()}${padCells(uname, boxW - 2)}${ansi.reset()}`
-    + `${ansi.fg(userColor)}│${ansi.reset()}`
-  );
-  lines.push(fillRow(`╰${'─'.repeat(Math.max(0, boxW - 2))}╯`, width, { fg: userColor }));
-  hits.push({ type: 'profile', x: 0, y: height - 3, w: width, h: 3 });
+  lines[barY] = fillRow('─'.repeat(Math.max(0, width)), width, { fg: PALETTE.rule });
+  hits.push({ type: 'profile', x: 0, y: barY, w: width, h: 1 });
+  if (logoutY >= 0 && logoutY < height) {
+    const label = padCells(' Log out', width);
+    lines[logoutY] = paintStripeLabel(label, state.animFrame || 0, !!state.hoverLogout, PALETTE.error, '#ff7b72');
+    hits.push({ type: 'logout', x: 0, y: logoutY, w: width, h: 1 });
+  }
+  for (let py = barY + 1; py < profileNameY; py += 1) {
+    if (py === logoutY) continue;
+    hits.push({ type: 'profile', x: 0, y: py, w: width, h: 1 });
+  }
+  if (profileNameY >= 0 && profileNameY < height) {
+    lines[profileNameY] = fillRow(` ${uname}`, width, { fg: userColor, bold: true });
+    hits.push({ type: 'profile', x: 0, y: profileNameY, w: width, h: 1 });
+  }
 
-  hits.unshift({ type: 'sidebar-empty', x: 0, y: 0, w: width, h: Math.max(0, height - reserved) });
+  hits.unshift({ type: 'sidebar-empty', x: 0, y: 0, w: width, h: Math.max(0, barY) });
   return { lines, hits };
 }
 
@@ -908,22 +927,27 @@ function buildBirdLines(width, height, frame, animate = true) {
   tier.art.forEach((artLine, row) => {
     const y = top + row;
     if (y < 0 || y >= height) return;
-    const styled = landing.styleArtLine(artLine, row, frame, animate ? tier.shimmer : false);
+    const styled = landing.styleArtLine(artLine, row, frame, animate ? landing.BIRD_SHIMMER : false);
     lines[y] = `${' '.repeat(left)}${styled}${' '.repeat(Math.max(0, width - left - ansi.width(artLine)))}`;
   });
   return lines;
 }
 
-function scrollbarGlyphs(trackH, total, view, offset) {
-  const cells = Array.from({ length: Math.max(0, trackH) }, () => '│');
-  if (trackH <= 0) return cells;
-  if (total <= view) return cells;
+function scrollbarThumb(trackH, total, view, offset) {
+  if (trackH <= 0 || total <= view) return null;
   const thumbH = Math.max(1, Math.round((trackH * view) / total));
   const maxOff = Math.max(1, total - view);
   const travel = Math.max(0, trackH - thumbH);
   const fromTop = Math.round(((maxOff - offset) / maxOff) * travel);
-  for (let i = 0; i < thumbH; i += 1) {
-    const idx = fromTop + i;
+  return { fromTop, thumbH };
+}
+
+function scrollbarGlyphs(trackH, total, view, offset) {
+  const cells = Array.from({ length: Math.max(0, trackH) }, () => '│');
+  const thumb = scrollbarThumb(trackH, total, view, offset);
+  if (!thumb) return cells;
+  for (let i = 0; i < thumb.thumbH; i += 1) {
+    const idx = thumb.fromTop + i;
     if (idx >= 0 && idx < trackH) cells[idx] = '█';
   }
   return cells;
@@ -1001,9 +1025,9 @@ function buildComposerHint(state, width) {
   let right = '';
   let rightActions = [];
   if (state.overlay && state.overlay.type === 'delete') {
-    const label = pulseText('confirm deletion?', state.animFrame, PALETTE.error, '#7a2d2d');
-    const key = `${ansi.fg(PALETTE.error)}enter${ansi.reset()}`;
-    right = `${label}   ${key}`;
+    const label = pulseText('confirm deletion? (enter)', state.animFrame, PALETTE.error, '#7a2d2d');
+    rightActions = [ACTIONS.clear];
+    right = `${label}   ${styleHint(rightActions)}`;
   } else if (state.channelMenu) {
     rightActions = channelHintActions(state.channelMenu);
     right = styleHint(rightActions);
@@ -1059,6 +1083,12 @@ function composerMetrics(state, boxWidth) {
   } else {
     caretCol = 0;
   }
+  let caretAt = 0;
+  if (!usingPlaceholder) {
+    const lineStart = wrapped[caretLine]?.start || 0;
+    const at = Math.max(0, Math.min(state.composerCaret || 0, raw.length));
+    caretAt = Math.max(0, at - lineStart);
+  }
   let lineScroll = state.composerScroll || 0;
   if (caretLine < lineScroll) lineScroll = caretLine;
   if (caretLine >= lineScroll + innerH) lineScroll = caretLine - innerH + 1;
@@ -1072,6 +1102,7 @@ function composerMetrics(state, boxWidth) {
     overflow,
     caretLine,
     caretCol,
+    caretAt,
     lineScroll,
     usingPlaceholder,
     placeholder,
@@ -1090,14 +1121,14 @@ function buildComposerBox(state, width, metrics) {
     const placeholderOnly = metrics.usingPlaceholder && absLine === 0;
     let caretCell = -1;
     if (placeholderOnly) caretCell = 0;
-    else if (!metrics.usingPlaceholder && absLine === metrics.caretLine) caretCell = metrics.caretCol;
+    else if (!metrics.usingPlaceholder && absLine === metrics.caretLine) caretCell = metrics.caretAt;
     const onLine = caretCell >= 0;
     const painted = landing.buildField({
       text: placeholderOnly ? '' : (entry.text || ''),
       placeholder: placeholderOnly ? metrics.placeholder : ' ',
       active: onLine,
       width: metrics.textW,
-      caret: onLine ? (placeholderOnly ? 0 : metrics.caretCol) : 0,
+      caret: onLine ? (placeholderOnly ? 0 : metrics.caretAt) : 0,
       bar: 0,
     });
     const thumb = metrics.overflow
@@ -1140,7 +1171,7 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
   const metrics = hideComp
     ? {
       innerW: 1, textW: 1, wrapped: [], total: 0, innerH: 0, overflow: false,
-      caretLine: 0, caretCol: 0, lineScroll: 0, usingPlaceholder: true,
+      caretLine: 0, caretCol: 0, caretAt: 0, lineScroll: 0, usingPlaceholder: true,
       placeholder: '', chrome: 0,
     }
     : composerMetrics(state, boxW);
@@ -1164,7 +1195,8 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
   const lines = Array.from({ length: height }, () => ' '.repeat(width));
   const recipients = groupRecipientCount(state);
 
-  const side = buildSidebar(state, sideW, height);
+  const profileNameY = profileNameRow(height);
+  const side = buildSidebar(state, sideW, height, profileNameY);
   const channels = hideBar ? { lines: [], hits: [] } : buildChannelBar(state, contentW, mainX, 0);
   hits.push(...side.hits, ...channels.hits);
 
@@ -1212,6 +1244,7 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
     )
     : null;
   const bar = scrollbarGlyphs(transcriptH, bird ? 0 : totalLines, transcriptH, offset);
+  const thumb = scrollbarThumb(transcriptH, bird ? 0 : totalLines, transcriptH, offset);
   const protectedRows = new Set();
   const confirmHits = [];
 
@@ -1297,7 +1330,7 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
         ? tickStrip(entry.item, recipients)
         : ''.padEnd(TICK_GUTTER, ' '),
       item: entry.item,
-      replyHot: hover && entry.rowInBlock === entry.layout.replyRow,
+      replyHot: !!(state.hoverReply && hover && entry.rowInBlock === entry.layout.replyRow),
     });
     let inner;
     if (color) inner = boxRow(painted, boxW, color);
@@ -1319,13 +1352,14 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
     });
 
     if (entry.rowInBlock === entry.layout.replyRow && entry.item.replyTo?.id) {
+      const replyW = Math.max(1, Math.min(textW, ansi.width(replyPreviewText(entry.item) || '↩')));
       hits.push({
         type: 'reply-ref',
         id: entry.item.replyTo.id,
         parentId: entry.item.msg.id,
         x: mainX + PAD + 1,
         y: screenY,
-        w: textW,
+        w: replyW,
         h: 1,
       });
     }
@@ -1376,7 +1410,7 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
     const padY = composerY + 1 + boxLines.length;
     if (padY < height) lines[padY] = withBar(padY, fillRow('', contentW, {}));
 
-    if (hint.rightActions.length && !(state.overlay && state.overlay.type === 'delete')) {
+    if (hint.rightActions.length) {
       const hintId = state.selectedMessageId || state.channelMenu || null;
       for (const hit of hintHits(hint.rightActions, mainX, composerY, contentW)) {
         hits.push({ ...hit, id: hintId });
@@ -1429,6 +1463,9 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
     scrollOffset: offset,
     messageBounds: bounds,
     selectedBounds,
+    scrollbarThumb: thumb
+      ? { x: barX, y: transcriptY + thumb.fromTop, w: SCROLLBAR_W, h: thumb.thumbH }
+      : null,
     composerMetrics: metrics,
     shouldLoadMore: !!(
       (state.hasMoreHistory || state.loadingMore)
@@ -1479,7 +1516,11 @@ module.exports = {
   SCROLLBAR_W,
   WHEEL_LINES,
   TRANSITION_MS,
+  GLIMMER,
+  PROFILE_NAME_OFFSET,
+  PROFILE_LIFT,
   DEFAULT_CHAT,
+  profileNameRow,
   sidebarWidth,
   sidebarTitle,
   formatTime,
@@ -1493,6 +1534,7 @@ module.exports = {
   layoutMessage,
   hitTest,
   filterMessages,
+  scrollbarThumb,
   scrollOffsetFromY,
   scrollOffsetFromDrag,
   hideChannelBar,

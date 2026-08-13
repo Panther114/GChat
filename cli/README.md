@@ -34,7 +34,7 @@ In the TUI:
 
 - Hover outlines a message; click to select (click again to deselect). Then `r` reply, `e` edit, `d` delete, Esc clear, `p` preview
 - Esc with nothing selected leaves the chat for the idle bird
-- The sidebar profile chip opens a Log out control that clears the session
+- The sidebar profile name sits on the composer input row; click it to raise a Log out control that clears the session
 - Click a selected channel again to delete (`d`); drag chips to reorder (`#main` stays first)
 - Icons (`↩` `✎` `×`) sit packed to the right of the content; ticks sit on the far right
 - Up / down moves to the previous / next message while one is selected

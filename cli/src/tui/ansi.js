@@ -306,6 +306,42 @@ function width(str) {
   return total;
 }
 
+/** Convert a UTF-16 string index to a code-point index. */
+function codePointIndex(str, utf16Index) {
+  const raw = String(str || '');
+  const at = Math.max(0, Math.min(utf16Index, raw.length));
+  let n = 0;
+  let i = 0;
+  for (const ch of raw) {
+    if (i >= at) break;
+    i += ch.length;
+    n += 1;
+  }
+  return n;
+}
+
+/** Move a UTF-16 index by one code point. Never lands inside a surrogate pair. */
+function stepCodePoint(str, utf16Index, dir) {
+  const raw = String(str || '');
+  let i = Math.max(0, Math.min(utf16Index, raw.length));
+  if (dir < 0) {
+    if (i <= 0) return 0;
+    const prev = raw.charCodeAt(i - 1);
+    if (prev >= 0xdc00 && prev <= 0xdfff && i >= 2) {
+      const hi = raw.charCodeAt(i - 2);
+      if (hi >= 0xd800 && hi <= 0xdbff) return i - 2;
+    }
+    return i - 1;
+  }
+  if (i >= raw.length) return raw.length;
+  const cur = raw.charCodeAt(i);
+  if (cur >= 0xd800 && cur <= 0xdbff && i + 1 < raw.length) {
+    const lo = raw.charCodeAt(i + 1);
+    if (lo >= 0xdc00 && lo <= 0xdfff) return i + 2;
+  }
+  return i + 1;
+}
+
 /** Pad a string with spaces so its visible width reaches `cols` (min 1 space gap if non-empty and short). */
 function padEnd(str, cols, gap = 1) {
   const current = width(str);
@@ -372,6 +408,8 @@ module.exports = {
   charWidth,
   stripAnsi,
   width,
+  codePointIndex,
+  stepCodePoint,
   padEnd,
   truncate,
 };

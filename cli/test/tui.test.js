@@ -172,8 +172,21 @@ test('landing frame: animation changes styling only, never the glyphs', () => {
 test('landing frame: isHot sweeps a diagonal band', () => {
   assert.equal(landing.isHot(0, 0, 0), true);
   assert.equal(landing.isHot(0, landing.BAND_WIDTH, 0), false);
-  // Moving +1 frame shifts the band along the diagonal.
-  assert.equal(landing.isHot(1, 0, 1), landing.isHot(0, 0, 0));
+  // Moving +1 frame shifts the band along the diagonal by BAND_SPEED.
+  assert.equal(landing.isHot(0, landing.BAND_SPEED, 1), landing.isHot(0, 0, 0));
+});
+
+test('shimmerHeat fades the band edges instead of a hard cut', () => {
+  const stripe = chatLayout.GLIMMER;
+  assert.equal(landing.shimmerHeat(0, 4, 0, stripe), 0, 'outside the band is idle');
+  const edge = landing.shimmerHeat(0, 0.2, 0, stripe);
+  const mid = landing.shimmerHeat(0, 2, 0, stripe);
+  const far = landing.shimmerHeat(0, 3.7, 0, stripe);
+  assert.ok(mid > edge, 'center is hotter than the leading edge');
+  assert.ok(mid > far, 'center is hotter than the trailing edge');
+  assert.ok(edge > 0 && edge < 1, 'leading edge is a partial fade');
+  assert.ok(far > 0 && far < 1, 'trailing edge is a partial fade');
+  assert.ok(mid > 0.9, 'the plateau stays near full heat');
 });
 
 test('composeFrame: eraseLine precedes content on every line (never after)', () => {
@@ -607,6 +620,15 @@ test('charWidth: variation selectors are zero-width', () => {
   assert.equal(ansi.width(`✎${chatLayout.TEXT}`), 1);
 });
 
+test('codePointIndex and stepCodePoint do not split emoji', () => {
+  const text = 'hi👍!';
+  assert.equal(ansi.codePointIndex(text, 0), 0);
+  assert.equal(ansi.codePointIndex(text, 2), 2);
+  assert.equal(ansi.codePointIndex(text, 4), 3);
+  assert.equal(ansi.stepCodePoint(text, 2, 1), 4);
+  assert.equal(ansi.stepCodePoint(text, 4, -1), 2);
+});
+
 test('chat frame: sidebar, channels, composer, and messages', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState());
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
@@ -696,7 +718,7 @@ test('formatBytes and formatTime are bounded and readable', () => {
   assert.match(chatLayout.formatTime('2026-08-13T10:03:00.000Z'), /^\d{2}:\d{2}$/);
 });
 
-test('chat reply preview is visible on the message', () => {
+test('chat reply preview keeps the ↩ symbol and the original sender', () => {
   const state = chatState({
     messages: [
       chatState().messages[0],
@@ -706,11 +728,32 @@ test('chat reply preview is visible on the message', () => {
       },
     ],
   });
-  const plain = chatLayout.buildChatFrame(80, 24, state).lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('ada: ship it tonight'));
-  assert.ok(!plain.includes('↩  ada'));
   const frame = chatLayout.buildChatFrame(80, 24, state);
-  assert.ok(frame.hits.some((h) => h.type === 'reply-ref' && String(h.id) === 'm1'));
+  const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.ok(plain.includes('↩  ada: ship it tonight'));
+  const ref = frame.hits.find((h) => h.type === 'reply-ref' && String(h.id) === 'm1');
+  assert.ok(ref);
+  assert.ok(ref.w < 30, 'reply hit is the text, not the whole message row');
+});
+
+test('reply preview only undims when the reply text itself is hovered', () => {
+  const base = chatState({
+    messages: [
+      chatState().messages[0],
+      {
+        ...chatState().messages[1],
+        replyTo: { id: 'm1', name: 'ada', preview: 'ship it tonight', color: '#79c0ff' },
+      },
+    ],
+    hoverMessageId: 'm2',
+  });
+  const overMsg = chatLayout.buildChatFrame(80, 24, { ...base, hoverReply: false });
+  const overReply = chatLayout.buildChatFrame(80, 24, { ...base, hoverReply: true });
+  assert.notEqual(overMsg.lines.join(''), overReply.lines.join(''), 'hovering the quote restyles it');
+  const ref = overReply.hits.find((h) => h.type === 'reply-ref');
+  const body = overReply.hits.find((h) => h.type === 'message' && String(h.id) === 'm2');
+  assert.ok(ref && body);
+  assert.ok(ref.w < body.w, 'quote hit is narrower than the message row');
 });
 
 test('sending messages are grayed and labeled', () => {
@@ -748,11 +791,12 @@ test('delete confirm flashes a red hint and paints the message red', () => {
     animFrame: 0,
   }));
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('confirm deletion?'));
+  assert.ok(plain.includes('confirm deletion? (enter)'));
   assert.ok(plain.includes('on it'));
-  assert.ok(plain.includes('enter'));
+  assert.ok(plain.includes('clear (esc)'));
   assert.ok(frame.lines.join('').includes(ansi.bg(chatLayout.PALETTE.deleteBg)), 'target message uses a red fill');
   assert.ok(!frame.hits.some((h) => h.type === 'confirm-delete'));
+  assert.ok(frame.hits.some((h) => h.type === 'action' && h.action === 'clear'));
 });
 
 test('channel chips are three lines tall and include +', () => {
@@ -1158,6 +1202,15 @@ test('idle bird is uniformly dim; loading bird uses a hot stripe', () => {
   assert.ok(loading.includes(ansi.bold()), 'loading bird has a bright stripe');
 });
 
+test('chat and landing birds share one shimmer', () => {
+  for (const tier of landing.LOGO_TIERS) {
+    assert.equal(tier.shimmer, landing.BIRD_SHIMMER);
+  }
+  assert.equal(landing.BIRD_SHIMMER.speed, 1.2);
+  assert.equal(landing.BIRD_SHIMMER.width, 18);
+  assert.equal(landing.BIRD_SHIMMER.period, 64);
+});
+
 test('older history is advertised with a flashing Loading more row', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState({
     hasMoreHistory: true,
@@ -1210,7 +1263,7 @@ test('delete confirm is enter/esc only and ignores other keys', () => {
   assert.equal(chat.state.overlay, null);
 });
 
-test('clicking the scrollbar starts a drag and does not jump the offset', () => {
+test('clicking the scrollbar thumb starts a drag; clicking the track jumps', () => {
   const many = Array.from({ length: 18 }, (_, i) => ({
     msg: {
       id: `s${i}`,
@@ -1226,15 +1279,30 @@ test('clicking the scrollbar starts a drag and does not jump the offset', () => 
   const frame = chat.draw();
   assert.ok(frame.maxScroll > 0, 'transcript can scroll');
   const bar = frame.regions.scrollbar;
+  const thumb = frame.scrollbarThumb;
+  assert.ok(thumb, 'a thumb is painted when the transcript overflows');
   const before = chat.state.scrollOffset;
   chat.handleMouse({
-    kind: 'press', button: 0, x: bar.x + 1, y: bar.y + 3, press: true, motion: false, wheel: 0,
+    kind: 'press', button: 0, x: thumb.x + 1, y: thumb.y + 1, press: true, motion: false, wheel: 0,
   });
-  assert.equal(chat.state.scrollOffset, before, 'pressing the bar does not teleport the thumb');
+  assert.equal(chat.state.scrollOffset, before, 'pressing the thumb does not teleport it');
   chat.handleMouse({
-    kind: 'move', button: 0, x: bar.x + 1, y: bar.y + 8, press: true, motion: true, wheel: 0,
+    kind: 'move', button: 0, x: thumb.x + 1, y: thumb.y + 6, press: true, motion: true, wheel: 0,
   });
-  assert.notEqual(chat.state.scrollOffset, before, 'dragging the bar moves the offset');
+  assert.notEqual(chat.state.scrollOffset, before, 'dragging the thumb moves the offset');
+
+  const jumped = makeController({ messages: many, scrollOffset: 4 });
+  const jumpFrame = jumped.draw();
+  const jumpThumb = jumpFrame.scrollbarThumb;
+  const trackY = jumpThumb.y > jumpFrame.regions.scrollbar.y
+    ? jumpFrame.regions.scrollbar.y + 1
+    : jumpThumb.y + jumpThumb.h + 1;
+  assert.ok(trackY >= bar.y && trackY < bar.y + bar.h);
+  assert.ok(trackY < jumpThumb.y || trackY >= jumpThumb.y + jumpThumb.h, 'click is on the track');
+  jumped.handleMouse({
+    kind: 'press', button: 0, x: bar.x + 1, y: trackY + 1, press: true, motion: false, wheel: 0,
+  });
+  assert.notEqual(jumped.state.scrollOffset, 4, 'clicking the track jumps the viewport');
 });
 
 test('preview hint has no icon glyph', () => {
@@ -1254,22 +1322,82 @@ test('reply/edit/delete hide on other messages while composing those actions', (
   assert.ok(busy.hits.some((h) => h.type === 'action' && h.action === 'preview' && String(h.id) === 'm3'));
 });
 
-test('sidebar shows a profile chip', () => {
+test('sidebar profile name stays pinned with a thin rule and padded logout', () => {
+  const pinnedY = chatLayout.profileNameRow(24);
+  const idle = chatLayout.buildChatFrame(80, 24, chatState({
+    activeGroupId: null,
+    username: 'will',
+    iconColor: '#79c0ff',
+  }));
   const frame = chatLayout.buildChatFrame(80, 24, chatState({ username: 'will', iconColor: '#79c0ff' }));
-  const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('will'));
-  assert.ok(frame.hits.some((h) => h.type === 'profile'));
+  const idleName = idle.hits.filter((h) => h.type === 'profile').at(-1);
+  const nameHit = frame.hits.filter((h) => h.type === 'profile').at(-1);
+  assert.ok(nameHit && idleName);
+  assert.equal(nameHit.y, pinnedY, 'name sits on the default input row');
+  assert.equal(idleName.y, pinnedY, 'idle bird does not drop the name to the bottom');
+  const sideW = frame.regions.sidebar.w;
+  const nameRow = ansi.stripAnsi(frame.lines[nameHit.y]).slice(0, sideW);
+  assert.ok(nameRow.includes('will'));
+  assert.ok(!nameRow.includes('╭') && !nameRow.includes('╰'), 'profile is not a rounded group chip');
+  const padRow = ansi.stripAnsi(frame.lines[nameHit.y - 1]).slice(0, sideW).trim();
+  assert.equal(padRow, '', 'one blank line sits between the rule and the name');
+  const ruleRow = frame.lines[nameHit.y - 2];
+  assert.ok(ansi.stripAnsi(ruleRow).slice(0, sideW).includes('─'), 'rule is a thin separator');
+  assert.ok(!ruleRow.includes(ansi.bg(chatLayout.PALETTE.rule)), 'rule is not a solid fill');
+
   const open = chatLayout.buildChatFrame(80, 24, chatState({
     username: 'will',
     profileOpen: true,
     profileExpandFrame: chatLayout.PROFILE_FRAMES,
   }));
-  assert.ok(open.hits.some((h) => h.type === 'logout'));
+  const openName = open.hits.filter((h) => h.type === 'profile').at(-1);
+  const logout = open.hits.find((h) => h.type === 'logout');
+  const openRuleY = open.hits.filter((h) => h.type === 'profile').map((h) => h.y).sort((a, b) => a - b)[0];
+  assert.ok(logout);
+  assert.equal(openName.y, pinnedY, 'name stays pinned when Log out opens');
+  assert.equal(openRuleY, nameHit.y - 2 - chatLayout.PROFILE_LIFT, 'rule lifts three rows');
+  assert.equal(logout.y, openRuleY + 2, 'Log out sits under a pad below the rule');
+  assert.ok(logout.y < openName.y - 1, 'Log out has padding above the name');
   assert.ok(open.lines.map((l) => ansi.stripAnsi(l)).join('\n').includes('Log out'));
+  const logoutRow = ansi.stripAnsi(open.lines[logout.y]).slice(0, sideW);
+  assert.ok(logoutRow.startsWith(' '), 'Log out has horizontal padding');
+  assert.ok(!logoutRow.includes('╭'), 'Log out is not a rounded box');
 });
 
 test('offsetToShowMessage keeps the target in view', () => {
   const bounds = { start: 10, end: 13 };
   const off = chatLayout.offsetToShowMessage(bounds, 40, 20);
   assert.ok(off >= 0 && off <= 20);
+});
+
+test('buildField and the composer keep emoji intact', () => {
+  const field = landing.buildField({
+    text: 'hi👍',
+    placeholder: 'x',
+    active: true,
+    width: 12,
+    caret: 2,
+    bar: 0,
+  });
+  const plain = ansi.stripAnsi(field);
+  assert.ok(plain.includes('👍'), 'emoji is not split into surrogate replacements');
+  assert.ok(!plain.includes('\uFFFD'));
+
+  const frame = chatLayout.buildChatFrame(80, 24, chatState({
+    composer: 'ok 😀',
+    composerCaret: 'ok 😀'.length,
+    editingId: 'm2',
+  }));
+  const composed = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.ok(composed.includes('😀'));
+  assert.ok(!composed.includes('\uFFFD'));
+});
+
+test('beginEdit keeps emoji in the composer', () => {
+  const chat = makeController();
+  chat.state.messages[1].text = 'ok 👍';
+  chat.beginEdit(chat.state.messages[1]);
+  assert.equal(chat.state.composer, 'ok 👍');
+  const drawn = chat.draw().lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.ok(drawn.includes('👍'));
 });
