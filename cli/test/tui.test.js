@@ -707,7 +707,10 @@ test('chat reply preview is visible on the message', () => {
     ],
   });
   const plain = chatLayout.buildChatFrame(80, 24, state).lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('↩  ada: ship it tonight'));
+  assert.ok(plain.includes('ada: ship it tonight'));
+  assert.ok(!plain.includes('↩  ada'));
+  const frame = chatLayout.buildChatFrame(80, 24, state);
+  assert.ok(frame.hits.some((h) => h.type === 'reply-ref' && String(h.id) === 'm1'));
 });
 
 test('sending messages are grayed and labeled', () => {
@@ -1064,6 +1067,7 @@ function makeController(over = {}) {
       markRead: () => {},
       getSecret: () => null,
       emitTyping: () => {},
+      logout: async () => {},
     },
     paths: configPaths(dir),
     stdout: { write() {}, columns: 80, rows: 24 },
@@ -1231,4 +1235,41 @@ test('clicking the scrollbar starts a drag and does not jump the offset', () => 
     kind: 'move', button: 0, x: bar.x + 1, y: bar.y + 8, press: true, motion: true, wheel: 0,
   });
   assert.notEqual(chat.state.scrollOffset, before, 'dragging the bar moves the offset');
+});
+
+test('preview hint has no icon glyph', () => {
+  const frame = chatLayout.buildChatFrame(80, 24, chatState({ selectedMessageId: 'm3' }));
+  const hint = frame.lines.map((l) => ansi.stripAnsi(l)).find((l) => l.includes('preview'));
+  assert.ok(hint);
+  assert.ok(!hint.includes('▣'), 'preview hint is text only');
+});
+
+test('reply/edit/delete hide on other messages while composing those actions', () => {
+  const busy = chatLayout.buildChatFrame(80, 24, chatState({
+    selectedMessageId: 'm3',
+    replyTo: { id: 'm1', name: 'ada', preview: 'ship' },
+  }));
+  assert.ok(!busy.hits.some((h) => h.type === 'action' && h.action === 'reply'));
+  assert.ok(!busy.hits.some((h) => h.type === 'action' && h.action === 'delete'));
+  assert.ok(busy.hits.some((h) => h.type === 'action' && h.action === 'preview' && String(h.id) === 'm3'));
+});
+
+test('sidebar shows a profile chip', () => {
+  const frame = chatLayout.buildChatFrame(80, 24, chatState({ username: 'will', iconColor: '#79c0ff' }));
+  const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.ok(plain.includes('will'));
+  assert.ok(frame.hits.some((h) => h.type === 'profile'));
+  const open = chatLayout.buildChatFrame(80, 24, chatState({
+    username: 'will',
+    profileOpen: true,
+    profileExpandFrame: chatLayout.PROFILE_FRAMES,
+  }));
+  assert.ok(open.hits.some((h) => h.type === 'logout'));
+  assert.ok(open.lines.map((l) => ansi.stripAnsi(l)).join('\n').includes('Log out'));
+});
+
+test('offsetToShowMessage keeps the target in view', () => {
+  const bounds = { start: 10, end: 13 };
+  const off = chatLayout.offsetToShowMessage(bounds, 40, 20);
+  assert.ok(off >= 0 && off <= 20);
 });

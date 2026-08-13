@@ -65,7 +65,9 @@ const WHEEL_LINES = 1;
 const FIELD_CARET = '█';
 const TRANSITION_MS = 480;
 const CHANNEL_EXPAND_FRAMES = 8;
+const PROFILE_FRAMES = 6;
 const HISTORY_PAGE = 50;
+const SCROLL_TWEEN_MS = 220;
 
 const DEFAULT_CHAT = {
   groups: [],
@@ -88,6 +90,7 @@ const DEFAULT_CHAT = {
   error: null,
   userId: null,
   username: '',
+  iconColor: '',
   overlay: null,
   loading: false,
   loadingGroup: false,
@@ -103,6 +106,11 @@ const DEFAULT_CHAT = {
   composerBeforeEdit: null,
   hasMoreHistory: false,
   loadingMore: false,
+  profileOpen: false,
+  profileClosing: false,
+  profileExpandFrame: 0,
+  hoverLogout: false,
+  scrollTween: null,
   memberCount: 0,
   now: null,
 };
@@ -287,18 +295,26 @@ function isImage(item) {
   return item?.msg?.type === 'image';
 }
 
-function actionListFor(item, userId) {
-  const list = [ACTIONS.reply];
+function actionMode(state = {}) {
+  return {
+    busy: !!(state.replyTo || state.editingId || (state.overlay && state.overlay.type === 'delete')),
+  };
+}
+
+function actionListFor(item, userId, mode = {}) {
+  const busy = !!mode.busy;
+  const list = [];
+  if (!busy) list.push(ACTIONS.reply);
   if (isImage(item)) list.push(ACTIONS.preview);
-  if (isOwnMessage(item, userId)) {
+  if (!busy && isOwnMessage(item, userId)) {
     if (!isAttachment(item) && item.msg?.type !== 'whisper') list.push(ACTIONS.edit);
     list.push(ACTIONS.delete);
   }
   return list;
 }
 
-function hintActionsFor(item, userId) {
-  return [...actionListFor(item, userId), ACTIONS.clear];
+function hintActionsFor(item, userId, mode = {}) {
+  return [...actionListFor(item, userId, mode), ACTIONS.clear];
 }
 
 const ACTION_SLOTS = ['reply', 'preview', 'edit', 'delete'];
@@ -378,19 +394,12 @@ function styleWord(word, color) {
 }
 
 function styleHint(actions) {
-  return actions.map((action) => {
-    let word = styleWord(action.label, action.color);
-    if (action.id === 'preview') {
-      word += ` ${ansi.fg(PALETTE.keyP)}${ACTIONS.preview.glyph}${ansi.reset()}`;
-    }
-    return word;
-  }).join('   ');
+  return actions.map((action) => styleWord(action.label, action.color)).join('   ');
 }
 
 function hintHits(actions, originX, originY, rowWidth) {
   const parts = actions.map((action) => {
-    const extra = action.id === 'preview' ? ` ${ACTIONS.preview.glyph}` : '';
-    return { action, w: ansi.width(action.label + extra) };
+    return { action, w: ansi.width(action.label) };
   });
   const total = parts.reduce((sum, p) => sum + p.w, 0) + Math.max(0, parts.length - 1) * 3;
   let x = originX + Math.max(0, rowWidth - total - 1);
@@ -422,12 +431,28 @@ function metaLine(item) {
   return `${name}${edited}`;
 }
 
-function replyLine(item) {
-  const reply = item.replyTo;
-  if (!reply) return null;
+function replyPreviewText(item) {
+  const reply = item?.replyTo;
+  if (!reply) return '';
   const name = reply.name || 'message';
-  const preview = String(reply.preview || '').replace(/\s+/g, ' ').slice(0, 48);
-  return `↩  ${name}${preview ? `: ${preview}` : ''}`;
+  const preview = String(reply.preview || '').replace(/\s+/g, ' ');
+  return preview ? `${name}: ${preview}` : name;
+}
+
+function replyLine(item) {
+  return item?.replyTo ? replyPreviewText(item) : null;
+}
+
+function paintReplyPreview(item, width, { hot = false, bg = null } = {}) {
+  const reply = item?.replyTo || {};
+  const name = reply.name || 'message';
+  const color = reply.color || hashNameColor(name);
+  let label = replyPreviewText(item);
+  if (ansi.width(label) > width) {
+    label = `${ansi.stripAnsi(ansi.truncate(label, Math.max(1, width - 1)))}…`;
+  }
+  const style = `${hot ? '' : ansi.dim()}${ansi.italic()}${ansi.fg(color)}`;
+  return withBg(`${style}${padCells(label, width)}`, bg);
 }
 
 const NAME_COLORS = [
@@ -449,8 +474,8 @@ function nameColor(item) {
   return hashNameColor(item?.msg?.senderName || item?.msg?.senderId || '?');
 }
 
-function layoutMessage(item, width, userId) {
-  const actions = actionListFor(item, userId);
+function layoutMessage(item, width, userId, mode = {}) {
+  const actions = actionListFor(item, userId, mode);
   const rows = [];
   const reply = replyLine(item);
   let replyRow = -1;
@@ -491,7 +516,7 @@ function withBg(text, bg) {
 
 function paintMessageRow(plain, width, {
   raised, deleting, isMeta, isReply, isIconRow, showIcons, hoverAction, actions, sending,
-  animFrame, isImageRow, nameTint, stamp, ticks,
+  animFrame, isImageRow, nameTint, stamp, ticks, item, replyHot,
 }) {
   const bg = deleting ? PALETTE.deleteBg : (raised ? PALETTE.selectedBg : null);
   const bgOn = bg ? ansi.bg(bg) : '';
@@ -510,7 +535,7 @@ function paintMessageRow(plain, width, {
   }
 
   if (isReply) {
-    return withBg(`${ansi.fg(PALETTE.reply)}${padCells(plain, width)}`, bg);
+    return paintReplyPreview(item, width, { hot: !!replyHot, bg });
   }
 
   const gutterW = CONTENT_GUTTER;
@@ -578,6 +603,18 @@ function sidebarTitle() {
   return `GChat CLI v${landing.TUI_VERSION}`;
 }
 
+function profileProgress(state) {
+  const frames = Math.max(1, PROFILE_FRAMES);
+  const raw = Number(state?.profileExpandFrame);
+  const frame = Number.isFinite(raw) ? raw : 0;
+  return Math.min(1, Math.max(0, frame / frames));
+}
+
+function paintStripeLabel(text, frame, hover, idleColor, hotColor) {
+  if (!hover) return `${ansi.fg(idleColor)}${text}${ansi.reset()}`;
+  return pulseText(text, frame, hotColor, idleColor);
+}
+
 function buildSidebar(state, width, height) {
   const lines = [];
   const hits = [];
@@ -585,8 +622,12 @@ function buildSidebar(state, width, height) {
   lines.push(fillRow(`${' '.repeat(Math.min(1, PAD))}${sidebarTitle()}`, width, { fg: PALETTE.muted }));
   const list = state.groups || [];
   const boxW = width;
+  const progress = profileProgress(state);
+  const eased = 1 - (1 - progress) * (1 - progress);
+  const logoutH = Math.round(3 * eased);
+  const reserved = 3 + logoutH;
   let y = 1;
-  for (let i = 0; i < list.length && y + 2 < height; i += 1) {
+  for (let i = 0; i < list.length && y + 2 < height - reserved; i += 1) {
     const group = list[i];
     const active = String(group.id) === String(state.activeGroupId);
     const color = active ? PALETTE.title : PALETTE.muted;
@@ -604,8 +645,40 @@ function buildSidebar(state, width, height) {
     hits.push({ type: 'group', id: group.id, x: 0, y, w: width, h: 3 });
     y += 3;
   }
-  while (lines.length < height) lines.push(fillRow('', width, {}));
-  hits.unshift({ type: 'sidebar-empty', x: 0, y: 0, w: width, h: height });
+  while (lines.length < height - reserved) lines.push(fillRow('', width, {}));
+
+  if (logoutH > 0) {
+    const logoutY = height - reserved;
+    const color = PALETTE.error;
+    const label = padCells(' Log out', Math.max(1, boxW - 2));
+    const body = paintStripeLabel(label, state.animFrame || 0, !!state.hoverLogout, PALETTE.error, '#ff7b72');
+    if (logoutH >= 1) lines.push(fillRow(`╭${'─'.repeat(Math.max(0, boxW - 2))}╮`, width, { fg: color }));
+    if (logoutH >= 2) {
+      lines.push(
+        `${ansi.fg(color)}│${ansi.reset()}${body}${ansi.fg(color)}│${ansi.reset()}`
+      );
+    }
+    if (logoutH >= 3) lines.push(fillRow(`╰${'─'.repeat(Math.max(0, boxW - 2))}╯`, width, { fg: color }));
+    while (lines.length < logoutY + logoutH) lines.push(fillRow('', width, {}));
+    if (logoutH >= 2) {
+      hits.push({ type: 'logout', x: 0, y: logoutY, w: width, h: logoutH });
+    }
+  }
+
+  const userColor = state.iconColor && /^#?[0-9a-fA-F]{6}$/.test(state.iconColor)
+    ? (String(state.iconColor).startsWith('#') ? state.iconColor : `#${state.iconColor}`)
+    : hashNameColor(state.username || '?');
+  const uname = String(state.username || 'you');
+  lines.push(fillRow(`╭${'─'.repeat(Math.max(0, boxW - 2))}╮`, width, { fg: userColor }));
+  lines.push(
+    `${ansi.fg(userColor)}│${ansi.reset()}`
+    + `${ansi.fg(userColor)}${ansi.bold()}${padCells(uname, boxW - 2)}${ansi.reset()}`
+    + `${ansi.fg(userColor)}│${ansi.reset()}`
+  );
+  lines.push(fillRow(`╰${'─'.repeat(Math.max(0, boxW - 2))}╯`, width, { fg: userColor }));
+  hits.push({ type: 'profile', x: 0, y: height - 3, w: width, h: 3 });
+
+  hits.unshift({ type: 'sidebar-empty', x: 0, y: 0, w: width, h: Math.max(0, height - reserved) });
   return { lines, hits };
 }
 
@@ -907,6 +980,14 @@ function clampScrollForMessage(offset, bounds, total, viewH) {
   return Math.max(0, Math.min(maxOff, Math.max(min, Math.min(max, offset))));
 }
 
+function offsetToShowMessage(bounds, total, viewH) {
+  if (!bounds || viewH <= 0) return 0;
+  const maxOff = Math.max(0, total - viewH);
+  const mid = Math.floor((bounds.start + bounds.end) / 2);
+  const offset = total - mid - Math.floor(viewH / 2);
+  return Math.max(0, Math.min(maxOff, offset));
+}
+
 function buildComposerHint(state, width) {
   let left = '';
   if (state.error) left = `${ansi.fg(PALETTE.error)}${state.error}${ansi.reset()}`;
@@ -920,17 +1001,16 @@ function buildComposerHint(state, width) {
   let right = '';
   let rightActions = [];
   if (state.overlay && state.overlay.type === 'delete') {
-    const on = Math.floor((state.animFrame || 0) / 4) % 2 === 0;
-    const label = 'confirm deletion?';
-    const key = `${on ? ansi.bold() : ''}${ansi.fg(PALETTE.error)}enter${ansi.reset()}`;
-    right = `${on ? ansi.bold() : ''}${ansi.fg(PALETTE.error)}${label}${ansi.reset()}   ${key}`;
+    const label = pulseText('confirm deletion?', state.animFrame, PALETTE.error, '#7a2d2d');
+    const key = `${ansi.fg(PALETTE.error)}enter${ansi.reset()}`;
+    right = `${label}   ${key}`;
   } else if (state.channelMenu) {
     rightActions = channelHintActions(state.channelMenu);
     right = styleHint(rightActions);
   } else if (state.selectedMessageId) {
     const item = (state.messages || []).find((m) => String(m.msg?.id) === String(state.selectedMessageId));
     if (item) {
-      rightActions = hintActionsFor(item, state.userId);
+      rightActions = hintActionsFor(item, state.userId, actionMode(state));
       right = styleHint(rightActions);
     }
   }
@@ -1089,9 +1169,10 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
   hits.push(...side.hits, ...channels.hits);
 
   const filtered = filterMessages(state.messages, state.activeChannel);
+  const mode = actionMode(state);
   const blocks = filtered.map((item) => ({
     item,
-    layout: layoutMessage(item, textW, state.userId),
+    layout: layoutMessage(item, textW, state.userId, mode),
   }));
 
   const flat = [];
@@ -1215,16 +1296,13 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
       ticks: entry.rowInBlock === entry.layout.iconRow
         ? tickStrip(entry.item, recipients)
         : ''.padEnd(TICK_GUTTER, ' '),
+      item: entry.item,
+      replyHot: hover && entry.rowInBlock === entry.layout.replyRow,
     });
     let inner;
     if (color) inner = boxRow(painted, boxW, color);
-    else if (deleting) {
-      const fill = ansi.bg(PALETTE.deleteBg);
-      inner = `${fill} ${painted}${fill} ${ansi.reset()}`;
-    } else if (selected) {
-      const fill = ansi.bg(PALETTE.selectedBg);
-      inner = `${fill} ${painted}${fill} ${ansi.reset()}`;
-    } else inner = ` ${painted} `;
+    else if (deleting || selected) inner = ` ${painted} `;
+    else inner = ` ${painted} `;
     lines[screenY] = join(left, `${' '.repeat(PAD)}${inner}`, bar[i]);
 
     if (selected || (state.overlay && state.overlay.type === 'delete' && String(state.overlay.messageId) === id)) {
@@ -1239,6 +1317,18 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
       w: contentW,
       h: 1,
     });
+
+    if (entry.rowInBlock === entry.layout.replyRow && entry.item.replyTo?.id) {
+      hits.push({
+        type: 'reply-ref',
+        id: entry.item.replyTo.id,
+        parentId: entry.item.msg.id,
+        x: mainX + PAD + 1,
+        y: screenY,
+        w: textW,
+        h: 1,
+      });
+    }
 
     if (showIcons && entry.rowInBlock === entry.layout.iconRow) {
       for (const hit of iconHits(entry.layout.actions, mainX + PAD + 1, screenY, textW)) {
@@ -1312,6 +1402,13 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
   }
   hits.push(...confirmHits);
 
+  if (state.overlay && state.overlay.type === 'delete') {
+    if (!hideComp) protectedRows.add(composerY);
+    for (let y = 0; y < height; y += 1) {
+      if (!protectedRows.has(y)) lines[y] = dimLine(lines[y]);
+    }
+  }
+
   if (state.overlay && state.overlay.type === 'error') {
     const overlayHits = paintErrorToast(lines, width, height, state.overlay);
     hits.push(...overlayHits);
@@ -1370,7 +1467,9 @@ module.exports = {
   SIDEBAR_MAX,
   CHANNEL_ROWS,
   CHANNEL_EXPAND_FRAMES,
+  PROFILE_FRAMES,
   HISTORY_PAGE,
+  SCROLL_TWEEN_MS,
   ACTION_SLOTS,
   ACTION_GUTTER,
   TICK_GUTTER,
@@ -1405,6 +1504,9 @@ module.exports = {
   CARET_LETTER,
   findMessageBounds,
   clampScrollForMessage,
+  offsetToShowMessage,
+  actionMode,
+  replyPreviewText,
   buildComposerHint,
   composerMetrics,
   buildBirdLines,

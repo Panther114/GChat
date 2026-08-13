@@ -285,6 +285,30 @@ async function runTui(options = {}) {
     }, FRAME_MS);
   }
 
+  function returnToLogin() {
+    if (chat) {
+      try { chat.stop(); } catch { /* ignore */ }
+      chat = null;
+    }
+    screen = 'landing';
+    ui.mode = 'login';
+    ui.modeFrame = TRANSITION_FRAMES;
+    ui.username = '';
+    ui.password = [];
+    ui.usernameCaret = 0;
+    ui.passwordCaret = 0;
+    ui.usernameScroll = 0;
+    ui.passwordScroll = 0;
+    ui.activeField = 'username';
+    ui.loggingIn = false;
+    ui.error = null;
+    stdout.write(ansi.clearScreen());
+    lastCols = null;
+    lastRows = null;
+    startLandingTimer();
+    draw();
+  }
+
   async function enterChat() {
     screen = 'chat';
     stopLandingTimer();
@@ -297,6 +321,7 @@ async function runTui(options = {}) {
       stdout,
       getSize: terminalSize,
       onQuit: () => exit(0),
+      onLogout: returnToLogin,
     });
     await chat.start();
     draw();

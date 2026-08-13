@@ -22,7 +22,12 @@ const {
   clampScrollForMessage,
   filterMessages,
   CHANNEL_EXPAND_FRAMES,
+  PROFILE_FRAMES,
   HISTORY_PAGE,
+  SCROLL_TWEEN_MS,
+  offsetToShowMessage,
+  nameColor,
+  hashNameColor,
   WHEEL_LINES,
 } = require('./chat-layout');
 const { looksLikeImagePath, readClipboardImage } = require('./clipboard-image');
@@ -51,7 +56,7 @@ function defaultChatState(over = {}) {
   return { ...DEFAULT_CHAT, ...over };
 }
 
-function createChatController({ client, paths, stdout, getSize, onDraw, onQuit } = {}) {
+function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, onLogout } = {}) {
   const state = defaultChatState({
     username: client?.user?.username || '',
     userId: client?.user?.id || null,
@@ -112,6 +117,10 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
     if (state.typing) return true;
     if (state.overlay && state.overlay.type === 'delete') return true;
     if (state.loadingMore) return true;
+    if (state.scrollTween) return true;
+    if (state.hoverLogout && (state.profileOpen || state.profileExpandFrame)) return true;
+    if (state.profileClosing && (state.profileExpandFrame || 0) > 0) return true;
+    if (state.profileOpen && (state.profileExpandFrame || 0) < PROFILE_FRAMES) return true;
     if (state.channelClosing && (state.channelExpandFrame || 0) > 0) return true;
     if (state.channelMenu && !state.channelClosing && (state.channelExpandFrame || 0) < CHANNEL_EXPAND_FRAMES) {
       return true;
@@ -128,6 +137,22 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
       }
       if (state.typing && state.typing.until && Date.now() >= state.typing.until) {
         state.typing = null;
+      }
+      if (state.scrollTween) {
+        const tween = state.scrollTween;
+        const t = Math.min(1, (Date.now() - tween.at) / Math.max(1, tween.ms));
+        const eased = 1 - (1 - t) * (1 - t);
+        state.scrollOffset = Math.round(tween.from + (tween.to - tween.from) * eased);
+        if (t >= 1) state.scrollTween = null;
+      }
+      if (state.profileClosing) {
+        if ((state.profileExpandFrame || 0) > 0) state.profileExpandFrame -= 1;
+        else {
+          state.profileOpen = false;
+          state.profileClosing = false;
+        }
+      } else if (state.profileOpen && (state.profileExpandFrame || 0) < PROFILE_FRAMES) {
+        state.profileExpandFrame = (state.profileExpandFrame || 0) + 1;
       }
       if (state.channelClosing) {
         if ((state.channelExpandFrame || 0) > 0) {
@@ -208,7 +233,6 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
     }
     state.loadingMore = true;
     startPulse();
-    const prevTotal = lastFrame ? lastFrame.totalLines : 0;
     const prevOffset = state.scrollOffset || 0;
     try {
       const page = await client.fetchMessages(state.activeGroupId, {
@@ -222,8 +246,12 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
       for (const item of incoming) upsertMessage(item);
       state.hasMoreHistory = (page || []).length >= HISTORY_PAGE;
       lastFrame = buildChatFrame(size().cols, size().rows, state);
-      const grown = Math.max(0, lastFrame.totalLines - prevTotal);
-      state.scrollOffset = prevOffset + grown;
+      state.scrollOffset = Math.max(0, Math.min(lastFrame.maxScroll, prevOffset));
+      if (state.pendingFocusId && findMessage(state.pendingFocusId)) {
+        const id = state.pendingFocusId;
+        state.pendingFocusId = null;
+        beginScrollToMessage(id);
+      }
     } catch (err) {
       state.hasMoreHistory = false;
       setError(err.message || String(err));
@@ -259,10 +287,12 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
     const name = original?.msg?.senderName || original?.msg?.senderId || null;
     const text = original?.text || preview || original?.attach?.filename || '';
     const [maybeName, ...rest] = String(preview || '').split(':');
+    const resolvedName = name || (preview && rest.length ? maybeName.trim() : 'message');
     return {
       id: replyId,
-      name: name || (preview && rest.length ? maybeName.trim() : 'message'),
+      name: resolvedName,
       preview: rest.length ? rest.join(':').trim() : text,
+      color: original ? nameColor(original) : hashNameColor(resolvedName),
     };
   }
 
@@ -359,7 +389,10 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
 
   function applyScroll(delta) {
     if (isFrozen()) return;
-    if (delta) allowAutoLoad = true;
+    if (delta) {
+      allowAutoLoad = true;
+      state.scrollTween = null;
+    }
     if (!lastFrame) lastFrame = buildChatFrame(size().cols, size().rows, state);
     let next = Math.max(0, Math.min(lastFrame.maxScroll, (state.scrollOffset || 0) + delta));
     if (state.overlay && state.overlay.type === 'delete' && lastFrame.messageBounds) {
@@ -404,6 +437,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
     running = true;
     state.username = client.user?.username || state.username;
     state.userId = client.user?.id || state.userId;
+    state.iconColor = client.user?.iconColor || state.iconColor;
     client.onEvent = (event, payload) => {
       handleEvent(event, payload).catch(() => {});
     };
@@ -411,6 +445,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
       const me = client.user || await client.me();
       state.username = me.username;
       state.userId = me.id;
+      state.iconColor = me.iconColor || me.senderColor || state.iconColor;
     } catch {
       /* session may already be warm */
     }
@@ -556,19 +591,22 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
 
   function applyHover(hit) {
     if (state.overlay && state.overlay.type === 'delete') return false;
-    const nextId = hit && (hit.type === 'message' || hit.type === 'action' || hit.type === 'card')
-      ? String(hit.id)
+    const nextId = hit && (hit.type === 'message' || hit.type === 'action' || hit.type === 'card' || hit.type === 'reply-ref')
+      ? String(hit.type === 'reply-ref' ? hit.parentId : hit.id)
       : null;
     const nextAction = hit && hit.type === 'action' ? hit.action : null;
     const nextChannel = hit && (hit.type === 'channel' || hit.type === 'create-channel')
       ? String(hit.name || '+')
       : null;
-    const key = `${nextId || ''}:${nextAction || ''}:${nextChannel || ''}`;
+    const nextLogout = !!(hit && hit.type === 'logout');
+    const key = `${nextId || ''}:${nextAction || ''}:${nextChannel || ''}:${nextLogout ? 'out' : ''}`;
     if (key === lastHoverKey) return false;
     lastHoverKey = key;
     state.hoverMessageId = nextId;
     state.hoverAction = nextAction;
     state.hoverChannel = nextChannel;
+    state.hoverLogout = nextLogout;
+    if (nextLogout) startPulse();
     return true;
   }
 
@@ -583,6 +621,49 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
     state.selectedMessageId = String(item.msg.id);
   }
 
+  function beginScrollToMessage(id) {
+    const item = findMessage(id);
+    if (!item) {
+      state.pendingFocusId = id;
+      allowAutoLoad = true;
+      if (state.hasMoreHistory && !state.loadingMore) {
+        loadOlderMessages().then(() => draw()).catch(() => draw());
+      }
+      return;
+    }
+    selectMessage(item);
+    lastFrame = buildChatFrame(size().cols, size().rows, state);
+    const bounds = lastFrame.selectedBounds;
+    if (!bounds) return;
+    const to = offsetToShowMessage(bounds, lastFrame.totalLines, lastFrame.regions.transcript.h);
+    const from = state.scrollOffset || 0;
+    if (from === to) return;
+    state.scrollTween = { from, to, at: Date.now(), ms: SCROLL_TWEEN_MS };
+    startPulse();
+  }
+
+  function toggleProfile() {
+    if (state.profileOpen && !state.profileClosing) {
+      state.profileClosing = true;
+      startPulse();
+      return;
+    }
+    state.profileOpen = true;
+    state.profileClosing = false;
+    state.profileExpandFrame = 0;
+    startPulse();
+  }
+
+  async function logout() {
+    try {
+      if (typeof client.logout === 'function') await client.logout();
+    } catch {
+      /* still clear locally */
+    }
+    if (typeof onLogout === 'function') onLogout();
+    else if (typeof onQuit === 'function') onQuit();
+  }
+
   function shortcutsArmed() {
     return !!(state.selectedMessageId && !state.composer && !state.editingId
       && !state.creatingChannel && !state.overlay && !state.channelMenu);
@@ -595,6 +676,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
       id: item.msg.id,
       name: item.msg.senderName || item.msg.senderId || 'reply',
       preview: (item.text || item.attach?.filename || '').slice(0, 40),
+      color: nameColor(item),
     };
   }
 
@@ -1004,6 +1086,18 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
       await loadGroup(null);
       return;
     }
+    if (hit.type === 'profile') {
+      toggleProfile();
+      return;
+    }
+    if (hit.type === 'logout') {
+      await logout();
+      return;
+    }
+    if (hit.type === 'reply-ref') {
+      beginScrollToMessage(hit.id);
+      return;
+    }
     if (hit.type === 'channel-action') {
       if (hit.action === 'delete' && hit.name !== 'main') await deleteChannel(hit.name);
       return;
@@ -1354,6 +1448,13 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
         draw();
         return;
       }
+      if (state.profileOpen || state.profileClosing) {
+        state.profileClosing = true;
+        state.profileOpen = true;
+        startPulse();
+        draw();
+        return;
+      }
       if (state.creatingChannel) {
         state.creatingChannel = false;
         state.channelDraft = '';
@@ -1533,6 +1634,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit }
     switchChannel,
     beginReply,
     beginEdit,
+    beginScrollToMessage,
     previewAttachment,
     findMessage,
   };
