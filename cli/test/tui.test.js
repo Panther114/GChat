@@ -1178,6 +1178,24 @@ test('composer uses the login block caret', () => {
   assert.ok(mid.lines.join('').includes('\u001b[48'), 'mid-text caret is a colored block');
 });
 
+test('composer grows to six lines and blank extra lines do not repeat the placeholder', () => {
+  assert.equal(chatLayout.COMPOSER_MAX_INNER, 6);
+  const metrics = chatLayout.composerMetrics(
+    chatState({ composer: '\n\n\n', composerCaret: 3 }),
+    40
+  );
+  assert.ok(metrics.innerH >= 4);
+  const frame = chatLayout.buildChatFrame(80, 24, chatState({
+    composer: '\n\n\n',
+    composerCaret: 3,
+  }));
+  const hits = frame.lines.map((l) => ansi.stripAnsi(l)).filter((l) => l.includes('message')).length;
+  assert.equal(hits, 0, 'placeholder is not painted on blank typed lines');
+  const empty = chatLayout.buildChatFrame(80, 24, chatState({ composer: '', composerCaret: 0 }));
+  const placeholders = empty.lines.map((l) => ansi.stripAnsi(l)).filter((l) => /\bmessage\b/.test(l));
+  assert.equal(placeholders.length, 1, 'empty composer shows the placeholder once');
+});
+
 test('delete confirm is enter/esc only and ignores other keys', () => {
   const chat = makeController({ selectedMessageId: 'm2' });
   chat.state.overlay = { type: 'delete', messageId: 'm2' };

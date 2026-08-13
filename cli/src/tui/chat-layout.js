@@ -59,7 +59,7 @@ const SIDEBAR_MAX = 26;
 const PAD = 2;
 const CHANNEL_ROWS = 3;
 const COMPOSER_MIN_INNER = 1;
-const COMPOSER_MAX_INNER = 4;
+const COMPOSER_MAX_INNER = 6;
 const SCROLLBAR_W = 1;
 const WHEEL_LINES = 1;
 const FIELD_CARET = '█';
@@ -393,7 +393,7 @@ function hintHits(actions, originX, originY, rowWidth) {
     return { action, w: ansi.width(action.label + extra) };
   });
   const total = parts.reduce((sum, p) => sum + p.w, 0) + Math.max(0, parts.length - 1) * 3;
-  let x = originX + Math.max(0, rowWidth - total);
+  let x = originX + Math.max(0, rowWidth - total - 1);
   const hits = [];
   for (const part of parts) {
     hits.push({ type: 'action', action: part.action.id, id: null, x, y: originY, w: part.w, h: 1 });
@@ -937,7 +937,7 @@ function buildComposerHint(state, width) {
 
   const leftW = ansi.width(left);
   const rightW = ansi.width(right);
-  const gap = Math.max(1, width - PAD - leftW - rightW);
+  const gap = Math.max(1, width - PAD - leftW - rightW - 1);
   const row = `${' '.repeat(PAD)}${left}${' '.repeat(gap)}${right}`;
   return { line: padCells(row, width), rightActions, rightStart: PAD + leftW + gap };
 }
@@ -1007,17 +1007,17 @@ function buildComposerBox(state, width, metrics) {
   while (shown.length < metrics.innerH) shown.push({ start: 0, text: '' });
   shown.forEach((entry, i) => {
     const absLine = metrics.lineScroll + i;
-    const text = metrics.usingPlaceholder ? metrics.placeholder : entry.text;
+    const placeholderOnly = metrics.usingPlaceholder && absLine === 0;
     let caretCell = -1;
-    if (metrics.usingPlaceholder && i === 0) caretCell = 0;
+    if (placeholderOnly) caretCell = 0;
     else if (!metrics.usingPlaceholder && absLine === metrics.caretLine) caretCell = metrics.caretCol;
     const onLine = caretCell >= 0;
     const painted = landing.buildField({
-      text: metrics.usingPlaceholder ? '' : text,
-      placeholder: metrics.placeholder,
+      text: placeholderOnly ? '' : (entry.text || ''),
+      placeholder: placeholderOnly ? metrics.placeholder : ' ',
       active: onLine,
       width: metrics.textW,
-      caret: onLine ? (metrics.usingPlaceholder ? 0 : metrics.caretCol) : 0,
+      caret: onLine ? (placeholderOnly ? 0 : metrics.caretCol) : 0,
       bar: 0,
     });
     const thumb = metrics.overflow
@@ -1055,7 +1055,7 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
   const barX = width - SCROLLBAR_W;
   const contentW = Math.max(1, mainW - SCROLLBAR_W);
   const boxW = Math.max(8, contentW - PAD);
-  const textW = Math.max(1, boxW - 1);
+  const textW = Math.max(1, boxW - 2);
   const hideComp = !showComposer(state);
   const metrics = hideComp
     ? {
@@ -1220,11 +1220,11 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
     if (color) inner = boxRow(painted, boxW, color);
     else if (deleting) {
       const fill = ansi.bg(PALETTE.deleteBg);
-      inner = `${fill} ${painted}${ansi.reset()}`;
+      inner = `${fill} ${painted}${fill} ${ansi.reset()}`;
     } else if (selected) {
       const fill = ansi.bg(PALETTE.selectedBg);
-      inner = `${fill} ${painted}${ansi.reset()}`;
-    } else inner = ` ${painted}`;
+      inner = `${fill} ${painted}${fill} ${ansi.reset()}`;
+    } else inner = ` ${painted} `;
     lines[screenY] = join(left, `${' '.repeat(PAD)}${inner}`, bar[i]);
 
     if (selected || (state.overlay && state.overlay.type === 'delete' && String(state.overlay.messageId) === id)) {
