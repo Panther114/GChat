@@ -32,10 +32,10 @@ gchat                                    # interactive TUI
 
 In the TUI:
 
-- Hover a message to highlight it; Unicode actions appear on the right (`↩` reply, `✎` edit, `×` delete)
-- Click an image/file card to reveal it (opens in the OS, with save in the overlay)
-- Type a message and press Enter to send to the active group/channel
-- Click a group or `#channel` to switch; `:open name` and `:channel design` still work
+- Hover a message for a gray outline and `(r)eply (e)dit (d)elete` (colored letters)
+- Click an image/file card to reveal it; paste an image (or a path) to auto-upload
+- Tab / Shift+Tab cycles channels; a sending message stays gray with `sending...`
+- Click empty sidebar space to deselect a group (pulsing bird)
 - `:q` or Ctrl+C to quit
 
 ## Config & data

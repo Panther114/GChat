@@ -61,6 +61,8 @@ class SocketClient {
       'user_updated',
       'typing',
       'stop_typing',
+      'user_typing',
+      'user_stop_typing',
       'presence_update',
       'channel_announce',
       'group_join_denied',

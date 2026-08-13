@@ -394,6 +394,7 @@ class GChatClient {
     text,
     channel,
     replyToId,
+    replyPreview,
     whisperTo,
     isDisappearing,
     disappearingDurationMs,
@@ -410,6 +411,7 @@ class GChatClient {
       type,
       channel: activeChannel,
       replyToId: replyToId || null,
+      replyPreview: replyPreview || null,
       isDisappearing: !!isDisappearing,
       disappearingDurationMs: isDisappearing
         ? (parseDurationToMs(disappearingDurationMs) || parseDurationToMs('5s') || 5000)

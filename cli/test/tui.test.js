@@ -610,7 +610,10 @@ test('charWidth: variation selectors are zero-width', () => {
 test('chat frame: sidebar, channels, composer, and messages', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState());
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.ok(plain.includes('GChat CLI v0.1'), 'sidebar title is the CLI version');
+  assert.ok(!plain.includes('chats\n') && !/^\s*chats\s*$/m.test(plain.split('\n')[0]), 'old "chats" label is gone');
   assert.ok(plain.includes('team'), 'active group in sidebar');
+  assert.ok(!plain.includes('●'), 'groups are not indented with a bullet');
   assert.ok(plain.includes('#main'), 'channel strip');
   assert.ok(plain.includes('#design'));
   assert.ok(plain.includes('ada'));
@@ -618,33 +621,37 @@ test('chat frame: sidebar, channels, composer, and messages', () => {
   assert.ok(plain.includes('on it'));
   assert.ok(plain.includes('photo.jpg'), 'attachment card filename');
   assert.ok(plain.includes('message'), 'composer placeholder');
+  assert.ok(!plain.includes('team  #main'), 'group/channel status line is gone');
   assert.ok(frame.regions.sidebar.w > 0);
   assert.ok(frame.hits.some((h) => h.type === 'group'));
+  assert.ok(frame.hits.some((h) => h.type === 'sidebar-empty'));
   assert.ok(frame.hits.some((h) => h.type === 'channel' && h.name === 'design'));
   assert.ok(frame.hits.some((h) => h.type === 'card' && h.id === 'm3'));
   assert.ok(frame.hits.some((h) => h.type === 'composer'));
+  assert.ok(frame.hits.some((h) => h.type === 'scrollbar'));
 });
 
-test('chat hover: paints every row of the message and reveals Unicode actions', () => {
+test('chat hover: gray fill, gap outline, and (r)eply (e)dit (d)elete', () => {
   const idle = chatLayout.buildChatFrame(80, 24, chatState());
   const idlePlain = idle.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(!idlePlain.includes('↩'), 'actions hidden until hover');
+  assert.ok(!idlePlain.includes('(r)eply'), 'action hint hidden until hover');
   assert.ok(!idle.lines.join('').includes(ansi.bg(chatLayout.PALETTE.hoverBg)), 'no hover bg when idle');
 
   const hovered = chatLayout.buildChatFrame(80, 24, chatState({ hoverMessageId: 'm2' }));
   const hoverPlain = hovered.lines.map((l) => ansi.stripAnsi(l));
-  const actionRow = hoverPlain.find((l) => l.includes('↩'));
-  assert.ok(actionRow, 'reply symbol on the right');
-  assert.ok(actionRow.includes('✎'), 'edit symbol for own message');
-  assert.ok(actionRow.includes('×'), 'delete symbol for own message');
+  const hint = hoverPlain.find((l) => l.includes('(r)eply'));
+  assert.ok(hint, 'hover hint uses (r)eply');
+  assert.ok(hint.includes('(e)dit'), 'edit in the hint for own message');
+  assert.ok(hint.includes('(d)elete'), 'delete in the hint for own message');
   const painted = hovered.lines.filter((l) => l.includes(ansi.bg(chatLayout.PALETTE.hoverBg)));
-  assert.ok(painted.length >= 2, 'entire message (meta + body) gets the hover background');
+  assert.ok(painted.length >= 2, 'entire message (meta + body) gets the gray hover fill');
+  assert.ok(hoverPlain.some((l) => /─{4,}/.test(l)), 'gap line becomes the hover outline');
 
   const other = chatLayout.buildChatFrame(80, 24, chatState({ hoverMessageId: 'm1' }));
-  const otherRow = other.lines.map((l) => ansi.stripAnsi(l)).find((l) => l.includes('↩'));
-  assert.ok(otherRow, 'reply still shown on someone else\'s message');
-  assert.ok(!otherRow.includes('✎'), 'edit is own-only');
-  assert.ok(!otherRow.includes('×'), 'delete is own-only');
+  const otherHint = other.lines.map((l) => ansi.stripAnsi(l)).find((l) => l.includes('(r)eply'));
+  assert.ok(otherHint, 'reply still shown on someone else\'s message');
+  assert.ok(!otherHint.includes('(e)dit'), 'edit is own-only');
+  assert.ok(!otherHint.includes('(d)elete'), 'delete is own-only');
 });
 
 test('chat hover: action and card hits sit on the hovered message', () => {
@@ -652,7 +659,6 @@ test('chat hover: action and card hits sit on the hovered message', () => {
   const reply = frame.hits.find((h) => h.type === 'action' && h.action === 'reply' && h.id === 'm2');
   const edit = frame.hits.find((h) => h.type === 'action' && h.action === 'edit' && h.id === 'm2');
   assert.ok(reply && edit, 'own message exposes reply + edit hits');
-  assert.equal(chatLayout.hitTest(frame.hits, reply.x, reply.y).type, 'action');
   assert.equal(chatLayout.hitTest(frame.hits, reply.x, reply.y).action, 'reply');
 
   const cardFrame = chatLayout.buildChatFrame(80, 24, chatState({ hoverMessageId: 'm3' }));
@@ -688,6 +694,44 @@ test('formatBytes and formatTime are bounded and readable', () => {
   assert.equal(chatLayout.formatBytes(240000), '234 KB');
   assert.equal(chatLayout.formatBytes(800), '800 B');
   assert.match(chatLayout.formatTime('2026-08-13T10:03:00.000Z'), /^\d{2}:\d{2}$/);
+});
+
+test('chat reply preview is visible on the message', () => {
+  const state = chatState({
+    messages: [
+      chatState().messages[0],
+      {
+        ...chatState().messages[1],
+        replyTo: { id: 'm1', name: 'ada', preview: 'ship it tonight' },
+      },
+    ],
+  });
+  const plain = chatLayout.buildChatFrame(80, 24, state).lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.ok(plain.includes('↩  ada: ship it tonight'));
+});
+
+test('sending messages are grayed and labeled', () => {
+  const state = chatState({
+    animFrame: 0,
+    messages: [{ ...chatState().messages[1], sending: true }],
+  });
+  const plain = chatLayout.buildChatFrame(80, 24, state).lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.ok(plain.includes('sending'));
+});
+
+test('empty group selection paints the pulsing bird instead of messages', () => {
+  const state = chatState({ activeGroupId: null, animFrame: 3 });
+  const frame = chatLayout.buildChatFrame(80, 24, state);
+  const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.ok(!plain.includes('ship it tonight'), 'messages hidden when no group is selected');
+  assert.ok(plain.includes('⠉') || plain.includes('⣦'), 'landing bird art is reused');
+});
+
+test('channel transition hides the transcript behind the bird', () => {
+  const state = chatState({ transition: { until: Date.now() + 400 }, animFrame: 2 });
+  const plain = chatLayout.buildChatFrame(80, 24, state).lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.ok(plain.includes('#design'), 'channel strip still updates');
+  assert.ok(!plain.includes('ship it tonight'), 'old transcript is not shown mid-switch');
 });
 
 test('chat overlay: buttons win hit-testing over the modal backdrop', () => {

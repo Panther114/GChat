@@ -60,6 +60,16 @@ function mouseDisable() {
   return `${ESC}?1000l${ESC}?1003l${ESC}?1006l`;
 }
 
+/** Enable bracketed paste so a pasted image path arrives as one chunk. */
+function pasteEnable() {
+  return `${ESC}?2004h`;
+}
+
+/** Disable bracketed paste. */
+function pasteDisable() {
+  return `${ESC}?2004l`;
+}
+
 /**
  * Parse one SGR mouse event (`ESC[<b;x;yM` press / `...m` release) into
  * 1-based terminal coordinates. Returns null for anything else.
@@ -293,6 +303,8 @@ module.exports = {
   exitAltScreen,
   mouseEnable,
   mouseDisable,
+  pasteEnable,
+  pasteDisable,
   parseSgrMouse,
   bold,
   dim,

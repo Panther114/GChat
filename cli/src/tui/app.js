@@ -221,7 +221,7 @@ async function runTui(options = {}) {
       /* not in raw mode */
     }
     stdin.pause();
-    stdout.write(ansi.cursorShow() + ansi.mouseDisable() + ansi.exitAltScreen() + ansi.clearScreen());
+    stdout.write(ansi.cursorShow() + ansi.mouseDisable() + ansi.pasteDisable() + ansi.exitAltScreen() + ansi.clearScreen());
   }
 
   function exit(code = 0) {
@@ -351,7 +351,7 @@ async function runTui(options = {}) {
   }
 
   // --- terminal setup ------------------------------------------------------
-  stdout.write(ansi.enterAltScreen() + ansi.clearScreen() + ansi.mouseEnable());
+  stdout.write(ansi.enterAltScreen() + ansi.clearScreen() + ansi.mouseEnable() + ansi.pasteEnable());
   stdin.setRawMode(true);
   stdin.resume();
   stdin.setEncoding('utf8');

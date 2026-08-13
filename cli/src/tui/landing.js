@@ -553,5 +553,6 @@ module.exports = {
   TEXT_X: artWidth(LOGO_TIERS[LOGO_TIERS.length - 1]) + LOGO_PADDING,
   isHot,
   selectTier,
+  styleArtLine,
   buildLandingFrame,
 };

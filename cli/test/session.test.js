@@ -10,6 +10,7 @@ const { loadSession, saveSession, cookieHeader, storeSetCookieHeaders, clearSess
 const { loadConfig, setConfigKey } = require('../src/store/config');
 const { putVaultEntry, getVaultEntry, listVaultEntries, removeVaultEntry } = require('../src/store/vault');
 const { HttpClient } = require('../src/client/http');
+const { looksLikeImagePath } = require('../src/tui/clipboard-image');
 const { socketIoOptions } = require('../src/client/socket');
 const { SYNC_PROTOCOL_HEADER, SYNC_PROTOCOL_VERSION } = require('../src/version');
 
@@ -41,6 +42,15 @@ test('vault put/get/list/remove', () => {
   assert.equal(listVaultEntries(paths).length, 1);
   removeVaultEntry('g1', paths);
   assert.equal(getVaultEntry('g1', paths), null);
+});
+
+test('looksLikeImagePath only accepts existing image files', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-img-'));
+  const file = path.join(dir, 'shot.png');
+  fs.writeFileSync(file, 'x');
+  assert.equal(looksLikeImagePath(file), file);
+  assert.equal(looksLikeImagePath('not-a-path'), false);
+  assert.equal(looksLikeImagePath('/tmp/nope.txt'), false);
 });
 
 test('HttpClient builds absolute URLs from configured server', () => {
