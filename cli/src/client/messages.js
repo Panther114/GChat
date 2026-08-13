@@ -176,6 +176,35 @@ async function encryptAttachmentEnvelope({
   };
 }
 
+/**
+ * Decrypt only attachment metadata (filename, mime, size) — not the bytes.
+ * Cheap enough to run for every visible card without touching the payload.
+ */
+async function decryptAttachmentMeta(msg, secret, groupId = msg.groupId) {
+  if (!msg || !secret || !msg.encryptedMetadata || !msg.metadataIv) return {};
+  const identity = {
+    groupId: msg.groupId || groupId,
+    id: msg.id,
+    senderId: msg.senderId,
+    type: msg.type || 'file',
+    keyVersion: msg.keyVersion || cryptoV2.KEY_VERSION,
+    revision: msg.revision || 1,
+  };
+  const aad = cryptoV2.messageAad(identity);
+  try {
+    return await cryptoV2.decryptJson(
+      msg.encryptedMetadata,
+      msg.metadataIv,
+      secret,
+      groupId,
+      'metadata',
+      aad
+    );
+  } catch {
+    return {};
+  }
+}
+
 async function decryptAttachment(msg, secret, groupId = msg.groupId) {
   const identity = {
     groupId: msg.groupId || groupId,
@@ -235,6 +264,7 @@ module.exports = {
   encryptTextEnvelope,
   decryptServerMessage,
   encryptAttachmentEnvelope,
+  decryptAttachmentMeta,
   decryptAttachment,
   formatMessageLine,
 };

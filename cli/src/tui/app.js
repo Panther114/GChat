@@ -1,13 +1,13 @@
 'use strict';
 
 /**
- * GChat CLI TUI entry — currently the landing page with a live login form.
+ * GChat CLI TUI entry — landing page, then Mini GChat.
  *
  * Handles terminal lifecycle (alternate screen, raw mode, resize, exit),
  * drives the pure frame builder in landing.js, and submits credentials to
- * the GChat backend through the shared GChatClient. On success it prints
- * basic account info (username, server, chats) and exits; on failure the
- * backend's error message (or "Couldn't connect") is surfaced in the hint.
+ * the GChat backend through the shared GChatClient. On success it hands
+ * off to the chat screen (groups / transcript / composer). An existing
+ * session skips the landing page.
  */
 
 const { stdin, stdout } = require('node:process');
@@ -23,6 +23,7 @@ const {
 } = require('./landing');
 const { GChatClient } = require('../client/api');
 const { configPaths } = require('../store/paths');
+const { createChatController } = require('./chat');
 
 /** Milliseconds between animation frames (~20 fps). */
 const FRAME_MS = 50;
@@ -87,6 +88,8 @@ async function runTui(options = {}) {
   let pendingKeys = '';
   let inputBuffer = '';
   let lastBounds = null;
+  let screen = 'landing'; // 'landing' | 'chat'
+  let chat = null;
   const ui = { ...DEFAULT_UI };
 
   /** Apply one keystroke to the login form (inserts at the active caret). */
@@ -209,6 +212,9 @@ async function runTui(options = {}) {
     if (done) return;
     done = true;
     if (timer) clearInterval(timer);
+    if (chat) {
+      try { chat.stop(); } catch { /* ignore */ }
+    }
     try {
       stdin.setRawMode(false);
     } catch {
@@ -230,6 +236,10 @@ async function runTui(options = {}) {
     }
     lastCols = cols;
     lastRows = rows;
+    if (screen === 'chat' && chat) {
+      chat.draw();
+      return;
+    }
     ui.now = Date.now();
     // Lazy scroll: the window only moves when the caret leaves it.
     ui.usernameScroll = clampScroll(ui.usernameScroll, ui.usernameCaret, ui.username.length, USERNAME_FIELD_WIDTH);
@@ -248,17 +258,63 @@ async function runTui(options = {}) {
     return "Couldn't connect";
   }
 
-  /** Print basic account info after a successful login, then exit the TUI. */
-  function finishLogin(user, groups) {
-    cleanup();
-    stdout.write(`Logged in as ${user.username} (${user.id})\n`);
-    stdout.write(`Server: ${client.server}\n`);
-    const list = Array.isArray(groups) ? groups : [];
-    stdout.write(`Chats: ${list.length}\n`);
-    for (const group of list) {
-      stdout.write(`  - ${group.name || '?'}  ${group.id}\n`);
+  function stopLandingTimer() {
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
     }
-    process.exit(0);
+  }
+
+  function startLandingTimer() {
+    if (timer) return;
+    timer = setInterval(() => {
+      frame += 1;
+      if (ui.error && Date.now() >= ui.error.until) ui.error = null;
+      if (ui.mode === 'transition') {
+        ui.modeFrame += 1;
+        if (ui.modeFrame >= TRANSITION_FRAMES) {
+          ui.mode = 'login';
+          if (pendingKeys) {
+            const replay = pendingKeys;
+            pendingKeys = '';
+            processLoginInput(replay);
+          }
+        }
+      }
+      draw();
+    }, FRAME_MS);
+  }
+
+  async function enterChat() {
+    screen = 'chat';
+    stopLandingTimer();
+    stdout.write(ansi.clearScreen());
+    lastCols = null;
+    lastRows = null;
+    chat = createChatController({
+      client,
+      paths,
+      stdout,
+      getSize: terminalSize,
+      onQuit: () => exit(0),
+    });
+    await chat.start();
+    draw();
+  }
+
+  /** After a successful login, hand off to the chat screen. */
+  function finishLogin() {
+    enterChat().catch((err) => {
+      ui.loggingIn = false;
+      ui.error = {
+        until: Date.now() + LOGIN_ERROR_MS,
+        fields: [],
+        message: (err && err.message) || "Couldn't open chat",
+      };
+      screen = 'landing';
+      startLandingTimer();
+      draw();
+    });
   }
 
   /** Submit the login form (Enter with both fields filled). */
@@ -281,9 +337,9 @@ async function runTui(options = {}) {
     }
     ui.loggingIn = true;
     try {
-      const user = await client.login(username, password);
-      const groups = await client.listGroups();
-      finishLogin(user, groups);
+      await client.login(username, password);
+      await client.listGroups().catch(() => []);
+      finishLogin();
     } catch (err) {
       ui.loggingIn = false;
       ui.error = {
@@ -305,6 +361,10 @@ async function runTui(options = {}) {
     const text = String(chunk);
     if (text.includes('\u0003') || text.includes('\u0004')) {
       exit(0);
+      return;
+    }
+    if (screen === 'chat' && chat) {
+      chat.pushInput(text);
       return;
     }
     if (ui.loggingIn) return; // ignore input while the login request is in flight
@@ -333,24 +393,24 @@ async function runTui(options = {}) {
     draw();
   });
 
-  // --- animation loop --------------------------------------------------------
-  draw();
-  timer = setInterval(() => {
-    frame += 1;
-    if (ui.error && Date.now() >= ui.error.until) ui.error = null;
-    if (ui.mode === 'transition') {
-      ui.modeFrame += 1;
-      if (ui.modeFrame >= TRANSITION_FRAMES) {
-        ui.mode = 'login';
-        if (pendingKeys) {
-          const replay = pendingKeys;
-          pendingKeys = '';
-          processLoginInput(replay);
-        }
-      }
+  // --- start: restore a session into chat, otherwise play the landing ------
+  let startOnChat = false;
+  try {
+    const cookies = client.session && client.session.cookies;
+    if (client.user || client.session?.user || (cookies && Object.keys(cookies).length > 0)) {
+      await client.me();
+      startOnChat = true;
     }
+  } catch {
+    startOnChat = false;
+  }
+
+  if (startOnChat) {
+    await enterChat();
+  } else {
     draw();
-  }, FRAME_MS);
+    startLandingTimer();
+  }
 
   // Keep alive until the process is told to exit.
   await new Promise(() => {});

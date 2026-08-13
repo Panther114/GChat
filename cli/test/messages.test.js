@@ -7,7 +7,10 @@ const {
   MIN_DISAPPEARING_MS,
   MAX_DISAPPEARING_MS,
   formatMessageLine,
+  encryptAttachmentEnvelope,
+  decryptAttachmentMeta,
 } = require('../src/client/messages');
+const cryptoV2 = require('../src/crypto-v2');
 
 test('parseDurationToMs accepts server-allowed range', () => {
   assert.equal(parseDurationToMs('5s'), 5000);
@@ -28,4 +31,33 @@ test('formatMessageLine includes sender and text', () => {
   assert.match(line, /alice/);
   assert.match(line, /hi/);
   assert.match(line, /#main/);
+});
+
+test('decryptAttachmentMeta returns filename without needing the bytes', async () => {
+  const secret = cryptoV2.generateGroupSecret();
+  const groupId = cryptoV2.randomUuid();
+  const senderId = cryptoV2.randomUuid();
+  const prepared = await encryptAttachmentEnvelope({
+    buffer: Buffer.from('png-bytes'),
+    filename: 'shot.png',
+    mimeType: 'image/png',
+    secret,
+    groupId,
+    senderId,
+    type: 'image',
+    channel: 'main',
+  });
+  const meta = await decryptAttachmentMeta({
+    id: prepared.identity.id,
+    groupId,
+    senderId,
+    type: 'image',
+    encryptedMetadata: prepared.encryptedMetadata,
+    metadataIv: prepared.metadataIv,
+    keyVersion: 1,
+    revision: 1,
+  }, secret, groupId);
+  assert.equal(meta.filename, 'shot.png');
+  assert.equal(meta.mimeType, 'image/png');
+  assert.equal(meta.hashtag, 'main');
 });

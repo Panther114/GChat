@@ -315,12 +315,18 @@ test('login mode: a password char hides as soon as the next one is typed', () =>
 });
 
 test('parseSgrMouse: parses click events and rejects non-events', () => {
-  assert.deepEqual(ansi.parseSgrMouse('\u001b[<0;45;12M'), { button: 0, x: 45, y: 12, press: true });
-  assert.deepEqual(ansi.parseSgrMouse('\u001b[<2;10;5m'), { button: 2, x: 10, y: 5, press: false });
+  assert.deepEqual(ansi.parseSgrMouse('\u001b[<0;45;12M'), {
+    button: 0, x: 45, y: 12, press: true, kind: 'press', motion: false, wheel: 0,
+  });
+  assert.deepEqual(ansi.parseSgrMouse('\u001b[<2;10;5m'), {
+    button: 2, x: 10, y: 5, press: false, kind: 'release', motion: false, wheel: 0,
+  });
   assert.equal(ansi.parseSgrMouse('\u001b[D'), null);
   assert.equal(ansi.parseSgrMouse('abc'), null);
   assert.equal(ansi.mouseEnable().includes('?1000h'), true);
+  assert.equal(ansi.mouseEnable().includes('?1003h'), true, 'hover motion tracking enabled');
   assert.equal(ansi.mouseDisable().includes('?1000l'), true);
+  assert.equal(ansi.mouseDisable().includes('?1003l'), true);
 });
 
 test('login mode: caret is a colored block with the letter visible beneath it', () => {
@@ -530,4 +536,171 @@ test('composeFrame: login ui passes through to the frame', () => {
   const plain = ansi.stripAnsi(out);
   assert.ok(plain.includes('bob█'));
   assert.ok(plain.includes('Press enter to login'));
+});
+
+const chatLayout = require('../src/tui/chat-layout');
+
+function chatState(over = {}) {
+  return {
+    ...chatLayout.DEFAULT_CHAT,
+    userId: 'me',
+    username: 'will',
+    groups: [{ id: 'g1', name: 'team' }],
+    activeGroupId: 'g1',
+    channels: ['main', 'design'],
+    activeChannel: 'main',
+    messages: [
+      {
+        msg: {
+          id: 'm1',
+          senderId: 'ada',
+          senderName: 'ada',
+          type: 'text',
+          createdAt: '2026-08-13T10:02:00.000Z',
+        },
+        text: 'ship it tonight',
+        channel: 'main',
+      },
+      {
+        msg: {
+          id: 'm2',
+          senderId: 'me',
+          senderName: 'will',
+          type: 'text',
+          createdAt: '2026-08-13T10:03:00.000Z',
+        },
+        text: 'on it',
+        channel: 'main',
+      },
+      {
+        msg: {
+          id: 'm3',
+          senderId: 'ada',
+          senderName: 'ada',
+          type: 'image',
+          createdAt: '2026-08-13T10:04:00.000Z',
+        },
+        text: null,
+        channel: 'main',
+        attach: { filename: 'photo.jpg', size: 240000, mimeType: 'image/jpeg' },
+      },
+    ],
+    ...over,
+  };
+}
+
+test('parseSgrMouse: hover motion and wheel', () => {
+  const hover = ansi.parseSgrMouse('\u001b[<35;20;8M');
+  assert.equal(hover.kind, 'move');
+  assert.equal(hover.motion, true);
+  assert.equal(hover.wheel, 0);
+  const wheelUp = ansi.parseSgrMouse('\u001b[<64;20;8M');
+  assert.equal(wheelUp.kind, 'wheel');
+  assert.equal(wheelUp.wheel, -1);
+  const wheelDown = ansi.parseSgrMouse('\u001b[<65;20;8M');
+  assert.equal(wheelDown.kind, 'wheel');
+  assert.equal(wheelDown.wheel, 1);
+});
+
+test('charWidth: variation selectors are zero-width', () => {
+  assert.equal(ansi.charWidth('\uFE0E'), 0);
+  assert.equal(ansi.width(`✎${chatLayout.TEXT}`), 1);
+});
+
+test('chat frame: sidebar, channels, composer, and messages', () => {
+  const frame = chatLayout.buildChatFrame(80, 24, chatState());
+  const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.ok(plain.includes('team'), 'active group in sidebar');
+  assert.ok(plain.includes('#main'), 'channel strip');
+  assert.ok(plain.includes('#design'));
+  assert.ok(plain.includes('ada'));
+  assert.ok(plain.includes('ship it tonight'));
+  assert.ok(plain.includes('on it'));
+  assert.ok(plain.includes('photo.jpg'), 'attachment card filename');
+  assert.ok(plain.includes('message'), 'composer placeholder');
+  assert.ok(frame.regions.sidebar.w > 0);
+  assert.ok(frame.hits.some((h) => h.type === 'group'));
+  assert.ok(frame.hits.some((h) => h.type === 'channel' && h.name === 'design'));
+  assert.ok(frame.hits.some((h) => h.type === 'card' && h.id === 'm3'));
+  assert.ok(frame.hits.some((h) => h.type === 'composer'));
+});
+
+test('chat hover: paints every row of the message and reveals Unicode actions', () => {
+  const idle = chatLayout.buildChatFrame(80, 24, chatState());
+  const idlePlain = idle.lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.ok(!idlePlain.includes('↩'), 'actions hidden until hover');
+  assert.ok(!idle.lines.join('').includes(ansi.bg(chatLayout.PALETTE.hoverBg)), 'no hover bg when idle');
+
+  const hovered = chatLayout.buildChatFrame(80, 24, chatState({ hoverMessageId: 'm2' }));
+  const hoverPlain = hovered.lines.map((l) => ansi.stripAnsi(l));
+  const actionRow = hoverPlain.find((l) => l.includes('↩'));
+  assert.ok(actionRow, 'reply symbol on the right');
+  assert.ok(actionRow.includes('✎'), 'edit symbol for own message');
+  assert.ok(actionRow.includes('×'), 'delete symbol for own message');
+  const painted = hovered.lines.filter((l) => l.includes(ansi.bg(chatLayout.PALETTE.hoverBg)));
+  assert.ok(painted.length >= 2, 'entire message (meta + body) gets the hover background');
+
+  const other = chatLayout.buildChatFrame(80, 24, chatState({ hoverMessageId: 'm1' }));
+  const otherRow = other.lines.map((l) => ansi.stripAnsi(l)).find((l) => l.includes('↩'));
+  assert.ok(otherRow, 'reply still shown on someone else\'s message');
+  assert.ok(!otherRow.includes('✎'), 'edit is own-only');
+  assert.ok(!otherRow.includes('×'), 'delete is own-only');
+});
+
+test('chat hover: action and card hits sit on the hovered message', () => {
+  const frame = chatLayout.buildChatFrame(80, 24, chatState({ hoverMessageId: 'm2' }));
+  const reply = frame.hits.find((h) => h.type === 'action' && h.action === 'reply' && h.id === 'm2');
+  const edit = frame.hits.find((h) => h.type === 'action' && h.action === 'edit' && h.id === 'm2');
+  assert.ok(reply && edit, 'own message exposes reply + edit hits');
+  assert.equal(chatLayout.hitTest(frame.hits, reply.x, reply.y).type, 'action');
+  assert.equal(chatLayout.hitTest(frame.hits, reply.x, reply.y).action, 'reply');
+
+  const cardFrame = chatLayout.buildChatFrame(80, 24, chatState({ hoverMessageId: 'm3' }));
+  const card = cardFrame.hits.find((h) => h.type === 'card' && h.id === 'm3');
+  assert.ok(card, 'attachment card is clickable');
+  assert.equal(chatLayout.hitTest(cardFrame.hits, card.x + 2, card.y).type, 'card');
+});
+
+test('chat frame: channel filter hides other channels', () => {
+  const state = chatState({
+    messages: [
+      ...chatState().messages,
+      {
+        msg: { id: 'm4', senderId: 'ada', senderName: 'ada', type: 'text', createdAt: '2026-08-13T10:05:00.000Z' },
+        text: 'design only',
+        channel: 'design',
+      },
+    ],
+    activeChannel: 'design',
+  });
+  const plain = chatLayout.buildChatFrame(80, 24, state).lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.ok(plain.includes('design only'));
+  assert.ok(!plain.includes('ship it tonight'));
+});
+
+test('wrapText wraps on word boundaries and hard-breaks long tokens', () => {
+  assert.deepEqual(chatLayout.wrapText('hello world', 8), ['hello ', 'world']);
+  const long = chatLayout.wrapText('abcdefghij', 4);
+  assert.deepEqual(long, ['abcd', 'efgh', 'ij']);
+});
+
+test('formatBytes and formatTime are bounded and readable', () => {
+  assert.equal(chatLayout.formatBytes(240000), '234 KB');
+  assert.equal(chatLayout.formatBytes(800), '800 B');
+  assert.match(chatLayout.formatTime('2026-08-13T10:03:00.000Z'), /^\d{2}:\d{2}$/);
+});
+
+test('chat overlay: buttons win hit-testing over the modal backdrop', () => {
+  const frame = chatLayout.buildChatFrame(80, 24, chatState({
+    overlay: { type: 'reveal', filename: 'photo.jpg', kind: 'image', size: '234 KB', opened: true },
+  }));
+  const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.ok(plain.includes('photo.jpg'));
+  assert.ok(plain.includes('[open]'));
+  const open = frame.hits.find((h) => h.type === 'overlay-button' && h.action === 'open');
+  const backdrop = frame.hits.find((h) => h.type === 'overlay');
+  assert.ok(open && backdrop);
+  const hit = chatLayout.hitTest(frame.hits, open.x, open.y);
+  assert.equal(hit.type, 'overlay-button');
+  assert.equal(hit.action, 'open');
 });

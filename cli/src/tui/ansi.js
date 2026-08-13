@@ -46,28 +46,48 @@ function exitAltScreen() {
   return `${ESC}?1049l`;
 }
 
-/** Enable SGR mouse tracking (click events, extended coordinates). */
+/**
+ * Enable SGR mouse tracking: clicks (1000), any-motion/hover (1003),
+ * and extended coordinates (1006). 1003 is what makes hover-highlight
+ * possible — without it the terminal only reports button events.
+ */
 function mouseEnable() {
-  return `${ESC}?1000h${ESC}?1006h`;
+  return `${ESC}?1000h${ESC}?1003h${ESC}?1006h`;
 }
 
-/** Disable SGR mouse tracking. */
+/** Disable SGR mouse tracking (all modes we enable). */
 function mouseDisable() {
-  return `${ESC}?1000l${ESC}?1006l`;
+  return `${ESC}?1000l${ESC}?1003l${ESC}?1006l`;
 }
 
 /**
  * Parse one SGR mouse event (`ESC[<b;x;yM` press / `...m` release) into
  * 1-based terminal coordinates. Returns null for anything else.
+ *
+ * `kind`: 'press' | 'release' | 'move' | 'wheel'
+ * `wheel`: -1 = up (older), +1 = down (newer), 0 = not a wheel event
+ * `button`: 0 left, 1 middle, 2 right, 3 = no button (hover move)
  */
 function parseSgrMouse(str) {
   const match = String(str).match(/^\u001b\[<(\d+);(\d+);(\d+)([Mm])$/);
   if (!match) return null;
+  const raw = Number(match[1]);
+  const press = match[4] === 'M';
+  const isWheel = (raw & 64) === 64;
+  const isMotion = (raw & 32) === 32 && !isWheel;
+  let kind = 'press';
+  if (isWheel) kind = 'wheel';
+  else if (isMotion) kind = 'move';
+  else if (!press) kind = 'release';
+  const button = isWheel ? raw : (raw & 3);
   return {
-    button: Number(match[1]),
+    button,
     x: Number(match[2]),
     y: Number(match[3]),
-    press: match[4] === 'M',
+    press,
+    kind,
+    motion: isMotion,
+    wheel: isWheel ? ((raw & 1) ? 1 : -1) : 0,
   };
 }
 
@@ -193,6 +213,8 @@ function charWidth(char) {
   const code = char.codePointAt(0);
   if (code === 0) return 0;
   if (CONTROL_RE.test(char)) return 0;
+  if (code >= 0xfe00 && code <= 0xfe0f) return 0; // variation selectors (text/emoji)
+  if (code >= 0x0300 && code <= 0x036f) return 0; // combining diacritics
   if (
     (code >= 0x1100 && code <= 0x115f) || // Hangul Jamo
     (code >= 0x2e80 && code <= 0x303e) || // CJK Radicals..CJK Symbols
