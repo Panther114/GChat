@@ -801,3 +801,310 @@ test('clampScrollForMessage keeps a short message on screen', () => {
   assert.ok(clamped >= Math.max(0, min));
   assert.ok(clamped <= Math.max(0, max));
 });
+
+function sliceByWidth(styled, start, width) {
+  const plain = ansi.stripAnsi(styled);
+  let x = 0;
+  let out = '';
+  for (const ch of plain) {
+    const cw = ansi.charWidth(ch);
+    if (x >= start + width) break;
+    if (x >= start) out += ch;
+    x += cw;
+  }
+  return out;
+}
+
+function cellsHaveBg(styled, startPlain, selectedBg) {
+  const bg = ansi.bg(selectedBg);
+  const tokens = String(styled).split(/(\u001b\[[0-9;]*m)/);
+  let on = false;
+  let seen = false;
+  let covered = 0;
+  let total = 0;
+  let buf = '';
+  for (const token of tokens) {
+    if (!token) continue;
+    if (token.startsWith('\u001b[')) {
+      if (token === '\u001b[0m') on = false;
+      else if (token === bg || token.includes('48;')) on = token !== '\u001b[0m' && token.includes('48;');
+      continue;
+    }
+    for (const ch of token) {
+      buf += ch;
+      if (!seen) {
+        if (buf.includes(startPlain)) seen = true;
+        continue;
+      }
+      total += 1;
+      if (on) covered += 1;
+    }
+  }
+  return { covered, total };
+}
+
+test('formatStamp puts time on the right and adds a date when it is not today', () => {
+  const now = new Date('2026-08-13T20:00:00');
+  assert.match(chatLayout.formatStamp('2026-08-13T10:02:00.000Z', now), /^\d{2}:\d{2}$/);
+  assert.match(chatLayout.formatStamp('2026-08-12T10:03:00.000Z', now), /Aug 12 \d{2}:\d{2}/);
+});
+
+test('message timestamps sit on the name row; actions sit on the content row', () => {
+  const now = new Date('2026-08-13T20:00:00');
+  const frame = chatLayout.buildChatFrame(80, 24, chatState({
+    selectedMessageId: 'm2',
+    memberCount: 3,
+    now,
+    messages: [
+      {
+        msg: {
+          id: 'm2',
+          senderId: 'me',
+          senderName: 'will',
+          type: 'text',
+          createdAt: '2026-08-12T10:03:00.000Z',
+          readCount: 1,
+          totalRecipients: 2,
+        },
+        text: 'on it',
+        channel: 'main',
+      },
+    ],
+  }));
+  const nameRow = frame.lines.map((l) => ansi.stripAnsi(l)).find((l) => l.includes('will') && l.includes('Aug 12'));
+  assert.ok(nameRow, 'date+time is on the name row');
+  assert.ok(nameRow.indexOf('will') < nameRow.indexOf('Aug 12'), 'timestamp is to the right of the name');
+  assert.ok(!nameRow.includes('↩'), 'action icons are not on the name row');
+  const content = frame.lines.map((l) => ansi.stripAnsi(l)).find((l) => l.includes('on it'));
+  assert.ok(content.includes('↩') && content.includes('×'), 'actions sit on the content row');
+  assert.ok(content.includes('✓') || content.includes('·'), 'ticks sit on the content row');
+});
+
+test('action slots stay aligned across messages with a uniform tick gutter', () => {
+  const state = chatState({
+    selectedMessageId: 'm2',
+    memberCount: 4,
+    messages: [
+      {
+        msg: {
+          id: 'm2', senderId: 'me', senderName: 'will', type: 'text',
+          createdAt: '2026-08-13T10:03:00.000Z', readCount: 1, totalRecipients: 3,
+        },
+        text: 'short',
+        channel: 'main',
+      },
+      {
+        msg: {
+          id: 'm3', senderId: 'me', senderName: 'will', type: 'image',
+          createdAt: '2026-08-13T10:04:00.000Z', readCount: 0, totalRecipients: 3,
+        },
+        text: null,
+        channel: 'main',
+        attach: { filename: 'photo.jpg', size: 1000, mimeType: 'image/jpeg' },
+      },
+    ],
+  });
+  const textFrame = chatLayout.buildChatFrame(80, 24, { ...state, selectedMessageId: 'm2', hoverMessageId: 'm2' });
+  const imageFrame = chatLayout.buildChatFrame(80, 24, { ...state, selectedMessageId: 'm3', hoverMessageId: 'm3' });
+  const replyText = textFrame.hits.find((h) => h.type === 'action' && h.action === 'reply' && h.id === 'm2');
+  const replyImage = imageFrame.hits.find((h) => h.type === 'action' && h.action === 'reply' && h.id === 'm3');
+  assert.ok(replyText && replyImage);
+  assert.equal(replyText.x, replyImage.x, 'reply slot is at the same column on every message');
+  const delText = textFrame.hits.find((h) => h.type === 'action' && h.action === 'delete' && h.id === 'm2');
+  const delImage = imageFrame.hits.find((h) => h.type === 'action' && h.action === 'delete' && h.id === 'm3');
+  assert.ok(delText && delImage);
+  assert.equal(delText.x, delImage.x, 'delete slot stays put even when preview is present');
+});
+
+test('selected image highlight continues after the sender name', () => {
+  const frame = chatLayout.buildChatFrame(80, 24, chatState({
+    selectedMessageId: 'm3',
+    messages: [chatState().messages[2]],
+  }));
+  const row = frame.lines.find((l) => {
+    const p = ansi.stripAnsi(l);
+    return p.includes('ada') && !p.includes('[Image]');
+  });
+  assert.ok(row, 'image message still has a name row');
+  const { covered, total } = cellsHaveBg(row, 'ada', chatLayout.PALETTE.selectedBg);
+  assert.ok(total > 4, 'there is space after the name');
+  assert.ok(covered > total * 0.7, `highlight covers the gap after the name (${covered}/${total})`);
+});
+
+test('composer hints sit on the right; typing stays on the left', () => {
+  const selected = chatLayout.buildChatFrame(80, 24, chatState({
+    selectedMessageId: 'm2',
+    typing: { username: 'ada', until: Date.now() + 3000 },
+  }));
+  const hint = selected.lines.map((l) => ansi.stripAnsi(l)).find((l) => l.includes('reply') && l.includes('ada is typing'));
+  assert.ok(hint, 'typing and action hints share the composer hint row');
+  assert.ok(hint.indexOf('ada is typing') < hint.indexOf('reply'), 'typing is on the left');
+  assert.ok(hint.trimEnd().endsWith('clear (esc)'), 'action hints are rightmost');
+
+  const channel = chatLayout.buildChatFrame(80, 24, chatState({
+    activeChannel: 'design',
+    channelMenu: 'design',
+  }));
+  const channelHint = channel.lines.map((l) => ansi.stripAnsi(l)).find((l) => l.includes('rename') && l.includes('delete'));
+  assert.ok(channelHint, 'selecting a channel shows rename/delete/clear hints');
+  assert.ok(channelHint.trimEnd().endsWith('clear (esc)'));
+  assert.ok(channelHint.indexOf('rename') > 40, 'channel hints are on the right');
+});
+
+test('create chip reads + Create and a draft chip has a cancel hit', () => {
+  const idle = chatLayout.buildChatFrame(80, 24, chatState());
+  assert.ok(idle.lines.map((l) => ansi.stripAnsi(l)).join('\n').includes('+ Create'));
+  const creating = chatLayout.buildChatFrame(80, 24, chatState({
+    creatingChannel: true,
+    channelDraft: 'pics',
+  }));
+  const mid = ansi.stripAnsi(creating.lines[1]);
+  assert.ok(mid.includes('#pics'));
+  assert.ok(mid.includes('×'));
+  assert.ok(creating.hits.some((h) => h.type === 'cancel-create'));
+});
+
+test('expanded channel chip top/mid/bot share one width', () => {
+  const frame = chatLayout.buildChatFrame(80, 24, chatState({
+    activeChannel: 'design',
+    channelMenu: 'design',
+    channelExpandFrame: chatLayout.CHANNEL_EXPAND_FRAMES,
+  }));
+  const hit = frame.hits.find((h) => h.type === 'channel' && h.name === 'design');
+  assert.ok(hit);
+  const localX = hit.x - frame.regions.channels.x;
+  const top = sliceByWidth(frame.lines[0], localX, hit.w);
+  const mid = sliceByWidth(frame.lines[1], localX, hit.w);
+  const bot = sliceByWidth(frame.lines[2], localX, hit.w);
+  assert.equal(ansi.width(top), hit.w);
+  assert.equal(ansi.width(mid), hit.w);
+  assert.equal(ansi.width(bot), hit.w);
+  assert.ok(mid.includes('#'));
+  assert.ok(frame.hits.some((h) => h.type === 'channel-action' && h.action === 'rename'));
+});
+
+test('channel chip width interpolates while expanding', () => {
+  const collapsed = chatLayout.buildChatFrame(80, 24, chatState({
+    activeChannel: 'design',
+    channelMenu: 'design',
+    channelExpandFrame: 0,
+  }));
+  const mid = chatLayout.buildChatFrame(80, 24, chatState({
+    activeChannel: 'design',
+    channelMenu: 'design',
+    channelExpandFrame: 4,
+  }));
+  const open = chatLayout.buildChatFrame(80, 24, chatState({
+    activeChannel: 'design',
+    channelMenu: 'design',
+    channelExpandFrame: chatLayout.CHANNEL_EXPAND_FRAMES,
+  }));
+  const wOf = (frame) => frame.hits.find((h) => h.type === 'channel' && h.name === 'design').w;
+  assert.ok(wOf(collapsed) < wOf(mid), 'chip grows during the expand animation');
+  assert.ok(wOf(mid) <= wOf(open));
+});
+
+test('group load hides the channel bar behind the bird', () => {
+  const frame = chatLayout.buildChatFrame(80, 24, chatState({
+    loadingGroup: true,
+    transition: { until: Date.now() + 400, kind: 'group' },
+    channels: ['main', 'design', 'oldone'],
+  }));
+  const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.ok(!plain.includes('#design'), 'old channels are not shown while a group loads');
+  assert.ok(!plain.includes('+ Create'));
+  assert.equal(frame.hits.filter((h) => h.type === 'channel' || h.type === 'create-channel').length, 0);
+  assert.ok(chatLayout.hideChannelBar({ activeGroupId: 'g1', loadingGroup: true }));
+});
+
+test('isShiftEnter recognizes common Shift+Enter encodings', () => {
+  assert.equal(ansi.isShiftEnter('\u001b[13;2u'), true);
+  assert.equal(ansi.isShiftEnter('\u001b[27;2;13~'), true);
+  assert.equal(ansi.isShiftEnter('\u001b[A'), false);
+});
+
+const { createChatController } = require('../src/tui/chat');
+const { configPaths } = require('../src/store/paths');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+function makeController(over = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-tui-'));
+  const chat = createChatController({
+    client: {
+      user: { id: 'me', username: 'will' },
+      listGroups: async () => [{ id: 'g1', name: 'team' }],
+      listMembers: async () => [{ id: 'me' }, { id: 'ada' }, { id: 'bob' }],
+      openGroup: async () => ({ messages: [] }),
+      connectSocket: async () => {},
+      disconnectSocket: () => {},
+      setActiveGroup: () => {},
+      switchChannel: (_g, name) => name,
+      markRead: () => {},
+      getSecret: () => null,
+      emitTyping: () => {},
+    },
+    paths: configPaths(dir),
+    stdout: { write() {}, columns: 80, rows: 24 },
+    getSize: () => ({ cols: 80, rows: 24 }),
+  });
+  Object.assign(chat.state, chatState(over));
+  return chat;
+}
+
+test('clicking a selected message deselects it', async () => {
+  const chat = makeController({ selectedMessageId: 'm2' });
+  const frame = chat.draw();
+  const hit = frame.hits.find((h) => h.type === 'message' && String(h.id) === 'm2');
+  assert.ok(hit);
+  await chat.handleClick(hit);
+  assert.equal(chat.state.selectedMessageId, null);
+});
+
+test('up and down move the selection by a whole message', () => {
+  const chat = makeController({ selectedMessageId: 'm2' });
+  chat.moveSelection(-1);
+  assert.equal(chat.state.selectedMessageId, 'm1');
+  chat.moveSelection(1);
+  assert.equal(chat.state.selectedMessageId, 'm2');
+  chat.moveSelection(1);
+  assert.equal(chat.state.selectedMessageId, 'm3');
+});
+
+test('Shift+Enter and bare LF insert a newline; Enter submits later', () => {
+  const chat = makeController();
+  chat.handleKey('h');
+  chat.handleKey('\n');
+  chat.handleKey('i');
+  assert.equal(chat.state.composer, 'h\ni');
+  chat.pushInput('\u001b[13;2u');
+  assert.equal(chat.state.composer, 'h\ni\n');
+});
+
+test('clicking the scrollbar starts a drag and does not jump the offset', () => {
+  const many = Array.from({ length: 18 }, (_, i) => ({
+    msg: {
+      id: `s${i}`,
+      senderId: 'ada',
+      senderName: 'ada',
+      type: 'text',
+      createdAt: `2026-08-13T11:${String(i).padStart(2, '0')}:00.000Z`,
+    },
+    text: `message body ${i} with enough words`,
+    channel: 'main',
+  }));
+  const chat = makeController({ messages: many, scrollOffset: 4 });
+  const frame = chat.draw();
+  assert.ok(frame.maxScroll > 0, 'transcript can scroll');
+  const bar = frame.regions.scrollbar;
+  const before = chat.state.scrollOffset;
+  chat.handleMouse({
+    kind: 'press', button: 0, x: bar.x + 1, y: bar.y + 3, press: true, motion: false, wheel: 0,
+  });
+  assert.equal(chat.state.scrollOffset, before, 'pressing the bar does not teleport the thumb');
+  chat.handleMouse({
+    kind: 'move', button: 0, x: bar.x + 1, y: bar.y + 8, press: true, motion: true, wheel: 0,
+  });
+  assert.notEqual(chat.state.scrollOffset, before, 'dragging the bar moves the offset');
+});

@@ -101,6 +101,25 @@ function parseSgrMouse(str) {
   };
 }
 
+/** Ask xterm-family terminals to distinguish Shift+Enter from Enter. */
+function modifyOtherKeysEnable() {
+  return `${ESC}>4;2m`;
+}
+
+function modifyOtherKeysDisable() {
+  return `${ESC}>4;0m`;
+}
+
+/** Shift+Enter as sent by xterm modifyOtherKeys, CSI 27, and Kitty CSI u. */
+function isShiftEnter(sequence) {
+  const seq = String(sequence);
+  return seq === '\u001b[13;2~'
+    || seq === '\u001b[27;2;13~'
+    || seq === '\u001b[13;2u'
+    || seq === '\u001b[13;2;13~'
+    || seq === '\u001b[13;2;13u';
+}
+
 // ---------------------------------------------------------------------------
 // Text attributes & 24-bit color
 // ---------------------------------------------------------------------------
@@ -305,7 +324,10 @@ module.exports = {
   mouseDisable,
   pasteEnable,
   pasteDisable,
+  modifyOtherKeysEnable,
+  modifyOtherKeysDisable,
   parseSgrMouse,
+  isShiftEnter,
   bold,
   dim,
   italic,

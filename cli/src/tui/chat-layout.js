@@ -3,14 +3,14 @@
 /**
  * Pure Mini GChat frame builder.
  *
- * Hover outlines a message (no fill). Click selects it. Icons sit on the
- * right; the hint row under the transcript spells reply/edit/delete/clear
- * with a stylized first letter — only while a message is selected.
+ * Hover outlines a message (no fill). Click selects it. Timestamps sit on
+ * the name row's right edge; ticks + a fixed action-slot gutter sit on the
+ * first content row. The hint row above the composer keeps typing on the
+ * left and action labels on the right.
  */
 
 const ansi = require('./ansi');
 const landing = require('./landing');
-const { clampScroll } = require('./landing');
 
 const PALETTE = {
   title: '#ffffff',
@@ -60,6 +60,7 @@ const SCROLLBAR_W = 1;
 const WHEEL_LINES = 1;
 const FIELD_CARET = '█';
 const TRANSITION_MS = 480;
+const CHANNEL_EXPAND_FRAMES = 8;
 
 const DEFAULT_CHAT = {
   groups: [],
@@ -84,6 +85,7 @@ const DEFAULT_CHAT = {
   username: '',
   overlay: null,
   loading: false,
+  loadingGroup: false,
   animFrame: 0,
   transition: null,
   typing: null,
@@ -91,6 +93,9 @@ const DEFAULT_CHAT = {
   channelDraft: '',
   channelMenu: null,
   renamingChannel: null,
+  channelExpandFrame: CHANNEL_EXPAND_FRAMES,
+  memberCount: 0,
+  now: null,
 };
 
 function sidebarWidth(cols) {
@@ -281,31 +286,63 @@ function hintActionsFor(item, userId) {
   return [...actionListFor(item, userId), ACTIONS.clear];
 }
 
-function iconStrip(actions) {
-  return actions.filter((a) => a.glyph).map((a) => a.glyph).join('  ');
+const ACTION_SLOTS = ['reply', 'preview', 'edit', 'delete'];
+const ACTION_SLOT_W = 1;
+const ACTION_GAP = 2;
+const ACTION_GUTTER = ACTION_SLOTS.length * ACTION_SLOT_W + (ACTION_SLOTS.length - 1) * ACTION_GAP;
+const TICK_GUTTER = 7;
+const CONTENT_GUTTER = TICK_GUTTER + 1 + ACTION_GUTTER;
+const CHANNEL_ICON_GAP = 2;
+
+function formatStamp(iso, now = new Date()) {
+  if (!iso) return '';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+  const time = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+  const same = date.getFullYear() === now.getFullYear()
+    && date.getMonth() === now.getMonth()
+    && date.getDate() === now.getDate();
+  if (same) return time;
+  const mon = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][date.getMonth()];
+  return `${mon} ${date.getDate()} ${time}`;
 }
 
-function overlayIcons(metaPlain, actions, width) {
-  const strip = iconStrip(actions);
-  if (!strip) return metaPlain;
-  const stripW = ansi.width(strip);
-  const bodyW = Math.max(0, width - stripW - 1);
-  const body = ansi.width(metaPlain) > bodyW
-    ? ansi.stripAnsi(ansi.truncate(metaPlain, Math.max(1, bodyW)))
-    : metaPlain;
-  return body + ' '.repeat(Math.max(0, width - ansi.width(body) - stripW)) + strip;
+function groupRecipientCount(state) {
+  const members = Math.max(0, Number(state?.memberCount) || 0);
+  if (members > 0) return Math.max(0, members - 1);
+  let max = 0;
+  for (const item of state?.messages || []) {
+    max = Math.max(max, Number(item?.msg?.totalRecipients) || 0);
+  }
+  return max;
 }
 
-function iconHits(actions, originX, originY, width) {
-  const strip = iconStrip(actions);
-  const stripW = ansi.width(strip);
-  let x = originX + width - stripW;
+function tickStrip(item, totalOverride) {
+  const total = Math.max(0, Number(totalOverride) || Number(item?.msg?.totalRecipients) || 0);
+  const read = Math.max(0, Math.min(total, Number(item?.msg?.readCount) || 0));
+  if (total <= 0) return ''.padEnd(TICK_GUTTER, ' ');
+  if (total > 6) return padCells(`${read}/${total}`, TICK_GUTTER);
+  return padCells(`${'✓'.repeat(read)}${'·'.repeat(total - read)}`, TICK_GUTTER);
+}
+
+function slotStrip(enabledIds) {
+  const enabled = new Set(enabledIds);
+  return ACTION_SLOTS.map((id) => {
+    const action = ACTIONS[id];
+    return enabled.has(id) ? action.glyph : ' ';
+  }).join(' '.repeat(ACTION_GAP));
+}
+
+function iconHits(enabledIds, originX, originY, rowWidth) {
+  const enabled = new Set(enabledIds);
+  const startX = originX + rowWidth - ACTION_GUTTER;
   const hits = [];
-  for (const action of actions) {
-    if (!action.glyph) continue;
-    const w = Math.max(1, ansi.width(action.glyph));
-    hits.push({ type: 'action', action: action.id, x, y: originY, w, h: 1 });
-    x += w + 2;
+  let x = startX;
+  for (const id of ACTION_SLOTS) {
+    if (enabled.has(id)) {
+      hits.push({ type: 'action', action: id, x, y: originY, w: 1, h: 1 });
+    }
+    x += ACTION_SLOT_W + ACTION_GAP;
   }
   return hits;
 }
@@ -326,16 +363,28 @@ function styleHint(actions) {
   }).join('   ');
 }
 
-function hintHits(actions, originX, originY) {
-  let x = originX;
-  const hits = [];
-  for (const action of actions) {
+function hintHits(actions, originX, originY, rowWidth) {
+  const parts = actions.map((action) => {
     const extra = action.id === 'preview' ? ` ${ACTIONS.preview.glyph}` : '';
-    const w = ansi.width(action.label + extra);
-    hits.push({ type: 'action', action: action.id, id: null, x, y: originY, w, h: 1 });
-    x += w + 3;
+    return { action, w: ansi.width(action.label + extra) };
+  });
+  const total = parts.reduce((sum, p) => sum + p.w, 0) + Math.max(0, parts.length - 1) * 3;
+  let x = originX + Math.max(0, rowWidth - total);
+  const hits = [];
+  for (const part of parts) {
+    hits.push({ type: 'action', action: part.action.id, id: null, x, y: originY, w: part.w, h: 1 });
+    x += part.w + 3;
   }
   return hits;
+}
+
+function channelHintActions(name) {
+  if (name === 'main') return [ACTIONS.clear];
+  return [
+    { id: 'rename', key: 'r', glyph: '✎', label: 'rename', color: PALETTE.keyE },
+    { id: 'delete-channel', key: 'd', glyph: '×', label: 'delete', color: PALETTE.keyD },
+    ACTIONS.clear,
+  ];
 }
 
 function bodyText(item) {
@@ -345,10 +394,9 @@ function bodyText(item) {
 }
 
 function metaLine(item) {
-  const time = formatTime(item.msg?.createdAt);
   const name = item.msg?.senderName || item.msg?.senderId || '?';
   const edited = item.msg?.editedAt ? '  edited' : '';
-  return `${time}  ${name}${edited}`;
+  return `${name}${edited}`;
 }
 
 function replyLine(item) {
@@ -378,10 +426,6 @@ function nameColor(item) {
   return hashNameColor(item?.msg?.senderName || item?.msg?.senderId || '?');
 }
 
-function styleImageLabel() {
-  return `${ansi.fg(PALETTE.image)}[Image]${ansi.reset()}`;
-}
-
 function layoutMessage(item, width, userId) {
   const actions = actionListFor(item, userId);
   const rows = [];
@@ -393,18 +437,21 @@ function layoutMessage(item, width, userId) {
   }
   const metaRow = rows.length;
   rows.push(metaLine(item));
+  const iconRow = rows.length;
   let card = null;
+  const bodyW = Math.max(1, width - CONTENT_GUTTER);
   if (isImage(item)) {
-    card = { start: rows.length, height: 1, width: Math.min(width, 8) };
+    card = { start: rows.length, height: 1, width: Math.min(bodyW, 8) };
     rows.push('[Image]');
   } else if (isAttachment(item)) {
     const name = item.attach?.filename || 'file';
-    card = { start: rows.length, height: 1, width: Math.min(width, ansi.width(name) + 8) };
+    card = { start: rows.length, height: 1, width: Math.min(bodyW, ansi.width(name) + 8) };
     rows.push(`[file] ${name}`);
   } else {
-    rows.push(...wrapText(bodyText(item), width));
+    const body = wrapText(bodyText(item), bodyW);
+    rows.push(...body);
   }
-  return { rows, actions, card, height: rows.length, replyRow, metaRow };
+  return { rows, actions, card, height: rows.length, replyRow, metaRow, iconRow };
 }
 
 function sendingLabel(frame) {
@@ -412,50 +459,59 @@ function sendingLabel(frame) {
   return on ? 'sending...' : 'sending   ';
 }
 
+function withBg(text, bg) {
+  if (!bg) return `${text}${ansi.reset()}`;
+  const reset = ansi.reset();
+  const bgOn = ansi.bg(bg);
+  return `${bgOn}${String(text).split(reset).join(reset + bgOn)}${reset}`;
+}
+
 function paintMessageRow(plain, width, {
-  outlined, raised, isMeta, isReply, showIcons, hoverAction, actions, sending, animFrame, isImageRow, nameTint,
+  raised, isMeta, isReply, isIconRow, showIcons, hoverAction, actions, sending,
+  animFrame, isImageRow, nameTint, stamp, ticks,
 }) {
-  let content = isImageRow ? '' : plain;
-  if (showIcons && isMeta) content = overlayIcons(plain, actions, width);
-  if (sending && !isMeta && !isReply && !isImageRow) {
-    const label = sendingLabel(animFrame);
-    const labelW = ansi.width(label);
-    const bodyW = Math.max(0, width - labelW - 1);
-    const body = ansi.width(content) > bodyW
-      ? ansi.stripAnsi(ansi.truncate(content, Math.max(1, bodyW)))
-      : content;
-    content = body + ' '.repeat(Math.max(0, width - ansi.width(body) - labelW)) + label;
-  }
-  const fg = isReply || sending ? PALETTE.muted : (isMeta ? PALETTE.muted : PALETTE.text);
   const bg = raised ? PALETTE.selectedBg : null;
-  let painted;
-  if (isImageRow) {
-    painted = fillRow('[Image]', width, { fg: PALETTE.image, bg });
-  } else if (isMeta && nameTint) {
-    const time = content.slice(0, 5);
-    const rest = content.slice(5);
-    const nameMatch = rest.match(/^(\s+)(\S+)(.*)$/);
-    if (nameMatch) {
-      const colored = `${ansi.fg(PALETTE.muted)}${time}${nameMatch[1]}${ansi.reset()}`
-        + `${ansi.fg(nameTint)}${ansi.bold()}${nameMatch[2]}${ansi.reset()}`
-        + `${ansi.fg(PALETTE.muted)}${nameMatch[3]}${ansi.reset()}`;
-      const pad = ' '.repeat(Math.max(0, width - ansi.width(time + nameMatch[1] + nameMatch[2] + nameMatch[3])));
-      painted = `${bg ? ansi.bg(bg) : ''}${colored}${bg ? ansi.bg(bg) : ''}${pad}${ansi.reset()}`;
-    } else {
-      painted = fillRow(content, width, { fg, dim: !!sending, bg });
-    }
-  } else {
-    painted = fillRow(content, width, { fg, dim: !!sending, bg });
+  const bgOn = bg ? ansi.bg(bg) : '';
+
+  if (isMeta) {
+    const stampText = stamp || '';
+    const stampW = ansi.width(stampText);
+    const nameMax = Math.max(1, width - stampW - (stampW ? 1 : 0));
+    const name = ansi.stripAnsi(ansi.truncate(String(plain || ''), nameMax));
+    const nameW = ansi.width(name);
+    const mid = Math.max(0, width - nameW - stampW);
+    const left = `${bgOn}${ansi.fg(nameTint || PALETTE.text)}${ansi.bold()}${name}${ansi.reset()}`;
+    const gap = `${bgOn}${' '.repeat(mid)}`;
+    const right = stampText ? `${bgOn}${ansi.fg(PALETTE.muted)}${stampText}${ansi.reset()}` : '';
+    return withBg(`${left}${gap}${right}`, bg);
   }
-  if (showIcons && isMeta) {
-    for (const action of actions) {
-      if (!action.glyph) continue;
-      const hot = hoverAction === action.id;
-      const styled = `${hot ? ansi.bold() : ''}${ansi.fg(action.color)}${action.glyph}${ansi.reset()}`;
-      painted = painted.replace(action.glyph, styled);
-    }
+
+  if (isReply) {
+    return withBg(`${ansi.fg(PALETTE.reply)}${padCells(plain, width)}`, bg);
   }
-  return painted;
+
+  const gutterW = CONTENT_GUTTER;
+  const bodyW = Math.max(1, width - gutterW);
+  let body = isImageRow ? '[Image]' : String(plain || '');
+  if (sending && !isImageRow) {
+    const label = sendingLabel(animFrame);
+    const room = Math.max(1, bodyW - ansi.width(label) - 1);
+    const cut = ansi.width(body) > room ? ansi.stripAnsi(ansi.truncate(body, room)) : body;
+    body = cut + ' '.repeat(Math.max(0, room - ansi.width(cut))) + label;
+  }
+  const bodyFg = isImageRow ? PALETTE.image : (sending ? PALETTE.muted : PALETTE.text);
+  const bodyStyled = `${bgOn}${ansi.fg(bodyFg)}${padCells(isImageRow ? '[Image]' : body, bodyW)}${ansi.reset()}`;
+  const tickText = isIconRow ? padCells(ticks || '', TICK_GUTTER) : ''.padEnd(TICK_GUTTER, ' ');
+  let gutterStyled = `${bgOn}${ansi.fg(PALETTE.muted)}${tickText}${ansi.reset()}${bgOn} `;
+  const slots = ACTION_SLOTS.map((id) => {
+    const action = ACTIONS[id];
+    const on = !!(isIconRow && showIcons && (actions || []).some((a) => a.id === id));
+    if (!on) return `${bgOn} `;
+    const hot = hoverAction === action.id;
+    return `${bgOn}${hot ? ansi.bold() : ''}${ansi.fg(action.color)}${action.glyph}${ansi.reset()}`;
+  });
+  gutterStyled += slots.join(`${bgOn}${' '.repeat(ACTION_GAP)}`);
+  return withBg(bodyStyled + gutterStyled, bg);
 }
 
 function boxTop(width, color) {
@@ -533,6 +589,37 @@ function chipWidth(label) {
   return Math.max(5, ansi.width(label) + 2);
 }
 
+function channelExpandIconsPlain() {
+  return `${ACTIONS.edit.glyph}${' '.repeat(CHANNEL_ICON_GAP)}${ACTIONS.delete.glyph}`;
+}
+
+function channelExpandIconsStyled() {
+  return `${ansi.fg(PALETTE.keyE)}${ACTIONS.edit.glyph}${ansi.reset()}`
+    + `${' '.repeat(CHANNEL_ICON_GAP)}`
+    + `${ansi.fg(PALETTE.keyD)}${ACTIONS.delete.glyph}${ansi.reset()}`;
+}
+
+function channelExpandProgress(state, name) {
+  if (!state || state.channelMenu !== name) return 0;
+  const frames = Math.max(1, CHANNEL_EXPAND_FRAMES);
+  const raw = Number(state.channelExpandFrame);
+  const frame = Number.isFinite(raw) ? raw : frames;
+  return Math.min(1, Math.max(0, frame / frames));
+}
+
+function paintBoxChip(innerStyled, w, color, { bold = false } = {}) {
+  const innerW = Math.max(1, w - 2);
+  const inner = padCells(innerStyled, innerW);
+  const fg = ansi.fg(color);
+  const reset = ansi.reset();
+  return {
+    top: `${fg}╭${'─'.repeat(innerW)}╮${reset}`,
+    mid: `${fg}│${reset}${fg}${bold ? ansi.bold() : ''}${inner}${reset}${fg}│${reset}`,
+    bot: `${fg}╰${'─'.repeat(innerW)}╯${reset}`,
+    innerW,
+  };
+}
+
 function buildChannelBar(state, width, originX, originY) {
   const hits = [];
   const lines = [
@@ -542,31 +629,25 @@ function buildChannelBar(state, width, originX, originY) {
   ];
   let x = PAD;
   const channels = state.channels && state.channels.length ? state.channels : ['main'];
-
-  const paintChip = (label, { active, hover, draft }) => {
-    const w = chipWidth(label);
-    if (x + w > width - 1) return false;
-    const color = active ? PALETTE.title : (hover ? PALETTE.channelHover : PALETTE.muted);
-    const body = ` ${padCells(label, w - 2)} `;
-    const top = `${ansi.fg(color)}╭${'─'.repeat(w - 2)}╮${ansi.reset()}`;
-    const mid = `${ansi.fg(color)}│${ansi.reset()}${ansi.fg(active ? PALETTE.title : color)}${ansi.bold()}${body.slice(1, -1)}${ansi.reset()}${ansi.fg(color)}│${ansi.reset()}`;
-    const bot = `${ansi.fg(color)}╰${'─'.repeat(w - 2)}╯${ansi.reset()}`;
-    const splice = (row, fragment) => {
-      const prefix = ansi.width(lines[row]) === width && lines[row].trim() === '' ? ' '.repeat(x) : padCells(lines[row].slice(0, 0) + ' '.repeat(x), x);
-      lines[row] = padCells(prefix + fragment + ' ', width);
-    };
-    // Rebuild each row from a buffer of chips instead of splicing ANSI.
-    return { x, w, top, mid, bot, color };
-  };
+  const expandPlain = channelExpandIconsPlain();
+  const expandStyled = channelExpandIconsStyled();
+  const expandIconW = ansi.width(expandPlain);
 
   const chips = [];
   for (const name of channels) {
-    const expanded = state.channelMenu === name && !state.renamingChannel;
+    const expanding = state.channelMenu === name;
     const renaming = state.renamingChannel === name;
-    let label = `#${name}`;
+    const collapsedLabel = `#${name}`;
+    const expandedLabel = `#${name}  ${expandPlain}`;
+    const progress = channelExpandProgress(state, name);
+    const eased = 1 - (1 - progress) * (1 - progress);
+    let label = collapsedLabel;
     if (renaming) label = `#${state.channelDraft || ''}${FIELD_CARET}`;
-    else if (expanded) label = `#${name}  ✎  ×`;
-    const w = chipWidth(label);
+    const collapsedW = chipWidth(collapsedLabel);
+    const expandedW = chipWidth(expandedLabel);
+    const w = renaming
+      ? Math.max(expandedW, chipWidth(label))
+      : Math.round(collapsedW + (expandedW - collapsedW) * eased);
     if (x + w > width - PAD - 6) break;
     const active = name === (state.activeChannel || 'main');
     const hover = !active && state.hoverChannel === name;
@@ -576,15 +657,16 @@ function buildChannelBar(state, width, originX, originY) {
       label,
       x,
       w,
-      active: active || expanded || renaming,
+      active: active || expanding || renaming,
       hover,
-      expanded,
+      expanding,
+      renaming,
     });
     x += w + 1;
   }
   if (state.creatingChannel) {
-    const draft = `#${state.channelDraft || ''}${FIELD_CARET}`;
-    const w = Math.max(8, chipWidth(draft));
+    const draft = `#${state.channelDraft || ''}${FIELD_CARET}  ×`;
+    const w = Math.max(10, chipWidth(draft));
     if (x + w <= width - PAD) {
       chips.push({
         type: 'channel-draft',
@@ -594,16 +676,17 @@ function buildChannelBar(state, width, originX, originY) {
         w,
         active: true,
         hover: false,
+        cancel: true,
       });
       x += w + 1;
     }
   } else {
-    const w = chipWidth('+');
+    const w = chipWidth('+ Create');
     if (x + w <= width - PAD) {
       chips.push({
         type: 'create-channel',
         name: '+',
-        label: '+',
+        label: '+ Create',
         x,
         w,
         active: false,
@@ -612,19 +695,7 @@ function buildChannelBar(state, width, originX, originY) {
     }
   }
 
-  const rowBuf = [' '.repeat(width), ' '.repeat(width), ' '.repeat(width)];
-  const writePlain = (row, at, text) => {
-    const chars = [...rowBuf[row]];
-    // rowBuf is spaces; we store styled strings separately
-    void chars;
-    void at;
-    void text;
-  };
-  void writePlain;
-  void paintChip;
-
   const styled = ['', '', ''];
-  let cursor = 0;
   const padTo = (target) => {
     const used = ansi.width(styled[0]);
     if (target > used) {
@@ -633,21 +704,33 @@ function buildChannelBar(state, width, originX, originY) {
       styled[1] += gap;
       styled[2] += gap;
     }
-    cursor = target;
   };
   padTo(PAD);
   for (const chip of chips) {
     padTo(chip.x);
     const color = chip.active ? PALETTE.title : (chip.hover ? PALETTE.channelHover : PALETTE.muted);
-    let inner = padCells(chip.label, chip.w - 2);
-    if (chip.expanded) {
+    const innerW = Math.max(1, chip.w - 2);
+    let inner = padCells(chip.label, innerW);
+    let iconsVisible = false;
+    if (chip.expanding && !chip.renaming) {
       const base = `#${chip.name}`;
-      const pad = ' '.repeat(Math.max(1, chip.w - 2 - ansi.width(base) - 5));
-      inner = `${base}${pad}${ansi.fg(PALETTE.keyE)}✎${ansi.reset()}${ansi.fg(color)}  ${ansi.fg(PALETTE.keyD)}×${ansi.reset()}`;
+      const baseW = ansi.width(base);
+      const expandedInner = Math.max(baseW + 1 + expandIconW, chipWidth(`#${chip.name}  ${expandPlain}`) - 2);
+      const full = `${base}${' '.repeat(Math.max(0, expandedInner - baseW - expandIconW))}${expandStyled}`;
+      inner = ansi.width(full) > innerW ? ansi.truncate(full, innerW) : padCells(full, innerW);
+      iconsVisible = innerW >= baseW + 1 + expandIconW;
+    } else if (chip.cancel) {
+      const base = `#${state.channelDraft || ''}${FIELD_CARET}`;
+      const cross = `${ansi.fg(PALETTE.keyD)}×${ansi.reset()}`;
+      const room = innerW - ansi.width(base);
+      inner = room >= 1
+        ? padCells(`${base}${' '.repeat(Math.max(0, room - 1))}${cross}`, innerW)
+        : padCells(base, innerW);
     }
-    styled[0] += `${ansi.fg(color)}╭${'─'.repeat(chip.w - 2)}╮${ansi.reset()}`;
-    styled[1] += `${ansi.fg(color)}│${ansi.reset()}${ansi.fg(color)}${chip.active ? ansi.bold() : ''}${inner}${ansi.reset()}${ansi.fg(color)}│${ansi.reset()}`;
-    styled[2] += `${ansi.fg(color)}╰${'─'.repeat(chip.w - 2)}╯${ansi.reset()}`;
+    const box = paintBoxChip(inner, chip.w, color, { bold: chip.active });
+    styled[0] += box.top;
+    styled[1] += box.mid;
+    styled[2] += box.bot;
     hits.push({
       type: chip.type,
       name: chip.name,
@@ -656,13 +739,14 @@ function buildChannelBar(state, width, originX, originY) {
       w: chip.w,
       h: 3,
     });
-    if (chip.expanded && chip.name !== '+') {
-      const iconStart = chip.x + chip.w - 5;
+    if (iconsVisible && chip.name !== '+') {
+      const deleteX = chip.x + chip.w - 2;
+      const renameX = deleteX - CHANNEL_ICON_GAP - 1;
       hits.push({
         type: 'channel-action',
         action: 'rename',
         name: chip.name,
-        x: originX + iconStart,
+        x: originX + renameX,
         y: originY + 1,
         w: 1,
         h: 1,
@@ -671,13 +755,21 @@ function buildChannelBar(state, width, originX, originY) {
         type: 'channel-action',
         action: 'delete',
         name: chip.name,
-        x: originX + iconStart + 3,
+        x: originX + deleteX,
         y: originY + 1,
         w: 1,
         h: 1,
       });
     }
-    cursor = chip.x + chip.w;
+    if (chip.cancel) {
+      hits.push({
+        type: 'cancel-create',
+        x: originX + chip.x + chip.w - 2,
+        y: originY + 1,
+        w: 1,
+        h: 1,
+      });
+    }
   }
   lines[0] = padCells(styled[0], width);
   lines[1] = padCells(styled[1], width);
@@ -730,6 +822,23 @@ function scrollOffsetFromY(y, region, maxScroll) {
   return Math.round((1 - t) * maxScroll);
 }
 
+function scrollOffsetFromDrag(startOffset, startY, y, region, maxScroll) {
+  const current = Math.max(0, Number(startOffset) || 0);
+  if (!region || region.h <= 1 || maxScroll <= 0) return Math.min(current, Math.max(0, maxScroll));
+  const view = region.h;
+  const total = maxScroll + view;
+  const thumbH = Math.max(1, Math.round((view * view) / Math.max(1, total)));
+  const travel = Math.max(1, view - thumbH);
+  const delta = Math.round((-(y - startY) / travel) * maxScroll);
+  return Math.max(0, Math.min(maxScroll, current + delta));
+}
+
+function hideChannelBar(state) {
+  if (!state || !state.activeGroupId) return true;
+  if (state.loadingGroup) return true;
+  return !!(state.transition && state.transition.kind === 'group');
+}
+
 function findMessageBounds(flat, id) {
   if (id == null) return null;
   const want = String(id);
@@ -758,27 +867,35 @@ function clampScrollForMessage(offset, bounds, total, viewH) {
 }
 
 function buildComposerHint(state, width) {
-  if (state.error) return fillRow(`${' '.repeat(PAD)}${state.error}`, width, { fg: PALETTE.error });
+  let left = '';
+  if (state.error) left = `${ansi.fg(PALETTE.error)}${state.error}${ansi.reset()}`;
+  else if (state.editingId) left = `${ansi.fg(PALETTE.muted)}editing${ansi.reset()}`;
+  else if (state.replyTo) left = `${ansi.fg(PALETTE.muted)}↩  ${state.replyTo.name || 'reply'}${ansi.reset()}`;
+  else if (state.typing && state.typing.username) {
+    const pulse = Math.floor((state.animFrame || 0) / 8) % 2 === 0;
+    left = `${ansi.fg(PALETTE.muted)}${state.typing.username} is typing${pulse ? '…' : '   '}${ansi.reset()}`;
+  }
+
+  let right = '';
+  let rightActions = [];
   if (state.overlay && state.overlay.type === 'delete') {
-    return fillRow('', width, {});
-  }
-  if (state.editingId) return fillRow(`${' '.repeat(PAD)}editing`, width, { fg: PALETTE.muted });
-  if (state.replyTo) {
-    return fillRow(`${' '.repeat(PAD)}↩  ${state.replyTo.name || 'reply'}`, width, { fg: PALETTE.muted });
-  }
-  if (state.selectedMessageId) {
+    right = '';
+  } else if (state.channelMenu && !state.renamingChannel) {
+    rightActions = channelHintActions(state.channelMenu);
+    right = styleHint(rightActions);
+  } else if (state.selectedMessageId) {
     const item = (state.messages || []).find((m) => String(m.msg?.id) === String(state.selectedMessageId));
     if (item) {
-      const actions = hintActionsFor(item, state.userId);
-      return padCells(`${' '.repeat(PAD)}${styleHint(actions)}`, width);
+      rightActions = hintActionsFor(item, state.userId);
+      right = styleHint(rightActions);
     }
   }
-  if (state.typing && state.typing.username) {
-    const pulse = Math.floor((state.animFrame || 0) / 8) % 2 === 0;
-    const dots = pulse ? '…' : '   ';
-    return fillRow(`${' '.repeat(PAD)}${state.typing.username} is typing${dots}`, width, { fg: PALETTE.muted });
-  }
-  return fillRow('', width, {});
+
+  const leftW = ansi.width(left);
+  const rightW = ansi.width(right);
+  const gap = Math.max(1, width - PAD - leftW - rightW);
+  const row = `${' '.repeat(PAD)}${left}${' '.repeat(gap)}${right}`;
+  return { line: padCells(row, width), rightActions, rightStart: PAD + leftW + gap };
 }
 
 function composerMetrics(state, boxWidth) {
@@ -862,7 +979,7 @@ function buildComposerBox(state, width, metrics) {
 }
 
 function showBird(state) {
-  return !state.activeGroupId || !!state.transition;
+  return !state.activeGroupId || !!state.transition || !!state.loadingGroup;
 }
 
 function outlineColor(hover) {
@@ -898,9 +1015,11 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
 
   const hits = [];
   const lines = Array.from({ length: height }, () => ' '.repeat(width));
+  const hideBar = hideChannelBar(state);
+  const recipients = groupRecipientCount(state);
 
   const side = buildSidebar(state, sideW, height);
-  const channels = buildChannelBar(state, contentW, mainX, 0);
+  const channels = hideBar ? { lines: [], hits: [] } : buildChannelBar(state, contentW, mainX, 0);
   hits.push(...side.hits, ...channels.hits);
 
   const filtered = filterMessages(state.messages, state.activeChannel);
@@ -930,8 +1049,10 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
   if (bounds) offset = clampScrollForMessage(offset, bounds, totalLines, transcriptH);
   const start = Math.max(0, totalLines - transcriptH - offset);
   const visible = flat.slice(start, start + transcriptH);
+  const selectedBounds = selectedId ? findMessageBounds(flat, selectedId) : null;
   const bird = showBird(state);
-  const birdLines = bird ? buildBirdLines(contentW, transcriptH, state.animFrame || 0) : null;
+  const birdH = hideBar && bird ? composerY : transcriptH;
+  const birdLines = bird ? buildBirdLines(contentW, birdH, state.animFrame || 0) : null;
   const bar = scrollbarGlyphs(transcriptH, bird ? 0 : totalLines, transcriptH, offset);
   const protectedRows = new Set();
   const confirmHits = [];
@@ -949,7 +1070,8 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
     const screenY = transcriptY + i;
     const left = sideW > 0 ? (side.lines[screenY] || fillRow('', sideW, {})) : '';
     if (bird) {
-      lines[screenY] = join(left, birdLines[i] || fillRow('', contentW, {}), ' ');
+      const birdRow = hideBar ? CHANNEL_ROWS + i : i;
+      lines[screenY] = join(left, birdLines[birdRow] || fillRow('', contentW, {}), ' ');
       continue;
     }
     const abs = start + i;
@@ -1005,10 +1127,10 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
     const color = outlineColor(hover);
     const showIcons = hover || selected;
     const painted = paintMessageRow(entry.row, textW, {
-      outlined: !!color,
       raised: selected,
       isMeta: entry.rowInBlock === entry.layout.metaRow,
       isReply: entry.rowInBlock === entry.layout.replyRow,
+      isIconRow: entry.rowInBlock === entry.layout.iconRow,
       showIcons,
       hoverAction: (hover || selected) ? state.hoverAction : null,
       actions: entry.layout.actions,
@@ -1016,14 +1138,19 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
       animFrame: state.animFrame || 0,
       isImageRow: entry.layout.card && entry.rowInBlock === entry.layout.card.start && isImage(entry.item),
       nameTint: entry.rowInBlock === entry.layout.metaRow ? nameColor(entry.item) : null,
+      stamp: entry.rowInBlock === entry.layout.metaRow
+        ? formatStamp(entry.item.msg?.createdAt, state.now || undefined)
+        : '',
+      ticks: entry.rowInBlock === entry.layout.iconRow
+        ? tickStrip(entry.item, recipients)
+        : ''.padEnd(TICK_GUTTER, ' '),
     });
     let inner;
     if (color) inner = boxRow(painted, boxW, color);
-    else if (selected) inner = fillRow(ansi.stripAnsi(painted) && painted, boxW, { bg: PALETTE.selectedBg });
-    else inner = `${' '.repeat(1)}${painted}${' '.repeat(1)}`;
-    if (selected && !color) {
-      inner = `${ansi.bg(PALETTE.selectedBg)}${padCells(painted, boxW)}${ansi.reset()}`;
-    }
+    else if (selected) {
+      const fill = ansi.bg(PALETTE.selectedBg);
+      inner = `${fill} ${painted}${fill} ${ansi.reset()}`;
+    } else inner = ` ${painted} `;
     lines[screenY] = join(left, `${' '.repeat(PAD)}${inner}`, bar[i]);
 
     if (selected || (state.overlay && state.overlay.type === 'delete' && String(state.overlay.messageId) === id)) {
@@ -1039,8 +1166,13 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
       h: 1,
     });
 
-    if (showIcons && entry.rowInBlock === entry.layout.metaRow) {
-      for (const hit of iconHits(entry.layout.actions, mainX + PAD + 1, screenY, textW)) {
+    if (showIcons && entry.rowInBlock === entry.layout.iconRow) {
+      for (const hit of iconHits(
+        (entry.layout.actions || []).map((a) => a.id),
+        mainX + PAD + 1,
+        screenY,
+        textW
+      )) {
         hits.push({ ...hit, id: entry.item.msg.id });
       }
     }
@@ -1070,24 +1202,26 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
   const withBar = (y, mid, barGlyph = ' ') => join(sideAt(y), mid, barGlyph);
 
   for (let i = 0; i < CHANNEL_ROWS; i += 1) {
-    lines[i] = withBar(i, channels.lines[i] || fillRow('', contentW, {}));
+    if (bird && hideBar) {
+      lines[i] = withBar(i, birdLines[i] || fillRow('', contentW, {}));
+    } else {
+      lines[i] = withBar(i, channels.lines[i] || fillRow('', contentW, {}));
+    }
   }
 
   const hint = buildComposerHint(state, contentW);
   const boxLines = buildComposerBox(state, boxW, metrics);
-  lines[composerY] = withBar(composerY, hint);
+  lines[composerY] = withBar(composerY, hint.line);
   boxLines.forEach((row, i) => {
     lines[composerY + 1 + i] = withBar(composerY + 1 + i, `${' '.repeat(PAD)}${row}`);
   });
   const padY = composerY + 1 + boxLines.length;
   if (padY < height) lines[padY] = withBar(padY, fillRow('', contentW, {}));
 
-  if (state.selectedMessageId && !(state.overlay && state.overlay.type === 'delete')) {
-    const item = (state.messages || []).find((m) => String(m.msg?.id) === String(state.selectedMessageId));
-    if (item) {
-      for (const hit of hintHits(hintActionsFor(item, state.userId), mainX + PAD, composerY)) {
-        hits.push({ ...hit, id: item.msg.id });
-      }
+  if (hint.rightActions.length && !(state.overlay && state.overlay.type === 'delete')) {
+    const hintId = state.selectedMessageId || state.channelMenu || null;
+    for (const hit of hintHits(hint.rightActions, mainX, composerY, contentW)) {
+      hits.push({ ...hit, id: hintId });
     }
   }
 
@@ -1134,6 +1268,7 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
     maxScroll,
     scrollOffset: offset,
     messageBounds: bounds,
+    selectedBounds,
     composerMetrics: metrics,
   };
 }
@@ -1165,6 +1300,11 @@ module.exports = {
   SIDEBAR_MIN,
   SIDEBAR_MAX,
   CHANNEL_ROWS,
+  CHANNEL_EXPAND_FRAMES,
+  ACTION_SLOTS,
+  ACTION_GUTTER,
+  TICK_GUTTER,
+  CONTENT_GUTTER,
   COMPOSER_MIN_INNER,
   COMPOSER_MAX_INNER,
   SCROLLBAR_W,
@@ -1174,6 +1314,7 @@ module.exports = {
   sidebarWidth,
   sidebarTitle,
   formatTime,
+  formatStamp,
   formatBytes,
   wrapText,
   wrapIndexed,
@@ -1184,8 +1325,13 @@ module.exports = {
   hitTest,
   filterMessages,
   scrollOffsetFromY,
+  scrollOffsetFromDrag,
+  hideChannelBar,
+  groupRecipientCount,
+  tickStrip,
   findMessageBounds,
   clampScrollForMessage,
+  buildComposerHint,
   composerMetrics,
   buildBirdLines,
   nameColor,
