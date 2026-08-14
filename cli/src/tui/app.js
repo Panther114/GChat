@@ -22,6 +22,8 @@ const {
   clampScroll,
   selectTier,
   styleArtLine,
+  sharedBirdY,
+  loginBirdOrigin,
   TUI_VERSION,
 } = require('./landing');
 const { configPaths } = require('../store/paths');
@@ -87,16 +89,15 @@ function splashBirdOrigin(cols, rows) {
   const height = Math.max(1, rows);
   const tier = selectTier(width, height);
   const artW = Math.max(...tier.art.map((line) => ansi.width(line)));
-  const blockH = tier.art.length + 3;
   return {
     x: Math.max(0, Math.floor((width - artW) / 2)),
-    y: Math.max(0, Math.floor((height - blockH) / 2)),
+    y: sharedBirdY(height, tier.art.length),
     artW,
     artH: tier.art.length,
   };
 }
 
-function splashScreenLines(cols, rows, theme, label, animFrame = 0) {
+function splashScreenLines(cols, rows, theme, label, animFrame = 0, originX = null) {
   return runWithTheme(theme, () => {
     const width = Math.max(1, cols);
     const height = Math.max(1, rows);
@@ -105,9 +106,8 @@ function splashScreenLines(cols, rows, theme, label, animFrame = 0) {
     const artW = Math.max(...tier.art.map((line) => ansi.width(line)));
     const title = `GChat CLI ${TUI_VERSION}`;
     const hint = label || 'Loading…';
-    const blockH = tier.art.length + 3;
-    const originY = Math.max(0, Math.floor((height - blockH) / 2));
-    const originX = Math.max(0, Math.floor((width - artW) / 2));
+    const originY = sharedBirdY(height, tier.art.length);
+    if (originX == null) originX = Math.max(0, Math.floor((width - artW) / 2));
     const lines = Array.from({ length: height }, () => paintCanvasLine('', width, 0, canvas));
     tier.art.forEach((artLine, i) => {
       const y = originY + i;
@@ -169,6 +169,9 @@ async function runTui(options = {}) {
   const painter = createScreenPainter();
   let splashTimer = null;
   let splashLabel = 'Loading…';
+  let splashFromX = null;
+  let splashToX = null;
+  let splashFlyAt = 0;
 
   /** Apply one keystroke to the login form (inserts at the active caret). */
   function handleKey(ch) {
@@ -347,14 +350,25 @@ async function runTui(options = {}) {
 
   function paintSplashNow() {
     const { cols, rows } = terminalSize();
+    const dest = splashBirdOrigin(cols, rows);
+    const t = Math.min(1, (Date.now() - splashFlyAt) / 420);
+    const eased = 1 - (1 - t) * (1 - t);
+    const fromX = splashFromX == null ? dest.x : splashFromX;
+    const toX = splashToX == null ? dest.x : splashToX;
+    const birdX = Math.round(fromX + (toX - fromX) * eased);
     const dots = '.'.repeat((Math.floor(frame / 8) % 3) + 1);
     const label = `${splashLabel.replace(/\.+$/, '')}${dots}`;
-    const bytes = painter.paint(splashScreenLines(cols, rows, ui.theme, label, frame), cols, rows);
+    const bytes = painter.paint(splashScreenLines(cols, rows, ui.theme, label, frame, birdX), cols, rows);
     if (bytes) stdout.write(bytes);
   }
 
   function startSplash(label = 'Loading') {
     splashLabel = label;
+    const { cols, rows } = terminalSize();
+    const dest = splashBirdOrigin(cols, rows);
+    splashToX = dest.x;
+    splashFromX = screen === 'landing' ? loginBirdOrigin(cols, rows).x : dest.x;
+    splashFlyAt = Date.now();
     screen = 'splash';
     paintSplashNow();
     if (splashTimer) return;

@@ -65,6 +65,7 @@ const DEFAULT_CHAT = {
   composer: '',
   composerCaret: 0,
   composerScroll: 0,
+  composerFollowCaret: true,
   birdFlight: null,
   replyTo: null,
   editingId: null,
@@ -317,13 +318,22 @@ function formatStamp(iso, now = new Date()) {
   if (!iso) return '';
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return '';
-  const time = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
-  const same = date.getFullYear() === now.getFullYear()
-    && date.getMonth() === now.getMonth()
-    && date.getDate() === now.getDate();
-  if (same) return time;
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+function dayKey(iso) {
+  if (!iso) return '';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+  return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+}
+
+function formatDayLabel(iso) {
+  if (!iso) return '';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
   const mon = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][date.getMonth()];
-  return `${mon} ${date.getDate()} ${time}`;
+  return `${mon} ${date.getDate()}`;
 }
 
 function groupRecipientCount(state) {
@@ -557,16 +567,18 @@ function paintMessageRow(plain, width, {
   return withBg(bodyStyled + gutterStyled, bg);
 }
 
-function boxTop(width, color) {
-  return fillRow(`╭${'─'.repeat(Math.max(0, width - 2))}╮`, width, { fg: color });
+function boxTop(width, color, fill = null) {
+  return fillRow(`╭${'─'.repeat(Math.max(0, width - 2))}╮`, width, { fg: color, bg: fill || undefined });
 }
 
-function boxBottom(width, color) {
-  return fillRow(`╰${'─'.repeat(Math.max(0, width - 2))}╯`, width, { fg: color });
+function boxBottom(width, color, fill = null) {
+  return fillRow(`╰${'─'.repeat(Math.max(0, width - 2))}╯`, width, { fg: color, bg: fill || undefined });
 }
 
-function boxRow(inner, width, color) {
-  return `${ansi.fg(color)}│${ansi.reset()}${padCells(inner, Math.max(0, width - 2))}${ansi.fg(color)}│${ansi.reset()}`;
+function boxRow(inner, width, color, fill = null) {
+  const bgOn = fill ? ansi.bg(fill) : '';
+  const reset = ansi.reset();
+  return `${bgOn}${ansi.fg(color)}│${reset}${bgOn}${padCells(inner, Math.max(0, width - 2))}${bgOn}${ansi.fg(color)}│${reset}`;
 }
 
 function pulseText(text, frame, hotColor, idleColor) {
@@ -951,11 +963,14 @@ function idleBirdOrigin(cols, rows, state = DEFAULT_CHAT) {
   const birdH = hideBar ? height - composerH : Math.max(1, height - CHANNEL_ROWS - composerH);
   const tier = pickBirdTier(contentW, birdH);
   const artW = Math.max(...tier.art.map((line) => ansi.width(line)));
-  const artH = tier.art.length;
+  const loginTier = landing.selectTier(width, height);
   const left = Math.max(0, Math.floor((contentW - artW) / 2));
-  const top = Math.max(0, Math.floor((birdH - artH) / 2));
-  const yShift = hideBar ? CHANNEL_ROWS : 0;
-  return { x: mainX + left, y: top - yShift, artW, artH };
+  return {
+    x: mainX + left,
+    y: landing.sharedBirdY(height, loginTier.art.length),
+    artW,
+    artH: tier.art.length,
+  };
 }
 
 function birdFlightPlacement(state, cols, rows) {
@@ -989,6 +1004,9 @@ function paintScrollbarCell(kind) {
 function scrollbarGlyphs(trackH, total, view, offset) {
   // Background-colored spaces fill the whole cell. Box-drawing │ and █
   // leave a gap between rows in Apple Terminal.app (a dotted bar).
+  if (!(trackH > 0) || !(total > view)) {
+    return Array.from({ length: Math.max(0, trackH) }, () => 'empty');
+  }
   const cells = Array.from({ length: Math.max(0, trackH) }, () => 'track');
   const thumb = scrollbarThumb(trackH, total, view, offset);
   if (!thumb) return cells;
@@ -1136,8 +1154,10 @@ function composerMetrics(state, boxWidth) {
     caretAt = Math.max(0, at - lineStart);
   }
   let lineScroll = state.composerScroll || 0;
-  if (caretLine < lineScroll) lineScroll = caretLine;
-  if (caretLine >= lineScroll + innerH) lineScroll = caretLine - innerH + 1;
+  if (state.composerFollowCaret !== false) {
+    if (caretLine < lineScroll) lineScroll = caretLine;
+    if (caretLine >= lineScroll + innerH) lineScroll = caretLine - innerH + 1;
+  }
   lineScroll = Math.max(0, Math.min(Math.max(0, total - innerH), lineScroll));
   return {
     innerW,
@@ -1256,13 +1276,40 @@ function buildChatFrameNow(cols, rows, state) {
     layout: layoutMessage(item, textW, state.userId, mode),
   }));
 
+  const contentProbe = [];
+  if (blocks.length) contentProbe.push('gap');
+  let prevDay = null;
+  for (const block of blocks) {
+    const day = dayKey(block.item?.msg?.createdAt);
+    if (day && day !== prevDay) {
+      contentProbe.push('date');
+      prevDay = day;
+    }
+    if (contentProbe.length > 1) contentProbe.push('gap');
+    block.layout.rows.forEach(() => contentProbe.push('row'));
+  }
+  if (blocks.length) contentProbe.push('gap');
+  const fillsScreen = contentProbe.length > transcriptH;
+
   const flat = [];
-  const showMore = !!(state.hasMoreHistory || state.loadingMore);
+  const showMore = !!(state.loadingMore || (state.hasMoreHistory && fillsScreen));
   if (showMore) {
     flat.push({ kind: 'more', item: null, row: 'Loading more...', rowInBlock: -1, layout: null });
   }
   if (blocks.length) flat.push({ kind: 'gap', item: null, row: '', rowInBlock: -1, layout: null });
+  prevDay = null;
   for (const block of blocks) {
+    const day = dayKey(block.item?.msg?.createdAt);
+    if (day && day !== prevDay) {
+      flat.push({
+        kind: 'date',
+        item: block.item,
+        row: formatDayLabel(block.item.msg.createdAt),
+        rowInBlock: -1,
+        layout: null,
+      });
+      prevDay = day;
+    }
     if (flat.length > 1) flat.push({ kind: 'gap', item: null, row: '', rowInBlock: -1, layout: null });
     block.layout.rows.forEach((row, rowInBlock) => {
       flat.push({ kind: 'row', item: block.item, row, rowInBlock, layout: block.layout });
@@ -1284,21 +1331,23 @@ function buildChatFrameNow(cols, rows, state) {
   const selectedBounds = selectedId ? findMessageBounds(flat, selectedId) : null;
   const bird = showBird(state);
   const birdH = hideBar && bird ? composerY : transcriptH;
+  const perch = bird ? idleBirdOrigin(width, height, state) : null;
   const flight = bird ? birdFlightPlacement(state, width, height) : null;
-  const birdOrigin = flight && !flight.done
-    ? { x: flight.x - mainX, y: flight.y + (hideBar ? CHANNEL_ROWS : 0) }
-    : null;
+  const birdOrigin = !bird ? null : (flight && !flight.done
+    ? { x: flight.x - mainX, y: flight.y }
+    : { x: perch.x - mainX, y: perch.y });
   const birdLines = bird
     ? buildBirdLines(
       contentW,
-      birdH,
-      (birdAnimated(state) || birdOrigin) ? (state.animFrame || 0) : 0,
-      !!(birdAnimated(state) || birdOrigin),
+      Math.max(birdH, height),
+      (birdAnimated(state) || (flight && !flight.done)) ? (state.animFrame || 0) : 0,
+      !!(birdAnimated(state) || (flight && !flight.done)),
       birdOrigin
     )
     : null;
-  const bar = scrollbarGlyphs(transcriptH, bird ? 0 : totalLines, transcriptH, offset);
-  const thumb = scrollbarThumb(transcriptH, bird ? 0 : totalLines, transcriptH, offset);
+  const overflow = !bird && totalLines > transcriptH;
+  const bar = scrollbarGlyphs(transcriptH, overflow ? totalLines : 0, transcriptH, offset);
+  const thumb = overflow ? scrollbarThumb(transcriptH, totalLines, transcriptH, offset) : null;
   const protectedRows = new Set();
   const confirmHits = [];
 
@@ -1312,8 +1361,7 @@ function buildChatFrameNow(cols, rows, state) {
     const screenY = transcriptY + i;
     const left = sideW > 0 ? (side.lines[screenY] || fillRow('', sideW, {})) : '';
     if (bird) {
-      const birdRow = hideBar ? CHANNEL_ROWS + i : i;
-      lines[screenY] = join(left, birdLines[birdRow] || fillRow('', contentW, {}), ' ');
+      lines[screenY] = join(left, birdLines[screenY] || fillRow('', contentW, {}), ' ');
       continue;
     }
     const abs = start + i;
@@ -1330,20 +1378,33 @@ function buildChatFrameNow(cols, rows, state) {
       continue;
     }
 
+    if (entry && entry.kind === 'date') {
+      const label = String(entry.row || '');
+      const rule = Math.max(2, Math.floor((contentW - ansi.width(label) - 2) / 2));
+      const plain = `${'─'.repeat(rule)} ${label} ${'─'.repeat(rule)}`;
+      const mid = fillRow(plain, contentW, { fg: PALETTE.muted, dim: true });
+      lines[screenY] = join(left, mid, bar[i]);
+      continue;
+    }
+
     if (!entry || entry.kind === 'gap') {
       const nextId = idOf(next);
       const prevId = idOf(prev);
-      const nextColor = outlineColor(nextId && nextId === hoverId);
-      const prevColor = outlineColor(prevId && prevId === hoverId);
+      const nextDeleting = !!(state.overlay && state.overlay.type === 'delete' && nextId && nextId === String(state.overlay.messageId));
+      const prevDeleting = !!(state.overlay && state.overlay.type === 'delete' && prevId && prevId === String(state.overlay.messageId));
+      const nextColor = nextDeleting ? PALETTE.error : outlineColor(nextId && nextId === hoverId);
+      const prevColor = prevDeleting ? PALETTE.error : outlineColor(prevId && prevId === hoverId);
+      const nextFill = nextDeleting ? PALETTE.deleteBg : null;
+      const prevFill = prevDeleting ? PALETTE.deleteBg : null;
       let mid;
       if (nextColor) {
-        mid = `${' '.repeat(PAD)}${boxTop(boxW, nextColor)}`;
-        if (nextId && (nextId === selectedId || (state.overlay && String(state.overlay.messageId) === nextId))) {
+        mid = `${' '.repeat(PAD)}${boxTop(boxW, nextColor, nextFill)}`;
+        if (nextId && (nextId === selectedId || nextDeleting)) {
           protectedRows.add(screenY);
         }
       } else if (prevColor) {
-        mid = `${' '.repeat(PAD)}${boxBottom(boxW, prevColor)}`;
-        if (prevId && (prevId === selectedId || (state.overlay && String(state.overlay.messageId) === prevId))) {
+        mid = `${' '.repeat(PAD)}${boxBottom(boxW, prevColor, prevFill)}`;
+        if (prevId && (prevId === selectedId || prevDeleting)) {
           protectedRows.add(screenY);
         }
       } else {
@@ -1359,7 +1420,7 @@ function buildChatFrameNow(cols, rows, state) {
     const selected = selectedId !== null && id === selectedId;
     const deleting = !!(state.overlay && state.overlay.type === 'delete'
       && String(state.overlay.messageId) === id);
-    const color = outlineColor(hover && !deleting);
+    const color = deleting ? PALETTE.error : outlineColor(hover && !deleting);
     const showIcons = (hover || selected) && !deleting;
     const painted = paintMessageRow(entry.row, textW, {
       raised: selected,
@@ -1384,8 +1445,7 @@ function buildChatFrameNow(cols, rows, state) {
       replyHot: !!(state.hoverReply && hover && entry.rowInBlock === entry.layout.replyRow),
     });
     let inner;
-    if (color) inner = boxRow(painted, boxW, color);
-    else if (deleting || selected) inner = ` ${painted} `;
+    if (color) inner = boxRow(painted, boxW, color, deleting ? PALETTE.deleteBg : null);
     else inner = ` ${painted} `;
     lines[screenY] = join(left, `${' '.repeat(PAD)}${inner}`, bar[i]);
 
@@ -1401,6 +1461,16 @@ function buildChatFrameNow(cols, rows, state) {
       w: contentW,
       h: 1,
     });
+    if (entry.rowInBlock !== entry.layout.metaRow && entry.rowInBlock !== entry.layout.replyRow) {
+      hits.push({
+        type: 'message-text',
+        id: entry.item.msg.id,
+        x: mainX + PAD + 1,
+        y: screenY,
+        w: Math.max(1, textW - CONTENT_GUTTER),
+        h: 1,
+      });
+    }
 
     if (entry.rowInBlock === entry.layout.replyRow && entry.item.replyTo?.id) {
       const replyW = Math.max(1, Math.min(textW, ansi.width(replyPreviewText(entry.item) || '↩')));
@@ -1434,13 +1504,15 @@ function buildChatFrameNow(cols, rows, state) {
     }
   }
 
-  hits.push({
-    type: 'scrollbar',
-    x: barX,
-    y: transcriptY,
-    w: SCROLLBAR_W,
-    h: transcriptH,
-  });
+  if (overflow) {
+    hits.push({
+      type: 'scrollbar',
+      x: barX,
+      y: transcriptY,
+      w: SCROLLBAR_W,
+      h: transcriptH,
+    });
+  }
 
   const sideAt = (y) => (sideW > 0 ? (side.lines[y] || fillRow('', sideW, {})) : '');
   const withBar = (y, mid, barGlyph = ' ') => join(sideAt(y), mid, barGlyph);
@@ -1519,10 +1591,9 @@ function buildChatFrameNow(cols, rows, state) {
       : null,
     composerMetrics: metrics,
     shouldLoadMore: !!(
-      (state.hasMoreHistory || state.loadingMore)
+      state.hasMoreHistory
       && !state.loadingMore
-      && state.hasMoreHistory
-      && visible.some((entry) => entry && entry.kind === 'more')
+      && (!fillsScreen || visible.some((entry) => entry && entry.kind === 'more'))
     ),
   };
 }
@@ -1582,6 +1653,8 @@ module.exports = {
   sidebarTitle,
   formatTime,
   formatStamp,
+  formatDayLabel,
+  dayKey,
   formatBytes,
   wrapText,
   wrapIndexed,

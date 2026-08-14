@@ -113,7 +113,7 @@ test('landing frame: contains title, option and hint with art glyphs intact', ()
   assert.equal(frame.height, tier.art.length + landing.LOGO_PADDING);
   assert.equal(frame.originX, Math.floor((100 - frame.width) / 2));
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r17/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r18/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
   // The braille glyphs themselves must be preserved exactly.
@@ -202,7 +202,7 @@ test('composeFrame: writes full-width rows without eraseLine', () => {
 test('composeFrame: content is written on each line', () => {
   const out = app.composeFrame(80, 24, 0);
   const plain = ansi.stripAnsi(out.replace(/\u001b\[\d+;\d+H/g, ''));
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r17/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r18/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
 });
@@ -222,7 +222,7 @@ test('splash screen paints a themed canvas with a loading label', () => {
   const lines = app.splashScreenLines(80, 24, 'dark', 'Loading…', 0);
   assert.equal(lines.length, 24);
   const plain = lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r17'));
+  assert.ok(plain.includes('GChat CLI 0.1 r18'));
   assert.ok(plain.includes('Loading'));
   assert.ok(lines.join('').includes(ansi.bg(theme.DARK.canvas)));
 });
@@ -661,7 +661,7 @@ test('codePointIndex and stepCodePoint do not split emoji', () => {
 test('chat frame: sidebar, channels, composer, and messages', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState());
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r17'), 'sidebar title is the CLI version');
+  assert.ok(plain.includes('GChat CLI 0.1 r18'), 'sidebar title is the CLI version');
   assert.ok(!plain.includes('chats\n') && !/^\s*chats\s*$/m.test(plain.split('\n')[0]), 'old "chats" label is gone');
   assert.ok(plain.includes('team'), 'active group in sidebar');
   assert.ok(!plain.includes('●'), 'groups are not indented with a bullet');
@@ -681,7 +681,6 @@ test('chat frame: sidebar, channels, composer, and messages', () => {
   assert.ok(frame.hits.some((h) => h.type === 'channel' && h.name === 'design'));
   assert.ok(frame.hits.some((h) => h.type === 'card' && h.id === 'm3'));
   assert.ok(frame.hits.some((h) => h.type === 'composer'));
-  assert.ok(frame.hits.some((h) => h.type === 'scrollbar'));
 });
 
 test('chat hover outlines without fill and does not show input shortcuts', () => {
@@ -854,6 +853,7 @@ test('delete confirm flashes a red hint and paints the message red', () => {
   assert.ok(plain.includes('on it'));
   assert.ok(plain.includes('clear (esc)'));
   assert.ok(frame.lines.join('').includes(ansi.bg(chatLayout.PALETTE.deleteBg)), 'target message uses a red fill');
+  assert.ok(plain.includes('╭') && plain.includes('╰') && plain.includes('│'), 'delete fill includes the message rectangle');
   assert.ok(!frame.hits.some((h) => h.type === 'confirm-delete'));
   assert.ok(frame.hits.some((h) => h.type === 'action' && h.action === 'clear'));
 });
@@ -975,10 +975,11 @@ function cellsHaveBg(styled, startPlain, selectedBg) {
   return { covered, total };
 }
 
-test('formatStamp puts time on the right and adds a date when it is not today', () => {
+test('formatStamp is time-only; date lives on the day rule', () => {
   const now = new Date('2026-08-13T20:00:00');
   assert.match(chatLayout.formatStamp('2026-08-13T10:02:00.000Z', now), /^\d{2}:\d{2}$/);
-  assert.match(chatLayout.formatStamp('2026-08-12T10:03:00.000Z', now), /Aug 12 \d{2}:\d{2}/);
+  assert.match(chatLayout.formatStamp('2026-08-12T10:03:00.000Z', now), /^\d{2}:\d{2}$/);
+  assert.equal(chatLayout.formatDayLabel('2026-08-12T10:03:00.000Z'), 'Aug 12');
 });
 
 test('message timestamps sit on the name row; actions sit on the content row', () => {
@@ -1003,10 +1004,12 @@ test('message timestamps sit on the name row; actions sit on the content row', (
       },
     ],
   }));
-  const nameRow = frame.lines.map((l) => ansi.stripAnsi(l)).find((l) => l.includes('will') && l.includes('Aug 12'));
-  assert.ok(nameRow, 'date+time is on the name row');
-  assert.ok(nameRow.indexOf('will') < nameRow.indexOf('Aug 12'), 'timestamp is to the right of the name');
+  const nameRow = frame.lines.map((l) => ansi.stripAnsi(l)).find((l) => l.includes('will') && /\d{2}:\d{2}/.test(l));
+  assert.ok(nameRow, 'time is on the name row');
+  assert.ok(nameRow.indexOf('will') < nameRow.search(/\d{2}:\d{2}/), 'timestamp is to the right of the name');
   assert.ok(!nameRow.includes('↩'), 'action icons are not on the name row');
+  const dayRule = frame.lines.map((l) => ansi.stripAnsi(l)).find((l) => l.includes('Aug 12'));
+  assert.ok(dayRule, 'the date sits on its own rule above the messages');
   const content = frame.lines.map((l) => ansi.stripAnsi(l)).find((l) => l.includes('on it'));
   assert.ok(content.includes('↩') && content.includes('×'), 'actions sit on the content row');
   assert.ok(content.includes('✓') || content.includes('·'), 'ticks sit on the content row');
@@ -1398,6 +1401,21 @@ test('a later group click discards a slower earlier load', async () => {
   assert.ok(!chat.state.messages.some((m) => String(m.msg?.id) === 'stale'));
 });
 
+test('composer scrollbar drag is not snapped back to the caret', () => {
+  const text = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'].join('\n');
+  const chat = makeController({ composer: text, composerCaret: 0, composerFollowCaret: false, composerScroll: 2 });
+  const frame = chat.draw();
+  assert.ok(frame.composerMetrics.overflow);
+  assert.equal(frame.composerMetrics.lineScroll, 2);
+  const bar = frame.hits.find((h) => h.type === 'composer-scrollbar');
+  assert.ok(bar);
+  chat.handleMouse({
+    kind: 'press', button: 0, x: bar.x + 1, y: bar.y + bar.h, press: true, motion: false, wheel: 0,
+  });
+  assert.ok(chat.state.composerScroll > 2, 'clicking the composer track moves the view');
+  assert.equal(chat.state.composerFollowCaret, false);
+});
+
 test('up and down move the composer caret across wrapped lines', () => {
   const chat = makeController({ composer: 'one\ntwo\nthree', composerCaret: 0 });
   chat.draw();
@@ -1455,6 +1473,53 @@ test('older history is advertised with a flashing Loading more row', () => {
   }));
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
   assert.ok(plain.includes('Loading more...'));
+});
+
+test('underfull transcript hides the track and loads more without a stuck label', () => {
+  const short = chatLayout.buildChatFrame(80, 24, chatState({
+    hasMoreHistory: true,
+    loadingMore: false,
+    messages: [chatState().messages[0]],
+  }));
+  const plain = short.lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.ok(!plain.includes('Loading more...'), 'label is hidden while the page is short');
+  assert.equal(short.scrollbarThumb, null, 'no thumb when content fits');
+  assert.ok(!short.hits.some((h) => h.type === 'scrollbar'));
+  assert.equal(short.shouldLoadMore, true, 'auto-load while the viewport is not full');
+});
+
+test('messages on a new day get a centered date rule', () => {
+  const frame = chatLayout.buildChatFrame(80, 24, chatState({
+    messages: [
+      {
+        msg: {
+          id: 'd1', senderId: 'ada', senderName: 'ada', type: 'text',
+          createdAt: '2026-08-06T10:00:00.000Z',
+        },
+        text: 'first',
+        channel: 'main',
+      },
+      {
+        msg: {
+          id: 'd2', senderId: 'ada', senderName: 'ada', type: 'text',
+          createdAt: '2026-08-07T10:00:00.000Z',
+        },
+        text: 'second',
+        channel: 'main',
+      },
+    ],
+  }));
+  const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.match(plain, /─+ Aug 6 ─+/);
+  assert.match(plain, /─+ Aug 7 ─+/);
+});
+
+test('login, splash, and idle birds share a Y', () => {
+  const login = landing.loginBirdOrigin(80, 24);
+  const splash = app.splashBirdOrigin(80, 24);
+  const idle = chatLayout.idleBirdOrigin(80, 24, chatState({ activeGroupId: null }));
+  assert.equal(login.y, splash.y);
+  assert.equal(splash.y, idle.y);
 });
 
 test('composer uses the login block caret', () => {

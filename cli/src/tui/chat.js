@@ -84,6 +84,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
   let allowAutoLoad = true;
   let draggingScroll = null;
   let draggingComposer = null;
+  let selectMode = false;
   let groupLoadSeq = 0;
   let channelDrag = null;
   let typingTimer = null;
@@ -110,8 +111,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       if (bytes) stdout.write(bytes);
     }
     if (typeof onDraw === 'function') onDraw(lastFrame);
-    if (lastFrame.shouldLoadMore && allowAutoLoad && !state.loadingMore) {
-      allowAutoLoad = false;
+    if (lastFrame.shouldLoadMore && !state.loadingMore) {
       loadOlderMessages().then(() => draw()).catch(() => draw());
     }
     return lastFrame;
@@ -547,6 +547,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       coalesceTimer = null;
     }
     coalescedMove = null;
+    setSelectMode(false);
     if (escTimer) {
       clearTimeout(escTimer);
       escTimer = null;
@@ -693,7 +694,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     if (draggingScroll || channelDrag || (screen && typeof screen.isOverloaded === 'function' && screen.isOverloaded())) {
       return clearHover();
     }
-    const nextId = hit && (hit.type === 'message' || hit.type === 'action' || hit.type === 'card' || hit.type === 'reply-ref')
+    const nextId = hit && (hit.type === 'message' || hit.type === 'message-text' || hit.type === 'action' || hit.type === 'card' || hit.type === 'reply-ref')
       ? String(hit.type === 'reply-ref' ? hit.parentId : hit.id)
       : null;
     const nextAction = hit && hit.type === 'action' ? hit.action : null;
@@ -1198,6 +1199,9 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       return;
     }
     if (!hit) return;
+    if (hit.type === 'message-text') {
+      hit = { ...hit, type: 'message' };
+    }
     if (hit.type === 'group') {
       const group = state.groups.find((g) => String(g.id) === String(hit.id));
       if (group) await loadGroup(group);
@@ -1354,6 +1358,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
         const max = Math.max(0, metrics.total - metrics.innerH);
         const next = Math.max(0, Math.min(max, (state.composerScroll || 0) + (mouse.wheel < 0 ? -1 : 1)));
         if (next === (state.composerScroll || 0)) return false;
+        state.composerFollowCaret = false;
         state.composerScroll = next;
         return true;
       }
@@ -1397,6 +1402,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       if (metrics && region) {
         const max = Math.max(0, metrics.total - metrics.innerH);
         const t = region.h <= 1 ? 0 : Math.max(0, Math.min(1, (y - region.y) / Math.max(1, region.h - 1)));
+        state.composerFollowCaret = false;
         state.composerScroll = Math.round(t * max);
         return true;
       }
@@ -1428,6 +1434,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       if (screen && typeof screen.isOverloaded === 'function' && screen.isOverloaded()) {
         return clearHover();
       }
+      setSelectMode(!!(hit && hit.type === 'message-text'));
       return applyHover(hit);
     }
 
@@ -1438,10 +1445,20 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
         if (metrics && region) {
           const max = Math.max(0, metrics.total - metrics.innerH);
           const t = region.h <= 1 ? 0 : Math.max(0, Math.min(1, (y - region.y) / Math.max(1, region.h - 1)));
+          state.composerFollowCaret = false;
           state.composerScroll = Math.round(t * max);
           draggingComposer = true;
           return true;
         }
+      }
+      if (hit && hit.type === 'composer') {
+        placeComposerCaret(x, y);
+        return true;
+      }
+      if (hit && hit.type === 'message-text') {
+        setSelectMode(true);
+      } else {
+        setSelectMode(false);
       }
       if (hit && hit.type === 'scrollbar') {
         const thumb = lastFrame.scrollbarThumb;
@@ -1487,6 +1504,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       return;
     }
     if (state.composer.length >= MAX_COMPOSER) return;
+    state.composerFollowCaret = true;
     const at = state.composerCaret;
     const piece = String(ch);
     state.composer = state.composer.slice(0, at) + piece + state.composer.slice(at);
@@ -1505,6 +1523,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     }
     const at = state.composerCaret;
     if (at > 0) {
+      state.composerFollowCaret = true;
       const prev = ansi.stepCodePoint(state.composer, at, -1);
       state.composer = state.composer.slice(0, prev) + state.composer.slice(at);
       state.composerCaret = prev;
@@ -1543,7 +1562,41 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       used += w;
       i += ch.length;
     }
+    state.composerFollowCaret = true;
     state.composerCaret = (line.start || 0) + i;
+  }
+
+  function placeComposerCaret(x, y) {
+    const metrics = lastFrame && lastFrame.composerMetrics
+      ? lastFrame.composerMetrics
+      : composerMetrics(state, composerBoxWidth());
+    const region = lastFrame && lastFrame.regions && lastFrame.regions.composer;
+    if (!region || !metrics.wrapped || !metrics.wrapped.length) {
+      state.composerCaret = (state.composer || '').length;
+      return;
+    }
+    const lineIdx = Math.max(0, Math.min(
+      metrics.wrapped.length - 1,
+      (metrics.lineScroll || 0) + (y - region.y)
+    ));
+    const line = metrics.wrapped[lineIdx];
+    const col = Math.max(0, x - region.x);
+    let i = 0;
+    let used = 0;
+    for (const ch of String(line.text || '')) {
+      const w = ansi.charWidth(ch);
+      if (used + w > col) break;
+      used += w;
+      i += ch.length;
+    }
+    state.composerFollowCaret = true;
+    state.composerCaret = (line.start || 0) + i;
+  }
+
+  function setSelectMode(on) {
+    if (!stdout || selectMode === on) return;
+    selectMode = on;
+    stdout.write(on ? ansi.mouseClicksOnly() : ansi.mouseEnable());
   }
 
   function moveComposer(delta) {
@@ -1552,6 +1605,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       state.overlay.caret = Math.max(0, Math.min(len, (state.overlay.caret || 0) + delta));
       return;
     }
+    state.composerFollowCaret = true;
     const dir = delta < 0 ? -1 : 1;
     let at = state.composerCaret;
     for (let n = 0; n < Math.abs(delta); n += 1) {
@@ -1603,6 +1657,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     const next = deleteWordIn(state.composer || '', state.composerCaret || 0);
     state.composer = next.text;
     state.composerCaret = next.caret;
+    state.composerFollowCaret = true;
   }
 
   function insertNewline() {

@@ -15,7 +15,7 @@ const ansi = require('./ansi');
 const { PALETTE, DARK, runWithTheme } = require('./theme');
 
 /** Display version for the landing page (intentionally separate from package version). */
-const TUI_VERSION = '0.1 r17';
+const TUI_VERSION = '0.1 r18';
 
 /**
  * Single adjustable padding number (in cells), used for both:
@@ -324,7 +324,7 @@ function underlineBox(box, barCells, color, dimOn) {
  * `barCells` cells. The cell at `caretCell` (when set) renders as the block
  * caret: a colored block with the letter visible beneath it.
  */
-function renderBox(box, barCells, color, dimOn, caretCell = -1) {
+function renderBox(box, barCells, color, dimOn, caretCell = -1, blockCaret = false) {
   const dim = dimOn ? ansi.dim() : '';
   const base = `${dim}${ansi.fg(color)}`;
   let out = '';
@@ -332,7 +332,13 @@ function renderBox(box, barCells, color, dimOn, caretCell = -1) {
   for (const ch of String(box || '')) {
     const underline = i < barCells ? ansi.underline() : '';
     if (i === caretCell) {
-      out += `${underline}${ansi.bg(color)}${ansi.fg(PALETTE.caretLetter)}${ch === ' ' ? FIELD_CARET : ch}${ansi.reset()}`;
+      if (blockCaret || ch === ' ' || ch === FIELD_CARET) {
+        // Title-on-title █ is a solid cell. A dark █ on a near-canvas
+        // foreground disappears on blank composer lines.
+        out += `${underline}${ansi.bg(PALETTE.title)}${ansi.fg(PALETTE.title)}█${ansi.reset()}`;
+      } else {
+        out += `${underline}${ansi.bg(color)}${ansi.fg(PALETTE.caretLetter)}${ch}${ansi.reset()}`;
+      }
     } else {
       out += underline + base + ch + ansi.reset();
     }
@@ -403,7 +409,7 @@ function buildField({ text, placeholder, active = false, width = 1, align = 'lef
   const box = (align === 'right' ? pad : '') + content + (align === 'right' ? '' : pad);
   const barCells = Math.max(0, Math.min(width, Math.round(bar * width)));
   const caretShift = align === 'right' ? Array.from(pad).length : 0;
-  return renderBox(box, barCells, color, dimOn, caretCell < 0 ? -1 : caretCell + caretShift);
+  return renderBox(box, barCells, color, dimOn, caretCell < 0 ? -1 : caretCell + caretShift, emptyActive);
 }
 
 /**
@@ -539,6 +545,23 @@ function buildTierLines(tier, frame, ui, captionX, optionRow, passwordRow, title
  * @param {object} [ui] interactive state (DEFAULT_UI when omitted)
  * @returns {{ lines: string[], originX: number, originY: number, width: number, height: number }}
  */
+function sharedBirdY(rows, artH) {
+  const height = Number(artH || 0) + LOGO_PADDING;
+  const originY = Math.max(0, Math.floor((Math.max(1, rows) - height) / 2));
+  return originY + Math.floor(LOGO_PADDING / 2);
+}
+
+function loginBirdOrigin(cols, rows) {
+  const tier = selectTier(cols, rows);
+  const w = tierWidth(tier);
+  return {
+    x: Math.max(0, Math.floor((Math.max(1, cols) - w) / 2)),
+    y: sharedBirdY(rows, tier.art.length),
+    artW: artWidth(tier),
+    artH: tier.art.length,
+  };
+}
+
 function buildLandingFrame(cols, rows, frame = 0, ui = DEFAULT_UI) {
   return runWithTheme(ui && ui.theme, () => buildLandingFrameNow(cols, rows, frame, ui));
 }
@@ -606,6 +629,8 @@ module.exports = {
   lerpHex,
   selectTier,
   styleArtLine,
+  sharedBirdY,
+  loginBirdOrigin,
   buildLandingFrame,
   buildField,
   renderBox,

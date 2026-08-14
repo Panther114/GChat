@@ -55,6 +55,11 @@ function mouseEnable() {
   return `${ESC}?1000h${ESC}?1003h${ESC}?1006h`;
 }
 
+/** Clicks only — no any-motion. Lets the terminal do native drag-select. */
+function mouseClicksOnly() {
+  return `${ESC}?1003l${ESC}?1000h${ESC}?1006h`;
+}
+
 /** Disable SGR mouse tracking (all modes we enable). */
 function mouseDisable() {
   return `${ESC}?1000l${ESC}?1003l${ESC}?1006l`;
@@ -391,6 +396,7 @@ module.exports = {
   enterAltScreen,
   exitAltScreen,
   mouseEnable,
+  mouseClicksOnly,
   mouseDisable,
   pasteEnable,
   pasteDisable,
