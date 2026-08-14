@@ -550,12 +550,12 @@ async function runTui(options = {}) {
   // --- input ---------------------------------------------------------------
   stdin.on('data', (chunk) => {
     const text = String(chunk);
-    if (text.includes('\u0003') || text.includes('\u0004')) {
-      exit(0);
-      return;
-    }
     if (screen === 'chat' && chat) {
       chat.pushInput(text);
+      return;
+    }
+    if (text.includes('\u0003') || text.includes('\u0004')) {
+      exit(0);
       return;
     }
     if (ui.loggingIn) return; // ignore input while the login request is in flight

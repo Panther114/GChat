@@ -140,6 +140,20 @@ function isAltEnter(sequence) {
     || seq === '\u001b[13;3;13~';
 }
 
+/** Letter for a Ctrl+key: raw C0 byte or CSI-u / modifyOtherKeys. */
+function ctrlLetter(sequence) {
+  const seq = String(sequence);
+  if (seq.length === 1) {
+    const code = seq.charCodeAt(0);
+    if (code >= 1 && code <= 26) return String.fromCharCode(96 + code);
+  }
+  const csiu = seq.match(/^\u001b\[(\d+);5u$/);
+  if (csiu) return String.fromCharCode(Number(csiu[1])).toLowerCase();
+  const other = seq.match(/^\u001b\[27;5;(\d+)~$/);
+  if (other) return String.fromCharCode(Number(other[1])).toLowerCase();
+  return null;
+}
+
 /** Alt+Backspace: ESC+DEL/BS, plus xterm/Kitty modified-key forms. */
 function isAltBackspace(sequence) {
   const seq = String(sequence);
@@ -406,6 +420,7 @@ module.exports = {
   isShiftEnter,
   isAltEnter,
   isAltBackspace,
+  ctrlLetter,
   bold,
   dim,
   italic,

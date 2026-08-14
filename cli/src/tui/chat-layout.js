@@ -25,11 +25,12 @@ const CARET_LETTER = DARK.caretLetter;
 const TEXT = '\uFE0E';
 
 const ACTIONS = {
-  reply: { id: 'reply', key: 'r', glyph: '↩', label: 'reply', get color() { return PALETTE.keyR; } },
-  edit: { id: 'edit', key: 'e', glyph: `${'✎'}${TEXT}`, label: 'edit', get color() { return PALETTE.keyE; } },
-  delete: { id: 'delete', key: 'd', glyph: '×', label: 'delete', get color() { return PALETTE.keyD; } },
-  preview: { id: 'preview', key: 'p', glyph: '▣', label: 'preview', get color() { return PALETTE.keyP; } },
-  clear: { id: 'clear', key: 'Escape', glyph: null, label: 'clear (esc)', get color() { return PALETTE.muted; } },
+  reply: { id: 'reply', key: 'r', glyph: '↩', word: 'reply', mod: 'ctrl', get color() { return PALETTE.keyR; } },
+  edit: { id: 'edit', key: 'e', glyph: `${'✎'}${TEXT}`, word: 'edit', mod: 'ctrl', get color() { return PALETTE.keyE; } },
+  delete: { id: 'delete', key: 'd', glyph: '×', word: 'delete', mod: 'ctrl', get color() { return PALETTE.keyD; } },
+  preview: { id: 'preview', key: 'p', glyph: '▣', word: 'preview', mod: 'ctrl', get color() { return PALETTE.keyP; } },
+  copy: { id: 'copy', key: 'c', glyph: null, word: 'copy', mod: 'ctrl', get color() { return PALETTE.keyC; } },
+  clear: { id: 'clear', key: 'Escape', glyph: null, word: 'clear (esc)', get color() { return PALETTE.muted; } },
 };
 
 const SIDEBAR_MIN = 20;
@@ -51,8 +52,10 @@ const GLIMMER = landing.TEXT_SHIMMER;
 const PROFILE_NAME_OFFSET = 3;
 const PROFILE_BUTTON_ROWS = 3;
 const PROFILE_BUTTON_COUNT = 3;
-/** Closed: rule + blank + name. Open: rule + pad + three stacked boxes + pad + name. */
-const PROFILE_LIFT = 1 + PROFILE_BUTTON_COUNT * PROFILE_BUTTON_ROWS;
+const PROFILE_BUTTON_GAP = 1;
+/** Closed: rule + blank + name. Open: rule + pad + three boxes with a gap row + pad + name. */
+const PROFILE_LIFT = 1 + PROFILE_BUTTON_COUNT * PROFILE_BUTTON_ROWS
+  + (PROFILE_BUTTON_COUNT - 1) * PROFILE_BUTTON_GAP;
 
 const DEFAULT_CHAT = {
   groups: [],
@@ -96,6 +99,8 @@ const DEFAULT_CHAT = {
   profileOpen: false,
   profileClosing: false,
   profileExpandFrame: 0,
+  profileCloseFrom: 0,
+  profileCloseFrame: 0,
   hoverLogout: false,
   hoverTheme: false,
   hoverSensitivity: false,
@@ -103,6 +108,7 @@ const DEFAULT_CHAT = {
   scrollSensitivity: 1,
   hoverReply: false,
   scrollTween: null,
+  scrollBatch: 0,
   memberCount: 0,
   now: null,
 };
@@ -308,7 +314,7 @@ function actionListFor(item, userId, mode = {}) {
 }
 
 function hintActionsFor(item, userId, mode = {}) {
-  return [...actionListFor(item, userId, mode), ACTIONS.clear];
+  return [...actionListFor(item, userId, mode), ACTIONS.copy, ACTIONS.clear];
 }
 
 const ACTION_SLOTS = ['reply', 'preview', 'edit', 'delete'];
@@ -390,26 +396,59 @@ function iconHits(actions, originX, originY, rowWidth) {
   return hits;
 }
 
-function styleWord(word, color) {
-  const first = word[0] || '';
-  const rest = word.slice(1);
-  return `${ansi.bold()}${ansi.fg(color)}${first}${ansi.reset()}${ansi.fg(PALETTE.muted)}${rest}${ansi.reset()}`;
+function hintPlain(action, compact = false) {
+  if (action.mod === 'ctrl') {
+    const word = action.word || action.id;
+    return compact ? `ctrl+${action.key || word[0] || ''}` : `ctrl + ${word}`;
+  }
+  if (compact && action.id === 'clear') return 'esc';
+  return action.word || action.label || action.id;
 }
 
-function styleHint(actions) {
-  return actions.map((action) => styleWord(action.label, action.color)).join('   ');
+function styleHintPart(action, compact = false) {
+  const color = action.color || PALETTE.muted;
+  if (action.mod === 'ctrl') {
+    const word = action.word || action.id;
+    if (compact) {
+      const key = String(action.key || word[0] || '');
+      return `${ansi.fg(PALETTE.muted)}ctrl+${ansi.reset()}${ansi.bold()}${ansi.fg(color)}${key}${ansi.reset()}`;
+    }
+    const prefix = `${ansi.fg(PALETTE.muted)}ctrl + ${ansi.reset()}`;
+    const hot = String(action.key || '');
+    const at = hot ? word.toLowerCase().indexOf(hot.toLowerCase()) : -1;
+    if (at < 0) return `${prefix}${ansi.fg(color)}${word}${ansi.reset()}`;
+    const before = word.slice(0, at);
+    const mark = word.slice(at, at + 1);
+    const after = word.slice(at + 1);
+    return `${prefix}${ansi.fg(PALETTE.muted)}${before}${ansi.reset()}`
+      + `${ansi.bold()}${ansi.fg(color)}${mark}${ansi.reset()}`
+      + `${ansi.fg(PALETTE.muted)}${after}${ansi.reset()}`;
+  }
+  const word = action.word || action.label || action.id;
+  const shown = compact && action.id === 'clear' ? 'esc' : word;
+  return `${ansi.fg(color)}${shown}${ansi.reset()}`;
+}
+
+function styleHint(actions, maxWidth = 0) {
+  const list = actions || [];
+  const wide = list.map((action) => styleHintPart(action, false)).join('  ');
+  if (!(maxWidth > 0) || ansi.width(wide) <= maxWidth) return wide;
+  return list.map((action) => styleHintPart(action, true)).join(' ');
 }
 
 function hintHits(actions, originX, originY, rowWidth) {
-  const parts = actions.map((action) => {
-    return { action, w: ansi.width(action.label) };
-  });
-  const total = parts.reduce((sum, p) => sum + p.w, 0) + Math.max(0, parts.length - 1) * 3;
+  const compact = ansi.width(styleHint(actions, 0)) > Math.max(1, rowWidth - 1);
+  const parts = actions.map((action) => ({
+    action,
+    w: ansi.width(hintPlain(action, compact)),
+  }));
+  const gap = compact ? 1 : 2;
+  const total = parts.reduce((sum, p) => sum + p.w, 0) + Math.max(0, parts.length - 1) * gap;
   let x = originX + Math.max(0, rowWidth - total - 1);
   const hits = [];
   for (const part of parts) {
     hits.push({ type: 'action', action: part.action.id, id: null, x, y: originY, w: part.w, h: 1 });
-    x += part.w + 3;
+    x += part.w + gap;
   }
   return hits;
 }
@@ -572,8 +611,14 @@ function paintMessageRow(plain, width, {
   return withBg(bodyStyled + gutterStyled, bg);
 }
 
-function boxTop(width, color, fill = null) {
-  return fillRow(`╭${'─'.repeat(Math.max(0, width - 2))}╮`, width, { fg: color, bg: fill || undefined });
+function boxTop(width, color, fill = null, title = '') {
+  const inner = Math.max(0, width - 2);
+  let mid = '─'.repeat(inner);
+  const name = title ? ` ${String(title).trim()} ` : '';
+  if (name && ansi.width(name) < inner) {
+    mid = `${name}${'─'.repeat(Math.max(0, inner - ansi.width(name)))}`;
+  }
+  return fillRow(`╭${mid}╮`, width, { fg: color, bg: fill || undefined });
 }
 
 function boxBottom(width, color, fill = null) {
@@ -617,6 +662,13 @@ function profileProgress(state) {
 }
 
 function profileEase(state) {
+  if (state && state.profileClosing) {
+    const frames = Math.max(1, PROFILE_FRAMES);
+    const raw = Number(state.profileCloseFrame);
+    const u = Math.min(1, Math.max(0, (Number.isFinite(raw) ? raw : 0) / frames));
+    const from = Math.min(1, Math.max(0, Number(state.profileCloseFrom) || 0));
+    return from * (1 - landing.easeOutCubic(u));
+  }
   return landing.easeOutCubic(profileProgress(state));
 }
 
@@ -681,6 +733,7 @@ function paintFillTrack(innerW, value, fade) {
 
 function paintOutlinedButton({
   label,
+  title = '',
   width,
   inset,
   frame,
@@ -699,7 +752,7 @@ function paintOutlinedButton({
   const line = (kind, fade, inner) => {
     if (!(fade > 0)) return blank;
     const outline = fadeHex(outlineTarget, fade);
-    if (kind === 'top') return `${side}${boxTop(boxW, outline)}${side}`;
+    if (kind === 'top') return `${side}${boxTop(boxW, outline, null, title)}${side}`;
     if (kind === 'bot') return `${side}${boxBottom(boxW, outline)}${side}`;
     return `${side}${boxRow(inner, boxW, outline)}${side}`;
   };
@@ -728,9 +781,10 @@ function buildSidebar(state, width, height, nameY = null) {
   const extra = Math.round(PROFILE_LIFT * eased);
   const profileNameY = Math.max(2, Math.min(height - 1, nameY == null ? profileNameRow(height) : nameY));
   const barY = Math.max(1, profileNameY - 2 - extra);
+  const step = PROFILE_BUTTON_ROWS + PROFILE_BUTTON_GAP;
   const logoutTop = extra >= 4 ? barY + 2 : -1;
-  const themeTop = extra >= 4 + PROFILE_BUTTON_ROWS && logoutTop >= 0 ? logoutTop + PROFILE_BUTTON_ROWS : -1;
-  const sensTop = extra >= 4 + PROFILE_BUTTON_ROWS * 2 && themeTop >= 0 ? themeTop + PROFILE_BUTTON_ROWS : -1;
+  const themeTop = extra >= 4 + step && logoutTop >= 0 ? logoutTop + step : -1;
+  const sensTop = extra >= 4 + step * 2 && themeTop >= 0 ? themeTop + step : -1;
   lines.push(fillRow('', width, {}));
   let y = 2;
   for (let i = 0; i < list.length && y < barY; i += 1) {
@@ -800,6 +854,7 @@ function buildSidebar(state, width, height, nameY = null) {
   }, PROFILE_BUTTON_ROWS);
   placeButton(sensTop, 'sensitivity', {
     label: '',
+    title: 'Sensitivity',
     hover: !!state.hoverSensitivity,
     idleFg: PALETTE.thumb,
     hotFg: PALETTE.outlineStrong,
@@ -1235,24 +1290,25 @@ function buildComposerHint(state, width) {
     left = `${ansi.fg(PALETTE.muted)}${state.typing.username} is typing${pulse ? '…' : '   '}${ansi.reset()}`;
   }
 
+  const leftW = ansi.width(left);
+  const hintRoom = Math.max(8, width - PAD - leftW - 2);
   let right = '';
   let rightActions = [];
   if (state.overlay && state.overlay.type === 'delete') {
     const label = pulseText('confirm deletion? (enter)', state.animFrame, PALETTE.error, PALETTE.deletePulse);
     rightActions = [ACTIONS.clear];
-    right = `${label}   ${styleHint(rightActions)}`;
+    right = `${label}   ${styleHint(rightActions, Math.max(8, hintRoom - ansi.width(label) - 3))}`;
   } else if (state.channelMenu) {
     rightActions = channelHintActions(state.channelMenu);
-    right = styleHint(rightActions);
+    right = styleHint(rightActions, hintRoom);
   } else if (state.selectedMessageId) {
     const item = (state.messages || []).find((m) => String(m.msg?.id) === String(state.selectedMessageId));
     if (item) {
       rightActions = hintActionsFor(item, state.userId, actionMode(state));
-      right = styleHint(rightActions);
+      right = styleHint(rightActions, hintRoom);
     }
   }
 
-  const leftW = ansi.width(left);
   const rightW = ansi.width(right);
   const gap = Math.max(1, width - PAD - leftW - rightW - 1);
   const row = `${' '.repeat(PAD)}${left}${' '.repeat(gap)}${right}`;
@@ -1787,6 +1843,7 @@ module.exports = {
   PROFILE_FRAMES,
   PROFILE_BUTTON_ROWS,
   PROFILE_BUTTON_COUNT,
+  PROFILE_BUTTON_GAP,
   HISTORY_PAGE,
   SCROLL_TWEEN_MS,
   ACTION_SLOTS,

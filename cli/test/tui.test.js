@@ -113,7 +113,7 @@ test('landing frame: contains title, option and hint with art glyphs intact', ()
   assert.equal(frame.height, tier.art.length + landing.LOGO_PADDING);
   assert.equal(frame.originX, Math.floor((100 - frame.width) / 2));
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r23/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r24/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
   // The braille glyphs themselves must be preserved exactly.
@@ -202,7 +202,7 @@ test('composeFrame: writes full-width rows without eraseLine', () => {
 test('composeFrame: content is written on each line', () => {
   const out = app.composeFrame(80, 24, 0);
   const plain = ansi.stripAnsi(out.replace(/\u001b\[\d+;\d+H/g, ''));
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r23/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r24/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
 });
@@ -222,7 +222,7 @@ test('splash screen paints a themed canvas with a loading label', () => {
   const lines = app.splashScreenLines(80, 24, 'dark', 'Loading', 0);
   assert.equal(lines.length, 24);
   const plain = lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r23'));
+  assert.ok(plain.includes('GChat CLI 0.1 r24'));
   assert.ok(plain.includes('Loading'));
   assert.ok(!plain.includes('Loading..'), 'loading does not animate dots');
   assert.ok(lines.join('').includes(ansi.bg(theme.DARK.canvas)));
@@ -679,7 +679,7 @@ test('codePointIndex and stepCodePoint do not split emoji', () => {
 test('chat frame: sidebar, channels, composer, and messages', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState());
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r23'), 'sidebar title is the CLI version');
+  assert.ok(plain.includes('GChat CLI 0.1 r24'), 'sidebar title is the CLI version');
   assert.ok(!plain.includes('chats\n') && !/^\s*chats\s*$/m.test(plain.split('\n')[0]), 'old "chats" label is gone');
   assert.ok(plain.includes('team'), 'active group in sidebar');
   assert.ok(!plain.includes('●'), 'groups are not indented with a bullet');
@@ -714,10 +714,11 @@ test('chat hover outlines without fill and does not show input shortcuts', () =>
 
   const selected = chatLayout.buildChatFrame(80, 24, chatState({ selectedMessageId: 'm2' }));
   const selPlain = selected.lines.map((l) => ansi.stripAnsi(l));
-  const hint = selPlain.find((l) => l.includes('reply') && l.includes('edit'));
-  assert.ok(hint, 'selection shows reply/edit/delete/clear on the hint row');
-  assert.ok(hint.includes('clear (esc)'));
-  assert.ok(hint.includes('delete'));
+  const hint = selPlain.find((l) => l.includes('ctrl+') || l.includes('ctrl + '));
+  assert.ok(hint, 'selection shows ctrl-prefixed actions on the hint row');
+  assert.ok(hint.includes('ctrl + reply') || hint.includes('ctrl+reply') || hint.includes('ctrl+r'));
+  assert.ok(hint.includes('ctrl + copy') || hint.includes('ctrl+copy') || hint.includes('ctrl+c'));
+  assert.ok(hint.includes('clear (esc)') || hint.includes('esc'));
   assert.ok(selected.lines.join('').includes(ansi.bg(chatLayout.PALETTE.selectedBg)), 'selected uses a raised background');
   assert.ok(selPlain.join('\n').includes('↩'), 'selected own message keeps icons on the right');
 });
@@ -1094,10 +1095,14 @@ test('composer hints sit on the right; typing stays on the left', () => {
     selectedMessageId: 'm2',
     typing: { username: 'ada', until: Date.now() + 3000 },
   }));
-  const hint = selected.lines.map((l) => ansi.stripAnsi(l)).find((l) => l.includes('reply') && l.includes('ada is typing'));
+  const hint = selected.lines.map((l) => ansi.stripAnsi(l)).find((l) => l.includes('ada is typing') && (l.includes('ctrl+') || l.includes('ctrl + ')));
   assert.ok(hint, 'typing and action hints share the composer hint row');
-  assert.ok(hint.indexOf('ada is typing') < hint.indexOf('reply'), 'typing is on the left');
-  assert.ok(hint.trimEnd().endsWith('clear (esc)'), 'action hints are rightmost');
+  assert.ok(hint.indexOf('ada is typing') < hint.indexOf('ctrl'), 'typing is on the left');
+  assert.ok(
+    hint.includes('ctrl + reply') || hint.includes('ctrl+reply') || hint.includes('ctrl+r'),
+    'selected actions are ctrl-prefixed'
+  );
+  assert.ok(/clear \(esc\)|esc\s*$/.test(hint.trimEnd()), 'action hints are rightmost');
 
   const channel = chatLayout.buildChatFrame(80, 24, chatState({
     activeChannel: 'design',
@@ -1198,6 +1203,13 @@ test('isAltEnter and isShiftEnter recognize modified Enter encodings', () => {
   assert.equal(ansi.isShiftEnter('\u001b[13;2u'), true);
   assert.equal(ansi.isShiftEnter('\u001b[27;2;13~'), true);
   assert.equal(ansi.isAltBackspace('\u001b\u007f'), true);
+});
+
+test('ctrlLetter reads C0 bytes and CSI-u encodings', () => {
+  assert.equal(ansi.ctrlLetter('\u0003'), 'c');
+  assert.equal(ansi.ctrlLetter('\u0012'), 'r');
+  assert.equal(ansi.ctrlLetter('\u001b[114;5u'), 'r');
+  assert.equal(ansi.ctrlLetter('r'), null);
 });
 
 const { createChatController } = require('../src/tui/chat');
@@ -1311,12 +1323,16 @@ test('a higher scroll sensitivity moves more lines per wheel tick', () => {
     kind: 'wheel', button: 64, x: region.x + 2, y: region.y + 2, press: false, motion: false, wheel: -1,
   });
   assert.equal(slow.state.scrollOffset, 1, 'default sensitivity is one line');
+  assert.equal(slow.state.scrollBatch || 0, 0, 'a single line does not queue a batch');
   const fast = makeController({ messages: many, scrollOffset: 0, scrollSensitivity: 5 });
   fast.draw();
   fast.handleMouse({
     kind: 'wheel', button: 64, x: region.x + 2, y: region.y + 2, press: false, motion: false, wheel: -1,
   });
-  assert.equal(fast.state.scrollOffset, 5, 'sensitivity 5 moves five lines');
+  assert.equal(fast.state.scrollOffset, 1, 'the first line applies immediately');
+  assert.equal(fast.state.scrollBatch, 4, 'the rest of the batch stays one-line steps');
+  fast.tickScrollBatch();
+  assert.equal(fast.state.scrollOffset, 2, 'each tick advances one line');
 });
 
 test('clicking a selected message deselects it', async () => {
@@ -1775,7 +1791,7 @@ test('scrollbar thumb moves in eighth-cell steps', () => {
 
 test('preview hint has no icon glyph', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState({ selectedMessageId: 'm3' }));
-  const hint = frame.lines.map((l) => ansi.stripAnsi(l)).find((l) => l.includes('preview'));
+  const hint = frame.lines.map((l) => ansi.stripAnsi(l)).find((l) => l.includes('preview') || l.includes('ctrl+p'));
   assert.ok(hint);
   assert.ok(!hint.includes('▣'), 'preview hint is text only');
 });
@@ -1858,7 +1874,7 @@ test('sidebar profile name stays pinned with a thin rule and padded logout', () 
 
   const themeHit = open.hits.find((h) => h.type === 'theme');
   assert.ok(themeHit, 'Theme sits in the open profile menu');
-  assert.equal(themeHit.y, logout.y + logout.h, 'Theme stacks against Log out like message outlines');
+  assert.equal(themeHit.y, logout.y + logout.h + 1, 'Theme sits one row below Log out');
   assert.equal(themeHit.h, chatLayout.PROFILE_BUTTON_ROWS, 'Theme is a three-line outlined button');
   assert.ok(themeHit.y < openName.y, 'Theme stays above the pinned name');
   const themeTop = ansi.stripAnsi(open.lines[themeHit.y]).slice(0, sideW);
@@ -1879,8 +1895,10 @@ test('sidebar profile name stays pinned with a thin rule and padded logout', () 
 
   const sens = open.hits.find((h) => h.type === 'sensitivity');
   assert.ok(sens, 'scroll sensitivity sits in the profile menu');
-  assert.equal(sens.y, themeHit.y + themeHit.h, 'sensitivity stacks under Theme');
+  assert.equal(sens.y, themeHit.y + themeHit.h + 1, 'sensitivity sits one row below Theme');
+  const sensTop = ansi.stripAnsi(open.lines[sens.y]).slice(0, sideW);
   const sensMid = open.lines[sens.y + 1];
+  assert.ok(sensTop.includes('Sensitivity'), 'the slider is labeled');
   assert.ok(
     sensMid.includes(ansi.bg(theme.DARK.thumb)) && sensMid.includes(ansi.bg(theme.DARK.track)),
     'sensitivity is a left-to-right fill'
@@ -1897,6 +1915,28 @@ test('profile buttons ease out and fade in line by line', () => {
   assert.equal(chatLayout.profileEase({ profileExpandFrame: chatLayout.PROFILE_FRAMES }), 1);
   const mid = chatLayout.profileEase({ profileExpandFrame: Math.round(chatLayout.PROFILE_FRAMES / 2) });
   assert.ok(mid > 0.5, 'ease-out cubic is ahead of linear at the midpoint');
+  const closeEarly = chatLayout.profileEase({
+    profileClosing: true,
+    profileCloseFrom: 1,
+    profileCloseFrame: 2,
+  });
+  const linearClose = 1 - (2 / chatLayout.PROFILE_FRAMES);
+  assert.ok(closeEarly < linearClose, 'close also starts fast then slows');
+});
+
+test('clear (esc) does not bold the letter c', () => {
+  const styled = chatLayout.styleHint([chatLayout.ACTIONS.clear]);
+  assert.ok(!styled.includes(`${ansi.bold()}${ansi.fg(theme.DARK.muted)}c`));
+  assert.equal(ansi.stripAnsi(styled), 'clear (esc)');
+});
+
+test('plain letters type while a message is selected; ctrl+r replies', () => {
+  const chat = makeController({ selectedMessageId: 'm2', composer: '', composerCaret: 0 });
+  chat.handleKey('r');
+  assert.equal(chat.state.composer, 'r', 'r goes to the composer');
+  assert.equal(chat.state.replyTo, null);
+  chat.handleKey('\u0012');
+  assert.ok(chat.state.replyTo, 'ctrl+r still replies');
 });
 
 test('scroll sensitivity maps a drag across the control to 1-20', () => {

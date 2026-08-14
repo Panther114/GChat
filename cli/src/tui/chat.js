@@ -10,7 +10,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const ansi = require('./ansi');
 const {
   DEFAULT_CHAT,
@@ -33,6 +33,7 @@ const {
   hashNameColor,
   WHEEL_LINES,
   sensitivityFromX,
+  profileEase,
 } = require('./chat-layout');
 const { looksLikeImagePath, readClipboardImage } = require('./clipboard-image');
 const { loadConfig, setConfigKey, normalizeScrollSensitivity } = require('../store/config');
@@ -87,6 +88,8 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
   let draggingScroll = null;
   let draggingComposer = null;
   let draggingSensitivity = null;
+  let scrollBatchTimer = null;
+  const SCROLL_STEP_MS = 16;
   let selectMode = false;
   let textDrag = null;
   let groupLoadSeq = 0;
@@ -150,7 +153,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     if (state.hoverLogout && (state.profileOpen || state.profileExpandFrame)) return true;
     if (state.hoverTheme && (state.profileOpen || state.profileExpandFrame)) return true;
     if (state.hoverSensitivity && (state.profileOpen || state.profileExpandFrame)) return true;
-    if (state.profileClosing && (state.profileExpandFrame || 0) > 0) return true;
+    if (state.profileClosing && (state.profileCloseFrame || 0) < PROFILE_FRAMES) return true;
     if (state.profileOpen && (state.profileExpandFrame || 0) < PROFILE_FRAMES) return true;
     if (state.channelClosing && (state.channelExpandFrame || 0) > 0) return true;
     if (state.channelMenu && !state.channelClosing && (state.channelExpandFrame || 0) < CHANNEL_EXPAND_FRAMES) {
@@ -183,10 +186,13 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
         if (t >= 1) state.scrollTween = null;
       }
       if (state.profileClosing) {
-        if ((state.profileExpandFrame || 0) > 0) state.profileExpandFrame -= 1;
+        if ((state.profileCloseFrame || 0) < PROFILE_FRAMES) state.profileCloseFrame += 1;
         else {
           state.profileOpen = false;
           state.profileClosing = false;
+          state.profileExpandFrame = 0;
+          state.profileCloseFrame = 0;
+          state.profileCloseFrom = 0;
         }
       } else if (state.profileOpen && (state.profileExpandFrame || 0) < PROFILE_FRAMES) {
         state.profileExpandFrame = (state.profileExpandFrame || 0) + 1;
@@ -447,13 +453,14 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
   }
 
   function applyScroll(delta) {
-    if (isFrozen()) return;
+    if (isFrozen()) return false;
     if (delta) {
       allowAutoLoad = true;
       state.scrollTween = null;
     }
     if (!lastFrame) lastFrame = buildChatFrame(size().cols, size().rows, state);
-    let next = Math.max(0, Math.min(lastFrame.maxScroll, (state.scrollOffset || 0) + delta));
+    const before = state.scrollOffset || 0;
+    let next = Math.max(0, Math.min(lastFrame.maxScroll, before + delta));
     if (state.overlay && state.overlay.type === 'delete' && lastFrame.messageBounds) {
       next = clampScrollForMessage(
         next,
@@ -463,6 +470,45 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       );
     }
     state.scrollOffset = next;
+    return next !== before;
+  }
+
+  function tickScrollBatch() {
+    const left = Number(state.scrollBatch) || 0;
+    if (!left) {
+      if (scrollBatchTimer) {
+        clearInterval(scrollBatchTimer);
+        scrollBatchTimer = null;
+      }
+      return false;
+    }
+    const dir = left > 0 ? 1 : -1;
+    if (!applyScroll(dir)) {
+      state.scrollBatch = 0;
+    } else {
+      state.scrollBatch = left - dir;
+    }
+    if (!state.scrollBatch && scrollBatchTimer) {
+      clearInterval(scrollBatchTimer);
+      scrollBatchTimer = null;
+    }
+    return true;
+  }
+
+  function enqueueScroll(delta) {
+    if (isFrozen() || !delta) return;
+    allowAutoLoad = true;
+    state.scrollTween = null;
+    const dir = delta > 0 ? 1 : -1;
+    applyScroll(dir);
+    const rest = delta - dir;
+    if (!rest) return;
+    state.scrollBatch = (Number(state.scrollBatch) || 0) + rest;
+    if (!scrollBatchTimer) {
+      scrollBatchTimer = setInterval(() => {
+        if (tickScrollBatch()) draw();
+      }, SCROLL_STEP_MS);
+    }
   }
 
   function moveSelection(delta) {
@@ -551,6 +597,11 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       clearInterval(pulseTimer);
       pulseTimer = null;
     }
+    if (scrollBatchTimer) {
+      clearInterval(scrollBatchTimer);
+      scrollBatchTimer = null;
+    }
+    state.scrollBatch = 0;
     if (coalesceTimer) {
       clearImmediate(coalesceTimer);
       coalesceTimer = null;
@@ -765,12 +816,16 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
   function toggleProfile() {
     if (state.profileOpen && !state.profileClosing) {
       state.profileClosing = true;
+      state.profileCloseFrom = profileEase(state);
+      state.profileCloseFrame = 0;
       startPulse();
       return;
     }
     state.profileOpen = true;
     state.profileClosing = false;
     state.profileExpandFrame = 0;
+    state.profileCloseFrame = 0;
+    state.profileCloseFrom = 0;
     startPulse();
   }
 
@@ -1129,6 +1184,46 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     else if (action === 'edit') beginEdit(item);
     else if (action === 'delete') await confirmDelete(item);
     else if (action === 'preview') await previewAttachment(item);
+    else if (action === 'copy') copyMessage(item);
+  }
+
+  function copyMessage(item) {
+    if (!item) return;
+    const text = item.text != null && item.text !== ''
+      ? String(item.text)
+      : String(item.attach?.filename || '');
+    try {
+      if (process.platform === 'darwin') {
+        spawnSync('pbcopy', { input: text, timeout: 2000 });
+        return;
+      }
+      if (process.platform === 'win32') {
+        spawnSync('clip', { input: text, timeout: 2000, windowsHide: true });
+        return;
+      }
+      const wl = spawnSync('wl-copy', { input: text, timeout: 2000 });
+      if (wl && wl.status === 0) return;
+      spawnSync('xclip', ['-selection', 'clipboard'], { input: text, timeout: 2000 });
+    } catch {
+      /* clipboard helpers are best-effort */
+    }
+  }
+
+  function handleCtrlLetter(letter) {
+    const key = String(letter || '').toLowerCase();
+    if (state.selectedMessageId && !state.overlay && !state.channelMenu && !state.creatingChannel) {
+      const item = findMessage(state.selectedMessageId);
+      if (key === 'r') { runAction('reply', item).then(() => draw()); return true; }
+      if (key === 'e') { runAction('edit', item).then(() => draw()); return true; }
+      if (key === 'd') { runAction('delete', item).then(() => draw()); return true; }
+      if (key === 'p') { runAction('preview', item).then(() => draw()); return true; }
+      if (key === 'c') { copyMessage(item); return true; }
+    }
+    if (key === 'c' || key === 'd') {
+      if (typeof onQuit === 'function') onQuit();
+      return true;
+    }
+    return false;
   }
 
   function snapCloseChannelMenu() {
@@ -1398,7 +1493,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
         || (bar && x >= bar.x && x < bar.x + bar.w && y >= bar.y && y < bar.y + bar.h);
       if (over) {
         const step = Math.max(1, Number(state.scrollSensitivity) || WHEEL_LINES);
-        applyScroll(mouse.wheel < 0 ? step : -step);
+        enqueueScroll(mouse.wheel < 0 ? step : -step);
         return true;
       }
       return false;
@@ -1743,6 +1838,8 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     if (seq.startsWith('\u001b[<')) {
       const mouse = ansi.parseSgrMouse(seq);
       if (mouse) queueMouse(mouse);
+    } else if (ansi.ctrlLetter(seq)) {
+      handleCtrlLetter(ansi.ctrlLetter(seq));
     } else if (ansi.isAltEnter(seq)) {
       insertNewline();
       draw();
@@ -1816,6 +1913,10 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
         return;
       }
       if (state.profileOpen || state.profileClosing) {
+        if (!state.profileClosing) {
+          state.profileCloseFrom = profileEase(state);
+          state.profileCloseFrame = 0;
+        }
         state.profileClosing = true;
         state.profileOpen = true;
         startPulse();
@@ -1903,14 +2004,12 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       draw();
       return;
     }
-    if (ch < ' ') return;
-    if (shortcutsArmed()) {
-      const item = findMessage(state.selectedMessageId);
-      if (ch === 'r') { runAction('reply', item).then(() => draw()); return; }
-      if (ch === 'e') { runAction('edit', item).then(() => draw()); return; }
-      if (ch === 'd') { runAction('delete', item).then(() => draw()); return; }
-      if (ch === 'p') { runAction('preview', item).then(() => draw()); return; }
+    const ctrl = ansi.ctrlLetter(ch);
+    if (ctrl) {
+      handleCtrlLetter(ctrl);
+      return;
     }
+    if (ch < ' ') return;
     pokeTyping();
     insertComposer(ch);
     draw();
@@ -2010,6 +2109,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     previewAttachment,
     findMessage,
     toggleTheme,
+    tickScrollBatch,
   };
 }
 
