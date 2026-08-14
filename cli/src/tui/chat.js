@@ -85,6 +85,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
   let draggingScroll = null;
   let draggingComposer = null;
   let selectMode = false;
+  let textDrag = null;
   let groupLoadSeq = 0;
   let channelDrag = null;
   let typingTimer = null;
@@ -1376,6 +1377,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     if (mouse.kind === 'release' && mouse.button === 0) {
       draggingScroll = null;
       draggingComposer = null;
+      textDrag = null;
       if (channelDrag) {
         const dragged = channelDrag.moved;
         const name = channelDrag.name;
@@ -1434,7 +1436,12 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       if (screen && typeof screen.isOverloaded === 'function' && screen.isOverloaded()) {
         return clearHover();
       }
-      setSelectMode(!!(hit && hit.type === 'message-text'));
+      if (textDrag && mouse.button === 0) {
+        if (Math.abs(x - textDrag.x) + Math.abs(y - textDrag.y) >= 1) {
+          setSelectMode(true);
+        }
+        return false;
+      }
       return applyHover(hit);
     }
 
@@ -1456,8 +1463,9 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
         return true;
       }
       if (hit && hit.type === 'message-text') {
-        setSelectMode(true);
+        textDrag = { x, y };
       } else {
+        textDrag = null;
         setSelectMode(false);
       }
       if (hit && hit.type === 'scrollbar') {
