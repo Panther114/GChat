@@ -113,7 +113,7 @@ test('landing frame: contains title, option and hint with art glyphs intact', ()
   assert.equal(frame.height, tier.art.length + landing.LOGO_PADDING);
   assert.equal(frame.originX, Math.floor((100 - frame.width) / 2));
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r20/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r21/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
   // The braille glyphs themselves must be preserved exactly.
@@ -202,7 +202,7 @@ test('composeFrame: writes full-width rows without eraseLine', () => {
 test('composeFrame: content is written on each line', () => {
   const out = app.composeFrame(80, 24, 0);
   const plain = ansi.stripAnsi(out.replace(/\u001b\[\d+;\d+H/g, ''));
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r20/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r21/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
 });
@@ -222,7 +222,7 @@ test('splash screen paints a themed canvas with a loading label', () => {
   const lines = app.splashScreenLines(80, 24, 'dark', 'Loading…', 0);
   assert.equal(lines.length, 24);
   const plain = lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r20'));
+  assert.ok(plain.includes('GChat CLI 0.1 r21'));
   assert.ok(plain.includes('Loading'));
   assert.ok(lines.join('').includes(ansi.bg(theme.DARK.canvas)));
 });
@@ -669,7 +669,7 @@ test('codePointIndex and stepCodePoint do not split emoji', () => {
 test('chat frame: sidebar, channels, composer, and messages', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState());
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r20'), 'sidebar title is the CLI version');
+  assert.ok(plain.includes('GChat CLI 0.1 r21'), 'sidebar title is the CLI version');
   assert.ok(!plain.includes('chats\n') && !/^\s*chats\s*$/m.test(plain.split('\n')[0]), 'old "chats" label is gone');
   assert.ok(plain.includes('team'), 'active group in sidebar');
   assert.ok(!plain.includes('●'), 'groups are not indented with a bullet');
@@ -1712,11 +1712,26 @@ test('scrollbar uses filled cells instead of box-drawing glyphs', () => {
   const y = frame.regions.transcript.y;
   const row = frame.lines[y];
   const plain = ansi.stripAnsi(row);
-  assert.equal(plain.slice(-1), ' ', 'bar cell is a space, not │ or █');
+  assert.ok(!plain.endsWith('│') && !plain.endsWith('█'), 'bar is not a box-drawing or full-block glyph');
   assert.ok(
     row.includes(ansi.bg(theme.DARK.track)) || row.includes(ansi.bg(theme.DARK.thumb)),
     'bar is a background fill so Terminal.app has no row gaps'
   );
+});
+
+test('scrollbar thumb moves in eighth-cell steps', () => {
+  const glyphsA = chatLayout.scrollbarGlyphs(10, 80, 10, 0);
+  const glyphsB = chatLayout.scrollbarGlyphs(10, 80, 10, 1);
+  assert.notDeepEqual(glyphsA, glyphsB, 'one line of scroll shifts the thumb by a fraction of a cell');
+  const split = [...glyphsA, ...glyphsB].find((cell) => cell && typeof cell === 'object');
+  assert.ok(split && split.eighths >= 1 && split.eighths <= 7, 'an edge cell is a partial fill');
+  const painted = theme.runWithTheme('dark', () => chatLayout.paintScrollbarCell(split));
+  assert.ok('▁▂▃▄▅▆▇'.includes(ansi.stripAnsi(painted)), 'partial cells use lower-eighth glyphs');
+  assert.ok(painted.includes(ansi.bg(theme.DARK.track)) && painted.includes(ansi.fg(theme.DARK.thumb))
+    || painted.includes(ansi.bg(theme.DARK.thumb)) && painted.includes(ansi.fg(theme.DARK.track)),
+    'partial cells keep both track and thumb colors so the cell stays filled');
+  const full = theme.runWithTheme('dark', () => chatLayout.paintScrollbarCell('thumb'));
+  assert.equal(ansi.stripAnsi(full), ' ', 'a solid thumb cell stays a background-filled space');
 });
 
 test('preview hint has no icon glyph', () => {

@@ -998,33 +998,63 @@ function birdFlightPlacement(state, cols, rows) {
   };
 }
 
-function scrollbarThumb(trackH, total, view, offset) {
+/** Sub-cell thumb steps. Unicode lower-eighths give 8 positions per row. */
+const SCROLLBAR_STEPS = 8;
+/** Lower n/8 of a cell. Index 0 unused; a full cell uses a background fill, not █. */
+const LOWER_EIGHTHS = Object.freeze(['', '▁', '▂', '▃', '▄', '▅', '▆', '▇']);
+
+function scrollbarThumbMetrics(trackH, total, view, offset) {
   if (trackH <= 0 || total <= view) return null;
-  const thumbH = Math.max(1, Math.round((trackH * view) / total));
+  const steps = SCROLLBAR_STEPS;
+  const trackSteps = trackH * steps;
+  const thumbSteps = Math.max(steps, Math.round((trackSteps * view) / total));
   const maxOff = Math.max(1, total - view);
-  const travel = Math.max(0, trackH - thumbH);
-  const fromTop = Math.round(((maxOff - offset) / maxOff) * travel);
-  return { fromTop, thumbH };
+  const travelSteps = Math.max(0, trackSteps - thumbSteps);
+  const fromTopSteps = Math.round(((maxOff - offset) / maxOff) * travelSteps);
+  const fromTop = Math.floor(fromTopSteps / steps);
+  const thumbH = Math.max(1, Math.ceil((fromTopSteps + thumbSteps) / steps) - fromTop);
+  return { fromTop, thumbH, fromTopSteps, thumbSteps, steps };
+}
+
+function scrollbarThumb(trackH, total, view, offset) {
+  const metrics = scrollbarThumbMetrics(trackH, total, view, offset);
+  if (!metrics) return null;
+  return { fromTop: metrics.fromTop, thumbH: metrics.thumbH };
 }
 
 function paintScrollbarCell(kind) {
+  // Full track/thumb cells stay background-colored spaces. │ and █ leave a
+  // gap between rows in Apple Terminal.app (a dotted bar). Edge cells use
+  // lower-eighth glyphs with both fg and bg set so that gap still fills.
   if (kind === 'thumb') return `${ansi.bg(PALETTE.thumb)} ${ansi.reset()}`;
   if (kind === 'track') return `${ansi.bg(PALETTE.track)} ${ansi.reset()}`;
+  if (kind && typeof kind === 'object') {
+    const n = Math.max(1, Math.min(SCROLLBAR_STEPS - 1, Number(kind.eighths) || 1));
+    if (kind.fromTop) {
+      const lower = SCROLLBAR_STEPS - n;
+      return `${ansi.fg(PALETTE.track)}${ansi.bg(PALETTE.thumb)}${LOWER_EIGHTHS[lower]}${ansi.reset()}`;
+    }
+    return `${ansi.fg(PALETTE.thumb)}${ansi.bg(PALETTE.track)}${LOWER_EIGHTHS[n]}${ansi.reset()}`;
+  }
   return ' ';
 }
 
 function scrollbarGlyphs(trackH, total, view, offset) {
-  // Background-colored spaces fill the whole cell. Box-drawing │ and █
-  // leave a gap between rows in Apple Terminal.app (a dotted bar).
   if (!(trackH > 0) || !(total > view)) {
     return Array.from({ length: Math.max(0, trackH) }, () => 'empty');
   }
-  const cells = Array.from({ length: Math.max(0, trackH) }, () => 'track');
-  const thumb = scrollbarThumb(trackH, total, view, offset);
-  if (!thumb) return cells;
-  for (let i = 0; i < thumb.thumbH; i += 1) {
-    const idx = thumb.fromTop + i;
-    if (idx >= 0 && idx < trackH) cells[idx] = 'thumb';
+  const metrics = scrollbarThumbMetrics(trackH, total, view, offset);
+  if (!metrics) return Array.from({ length: trackH }, () => 'track');
+  const cells = new Array(trackH);
+  for (let i = 0; i < trackH; i += 1) {
+    const a = i * metrics.steps;
+    const b = a + metrics.steps;
+    const lo = Math.max(a, metrics.fromTopSteps);
+    const hi = Math.min(b, metrics.fromTopSteps + metrics.thumbSteps);
+    const n = Math.max(0, hi - lo);
+    if (n <= 0) cells[i] = 'track';
+    else if (n >= metrics.steps) cells[i] = 'thumb';
+    else cells[i] = { eighths: n, fromTop: lo === a };
   }
   return cells;
 }
@@ -1657,6 +1687,7 @@ module.exports = {
   COMPOSER_MIN_INNER,
   COMPOSER_MAX_INNER,
   SCROLLBAR_W,
+  SCROLLBAR_STEPS,
   WHEEL_LINES,
   TRANSITION_MS,
   BIRD_FLIGHT_MS,
@@ -1681,6 +1712,8 @@ module.exports = {
   hitTest,
   filterMessages,
   scrollbarThumb,
+  scrollbarThumbMetrics,
+  scrollbarGlyphs,
   scrollOffsetFromY,
   scrollOffsetFromDrag,
   hideChannelBar,
