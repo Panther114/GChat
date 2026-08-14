@@ -37,7 +37,7 @@ const {
 } = require('./chat-layout');
 const { looksLikeImagePath, readClipboardImage } = require('./clipboard-image');
 const { loadConfig, setConfigKey, normalizeScrollSensitivity } = require('../store/config');
-const { normalizeTheme, nextTheme } = require('./theme');
+const { normalizeTheme, nextTheme, PALETTE } = require('./theme');
 const { createScreenPainter } = require('./paint');
 const {
   decryptServerMessage,
@@ -153,6 +153,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     if (state.hoverLogout && (state.profileOpen || state.profileExpandFrame)) return true;
     if (state.hoverTheme && (state.profileOpen || state.profileExpandFrame)) return true;
     if (state.hoverSensitivity && (state.profileOpen || state.profileExpandFrame)) return true;
+    if (state.flash && Date.now() < Number(state.flash.until || 0)) return true;
     if (state.profileClosing && (state.profileCloseFrame || 0) < PROFILE_FRAMES) return true;
     if (state.profileOpen && (state.profileExpandFrame || 0) < PROFILE_FRAMES) return true;
     if (state.channelClosing && (state.channelExpandFrame || 0) > 0) return true;
@@ -171,6 +172,9 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       }
       if (state.typing && state.typing.until && Date.now() >= state.typing.until) {
         state.typing = null;
+      }
+      if (state.flash && Date.now() >= Number(state.flash.until || 0)) {
+        state.flash = null;
       }
       if (state.birdFlight) {
         const flight = state.birdFlight;
@@ -790,6 +794,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
   function selectMessage(item) {
     if (!item) return;
     state.selectedMessageId = String(item.msg.id);
+    state.inputFocus = 'transcript';
   }
 
   function beginScrollToMessage(id) {
@@ -1067,13 +1072,26 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     startPulse();
   }
 
+  function setFlash(text, ms = 1800, hot, idle) {
+    state.flash = {
+      text: String(text || ''),
+      until: Date.now() + Math.max(200, Number(ms) || 1800),
+      hot: hot || PALETTE.title,
+      idle: idle || PALETTE.muted,
+    };
+    startPulse();
+  }
+
   async function performDelete(messageId) {
+    closeOverlay();
+    clearSelection();
+    setFlash('deleting...', 30000, PALETTE.error, PALETTE.deletePulse);
     try {
       await client.deleteMessage(state.activeGroupId, messageId);
       state.messages = state.messages.filter((m) => String(m.msg.id) !== String(messageId));
-      closeOverlay();
-      clearSelection();
+      state.flash = null;
     } catch (err) {
+      state.flash = null;
       state.overlay = { type: 'error', message: err.message || String(err) };
     }
   }
@@ -1184,40 +1202,96 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     else if (action === 'edit') beginEdit(item);
     else if (action === 'delete') await confirmDelete(item);
     else if (action === 'preview') await previewAttachment(item);
-    else if (action === 'copy') copyMessage(item);
+    else if (action === 'copy') await copyMessage(item);
   }
 
-  function copyMessage(item) {
+  function copyTextToClipboard(text) {
+    const payload = String(text || '');
+    try {
+      if (process.platform === 'darwin') {
+        spawnSync('pbcopy', { input: payload, timeout: 2000 });
+        return true;
+      }
+      if (process.platform === 'win32') {
+        spawnSync('clip', { input: payload, timeout: 2000, windowsHide: true });
+        return true;
+      }
+      const wl = spawnSync('wl-copy', { input: payload, timeout: 2000 });
+      if (wl && wl.status === 0) return true;
+      const x = spawnSync('xclip', ['-selection', 'clipboard'], { input: payload, timeout: 2000 });
+      return !!(x && x.status === 0);
+    } catch {
+      return false;
+    }
+  }
+
+  function copyImageToClipboard(bytes, filePath) {
+    try {
+      if (process.platform === 'darwin') {
+        const src = filePath && fs.existsSync(filePath)
+          ? filePath
+          : path.join(os.tmpdir(), `gchat-clip-${process.pid}.png`);
+        if (!filePath || src !== filePath) fs.writeFileSync(src, bytes);
+        const escaped = src.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+        const result = spawnSync('osascript', [
+          '-e',
+          `set the clipboard to (read (POSIX file "${escaped}") as «class PNGf»)`,
+        ], { timeout: 4000 });
+        return !!(result && result.status === 0);
+      }
+      if (process.platform === 'linux') {
+        const wl = spawnSync('wl-copy', ['--type', 'image/png'], { input: bytes, timeout: 4000 });
+        if (wl && wl.status === 0) return true;
+        const x = spawnSync('xclip', ['-selection', 'clipboard', '-t', 'image/png'], {
+          input: bytes,
+          timeout: 4000,
+        });
+        return !!(x && x.status === 0);
+      }
+    } catch {
+      return false;
+    }
+    return false;
+  }
+
+  async function copyMessage(item) {
     if (!item) return;
+    if (item.msg?.type === 'image') {
+      try {
+        const entry = await materializeAttachment(item);
+        if (entry?.bytes && copyImageToClipboard(entry.bytes, entry.path)) {
+          setFlash('copied!', 1600, PALETTE.title, PALETTE.muted);
+          return;
+        }
+      } catch {
+        /* fall through to filename text */
+      }
+    }
     const text = item.text != null && item.text !== ''
       ? String(item.text)
       : String(item.attach?.filename || '');
-    try {
-      if (process.platform === 'darwin') {
-        spawnSync('pbcopy', { input: text, timeout: 2000 });
-        return;
-      }
-      if (process.platform === 'win32') {
-        spawnSync('clip', { input: text, timeout: 2000, windowsHide: true });
-        return;
-      }
-      const wl = spawnSync('wl-copy', { input: text, timeout: 2000 });
-      if (wl && wl.status === 0) return;
-      spawnSync('xclip', ['-selection', 'clipboard'], { input: text, timeout: 2000 });
-    } catch {
-      /* clipboard helpers are best-effort */
-    }
+    copyTextToClipboard(text);
+    setFlash('copied!', 1600, PALETTE.title, PALETTE.muted);
+  }
+
+  function toggleInputFocus() {
+    state.inputFocus = state.inputFocus === 'composer' ? 'transcript' : 'composer';
   }
 
   function handleCtrlLetter(letter) {
     const key = String(letter || '').toLowerCase();
+    if (key === 'f' && state.activeGroupId && !state.overlay) {
+      toggleInputFocus();
+      draw();
+      return true;
+    }
     if (state.selectedMessageId && !state.overlay && !state.channelMenu && !state.creatingChannel) {
       const item = findMessage(state.selectedMessageId);
       if (key === 'r') { runAction('reply', item).then(() => draw()); return true; }
       if (key === 'e') { runAction('edit', item).then(() => draw()); return true; }
       if (key === 'd') { runAction('delete', item).then(() => draw()); return true; }
       if (key === 'p') { runAction('preview', item).then(() => draw()); return true; }
-      if (key === 'c') { copyMessage(item); return true; }
+      if (key === 'c') { copyMessage(item).then(() => draw()); return true; }
     }
     if (key === 'c' || key === 'd') {
       if (typeof onQuit === 'function') onQuit();
@@ -1684,13 +1758,9 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
   }
 
   function composerUsesArrows() {
-    if (channelDraftEditing() || state.selectedMessageId) return false;
+    if (channelDraftEditing()) return false;
     if (!state.activeGroupId || state.transition || state.loadingGroup) return false;
-    if (String(state.composer || '').includes('\n')) return true;
-    const metrics = lastFrame && lastFrame.composerMetrics
-      ? lastFrame.composerMetrics
-      : composerMetrics(state, composerBoxWidth());
-    return (metrics.total || 1) > 1;
+    return state.inputFocus === 'composer';
   }
 
   function moveComposerLine(dir) {
@@ -1714,6 +1784,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
   }
 
   function placeComposerCaret(x, y) {
+    state.inputFocus = 'composer';
     const metrics = lastFrame && lastFrame.composerMetrics
       ? lastFrame.composerMetrics
       : composerMetrics(state, composerBoxWidth());
