@@ -11,47 +11,24 @@
 
 const ansi = require('./ansi');
 const landing = require('./landing');
+const {
+  PALETTE,
+  DARK,
+  runWithTheme,
+  withBg,
+  paintCanvasLine,
+} = require('./theme');
 
-const PALETTE = {
-  title: '#ffffff',
-  text: '#e6edf3',
-  muted: '#6e7681',
-  hoverFg: '#e6edf3',
-  outline: '#6e7681',
-  outlineStrong: '#8b93a0',
-  selectedBg: '#2a3139',
-  deleteBg: '#4a1518',
-  channelHover: '#b1bac4',
-  composerOutline: '#3d444d',
-  image: '#e3b341',
-  action: '#e6edf3',
-  activeBg: '#21262d',
-  border: '#30363d',
-  rule: '#30363d',
-  card: '#8b93a0',
-  error: '#f85149',
-  placeholder: '#8a8a8a',
-  sending: '#6e7681',
-  reply: '#8b93a0',
-  keyR: '#79c0ff',
-  keyE: '#d2a8ff',
-  keyD: '#f85149',
-  keyP: '#7ee787',
-  track: '#30363d',
-  thumb: '#8b93a0',
-  faint: '#484f58',
-};
-
-const CARET_LETTER = '#161b22';
+const CARET_LETTER = DARK.caretLetter;
 
 const TEXT = '\uFE0E';
 
 const ACTIONS = {
-  reply: { id: 'reply', key: 'r', glyph: '↩', label: 'reply', color: PALETTE.keyR },
-  edit: { id: 'edit', key: 'e', glyph: `${'✎'}${TEXT}`, label: 'edit', color: PALETTE.keyE },
-  delete: { id: 'delete', key: 'd', glyph: '×', label: 'delete', color: PALETTE.keyD },
-  preview: { id: 'preview', key: 'p', glyph: '▣', label: 'preview', color: PALETTE.keyP },
-  clear: { id: 'clear', key: 'Escape', glyph: null, label: 'clear (esc)', color: PALETTE.muted },
+  reply: { id: 'reply', key: 'r', glyph: '↩', label: 'reply', get color() { return PALETTE.keyR; } },
+  edit: { id: 'edit', key: 'e', glyph: `${'✎'}${TEXT}`, label: 'edit', get color() { return PALETTE.keyE; } },
+  delete: { id: 'delete', key: 'd', glyph: '×', label: 'delete', get color() { return PALETTE.keyD; } },
+  preview: { id: 'preview', key: 'p', glyph: '▣', label: 'preview', get color() { return PALETTE.keyP; } },
+  clear: { id: 'clear', key: 'Escape', glyph: null, label: 'clear (esc)', get color() { return PALETTE.muted; } },
 };
 
 const SIDEBAR_MIN = 20;
@@ -113,6 +90,8 @@ const DEFAULT_CHAT = {
   profileClosing: false,
   profileExpandFrame: 0,
   hoverLogout: false,
+  hoverTheme: false,
+  theme: 'dark',
   hoverReply: false,
   scrollTween: null,
   memberCount: 0,
@@ -275,7 +254,11 @@ function padStartCells(str, width) {
   return ' '.repeat(width - w) + str;
 }
 
-function fillRow(plain, width, { bg = null, fg = null, bold = false, dim = false } = {}) {
+function fillRow(plain, width, opts = {}) {
+  const bg = opts.bg === undefined ? PALETTE.canvas : opts.bg;
+  const fg = opts.fg || null;
+  const bold = !!opts.bold;
+  const dim = !!opts.dim;
   const clipped = ansi.width(plain) > width ? ansi.stripAnsi(ansi.truncate(plain, width)) : plain;
   const pad = ' '.repeat(Math.max(0, width - ansi.width(clipped)));
   const style = `${bg ? ansi.bg(bg) : ''}${fg ? ansi.fg(fg) : ''}${bold ? ansi.bold() : ''}${dim ? ansi.dim() : ''}`;
@@ -476,15 +459,11 @@ function paintReplyPreview(item, width, { hot = false, bg = null } = {}) {
   return withBg(`${styled}${' '.repeat(Math.max(0, width - ansi.width(plain)))}`, bg);
 }
 
-const NAME_COLORS = [
-  '#79c0ff', '#d2a8ff', '#7ee787', '#ffa657',
-  '#ff7b72', '#a5d6ff', '#f778ba', '#e3b341',
-];
-
 function hashNameColor(name) {
+  const colors = PALETTE.nameColors;
   let hash = 0;
   for (const ch of String(name || '?')) hash = (hash * 33 + ch.charCodeAt(0)) >>> 0;
-  return NAME_COLORS[hash % NAME_COLORS.length];
+  return colors[hash % colors.length];
 }
 
 function nameColor(item) {
@@ -528,18 +507,11 @@ function sendingLabel(frame) {
   return on ? 'sending...' : 'sending   ';
 }
 
-function withBg(text, bg) {
-  if (!bg) return `${text}${ansi.reset()}`;
-  const reset = ansi.reset();
-  const bgOn = ansi.bg(bg);
-  return `${bgOn}${String(text).split(reset).join(reset + bgOn)}${reset}`;
-}
-
 function paintMessageRow(plain, width, {
   raised, deleting, isMeta, isReply, isIconRow, showIcons, hoverAction, actions, sending,
   animFrame, isImageRow, nameTint, stamp, ticks, item, replyHot,
 }) {
-  const bg = deleting ? PALETTE.deleteBg : (raised ? PALETTE.selectedBg : null);
+  const bg = deleting ? PALETTE.deleteBg : (raised ? PALETTE.selectedBg : PALETTE.canvas);
   const bgOn = bg ? ansi.bg(bg) : '';
 
   if (isMeta) {
@@ -656,6 +628,7 @@ function buildSidebar(state, width, height, nameY = null) {
   const profileNameY = Math.max(2, Math.min(height - 1, nameY == null ? profileNameRow(height) : nameY));
   const barY = Math.max(1, profileNameY - 2 - extra);
   const logoutY = extra >= 2 ? barY + 2 : -1;
+  const themeY = logoutY >= 0 && logoutY + 1 < profileNameY ? logoutY + 1 : -1;
   let y = 1;
   for (let i = 0; i < list.length && y + 2 < barY; i += 1) {
     const group = list[i];
@@ -685,11 +658,22 @@ function buildSidebar(state, width, height, nameY = null) {
   hits.push({ type: 'profile', x: 0, y: barY, w: width, h: 1 });
   if (logoutY >= 0 && logoutY < height) {
     const label = padCells(' Log out', width);
-    lines[logoutY] = paintStripeLabel(label, state.animFrame || 0, !!state.hoverLogout, PALETTE.error, '#ff7b72');
+    lines[logoutY] = withBg(
+      paintStripeLabel(label, state.animFrame || 0, !!state.hoverLogout, PALETTE.error, PALETTE.logoutHot),
+      PALETTE.canvas
+    );
     hits.push({ type: 'logout', x: 0, y: logoutY, w: width, h: 1 });
   }
+  if (themeY >= 0 && themeY < height) {
+    const label = padCells(' Theme', width);
+    lines[themeY] = withBg(
+      paintStripeLabel(label, state.animFrame || 0, !!state.hoverTheme, PALETTE.theme, PALETTE.themeHot),
+      PALETTE.canvas
+    );
+    hits.push({ type: 'theme', x: 0, y: themeY, w: width, h: 1 });
+  }
   for (let py = barY + 1; py < profileNameY; py += 1) {
-    if (py === logoutY) continue;
+    if (py === logoutY || py === themeY) continue;
     hits.push({ type: 'profile', x: 0, y: py, w: width, h: 1 });
   }
   if (profileNameY >= 0 && profileNameY < height) {
@@ -751,7 +735,7 @@ function paintLineWithCaret(text, width, { caret = -1, fg }) {
   for (let i = 0; i < visual.length; i += 1) {
     const ch = visual[i];
     if (i === caret) {
-      out += `${ansi.bg(fg)}${ansi.fg(CARET_LETTER)}${ch === ' ' ? FIELD_CARET : ch}${ansi.reset()}`;
+      out += `${ansi.bg(fg)}${ansi.fg(PALETTE.caretLetter)}${ch === ' ' ? FIELD_CARET : ch}${ansi.reset()}`;
     } else {
       out += `${ansi.fg(fg)}${ch}${ansi.reset()}`;
     }
@@ -1025,7 +1009,7 @@ function buildComposerHint(state, width) {
   let right = '';
   let rightActions = [];
   if (state.overlay && state.overlay.type === 'delete') {
-    const label = pulseText('confirm deletion? (enter)', state.animFrame, PALETTE.error, '#7a2d2d');
+    const label = pulseText('confirm deletion? (enter)', state.animFrame, PALETTE.error, PALETTE.deletePulse);
     rightActions = [ACTIONS.clear];
     right = `${label}   ${styleHint(rightActions)}`;
   } else if (state.channelMenu) {
@@ -1158,6 +1142,10 @@ function outlineColor(hover) {
 }
 
 function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
+  return runWithTheme(state && state.theme, () => buildChatFrameNow(cols, rows, state));
+}
+
+function buildChatFrameNow(cols, rows, state) {
   const width = Math.max(1, cols);
   const height = Math.max(1, rows);
   const sideW = sidebarWidth(width);
@@ -1192,7 +1180,7 @@ function buildChatFrame(cols, rows, state = DEFAULT_CHAT) {
   };
 
   const hits = [];
-  const lines = Array.from({ length: height }, () => ' '.repeat(width));
+  const lines = Array.from({ length: height }, () => fillRow('', width, {}));
   const recipients = groupRecipientCount(state);
 
   const profileNameY = profileNameRow(height);
@@ -1487,16 +1475,21 @@ function paintErrorToast(lines, cols, rows, overlay) {
 }
 
 function composeChatFrame(cols, rows, state) {
-  const { lines } = buildChatFrame(cols, rows, state);
-  let out = ansi.cursorHide();
-  for (let i = 0; i < lines.length; i += 1) {
-    out += ansi.cursorTo(0, i) + ansi.eraseLine() + ansi.truncate(lines[i], cols);
-  }
-  return out;
+  return runWithTheme(state && state.theme, () => {
+    const { lines } = buildChatFrame(cols, rows, state);
+    const canvas = PALETTE.canvas;
+    const width = Math.max(1, cols);
+    const height = Math.max(1, rows);
+    let out = ansi.cursorHide();
+    for (let i = 0; i < height; i += 1) {
+      out += ansi.cursorTo(0, i) + ansi.eraseLine() + paintCanvasLine(lines[i] || '', width, 0, canvas);
+    }
+    return out;
+  });
 }
 
 module.exports = {
-  PALETTE,
+  PALETTE: DARK,
   ACTIONS,
   TEXT,
   PAD,

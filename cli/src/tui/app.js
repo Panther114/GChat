@@ -24,6 +24,8 @@ const {
 const { GChatClient } = require('../client/api');
 const { configPaths } = require('../store/paths');
 const { createChatController } = require('./chat');
+const { loadConfig } = require('../store/config');
+const { PALETTE, normalizeTheme, runWithTheme, paintCanvasLine } = require('./theme');
 
 /** Milliseconds between animation frames (~20 fps). */
 const FRAME_MS = 50;
@@ -47,17 +49,26 @@ function terminalSize() {
  * Kept separate from draw() so the render pipeline is unit-testable and the
  * erase-before-content invariant is enforced in one place.
  *
- * Invariant: each line is (eraseLine → content). Erase must come FIRST —
- * eraseLine wipes the entire current line, so writing it after content would
- * blank the frame.
+ * Invariant: each line is (eraseLine → full-width canvas row). Erase must
+ * come FIRST — eraseLine wipes the current line to the terminal default,
+ * so writing it after content would blank the frame. Every cell is then
+ * painted with the theme canvas so a light terminal profile cannot leak.
  */
 function composeFrame(cols, rows, frame, ui) {
-  const { lines, originX, originY } = buildLandingFrame(cols, rows, frame, ui);
-  let out = ansi.cursorHide();
-  for (let i = 0; i < lines.length; i += 1) {
-    out += ansi.cursorTo(originX, originY + i) + ansi.eraseLine() + ansi.truncate(lines[i], Math.max(0, cols - originX));
-  }
-  return out;
+  const view = ui || DEFAULT_UI;
+  return runWithTheme(view.theme, () => {
+    const { lines, originX, originY } = buildLandingFrame(cols, rows, frame, view);
+    const canvas = PALETTE.canvas;
+    const width = Math.max(1, cols);
+    const height = Math.max(1, rows);
+    let out = ansi.cursorHide();
+    for (let y = 0; y < height; y += 1) {
+      const local = y - originY;
+      const content = (local >= 0 && local < lines.length) ? lines[local] : '';
+      out += ansi.cursorTo(0, y) + ansi.eraseLine() + paintCanvasLine(content, width, originX, canvas);
+    }
+    return out;
+  });
 }
 
 /**
@@ -251,6 +262,7 @@ async function runTui(options = {}) {
 
   const paths = options.paths || configPaths(options.configDir);
   const client = options.client || new GChatClient({ server: options.server, paths });
+  ui.theme = normalizeTheme(loadConfig(paths).theme);
 
   /** Map a login failure to a user-facing message (server errors pass through). */
   function mapLoginError(err) {
@@ -302,6 +314,7 @@ async function runTui(options = {}) {
     ui.activeField = 'username';
     ui.loggingIn = false;
     ui.error = null;
+    ui.theme = normalizeTheme(loadConfig(paths).theme);
     stdout.write(ansi.clearScreen());
     lastCols = null;
     lastRows = null;

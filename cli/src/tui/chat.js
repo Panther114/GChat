@@ -32,6 +32,8 @@ const {
   WHEEL_LINES,
 } = require('./chat-layout');
 const { looksLikeImagePath, readClipboardImage } = require('./clipboard-image');
+const { loadConfig, setConfigKey } = require('../store/config');
+const { normalizeTheme, nextTheme } = require('./theme');
 const {
   decryptServerMessage,
   decryptAttachment,
@@ -58,10 +60,12 @@ function defaultChatState(over = {}) {
 }
 
 function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, onLogout } = {}) {
+  const storedTheme = paths ? loadConfig(paths).theme : 'dark';
   const state = defaultChatState({
     username: client?.user?.username || '',
     userId: client?.user?.id || null,
     status: 'connecting',
+    theme: normalizeTheme(storedTheme),
   });
 
   let lastFrame = null;
@@ -120,6 +124,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     if (state.loadingMore) return true;
     if (state.scrollTween) return true;
     if (state.hoverLogout && (state.profileOpen || state.profileExpandFrame)) return true;
+    if (state.hoverTheme && (state.profileOpen || state.profileExpandFrame)) return true;
     if (state.profileClosing && (state.profileExpandFrame || 0) > 0) return true;
     if (state.profileOpen && (state.profileExpandFrame || 0) < PROFILE_FRAMES) return true;
     if (state.channelClosing && (state.channelExpandFrame || 0) > 0) return true;
@@ -600,16 +605,18 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       ? String(hit.name || '+')
       : null;
     const nextLogout = !!(hit && hit.type === 'logout');
+    const nextThemeHit = !!(hit && hit.type === 'theme');
     const nextReply = !!(hit && hit.type === 'reply-ref');
-    const key = `${nextId || ''}:${nextAction || ''}:${nextChannel || ''}:${nextLogout ? 'out' : ''}:${nextReply ? 'reply' : ''}`;
+    const key = `${nextId || ''}:${nextAction || ''}:${nextChannel || ''}:${nextLogout ? 'out' : ''}:${nextThemeHit ? 'theme' : ''}:${nextReply ? 'reply' : ''}`;
     if (key === lastHoverKey) return false;
     lastHoverKey = key;
     state.hoverMessageId = nextId;
     state.hoverAction = nextAction;
     state.hoverChannel = nextChannel;
     state.hoverLogout = nextLogout;
+    state.hoverTheme = nextThemeHit;
     state.hoverReply = nextReply;
-    if (nextLogout) startPulse();
+    if (nextLogout || nextThemeHit) startPulse();
     return true;
   }
 
@@ -665,6 +672,15 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     }
     if (typeof onLogout === 'function') onLogout();
     else if (typeof onQuit === 'function') onQuit();
+  }
+
+  function toggleTheme() {
+    state.theme = nextTheme(state.theme);
+    try {
+      if (paths) setConfigKey('theme', state.theme, paths);
+    } catch {
+      /* keep the in-session switch even if config cannot be written */
+    }
   }
 
   function shortcutsArmed() {
@@ -1101,6 +1117,10 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     }
     if (hit.type === 'logout') {
       await logout();
+      return;
+    }
+    if (hit.type === 'theme') {
+      toggleTheme();
       return;
     }
     if (hit.type === 'reply-ref') {
@@ -1668,6 +1688,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     beginScrollToMessage,
     previewAttachment,
     findMessage,
+    toggleTheme,
   };
 }
 

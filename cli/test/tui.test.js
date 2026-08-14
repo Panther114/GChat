@@ -6,6 +6,7 @@ const assert = require('node:assert/strict');
 const ansi = require('../src/tui/ansi');
 const landing = require('../src/tui/landing');
 const app = require('../src/tui/app');
+const theme = require('../src/tui/theme');
 
 test('width: braille is 1 cell, CJK is 2 cells, ANSI is stripped', () => {
   assert.equal(ansi.width('⠉⣦⣀'), 3);
@@ -215,6 +216,24 @@ test('composeFrame: content is written on each line after the erase', () => {
   assert.match(plain, /Welcome to GChat CLI v0\.1/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
+});
+
+test('composeFrame: every row is painted with the dark canvas', () => {
+  const out = app.composeFrame(80, 24, 0);
+  const canvas = ansi.bg(theme.DARK.canvas);
+  assert.ok(out.includes(canvas), 'dark canvas SGR is present');
+  const segments = out.split(/\u001b\[\d+;\d+H/).slice(1);
+  assert.equal(segments.length, 24, 'one write per terminal row');
+  for (const segment of segments) {
+    assert.ok(segment.includes(canvas), 'row sits on the canvas after erase');
+  }
+});
+
+test('composeFrame: light theme uses the light canvas and dark art', () => {
+  const out = app.composeFrame(80, 24, 0, testUi({ theme: 'light' }));
+  assert.ok(out.includes(ansi.bg(theme.LIGHT.canvas)), 'light canvas is painted');
+  assert.ok(out.includes(ansi.fg(theme.LIGHT.artIdle)), 'bird uses the light idle color');
+  assert.ok(out.includes(ansi.fg(theme.LIGHT.title)), 'title uses the light palette');
 });
 
 test('redrawRequired: a geometry change forces a full clear before redraw', () => {
@@ -821,6 +840,9 @@ test('nameColor prefers senderColor and hashes otherwise', () => {
   const c = chatLayout.hashNameColor('will');
   assert.equal(a, b);
   assert.notEqual(a, c);
+  assert.ok(theme.DARK.nameColors.includes(a));
+  const lightName = theme.runWithTheme('light', () => chatLayout.hashNameColor('ada'));
+  assert.ok(theme.LIGHT.nameColors.includes(lightName));
 });
 
 test('WHEEL_LINES is a single line step', () => {
@@ -1121,6 +1143,66 @@ function makeController(over = {}) {
   return chat;
 }
 
+test('chat frame paints the theme canvas and light selected fill', () => {
+  const dark = chatLayout.buildChatFrame(80, 24, chatState({ selectedMessageId: 'm2' }));
+  assert.ok(dark.lines.join('').includes(ansi.bg(theme.DARK.canvas)));
+  assert.ok(dark.lines.join('').includes(ansi.bg(theme.DARK.selectedBg)));
+  const composed = chatLayout.composeChatFrame(80, 24, chatState());
+  const segments = composed.split(/\u001b\[\d+;\d+H/).slice(1);
+  assert.equal(segments.length, 24);
+  for (const segment of segments) {
+    assert.ok(segment.includes(ansi.bg(theme.DARK.canvas)), 'composed chat row is on the canvas');
+  }
+
+  const light = chatLayout.buildChatFrame(80, 24, chatState({
+    theme: 'light',
+    selectedMessageId: 'm2',
+  }));
+  assert.ok(light.lines.join('').includes(ansi.bg(theme.LIGHT.canvas)));
+  assert.ok(light.lines.join('').includes(ansi.bg(theme.LIGHT.selectedBg)));
+  assert.ok(!light.lines.join('').includes(ansi.bg(theme.DARK.selectedBg)));
+});
+
+test('Theme button toggles the palette and persists it', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-theme-tui-'));
+  const paths = configPaths(dir);
+  const chat = createChatController({
+    client: {
+      user: { id: 'me', username: 'will' },
+      listGroups: async () => [{ id: 'g1', name: 'team' }],
+      listMembers: async () => [{ id: 'me' }, { id: 'ada' }],
+      openGroup: async () => ({ messages: [] }),
+      connectSocket: async () => {},
+      disconnectSocket: () => {},
+      setActiveGroup: () => {},
+      switchChannel: (_g, name) => name,
+      markRead: () => {},
+      getSecret: () => null,
+      emitTyping: () => {},
+      logout: async () => {},
+    },
+    paths,
+    stdout: { write() {}, columns: 80, rows: 24 },
+    getSize: () => ({ cols: 80, rows: 24 }),
+  });
+  Object.assign(chat.state, chatState({
+    profileOpen: true,
+    profileExpandFrame: chatLayout.PROFILE_FRAMES,
+  }));
+  const open = chat.draw();
+  const hit = open.hits.find((h) => h.type === 'theme');
+  assert.ok(hit);
+  await chat.handleClick(hit);
+  assert.equal(chat.state.theme, 'light');
+  const { loadConfig } = require('../src/store/config');
+  assert.equal(loadConfig(paths).theme, 'light');
+  const light = chat.draw();
+  assert.ok(light.lines.join('').includes(ansi.bg(theme.LIGHT.canvas)));
+  await chat.handleClick(light.hits.find((h) => h.type === 'theme'));
+  assert.equal(chat.state.theme, 'dark');
+  assert.equal(loadConfig(paths).theme, 'dark');
+});
+
 test('clicking a selected message deselects it', async () => {
   const chat = makeController({ selectedMessageId: 'm2' });
   const frame = chat.draw();
@@ -1207,7 +1289,7 @@ test('chat and landing birds share one shimmer', () => {
     assert.equal(tier.shimmer, landing.BIRD_SHIMMER);
   }
   assert.equal(landing.BIRD_SHIMMER.speed, 1.2);
-  assert.equal(landing.BIRD_SHIMMER.width, 18);
+  assert.equal(landing.BIRD_SHIMMER.width, landing.BAND_WIDTH);
   assert.equal(landing.BIRD_SHIMMER.period, 64);
 });
 
@@ -1362,6 +1444,15 @@ test('sidebar profile name stays pinned with a thin rule and padded logout', () 
   const logoutRow = ansi.stripAnsi(open.lines[logout.y]).slice(0, sideW);
   assert.ok(logoutRow.startsWith(' '), 'Log out has horizontal padding');
   assert.ok(!logoutRow.includes('╭'), 'Log out is not a rounded box');
+
+  const themeHit = open.hits.find((h) => h.type === 'theme');
+  assert.ok(themeHit, 'Theme sits in the open profile menu');
+  assert.equal(themeHit.y, logout.y + 1, 'Theme sits directly below Log out');
+  assert.ok(themeHit.y < openName.y, 'Theme stays above the pinned name');
+  const themeRow = ansi.stripAnsi(open.lines[themeHit.y]).slice(0, sideW);
+  assert.ok(themeRow.includes('Theme'));
+  assert.ok(themeRow.startsWith(' '), 'Theme has horizontal padding');
+  assert.ok(!themeRow.includes('╭'), 'Theme is not a rounded box');
 });
 
 test('offsetToShowMessage keeps the target in view', () => {

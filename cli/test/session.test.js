@@ -35,6 +35,18 @@ test('config set server persists', () => {
   assert.equal(loadConfig(paths).server, 'http://127.0.0.1:4400');
 });
 
+test('config set theme normalizes to dark or light', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-theme-'));
+  const paths = configPaths(dir);
+  assert.equal(loadConfig(paths).theme, 'dark');
+  setConfigKey('theme', 'light', paths);
+  assert.equal(loadConfig(paths).theme, 'light');
+  setConfigKey('theme', 'DARK', paths);
+  assert.equal(loadConfig(paths).theme, 'dark');
+  setConfigKey('theme', 'nope', paths);
+  assert.equal(loadConfig(paths).theme, 'dark');
+});
+
 test('vault put/get/list/remove', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-vault-'));
   const paths = configPaths(dir);

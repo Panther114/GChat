@@ -12,6 +12,7 @@
  */
 
 const ansi = require('./ansi');
+const { PALETTE, DARK, runWithTheme } = require('./theme');
 
 /** Display version for the landing page (intentionally separate from package version). */
 const TUI_VERSION = '0.1';
@@ -40,8 +41,8 @@ const TRANSITION_FRAMES = 10;
 const PASSWORD_MASK_MS = 1000;
 /** Block caret shown at the insertion point of the active field. */
 const FIELD_CARET = '█';
-/** Letter color on the caret block (readable on the light field colors). */
-const CARET_LETTER = '#161b22';
+/** Letter color on the caret block (dark-theme default; live value is PALETTE.caretLetter). */
+const CARET_LETTER = DARK.caretLetter;
 /** Overflow indicator — the condensed triple dot. */
 const ELLIPSIS = '…';
 /** The label color reaches the final gray one frame before the morph ends. */
@@ -69,6 +70,7 @@ const DEFAULT_UI = {
   now: 0, // epoch ms used for password masking (set per draw)
   error: null, // { until, fields, message } — invalid-submit / login-failure feedback
   loggingIn: false, // a login request is in flight
+  theme: 'dark',
 };
 
 /** Braille logo tiers, largest first. Caption keys are art row indexes. */
@@ -128,18 +130,8 @@ const LOGO_TIERS = [
   },
 ];
 
-const ART_IDLE = '#8b93a0'; // dim gray — base art
-const ART_HOT = '#ffffff'; // bright white — pulsed cells
-
-const PALETTE = {
-  title: '#ffffff',
-  label: '#e6edf3',
-  hint: '#6e7681',
-  error: '#f85149',
-};
-
 /** Neutral gray for field placeholders — the morph fades to this (no blue hues). */
-const PLACEHOLDER_COLOR = '#8a8a8a';
+const PLACEHOLDER_COLOR = DARK.placeholder;
 
 /** How long the "Input invalid" hint flash lasts (ms). */
 const ERROR_HINT_MS = 1000;
@@ -212,7 +204,7 @@ function styleArtLine(artLine, row, frame, shimmer = DEFAULT_SHIMMER) {
   for (let col = 0; col < artLine.length; col += 1) {
     const ch = artLine[col];
     const heat = animate ? shimmerHeat(row, col, frame, shimmer) : 0;
-    const color = heat > 0 ? lerpHex(ART_IDLE, ART_HOT, heat) : ART_IDLE;
+    const color = heat > 0 ? lerpHex(PALETTE.artIdle, PALETTE.artHot, heat) : PALETTE.artIdle;
     out += heat >= 0.55
       ? `${ansi.fg(color)}${ansi.bold()}${ch}${ansi.reset()}`
       : `${ansi.fg(color)}${ch}${ansi.reset()}`;
@@ -327,7 +319,7 @@ function renderBox(box, barCells, color, dimOn, caretCell = -1) {
   for (const ch of String(box || '')) {
     const underline = i < barCells ? ansi.underline() : '';
     if (i === caretCell) {
-      out += `${underline}${ansi.bg(color)}${ansi.fg(CARET_LETTER)}${ch === ' ' ? FIELD_CARET : ch}${ansi.reset()}`;
+      out += `${underline}${ansi.bg(color)}${ansi.fg(PALETTE.caretLetter)}${ch === ' ' ? FIELD_CARET : ch}${ansi.reset()}`;
     } else {
       out += underline + base + ch + ansi.reset();
     }
@@ -350,7 +342,7 @@ function buildField({ text, placeholder, active = false, width = 1, align = 'lef
   const shown = String(has || muted ? text : placeholder || '');
   const chars = Array.from(shown);
   const len = chars.length;
-  const color = has && !muted ? PALETTE.label : PLACEHOLDER_COLOR;
+  const color = has && !muted ? PALETTE.label : PALETTE.placeholder;
   const dimOn = !(has && !muted);
   const at = active ? Math.max(0, Math.min(ansi.codePointIndex(shown, caret), has ? len : 0)) : 0;
 
@@ -410,7 +402,7 @@ function buildTransitionLabel(progress, linear) {
   const shown = LOGIN_LABEL.slice(drop);
   const x = Math.round((1 - progress) * 4);
   const fadeT = Math.min(1, linear / FADE_FINISH_AT);
-  const color = lerpHex(PALETTE.label, PLACEHOLDER_COLOR, fadeT);
+  const color = lerpHex(PALETTE.label, PALETTE.placeholder, fadeT);
   const box = (' '.repeat(x) + shown).padEnd(USERNAME_FIELD_WIDTH, ' ');
   const barCells = Math.max(0, Math.min(USERNAME_FIELD_WIDTH, Math.round(progress * USERNAME_FIELD_WIDTH)));
   return underlineBox(box, barCells, color, false);
@@ -531,6 +523,10 @@ function buildTierLines(tier, frame, ui, captionX, optionRow, passwordRow, title
  * @returns {{ lines: string[], originX: number, originY: number, width: number, height: number }}
  */
 function buildLandingFrame(cols, rows, frame = 0, ui = DEFAULT_UI) {
+  return runWithTheme(ui && ui.theme, () => buildLandingFrameNow(cols, rows, frame, ui));
+}
+
+function buildLandingFrameNow(cols, rows, frame, ui) {
   const tier = selectTier(cols, rows);
   const captionX = artWidth(tier) + LOGO_PADDING;
   const topPad = Math.floor(LOGO_PADDING / 2);

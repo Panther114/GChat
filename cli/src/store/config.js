@@ -37,6 +37,9 @@ function setConfigKey(key, value, paths) {
   if (key === 'adminSecret' && (value === 'null' || value === 'clear' || value === '')) {
     parsed = null;
   }
+  if (key === 'theme') {
+    parsed = String(value || '').trim().toLowerCase() === 'light' ? 'light' : 'dark';
+  }
   current[key] = parsed;
   return saveConfig(current, paths);
 }
