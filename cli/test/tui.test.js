@@ -113,7 +113,7 @@ test('landing frame: contains title, option and hint with art glyphs intact', ()
   assert.equal(frame.height, tier.art.length + landing.LOGO_PADDING);
   assert.equal(frame.originX, Math.floor((100 - frame.width) / 2));
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r21/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r22/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
   // The braille glyphs themselves must be preserved exactly.
@@ -202,7 +202,7 @@ test('composeFrame: writes full-width rows without eraseLine', () => {
 test('composeFrame: content is written on each line', () => {
   const out = app.composeFrame(80, 24, 0);
   const plain = ansi.stripAnsi(out.replace(/\u001b\[\d+;\d+H/g, ''));
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r21/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r22/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
 });
@@ -219,12 +219,22 @@ test('composeFrame: every row is painted with the dark canvas', () => {
 });
 
 test('splash screen paints a themed canvas with a loading label', () => {
-  const lines = app.splashScreenLines(80, 24, 'dark', 'Loading…', 0);
+  const lines = app.splashScreenLines(80, 24, 'dark', 'Loading', 0);
   assert.equal(lines.length, 24);
   const plain = lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r21'));
+  assert.ok(plain.includes('GChat CLI 0.1 r22'));
   assert.ok(plain.includes('Loading'));
+  assert.ok(!plain.includes('Loading..'), 'loading does not animate dots');
   assert.ok(lines.join('').includes(ansi.bg(theme.DARK.canvas)));
+});
+
+test('splash loading label uses the confirm-delete shimmer', () => {
+  const a = app.splashScreenLines(80, 24, 'dark', 'Loading', 0);
+  const b = app.splashScreenLines(80, 24, 'dark', 'Loading', 9);
+  const plainA = a.map((l) => ansi.stripAnsi(l)).join('\n');
+  const plainB = b.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.equal(plainA, plainB, 'the Loading letters do not change');
+  assert.notEqual(a.join('\n'), b.join('\n'), 'the label restyles as the shimmer moves');
 });
 
 test('screen painter writes only dirty rows and can force a full refresh', () => {
@@ -669,7 +679,7 @@ test('codePointIndex and stepCodePoint do not split emoji', () => {
 test('chat frame: sidebar, channels, composer, and messages', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState());
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r21'), 'sidebar title is the CLI version');
+  assert.ok(plain.includes('GChat CLI 0.1 r22'), 'sidebar title is the CLI version');
   assert.ok(!plain.includes('chats\n') && !/^\s*chats\s*$/m.test(plain.split('\n')[0]), 'old "chats" label is gone');
   assert.ok(plain.includes('team'), 'active group in sidebar');
   assert.ok(!plain.includes('●'), 'groups are not indented with a bullet');
@@ -1176,7 +1186,7 @@ test('light-theme idle bird is pale enough for the shimmer to read', () => {
   const [hr, hg, hb] = ansi.hexToRgb(theme.LIGHT.artHot);
   const idleLum = lr + lg + lb;
   const hotLum = hr + hg + hb;
-  assert.ok(idleLum > 360, 'idle is a light gray on the white canvas');
+  assert.ok(idleLum > 680, 'idle is a faint gray so the dark stripe can read');
   assert.ok(idleLum - hotLum > 200, 'shimmer has a wide dark swing');
 });
 
@@ -1751,6 +1761,26 @@ test('reply/edit/delete hide on other messages while composing those actions', (
   assert.ok(busy.hits.some((h) => h.type === 'action' && h.action === 'preview' && String(h.id) === 'm3'));
 });
 
+test('clicking empty sidebar does not leave the current group', async () => {
+  const chat = makeController({ activeGroupId: 'g1' });
+  const frame = chat.draw();
+  const empty = frame.hits.find((h) => h.type === 'sidebar-empty');
+  assert.ok(empty, 'empty sidebar region is still a hit target');
+  await chat.handleClick(empty);
+  assert.equal(chat.state.activeGroupId, 'g1', 'only Esc leaves the group');
+});
+
+test('scrollbar drag steps by an eighth of the thumb', () => {
+  const region = { y: 0, h: 10 };
+  const maxScroll = 80;
+  const one = chatLayout.scrollOffsetFromDrag(40, 5, 4, region, maxScroll);
+  const two = chatLayout.scrollOffsetFromDrag(40, 5, 3, region, maxScroll);
+  assert.ok(one !== 40, 'one mouse row moves the offset');
+  assert.ok(Math.abs(two - 40) > Math.abs(one - 40), 'another row keeps moving');
+  const fullCell = Math.round(maxScroll / Math.max(1, 10 - 1));
+  assert.ok(Math.abs(one - 40) < fullCell, 'one mouse row is finer than a whole-cell thumb jump');
+});
+
 test('sidebar profile name stays pinned with a thin rule and padded logout', () => {
   const pinnedY = chatLayout.profileNameRow(24);
   const idle = chatLayout.buildChatFrame(80, 24, chatState({
@@ -1784,22 +1814,29 @@ test('sidebar profile name stays pinned with a thin rule and padded logout', () 
   const openRuleY = open.hits.filter((h) => h.type === 'profile').map((h) => h.y).sort((a, b) => a - b)[0];
   assert.ok(logout);
   assert.equal(openName.y, pinnedY, 'name stays pinned when Log out opens');
-  assert.equal(openRuleY, nameHit.y - 2 - chatLayout.PROFILE_LIFT, 'rule lifts three rows');
+  assert.equal(openRuleY, nameHit.y - 2 - chatLayout.PROFILE_LIFT, 'rule lifts to fit both outlined buttons');
   assert.equal(logout.y, openRuleY + 2, 'Log out sits under a pad below the rule');
-  assert.ok(logout.y < openName.y - 1, 'Log out has padding above the name');
+  assert.equal(logout.h, chatLayout.PROFILE_BUTTON_ROWS, 'Log out is a three-line outlined button');
+  assert.ok(logout.y + logout.h < openName.y - 1, 'Log out has padding above the name');
   assert.ok(open.lines.map((l) => ansi.stripAnsi(l)).join('\n').includes('Log out'));
-  const logoutRow = ansi.stripAnsi(open.lines[logout.y]).slice(0, sideW);
-  assert.ok(logoutRow.startsWith(' '), 'Log out has horizontal padding');
-  assert.ok(!logoutRow.includes('╭'), 'Log out is not a rounded box');
+  const logoutTop = ansi.stripAnsi(open.lines[logout.y]).slice(0, sideW);
+  const logoutMid = ansi.stripAnsi(open.lines[logout.y + 1]).slice(0, sideW);
+  const logoutBot = ansi.stripAnsi(open.lines[logout.y + 2]).slice(0, sideW);
+  assert.ok(logoutTop.includes('╭') && logoutTop.includes('╮'), 'Log out has a top outline');
+  assert.ok(logoutMid.includes('Log out') && logoutMid.includes('│'), 'Log out label sits inside the box');
+  assert.ok(logoutBot.includes('╰') && logoutBot.includes('╯'), 'Log out has a bottom outline');
+  assert.ok(logoutTop.startsWith(' '), 'Log out has horizontal padding');
 
   const themeHit = open.hits.find((h) => h.type === 'theme');
   assert.ok(themeHit, 'Theme sits in the open profile menu');
-  assert.equal(themeHit.y, logout.y + 1, 'Theme sits directly below Log out');
+  assert.equal(themeHit.y, logout.y + logout.h + 1, 'Theme sits below Log out with a gap');
+  assert.equal(themeHit.h, chatLayout.PROFILE_BUTTON_ROWS, 'Theme is a three-line outlined button');
   assert.ok(themeHit.y < openName.y, 'Theme stays above the pinned name');
-  const themeRow = ansi.stripAnsi(open.lines[themeHit.y]).slice(0, sideW);
-  assert.ok(themeRow.includes('Theme'));
-  assert.ok(themeRow.startsWith(' '), 'Theme has horizontal padding');
-  assert.ok(!themeRow.includes('╭'), 'Theme is not a rounded box');
+  const themeTop = ansi.stripAnsi(open.lines[themeHit.y]).slice(0, sideW);
+  const themeMid = ansi.stripAnsi(open.lines[themeHit.y + 1]).slice(0, sideW);
+  assert.ok(themeTop.includes('╭'), 'Theme has an outline');
+  assert.ok(themeMid.includes('Theme'));
+  assert.ok(themeTop.startsWith(' '), 'Theme has horizontal padding');
 });
 
 test('offsetToShowMessage keeps the target in view', () => {

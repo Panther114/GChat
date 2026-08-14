@@ -24,6 +24,7 @@ const {
   styleArtLine,
   sharedBirdY,
   loginBirdOrigin,
+  pulseText,
   TUI_VERSION,
   BIRD_FLIGHT_MS,
 } = require('./landing');
@@ -106,7 +107,8 @@ function splashScreenLines(cols, rows, theme, label, animFrame = 0, originX = nu
     const tier = selectTier(cols, rows);
     const artW = Math.max(...tier.art.map((line) => ansi.width(line)));
     const title = `GChat CLI ${TUI_VERSION}`;
-    const hint = label || 'Loading…';
+    const hintPlain = String(label || 'Loading').replace(/\.+$/, '') || 'Loading';
+    const hint = pulseText(hintPlain, animFrame, PALETTE.title, PALETTE.hint);
     const originY = sharedBirdY(height, tier.art.length);
     if (originX == null) originX = Math.max(0, Math.floor((width - artW) / 2));
     const lines = Array.from({ length: height }, () => paintCanvasLine('', width, 0, canvas));
@@ -126,11 +128,8 @@ function splashScreenLines(cols, rows, theme, label, animFrame = 0, originX = nu
       );
     }
     if (hintY >= 0 && hintY < height) {
-      const x = Math.max(0, Math.floor((width - ansi.width(hint)) / 2));
-      lines[hintY] = paintCanvasLine(
-        `${ansi.fg(PALETTE.hint)}${ansi.dim()}${hint}${ansi.reset()}`,
-        width, x, canvas
-      );
+      const x = Math.max(0, Math.floor((width - ansi.width(hintPlain)) / 2));
+      lines[hintY] = paintCanvasLine(hint, width, x, canvas);
     }
     return lines;
   });
@@ -366,8 +365,7 @@ async function runTui(options = {}) {
     const fromX = splashFromX == null ? dest.x : splashFromX;
     const toX = splashToX == null ? dest.x : splashToX;
     const birdX = Math.round(fromX + (toX - fromX) * eased);
-    const dots = '.'.repeat((Math.floor(frame / 8) % 3) + 1);
-    const label = `${splashLabel.replace(/\.+$/, '')}${dots}`;
+    const label = splashLabel.replace(/\.+$/, '') || 'Loading';
     const bytes = painter.paint(
       splashScreenLines(cols, rows, ui.theme, label, frame, birdX),
       cols, rows,

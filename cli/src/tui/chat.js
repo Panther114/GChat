@@ -1213,7 +1213,6 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       return;
     }
     if (hit.type === 'sidebar-empty') {
-      await loadGroup(null);
       return;
     }
     if (hit.type === 'profile') {

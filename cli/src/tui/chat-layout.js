@@ -47,9 +47,11 @@ const CHANNEL_EXPAND_FRAMES = 8;
 const PROFILE_FRAMES = 8;
 const HISTORY_PAGE = 50;
 const SCROLL_TWEEN_MS = 220;
-const GLIMMER = { speed: 0.6, width: 4, period: 18 };
+const GLIMMER = landing.TEXT_SHIMMER;
 const PROFILE_NAME_OFFSET = 3;
-const PROFILE_LIFT = 3;
+/** Closed: rule + blank + name. Open: rule + pad + logout box + gap + theme box + pad + name. */
+const PROFILE_LIFT = 8;
+const PROFILE_BUTTON_ROWS = 3;
 
 const DEFAULT_CHAT = {
   groups: [],
@@ -582,25 +584,7 @@ function boxRow(inner, width, color, fill = null) {
 }
 
 function pulseText(text, frame, hotColor, idleColor) {
-  let out = '';
-  let run = '';
-  let runColor = null;
-  const flush = () => {
-    if (!run) return;
-    out += `${ansi.bold()}${ansi.fg(runColor)}${run}${ansi.reset()}`;
-    run = '';
-  };
-  let i = 0;
-  for (const ch of String(text || '')) {
-    const heat = landing.shimmerHeat(0, i, frame || 0, GLIMMER);
-    const color = heat > 0 ? landing.lerpHex(idleColor, hotColor, heat) : idleColor;
-    if (runColor !== null && color !== runColor) flush();
-    runColor = color;
-    run += ch;
-    i += 1;
-  }
-  flush();
-  return out;
+  return landing.pulseText(text, frame, hotColor, idleColor, GLIMMER);
 }
 
 function hitTest(hits, x, y) {
@@ -642,13 +626,19 @@ function insetSidebarRow(label, width, inset, opts = {}) {
   return `${fillRow('', pad, {})}${inner}${fillRow('', pad, {})}`;
 }
 
-function insetSidebarButton(label, width, inset, frame, hover, idleFg, hotFg) {
+function paintOutlinedButton(label, width, inset, frame, hover, idleFg, hotFg) {
   const pad = Math.max(0, Number(inset) || 0);
-  const innerW = Math.max(1, width - pad * 2);
-  const styled = paintStripeLabel(padCells(String(label || ''), innerW), frame, hover, idleFg, hotFg);
-  const inner = withBg(styled, hover ? PALETTE.selectedBg : PALETTE.activeBg);
-  if (pad <= 0) return inner;
-  return `${fillRow('', pad, {})}${inner}${fillRow('', pad, {})}`;
+  const boxW = Math.max(3, width - pad * 2);
+  const outline = hover ? (hotFg || PALETTE.outlineStrong) : (idleFg || PALETTE.outline);
+  const fill = hover ? PALETTE.selectedBg : null;
+  const caption = padCells(` ${String(label || '').replace(/^\s+/, '')}`, Math.max(1, boxW - 2));
+  const styled = paintStripeLabel(caption, frame, hover, idleFg, hotFg);
+  const side = fillRow('', pad, {});
+  return {
+    top: `${side}${boxTop(boxW, outline, fill)}${side}`,
+    mid: `${side}${boxRow(styled, boxW, outline, fill)}${side}`,
+    bot: `${side}${boxBottom(boxW, outline, fill)}${side}`,
+  };
 }
 
 function profileNameRow(height) {
@@ -667,8 +657,8 @@ function buildSidebar(state, width, height, nameY = null) {
   const extra = Math.round(PROFILE_LIFT * eased);
   const profileNameY = Math.max(2, Math.min(height - 1, nameY == null ? profileNameRow(height) : nameY));
   const barY = Math.max(1, profileNameY - 2 - extra);
-  const logoutY = extra >= 2 ? barY + 2 : -1;
-  const themeY = logoutY >= 0 && logoutY + 1 < profileNameY ? logoutY + 1 : -1;
+  const logoutTop = extra >= 4 ? barY + 2 : -1;
+  const themeTop = extra >= PROFILE_LIFT && logoutTop >= 0 ? logoutTop + PROFILE_BUTTON_ROWS + 1 : -1;
   lines.push(fillRow('', width, {}));
   let y = 2;
   for (let i = 0; i < list.length && y < barY; i += 1) {
@@ -699,20 +689,41 @@ function buildSidebar(state, width, height, nameY = null) {
   const uname = String(state.username || 'you');
   lines[barY] = fillRow('─'.repeat(Math.max(0, width)), width, { fg: PALETTE.rule });
   hits.push({ type: 'profile', x: 0, y: barY, w: width, h: 1 });
-  if (logoutY >= 0 && logoutY < height) {
-    lines[logoutY] = insetSidebarButton(
-      ' Log out', width, inset, state.animFrame || 0, !!state.hoverLogout, PALETTE.error, PALETTE.logoutHot
+  const covered = new Set();
+  if (logoutTop >= 0 && logoutTop + PROFILE_BUTTON_ROWS <= height) {
+    const box = paintOutlinedButton(
+      'Log out', width, inset, state.animFrame || 0, !!state.hoverLogout, PALETTE.error, PALETTE.logoutHot
     );
-    hits.push({ type: 'logout', x: inset, y: logoutY, w: Math.max(1, width - inset * 2), h: 1 });
+    lines[logoutTop] = box.top;
+    lines[logoutTop + 1] = box.mid;
+    lines[logoutTop + 2] = box.bot;
+    hits.push({
+      type: 'logout',
+      x: inset,
+      y: logoutTop,
+      w: Math.max(1, width - inset * 2),
+      h: PROFILE_BUTTON_ROWS,
+    });
+    covered.add(logoutTop).add(logoutTop + 1).add(logoutTop + 2);
   }
-  if (themeY >= 0 && themeY < height) {
-    lines[themeY] = insetSidebarButton(
-      ' Theme', width, inset, state.animFrame || 0, !!state.hoverTheme, PALETTE.theme, PALETTE.themeHot
+  if (themeTop >= 0 && themeTop + PROFILE_BUTTON_ROWS <= height) {
+    const box = paintOutlinedButton(
+      'Theme', width, inset, state.animFrame || 0, !!state.hoverTheme, PALETTE.theme, PALETTE.themeHot
     );
-    hits.push({ type: 'theme', x: inset, y: themeY, w: Math.max(1, width - inset * 2), h: 1 });
+    lines[themeTop] = box.top;
+    lines[themeTop + 1] = box.mid;
+    lines[themeTop + 2] = box.bot;
+    hits.push({
+      type: 'theme',
+      x: inset,
+      y: themeTop,
+      w: Math.max(1, width - inset * 2),
+      h: PROFILE_BUTTON_ROWS,
+    });
+    covered.add(themeTop).add(themeTop + 1).add(themeTop + 2);
   }
   for (let py = barY + 1; py < profileNameY; py += 1) {
-    if (py === logoutY || py === themeY) continue;
+    if (covered.has(py)) continue;
     hits.push({ type: 'profile', x: 0, y: py, w: width, h: 1 });
   }
   if (profileNameY >= 0 && profileNameY < height) {
@@ -1061,19 +1072,32 @@ function scrollbarGlyphs(trackH, total, view, offset) {
 
 function scrollOffsetFromY(y, region, maxScroll) {
   if (!region || region.h <= 1) return 0;
-  const rel = (y - region.y) / Math.max(1, region.h - 1);
-  const t = Math.max(0, Math.min(1, rel));
-  return Math.round((1 - t) * maxScroll);
+  const view = region.h;
+  const total = maxScroll + view;
+  const metrics = scrollbarThumbMetrics(view, total, view, 0);
+  if (!metrics) {
+    const rel = (y - region.y) / Math.max(1, region.h - 1);
+    return Math.round((1 - Math.max(0, Math.min(1, rel))) * maxScroll);
+  }
+  const travelSteps = Math.max(1, view * SCROLLBAR_STEPS - metrics.thumbSteps);
+  const fromTopSteps = Math.max(0, Math.min(travelSteps, (y - region.y) * SCROLLBAR_STEPS));
+  return Math.round((1 - fromTopSteps / travelSteps) * maxScroll);
 }
 
 function scrollOffsetFromDrag(startOffset, startY, y, region, maxScroll) {
   const current = Math.max(0, Number(startOffset) || 0);
   if (!region || region.h <= 1 || maxScroll <= 0) return Math.min(current, Math.max(0, maxScroll));
+  if (y === startY) return current;
   const view = region.h;
   const total = maxScroll + view;
-  const thumbH = Math.max(1, Math.round((view * view) / Math.max(1, total)));
-  const travel = Math.max(1, view - thumbH);
-  const delta = Math.round((-(y - startY) / travel) * maxScroll);
+  const metrics = scrollbarThumbMetrics(view, total, view, current);
+  const travelSteps = metrics
+    ? Math.max(1, view * SCROLLBAR_STEPS - metrics.thumbSteps)
+    : Math.max(1, view);
+  // One mouse row = one eighth of thumb travel (jump-then-drag fine tune).
+  const deltaSteps = -(y - startY);
+  let delta = Math.round((deltaSteps / travelSteps) * maxScroll);
+  if (delta === 0) delta = deltaSteps > 0 ? 1 : -1;
   return Math.max(0, Math.min(maxScroll, current + delta));
 }
 
@@ -1678,6 +1702,7 @@ module.exports = {
   CHANNEL_ROWS,
   CHANNEL_EXPAND_FRAMES,
   PROFILE_FRAMES,
+  PROFILE_BUTTON_ROWS,
   HISTORY_PAGE,
   SCROLL_TWEEN_MS,
   ACTION_SLOTS,

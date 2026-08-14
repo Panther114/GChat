@@ -15,7 +15,7 @@ const ansi = require('./ansi');
 const { PALETTE, DARK, runWithTheme } = require('./theme');
 
 /** Display version for the landing page (intentionally separate from package version). */
-const TUI_VERSION = '0.1 r21';
+const TUI_VERSION = '0.1 r22';
 /** Shared duration for login→loading and loading→idle bird hops. */
 const BIRD_FLIGHT_MS = 560;
 
@@ -222,6 +222,31 @@ function styleArtLine(artLine, row, frame, shimmer = DEFAULT_SHIMMER) {
     runColor = color;
     runBold = bold;
     run += ch;
+  }
+  flush();
+  return out;
+}
+
+/** Soft sweep used by Loading / confirm-delete (not the bird band). */
+const TEXT_SHIMMER = { speed: 0.6, width: 4, period: 18 };
+
+function pulseText(text, frame, hotColor, idleColor, shimmer = TEXT_SHIMMER) {
+  let out = '';
+  let run = '';
+  let runColor = null;
+  const flush = () => {
+    if (!run) return;
+    out += `${ansi.bold()}${ansi.fg(runColor)}${run}${ansi.reset()}`;
+    run = '';
+  };
+  let i = 0;
+  for (const ch of String(text || '')) {
+    const heat = shimmerHeat(0, i, frame || 0, shimmer);
+    const color = heat > 0 ? lerpHex(idleColor, hotColor, heat) : idleColor;
+    if (runColor !== null && color !== runColor) flush();
+    runColor = color;
+    run += ch;
+    i += 1;
   }
   flush();
   return out;
@@ -627,9 +652,11 @@ module.exports = {
   BAND_PERIOD,
   BIRD_SHIMMER,
   DEFAULT_SHIMMER,
+  TEXT_SHIMMER,
   isHot,
   shimmerHeat,
   lerpHex,
+  pulseText,
   selectTier,
   styleArtLine,
   sharedBirdY,
