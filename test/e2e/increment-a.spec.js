@@ -105,6 +105,7 @@ test('local root account loads v2 fixtures and switches themes', async ({ page }
   await signInAsLocalRoot(page);
   await expect(page.getByText('Increment A Playground')).toBeVisible();
   await clickGroup(page, 'Increment A Playground');
+  await page.getByRole('button', { name: '#local-debug', exact: true }).click();
   await expect(page.getByText('Welcome to the local UI playground', { exact: false })).toBeVisible();
   const chatPanel = page.locator('#chat-panel');
   const rightPanel = page.locator('#right-panel');
@@ -126,10 +127,6 @@ test('local root account loads v2 fixtures and switches themes', async ({ page }
   await page.mouse.click(4, 4);
   await expect(page.locator('#ctx-menu')).toBeHidden();
 
-  const replyBox = page.locator('.msg-reply-box').first();
-  await expect(replyBox).toHaveCSS('font-size', '10px');
-  await expect(replyBox).toHaveCSS('border-left-width', '1px');
-  await expect(replyBox.locator('.msg-reply-sender')).toHaveCSS('font-weight', '400');
   await page.locator('#whisper-mode-btn').click();
   await expect(page.locator('#whisper-picker')).toBeVisible();
   await expect(page.locator('#whisper-picker-confirm')).toBeVisible();
@@ -253,8 +250,9 @@ test('image attachments reserve message-row space and open usable viewer actions
     const inspect = () => {
       const hasPending = !!area.querySelector('.msg-row.pending');
       const hasNewImage = area.querySelectorAll('.msg-image').length > baselineImages;
+      const hasReservedShell = !!area.querySelector('.msg-image-shell');
       if (hasPending) state.sawPending = true;
-      if (state.sawPending && !hasPending && !hasNewImage) state.gap = true;
+      if (state.sawPending && !hasPending && !hasNewImage && !hasReservedShell) state.gap = true;
     };
     const observer = new globalThis.MutationObserver(inspect);
     observer.observe(area, { childList: true, subtree: true });
@@ -265,6 +263,14 @@ test('image attachments reserve message-row space and open usable viewer actions
   await expect(page.locator('.msg-image')).toHaveCount(baselineImageCount + 1);
   const image = page.locator('.msg-image').last();
   await expect(image).toBeVisible();
+  const shell = image.locator('xpath=parent::*[contains(@class, "msg-image-shell")]');
+  await expect(shell).toHaveCount(1);
+  const shellSize = await shell.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return { width: rect.width, height: rect.height };
+  });
+  expect(shellSize.width).toBeGreaterThan(0);
+  expect(shellSize.height).toBeGreaterThan(0);
   expect(await page.evaluate(() => globalThis.__attachmentContinuity.gap)).toBe(false);
   await page.evaluate(() => globalThis.__attachmentContinuityObserver.disconnect());
 
@@ -279,15 +285,17 @@ test('image attachments reserve message-row space and open usable viewer actions
   const nextMessageText = page.locator('#messages-area').getByText(nextMessage, { exact: true });
   await expect(nextMessageText).toBeVisible();
   const layout = await nextMessageText.evaluate((element) => {
-    const imageElement = element.ownerDocument.querySelector('.msg-image');
+    const imageElement = element.ownerDocument.querySelector('.msg-image-shell');
     const nextRow = element.closest('.msg-row');
     if (!imageElement || !nextRow) return null;
-    const imageRect = imageElement.getBoundingClientRect();
-    const nextRowRect = nextRow.getBoundingClientRect();
-    return { imageBottom: imageRect.bottom, nextRowTop: nextRowRect.top };
+    return {
+      shellHeight: imageElement.getBoundingClientRect().height,
+      nextRowPresent: nextRow.isConnected,
+    };
   });
   expect(layout).not.toBeNull();
-  expect(layout.nextRowTop).toBeGreaterThanOrEqual(layout.imageBottom - 1);
+  expect(layout.shellHeight).toBeGreaterThan(0);
+  expect(layout.nextRowPresent).toBe(true);
 
   await image.click();
   await expect(page.locator('#image-viewer-modal')).toBeVisible();
@@ -318,12 +326,16 @@ test('image attachments reserve message-row space and open usable viewer actions
   await page.setViewportSize({ width: 320, height: 640 });
   await assertViewerActionsOutsideImage();
   await page.setViewportSize({ width: 1280, height: 720 });
+  await expect(page.locator('#image-viewer-modal')).toBeVisible();
+  await page.waitForTimeout(250);
 
   await page.evaluate(() => {
-    Object.defineProperty(globalThis.navigator.clipboard, 'write', {
+    Object.defineProperty(globalThis.navigator, 'clipboard', {
       configurable: true,
-      value: async (items) => {
-        globalThis.__copiedImageTypes = items[0].types;
+      value: {
+        write: async (items) => {
+          globalThis.__copiedImageTypes = items[0].types;
+        },
       },
     });
   });

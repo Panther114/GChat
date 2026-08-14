@@ -258,6 +258,8 @@ test('AI routes are unavailable while the feature flag is disabled', async () =>
 });
 
 test('v1.4.3 channels endpoint lists distinct blind tag indexes with sample messages', async () => {
+  const tagA = 'A'.repeat(43);
+  const tagB = 'B'.repeat(43);
   const ids = [
     'cccccccc-0000-4ccc-8ccc-cccccccccc01',
     'cccccccc-0000-4ccc-8ccc-cccccccccc02',
@@ -265,12 +267,12 @@ test('v1.4.3 channels endpoint lists distinct blind tag indexes with sample mess
   ];
   stmts.insertV2Message.run(
     ids[0], group.id, group.ownerId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null,
-    null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', 'tag-aaa', null,
+    null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', tagA, null,
     '2026-02-01T00:00:00.000Z'
   );
   stmts.insertV2Message.run(
     ids[1], group.id, group.ownerId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null,
-    null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', 'tag-bbb', null,
+    null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', tagB, null,
     '2026-02-02T00:00:00.000Z'
   );
   // #main (NULL tag index) must never be listed.
@@ -279,16 +281,39 @@ test('v1.4.3 channels endpoint lists distinct blind tag indexes with sample mess
     null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null,
     '2026-02-03T00:00:00.000Z'
   );
+  const insertSummary = db.prepare(`
+    INSERT OR REPLACE INTO group_channels (
+      group_id, channel_key, last_message_id, last_message_at, message_count
+    ) VALUES (?, ?, ?, ?, ?)
+  `);
+  insertSummary.run(group.id, tagA, ids[0], '2026-02-01T00:00:00.000Z', 1);
+  insertSummary.run(group.id, tagB, ids[1], '2026-02-02T00:00:00.000Z', 1);
 
   const res = await owner.get(`/api/groups/${group.id}/channels`).expect(200);
   assert.equal(res.body.ok, true);
   const channels = res.body.channels;
   assert.equal(channels.length, 2);
   const byTag = Object.fromEntries(channels.map((c) => [c.tagIndex, c]));
-  assert.equal(byTag['tag-aaa'].sampleMessageId, ids[0]);
-  assert.equal(byTag['tag-aaa'].messageCount, 1);
-  assert.equal(byTag['tag-bbb'].sampleMessageId, ids[1]);
-  assert.ok(byTag['tag-bbb'].lastMessageAt >= byTag['tag-aaa'].lastMessageAt);
+  assert.equal(byTag[tagA].sampleMessageId, ids[0]);
+  assert.equal(byTag[tagA].sampleMessage.id, ids[0]);
+  assert.equal(byTag[tagA].messageCount, 1);
+  assert.equal(byTag[tagB].sampleMessageId, ids[1]);
+  assert.ok(byTag[tagB].lastMessageAt >= byTag[tagA].lastMessageAt);
+
+  const ownerCsrf = await csrf(owner);
+  await owner
+    .delete(`/api/groups/${group.id}/messages/${ids[0]}`)
+    .set('X-CSRF-Token', ownerCsrf)
+    .expect(200);
+  const afterDelete = await owner.get(`/api/groups/${group.id}/channels`).expect(200);
+  assert.deepEqual(afterDelete.body.channels.map((channel) => channel.tagIndex), [tagB]);
+
+  await owner
+    .delete(`/api/groups/${group.id}/tags/${tagB}/messages`)
+    .set('X-CSRF-Token', ownerCsrf)
+    .expect(200);
+  const afterClear = await owner.get(`/api/groups/${group.id}/channels`).expect(200);
+  assert.deepEqual(afterClear.body.channels, []);
 
   // Membership is enforced.
   const outsider = request.agent(app);
@@ -1035,6 +1060,40 @@ test('per-channel read cursors drive unread counts and broadcast to every device
   assert.equal(myGroupAfterAll.unreadCount, 0);
 
   sock.close();
+});
+
+test('deleted and cleared messages never contribute to group, channel, or push unread counts', async () => {
+  const viewer = request.agent(app);
+  const viewerResponse = await register(viewer, 'bounded-unread-history-test');
+  const viewerCsrf = await csrf(viewer);
+  const secret = Buffer.alloc(32, 31).toString('base64url');
+  const commitment = crypto.createHash('sha256').update(Buffer.from(secret, 'base64url')).digest('base64url');
+  const created = await viewer
+    .post('/api/groups/create')
+    .set('X-CSRF-Token', viewerCsrf)
+    .send({ name: 'Bounded unread room', code: 'bound1', secret, keyCommitment: commitment })
+    .expect(201);
+  const groupId = created.body.id;
+  const viewerId = viewerResponse.body.id;
+  const otherId = stmts.findUserByUsername.get('owner-test').id;
+  const tagIndex = Buffer.alloc(32, 7).toString('base64url');
+  const deletedId = crypto.randomUUID();
+  const clearedId = crypto.randomUUID();
+
+  stmts.insertV2Message.run(deletedId, groupId, otherId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null, null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null, '2026-06-01T00:00:00.000Z');
+  stmts.insertV2Message.run(clearedId, groupId, otherId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null, null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', tagIndex, null, '2026-06-01T00:00:01.000Z');
+  db.prepare('UPDATE messages SET deleted_at = ? WHERE id = ?').run('2026-06-01T00:01:00.000Z', deletedId);
+  db.prepare(`
+    INSERT INTO group_history_boundaries (group_id, channel_key, cleared_at, cleared_seq, cleared_by)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(groupId, tagIndex, '2026-06-01T00:02:00.000Z', Number.MAX_SAFE_INTEGER, viewerId);
+
+  const mine = await viewer.get('/api/groups/mine').expect(200);
+  assert.equal(mine.body.find((group) => group.id === groupId).unreadCount, 0);
+  const channel = await viewer.get(`/api/groups/${groupId}/unread?tags=${encodeURIComponent(tagIndex)}`).expect(200);
+  assert.deepEqual(channel.body.counts, { '': 0, [tagIndex]: 0 });
+  const push = await viewer.get('/api/push/status').expect(200);
+  assert.equal(push.body.totalUnreadCount, 0);
 });
 
 test('one-shot migration nulls the phantom #main blind tag index so cursors cover it', async () => {

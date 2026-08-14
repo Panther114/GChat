@@ -3,37 +3,25 @@
 (() => {
   if (!('serviceWorker' in navigator)) return;
 
-  let refreshingForUpdate = false;
-  const SW_RELOAD_GUARD_KEY = 'gchat-sw-reload-guard-ts';
-  const SW_RELOAD_GUARD_WINDOW_MS = 60 * 1000;
+  let reloadRequested = false;
+  let activeRegistration = null;
 
-  function isDesktopShell() {
-    return typeof window !== 'undefined' && !!window.electronAPI;
-  }
-
-  function shouldReloadForControllerChange() {
-    // v1.3.9: never force-reload inside the desktop shell or while the app is
-    // hidden/backgrounded — a silent full reload there is what made the app
-    // "refresh and reload all chat history" in the background. The in-app
-    // update banner offers a user-confirmed reload instead.
-    if (isDesktopShell()) return false;
-    if (document.hidden) return false;
-    const now = Date.now();
-    try {
-      const lastReloadAt = Number(sessionStorage.getItem(SW_RELOAD_GUARD_KEY)) || 0;
-      if (lastReloadAt > 0 && (now - lastReloadAt) < SW_RELOAD_GUARD_WINDOW_MS) return false;
-      sessionStorage.setItem(SW_RELOAD_GUARD_KEY, String(now));
-    } catch {
-      // best effort only
-    }
-    return true;
+  function announceUpdate(registration) {
+    activeRegistration = registration;
+    window.dispatchEvent(new CustomEvent('gchat:update-available'));
   }
 
   navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (refreshingForUpdate) return;
-    if (!shouldReloadForControllerChange()) return;
-    refreshingForUpdate = true;
+    if (!reloadRequested) return;
+    reloadRequested = false;
     window.location.reload();
+  });
+
+  window.addEventListener('gchat:apply-update', async () => {
+    const registration = activeRegistration || await navigator.serviceWorker.getRegistration('/');
+    if (!registration?.waiting) return;
+    reloadRequested = true;
+    registration.waiting.postMessage({ type: 'SKIP_WAITING' });
   });
 
   window.addEventListener('load', () => {
@@ -41,6 +29,17 @@
       scope: '/',
       updateViaCache: 'none',
     }).then((registration) => {
+      activeRegistration = registration;
+      if (registration.waiting) announceUpdate(registration);
+      registration.addEventListener('updatefound', () => {
+        const worker = registration.installing;
+        if (!worker) return;
+        worker.addEventListener('statechange', () => {
+          if (worker.state === 'installed' && navigator.serviceWorker.controller) {
+            announceUpdate(registration);
+          }
+        });
+      });
       void registration.update().catch(() => {});
     }).catch(() => {});
   });

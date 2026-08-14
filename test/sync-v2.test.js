@@ -14,6 +14,10 @@ const {
   normalizeChannelKey,
 } = require('../src/server/sync-v2');
 const { applySyncV2Migration, ciphertextSampleHash } = require('../src/server/sync-v2-migration');
+const {
+  applyChannelSummaryReconciliation,
+  verifyChannelSummaries,
+} = require('../src/server/channel-summary-reconciliation');
 
 function fixtureDb() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-sync-v2-test-'));
@@ -49,6 +53,30 @@ test('sync migration is additive and preserves sampled ciphertext', () => {
     assert.equal(report.verification.stateCount, 1);
     assert.deepEqual(ciphertextSampleHash(db), before);
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM group_channels').get().count, 1);
+  } finally { db.close(); }
+});
+
+test('channel-summary reconciliation respects delete/clear boundaries and preserves ciphertext', () => {
+  const db = fixtureDb();
+  try {
+    installSyncV2Schema(db);
+    const insert = db.prepare(`INSERT INTO messages
+      (id, group_id, sender_id, encrypted_content, iv, created_at, created_seq, type, tag_index, deleted_at)
+      VALUES (?, 'g1', 'u1', ?, 'AAAAAAAAAAAAAAAA', ?, ?, 'text', ?, ?)`);
+    insert.run('old', 'cipher-old', '2026-01-01T00:00:00.000Z', 1, 'channel-a', null);
+    insert.run('deleted', 'cipher-deleted', '2026-01-02T00:00:00.000Z', 2, 'channel-a', '2026-01-03T00:00:00.000Z');
+    insert.run('visible', 'cipher-visible', '2026-01-04T00:00:00.000Z', 4, 'channel-a', null);
+    db.prepare(`INSERT INTO group_history_boundaries
+      (group_id, channel_key, cleared_at, cleared_seq, cleared_by)
+      VALUES ('g1', 'channel-a', '2026-01-03T00:00:00.000Z', 3, 'u1')`).run();
+    const before = ciphertextSampleHash(db);
+    const report = applyChannelSummaryReconciliation(db);
+    assert.equal(report.appliedRows, 1);
+    assert.deepEqual(ciphertextSampleHash(db), before);
+    assert.equal(verifyChannelSummaries(db).ok, true);
+    const summary = db.prepare("SELECT * FROM group_channels WHERE group_id = 'g1' AND channel_key = 'channel-a'").get();
+    assert.equal(summary.last_message_id, 'visible');
+    assert.equal(summary.message_count, 1);
   } finally { db.close(); }
 });
 

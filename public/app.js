@@ -692,7 +692,7 @@
     }
   }
   var HISTORY_DB_NAME = "gchat-replica-v2";
-  var HISTORY_DB_VERSION = 1;
+  var HISTORY_DB_VERSION = 2;
   var HISTORY_MESSAGES_STORE = "messages";
   var HISTORY_META_STORE = "meta";
   var HISTORY_OUTBOX_STORE = "outbox";
@@ -772,11 +772,20 @@
       }
       request.onupgradeneeded = () => {
         const db = request.result;
+        let messageStore;
         if (!db.objectStoreNames.contains(HISTORY_MESSAGES_STORE)) {
-          const store = db.createObjectStore(HISTORY_MESSAGES_STORE, { keyPath: "key" });
-          store.createIndex("groupKey", "groupKey", { unique: false });
-          store.createIndex("channelKey", ["groupKey", "channelKey"], { unique: false });
-          store.createIndex("lastAccessedAt", "lastAccessedAt", { unique: false });
+          messageStore = db.createObjectStore(HISTORY_MESSAGES_STORE, { keyPath: "key" });
+          messageStore.createIndex("groupKey", "groupKey", { unique: false });
+          messageStore.createIndex("channelKey", ["groupKey", "channelKey"], { unique: false });
+          messageStore.createIndex("lastAccessedAt", "lastAccessedAt", { unique: false });
+        } else {
+          messageStore = request.transaction.objectStore(HISTORY_MESSAGES_STORE);
+        }
+        if (!messageStore.indexNames.contains("groupCreated")) {
+          messageStore.createIndex("groupCreated", ["groupKey", "createdAt", "key"], { unique: false });
+        }
+        if (!messageStore.indexNames.contains("groupChannelCreated")) {
+          messageStore.createIndex("groupChannelCreated", ["groupKey", "channelKey", "createdAt", "key"], { unique: false });
         }
         if (!db.objectStoreNames.contains(HISTORY_META_STORE)) {
           db.createObjectStore(HISTORY_META_STORE, { keyPath: "key" });
@@ -840,7 +849,6 @@
         }
         hydrated.push(msg);
       }
-      invalidateHistoryReadMemo(groupId);
       await runHistoryStore(HISTORY_MESSAGES_STORE, "readwrite", (store) => {
         for (const msg of hydrated) {
           store.put({
@@ -853,8 +861,24 @@
           });
         }
       });
-      await pruneHistoryMessages(groupId);
+      const memoKey = String(groupId);
+      const memoized = historyReadMemo.get(memoKey);
+      if (memoized) {
+        const byId = new Map(memoized.map((msg) => [String(msg.id), msg]));
+        for (const msg of hydrated) byId.set(String(msg.id), msg);
+        historyReadMemo.set(memoKey, sortMessagesChronologically([...byId.values()]).slice(-HISTORY_RENDER_WINDOW));
+      }
+      scheduleHistoryPrune(groupId);
     })();
+  }
+  var historyPruneTimers = /* @__PURE__ */ new Map();
+  function scheduleHistoryPrune(groupId) {
+    const key = String(groupId);
+    if (historyPruneTimers.has(key)) return;
+    historyPruneTimers.set(key, setTimeout(() => {
+      historyPruneTimers.delete(key);
+      void pruneHistoryMessages(key);
+    }, 750));
   }
   async function pruneHistoryMessages(groupId) {
     if (!historyDbSupported) return;
@@ -872,7 +896,14 @@
         await pruneGlobalHistoryMessages();
         return;
       }
-      const messages = await readHistoryMessages(groupId);
+      const rowsRequest = await runHistoryStore(HISTORY_MESSAGES_STORE, "readonly", (store) => {
+        const request = store.index("groupKey").getAll(replicaGroupKey(key));
+        request.onsuccess = () => {
+          request._rows = request.result || [];
+        };
+        return request;
+      });
+      const messages = (rowsRequest?._rows || []).map((row) => row.msg).filter(Boolean).sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")) || String(a.id).localeCompare(String(b.id)));
       const excess = messages.length - HISTORY_MAX_MESSAGES_PER_GROUP;
       if (excess <= 0) return;
       const excessIds = messages.slice(0, excess).map((m) => replicaMessageKey(groupId, m.id));
@@ -893,18 +924,32 @@
     const memoized = historyReadMemo.get(key);
     if (memoized) return Promise.resolve(memoized);
     return runHistoryStore(HISTORY_MESSAGES_STORE, "readonly", (store) => {
-      const request = store.index("groupKey").getAll(replicaGroupKey(key));
+      let index;
+      try {
+        index = store.index("groupCreated");
+      } catch {
+        const fallback = store.index("groupKey").getAll(replicaGroupKey(key));
+        fallback.onsuccess = () => {
+          fallback._messages = (fallback.result || []).map((row) => row.msg).filter(Boolean).sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")) || String(a.id).localeCompare(String(b.id))).slice(-HISTORY_RENDER_WINDOW);
+        };
+        return fallback;
+      }
+      const range = IDBKeyRange.bound(
+        [replicaGroupKey(key), "", ""],
+        [replicaGroupKey(key), "\uFFFF", "\uFFFF"]
+      );
+      const request = index.openCursor(range, "prev");
+      const messages = [];
       request.onsuccess = () => {
-        const rows = request.result || [];
-        const messages = rows.map((row) => row.msg).filter(Boolean).sort((a, b) => {
-          const timeDiff = String(a.createdAt || "").localeCompare(String(b.createdAt || ""));
-          return timeDiff !== 0 ? timeDiff : String(a.id).localeCompare(String(b.id));
-        });
-        if (messages.length > HISTORY_MAX_MESSAGES_PER_GROUP) {
-          messages.splice(0, messages.length - HISTORY_MAX_MESSAGES_PER_GROUP);
+        const cursor = request.result;
+        if (!cursor || messages.length >= HISTORY_RENDER_WINDOW) {
+          request._messages = messages.reverse();
+          return;
         }
-        request._messages = messages;
+        if (cursor.value?.msg) messages.push(cursor.value.msg);
+        cursor.continue();
       };
+      return request;
     }).then((request) => {
       if (request && request._messages) {
         historyReadMemo.set(key, request._messages);
@@ -1117,7 +1162,6 @@
     await reloadAppShell();
   }
   var LAST_SEEN_DEPLOY_KEY = "gchat:last-seen-deploy";
-  var autoResetScheduled = false;
   function readLastSeenDeploy() {
     try {
       const raw = localStorage.getItem(LAST_SEEN_DEPLOY_KEY);
@@ -1136,7 +1180,7 @@
     }
   }
   function scheduleAutoResetClientCache(info) {
-    if (!info || autoResetScheduled) return;
+    if (!info) return;
     const lastSeen = readLastSeenDeploy();
     const lastFp = String(lastSeen && lastSeen.buildFingerprint || "");
     const lastVer = String(lastSeen && lastSeen.version || "");
@@ -1148,17 +1192,9 @@
     }
     const sameBuild = lastFp ? lastFp === newFp && lastVer === newVer : lastVer === newVer && lastVer !== "";
     if (sameBuild) return;
-    autoResetScheduled = true;
     writeLastSeenDeploy(newVer, newFp);
-    const jitterMs = 1500 + Math.floor(Math.random() * 8e3);
-    setTimeout(async () => {
-      try {
-        const registration = await navigator.serviceWorker?.getRegistration();
-        await registration?.update();
-      } catch {
-      }
-      await reloadAppShell();
-    }, jitterMs);
+    hostedAppReloadPending = true;
+    showUpdateAvailableBanner();
   }
   async function fetchAppVersionInfo() {
     try {
@@ -1173,19 +1209,32 @@
   async function checkForHostedAppUpdate() {
     const info = await fetchAppVersionInfo();
     if (!info) return false;
-    currentAppVersion = currentAppVersion || info.version;
+    const lastSeen = readLastSeenDeploy();
+    const changed = String(currentAppVersion || "") !== String(info.version || "") || String(info.buildFingerprint || "") && String(lastSeen?.buildFingerprint || "") !== String(info.buildFingerprint);
     appVersionLabel = "v" + info.version;
     $("app-version-label").textContent = appVersionLabel;
-    if (currentAppVersion === info.version && hostedAppReloadPending) return false;
+    if (!changed) return false;
     currentAppVersion = info.version;
     hostedAppReloadPending = true;
-    scheduleAutoResetClientCache(info);
+    writeLastSeenDeploy(info.version, info.buildFingerprint);
+    showUpdateAvailableBanner();
     return true;
+  }
+  function showUpdateAvailableBanner() {
+    const banner = $("update-available-banner");
+    if (!banner) return;
+    const text = $("update-available-text");
+    if (text) text.textContent = `GChat ${currentAppVersion} is available.`;
+    banner.hidden = false;
   }
   function startHostedAppUpdatePolling() {
     if (hostedAppUpdateTimer) clearInterval(hostedAppUpdateTimer);
     hostedAppUpdateTimer = null;
   }
+  window.addEventListener("gchat:update-available", () => {
+    hostedAppReloadPending = true;
+    showUpdateAvailableBanner();
+  });
   function createUploadId() {
     if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
     return `upload-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -2699,6 +2748,11 @@
   function revokeBlobUrlsIn(root) {
     if (!root) return;
     try {
+      const shells = root.matches?.(".msg-image-shell") ? [root] : Array.from(root.querySelectorAll?.(".msg-image-shell") || []);
+      for (const shell of shells) {
+        imageAttachmentObserver?.unobserve(shell);
+        attachmentLoadTokens.delete(shell);
+      }
       if (root.tagName === "IMG" && (root.src || "").startsWith("blob:")) {
         URL.revokeObjectURL(root.src);
         root.removeAttribute("src");
@@ -2709,6 +2763,16 @@
       }
     } catch {
     }
+  }
+  function disposeChannelRowMemo(memo) {
+    if (!memo?.rows) return;
+    for (const row of memo.rows) {
+      if (!row) continue;
+      if (readObserver) readObserver.unobserve(row);
+      revokeBlobUrlsIn(row);
+    }
+    memo.rows = [];
+    memo.byId?.clear?.();
   }
   function showImageViewer(blob, filename = "image") {
     const modal = $("image-viewer-modal");
@@ -2837,6 +2901,8 @@
   var groups = [];
   var members = [];
   var socket = null;
+  var initialBootstrapPromise = null;
+  var socketHasConnected = false;
   var messageMode = "normal";
   var whisperRecipients = [];
   var replyingTo = null;
@@ -2994,7 +3060,16 @@
           }
         }
         topic = cached ? getMessageHashtagKey(cached) : null;
-        if (!topic && entry.sampleMessageId) {
+        if (!topic && Object.prototype.hasOwnProperty.call(entry, "sampleMessage")) {
+          const msg = entry.sampleMessage;
+          if (msg && !getMessageHashtagKey(msg)) {
+            try {
+              await hydrateMessageChannel(msg, groupId);
+            } catch {
+            }
+          }
+          topic = msg ? getMessageHashtagKey(msg) : null;
+        } else if (!topic && entry.sampleMessageId) {
           try {
             const msgRes = await fetch(`/api/groups/${groupId}/messages/${entry.sampleMessageId}`);
             if (msgRes.ok) {
@@ -3246,22 +3321,60 @@
     await persistSyncBatch(groupId, ordered, cursor);
     const cache = ensureGroupCacheEntry(groupId);
     let nextMessages = [...cache.messages || []];
+    const affectedTopics = /* @__PURE__ */ new Set();
+    let allChannelsAffected = false;
     for (const event of ordered) {
       if ((event.type === "message.created" || event.type === "message.edited") && event.message) {
+        const existingCreated = event.type === "message.created" ? nextMessages.find((message) => String(message.id) === String(event.message.id)) : null;
+        const optimistic = existingCreated?._optimistic ? existingCreated : null;
+        if (optimistic) {
+          reconcileOptimisticEcho(event.message);
+          nextMessages = sortMessagesChronologically(nextMessages);
+          continue;
+        }
+        if (existingCreated) continue;
+        affectedTopics.add(resolveMessageTagTopic(event.message));
         const byId = new Map(nextMessages.map((message) => [String(message.id), message]));
         byId.set(String(event.message.id), event.message);
         nextMessages = sortMessagesChronologically([...byId.values()]);
       } else if (event.type === "message.deleted") {
+        const removed = nextMessages.find((message) => String(message.id) === String(event.entityId));
+        if (removed) affectedTopics.add(resolveMessageTagTopic(removed));
         nextMessages = nextMessages.filter((message) => String(message.id) !== String(event.entityId));
       } else if (event.type === "history.cleared") {
         const channelKey = event.auxiliary?.channelKey || event.channelKey;
+        if (channelKey === "*") {
+          allChannelsAffected = true;
+        } else {
+          const channelMessage = nextMessages.find((message) => (message.tagIndex || "main") === channelKey);
+          if (channelMessage) affectedTopics.add(resolveMessageTagTopic(channelMessage));
+          if (channelKey === "main") affectedTopics.add(DEFAULT_TAG_TOPIC);
+        }
         nextMessages = channelKey === "*" ? [] : nextMessages.filter((message) => (message.tagIndex || "main") !== channelKey);
       }
     }
     cache.messages = nextMessages;
-    cache.rowsDirty = true;
+    const activeTopic = String(currentGroupId) === String(groupId) ? getActiveTagTopic() : null;
+    const retiredActiveMemos = [];
+    if (cache.channelRows) {
+      if (allChannelsAffected) {
+        for (const [topic, memo] of Object.entries(cache.channelRows)) {
+          if (topic === activeTopic) retiredActiveMemos.push(memo);
+          else disposeChannelRowMemo(memo);
+        }
+        cache.channelRows = {};
+      } else {
+        for (const topic of affectedTopics) {
+          const memo = cache.channelRows[topic];
+          if (!memo) continue;
+          if (topic === activeTopic) retiredActiveMemos.push(memo);
+          else disposeChannelRowMemo(memo);
+          delete cache.channelRows[topic];
+        }
+      }
+    }
+    cache.rowsDirty = allChannelsAffected || affectedTopics.size > 0;
     cache.messageRows = null;
-    cache.channelRows = null;
     cache.oldestMessageId = nextMessages.length ? cache.oldestMessageId : null;
     writeLocalGroupCache(groupId, cache);
     if (render && String(currentGroupId) === String(groupId)) {
@@ -3274,7 +3387,10 @@
         $("chat-member-count").textContent = members.length + " member" + (members.length !== 1 ? "s" : "");
         refreshVisibleDeliveryTicks(groupId);
       }
-      await renderActiveChannelStream({ restoreScroll: true });
+      if (allChannelsAffected || affectedTopics.has(activeTopic)) {
+        await renderActiveChannelStream({ restoreScroll: true });
+        for (const memo of retiredActiveMemos) disposeChannelRowMemo(memo);
+      }
       renderTagFilters();
     }
   }
@@ -3764,11 +3880,14 @@
     const area = messagesArea();
     if (!area) return;
     const cache = ensureGroupCacheEntry(currentGroupId);
-    const anchorId = cache.channelAnchors?.[getActiveTagTopic()] || null;
+    const savedAnchor = cache.channelAnchors?.[getActiveTagTopic()] || null;
+    const anchorId = typeof savedAnchor === "string" ? savedAnchor : savedAnchor?.messageId;
     if (anchorId) {
       const row = area.querySelector(`[data-msg-id="${CSS.escape(anchorId)}"]`);
       if (row) {
-        area.scrollTop = row.getBoundingClientRect().top - area.getBoundingClientRect().top + area.scrollTop;
+        const currentOffset = row.getBoundingClientRect().top - area.getBoundingClientRect().top;
+        const savedOffset = typeof savedAnchor === "object" && Number.isFinite(savedAnchor.offsetFromTop) ? savedAnchor.offsetFromTop : 0;
+        area.scrollTop += currentOffset - savedOffset;
         updateFirstUnreadButton();
         return;
       }
@@ -4836,12 +4955,25 @@
     $("user-username").textContent = currentUser.username;
     renderCurrentUserAvatar(currentUser);
     loadMergedLocalSettings(currentUser.id);
-    await loadSettingsFromServer();
+    const settingsPromise = loadSettingsFromServer();
+    const versionPromise = fetchAppVersionInfo();
+    const historyMigrationPromise = migrateLocalCachesToHistory();
+    initialBootstrapPromise = loadGroups();
+    initSocket();
+    bindOnlineOfflineListeners();
+    setupEventListeners();
+    setupEmojiPicker();
+    setupKeyboardShortcuts();
+    const [, versionInfo] = await Promise.all([
+      settingsPromise,
+      versionPromise,
+      historyMigrationPromise,
+      initialBootstrapPromise
+    ]);
     applyWallpaperFromSettings();
     wallpaperTheme?.applyTheme(appLocalSettings.theme);
     bindThemeToggleControl();
     writeLocalSettings(appLocalSettings, currentUser.id);
-    const versionInfo = await fetchAppVersionInfo();
     if (versionInfo) {
       currentAppVersion = versionInfo.version;
       appVersionLabel = "v" + versionInfo.version;
@@ -4851,11 +4983,9 @@
     $("app-version-label").textContent = appVersionLabel;
     syncAiFeatureVisibility();
     if (aiFeatureEnabled) {
-      await refreshAiUsageSummary();
+      void refreshAiUsageSummary();
       void loadAndRenderAiTones();
     }
-    await migrateLocalCachesToHistory();
-    await loadGroups();
     const lastGroupId = readStoredLastGroupId();
     if (lastGroupId && groups.some((g) => String(g.id) === String(lastGroupId))) {
       void selectGroup(lastGroupId);
@@ -4867,12 +4997,7 @@
         syncUnreadIndicators(pushStatus.totalUnreadCount);
       });
     }
-    initSocket();
-    bindOnlineOfflineListeners();
-    setupEventListeners();
     syncProfilePictureModeUI();
-    setupEmojiPicker();
-    setupKeyboardShortcuts();
     updateMessageModeBtn();
     syncResponsiveUiState();
     startHostedAppUpdatePolling();
@@ -6032,6 +6157,47 @@
     scheduleDisappearingTimerForMessage(msg);
     return row;
   }
+  var ATTACHMENT_RENDER_CONCURRENCY = 3;
+  var attachmentRenderQueue = [];
+  var activeAttachmentRenders = 0;
+  var imageAttachmentObserver = null;
+  var attachmentLoadTokens = /* @__PURE__ */ new WeakMap();
+  function drainAttachmentRenderQueue() {
+    while (activeAttachmentRenders < ATTACHMENT_RENDER_CONCURRENCY && attachmentRenderQueue.length) {
+      const task = attachmentRenderQueue.shift();
+      activeAttachmentRenders += 1;
+      Promise.resolve().then(task).catch(() => {
+      }).finally(() => {
+        activeAttachmentRenders -= 1;
+        drainAttachmentRenderQueue();
+      });
+    }
+  }
+  function enqueueAttachmentRender(task) {
+    attachmentRenderQueue.push(task);
+    drainAttachmentRenderQueue();
+  }
+  function observeImageAttachment(shell, load) {
+    if (typeof IntersectionObserver !== "function") {
+      load();
+      return;
+    }
+    if (!imageAttachmentObserver) {
+      imageAttachmentObserver = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          const token2 = attachmentLoadTokens.get(entry.target);
+          if (!token2 || token2.started) continue;
+          token2.started = true;
+          imageAttachmentObserver.unobserve(entry.target);
+          token2.load();
+        }
+      }, { root: messagesArea(), rootMargin: "400px 0px" });
+    }
+    const token = { started: false, load };
+    attachmentLoadTokens.set(shell, token);
+    imageAttachmentObserver.observe(shell);
+  }
   async function renderMsgContent(msg, textEl, bubble, groupId = currentGroupId) {
     const key = groupId ? getGroupKey(groupId) : null;
     if (msg.type === "image") {
@@ -6041,31 +6207,53 @@
         locked.appendChild(createIcon("lock"));
         textEl.appendChild(locked);
       } else {
-        const buf = await decryptAttachmentBytes(msg, key, groupId);
-        if (buf) {
+        const shell = document.createElement("div");
+        shell.className = "msg-image-shell";
+        shell.setAttribute("aria-label", "Image loading");
+        const placeholder = document.createElement("span");
+        placeholder.className = "msg-image-placeholder";
+        placeholder.appendChild(createIcon("image"));
+        shell.appendChild(placeholder);
+        textEl.appendChild(shell);
+        const load = () => enqueueAttachmentRender(async () => {
+          const loadGeneration = viewGeneration;
+          const buf = await decryptAttachmentBytes(msg, key, groupId);
+          const token = attachmentLoadTokens.get(shell);
+          if (!token) return;
+          if (String(currentGroupId) !== String(groupId) || viewGeneration !== loadGeneration) {
+            token.started = false;
+            imageAttachmentObserver?.observe(shell);
+            return;
+          }
+          if (!buf) {
+            shell.classList.add("is-error");
+            shell.setAttribute("aria-label", "Image unavailable");
+            shell.replaceChildren(createIcon("lock"));
+            return;
+          }
           const mimeType = detectImageMime(buf) || "image/jpeg";
           const blob = new Blob([buf], { type: mimeType });
           const url = URL.createObjectURL(blob);
           const img = document.createElement("img");
           img.className = "msg-image";
           img.src = url;
-          img.alt = "image";
-          img.style.cursor = "pointer";
-          await new Promise((resolve) => {
-            img.addEventListener("load", resolve, { once: true });
-            img.addEventListener("error", resolve, { once: true });
-          });
-          img.addEventListener("click", (e) => {
-            e.stopPropagation();
+          img.alt = msg.filename || "image";
+          img.addEventListener("click", (event) => {
+            event.stopPropagation();
             showImageViewer(blob, msg.filename || "image");
           });
-          textEl.appendChild(img);
-        } else {
-          const locked = document.createElement("div");
-          locked.className = "msg-image-locked";
-          locked.appendChild(createIcon("lock"));
-          textEl.appendChild(locked);
-        }
+          try {
+            await img.decode();
+          } catch {
+          }
+          if (attachmentLoadTokens.get(shell) !== token) {
+            URL.revokeObjectURL(url);
+            return;
+          }
+          shell.replaceChildren(img);
+          shell.removeAttribute("aria-label");
+        });
+        observeImageAttachment(shell, load);
       }
       return;
     }
@@ -6073,41 +6261,54 @@
       if (!key) {
         textEl.textContent = "File unavailable: " + (msg.filename || "file");
       } else {
-        const buf = await decryptAttachmentBytes(msg, key, groupId);
-        if (buf) {
-          const btn = document.createElement("button");
-          btn.type = "button";
-          btn.className = "msg-file-btn";
-          const fileIcon = document.createElement("span");
-          fileIcon.className = "msg-file-icon";
-          fileIcon.appendChild(createIcon("file"));
-          btn.appendChild(fileIcon);
-          const info = document.createElement("span");
-          info.className = "msg-file-info";
-          const fileName = document.createElement("strong");
-          fileName.textContent = msg.filename || "file";
-          const fileMeta = document.createElement("small");
-          const extension = (msg.filename || "").split(".").pop()?.toUpperCase() || "FILE";
-          fileMeta.textContent = `${extension} \xB7 ${formatBytes(buf.byteLength)}`;
-          info.append(fileName, fileMeta);
-          btn.appendChild(info);
-          const downloadLabel = document.createElement("span");
-          downloadLabel.className = "msg-file-download-label";
-          downloadLabel.textContent = "Download";
-          btn.appendChild(downloadLabel);
-          btn.addEventListener("click", (e) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "msg-file-btn";
+        const fileIcon = document.createElement("span");
+        fileIcon.className = "msg-file-icon";
+        fileIcon.appendChild(createIcon("file"));
+        btn.appendChild(fileIcon);
+        const info = document.createElement("span");
+        info.className = "msg-file-info";
+        const fileName = document.createElement("strong");
+        fileName.textContent = msg.filename || "file";
+        const fileMeta = document.createElement("small");
+        const extension = (msg.filename || "").split(".").pop()?.toUpperCase() || "FILE";
+        const envelopeSize = Number(msg.attachmentSize || msg.size || msg.encryptedSize);
+        fileMeta.textContent = Number.isFinite(envelopeSize) && envelopeSize > 0 ? `${extension} \xB7 ${formatBytes(envelopeSize)}` : extension;
+        info.append(fileName, fileMeta);
+        btn.appendChild(info);
+        const downloadLabel = document.createElement("span");
+        downloadLabel.className = "msg-file-download-label";
+        downloadLabel.textContent = "Download";
+        btn.appendChild(downloadLabel);
+        btn.addEventListener("click", async (event) => {
+          event.stopPropagation();
+          if (btn.disabled) return;
+          btn.disabled = true;
+          downloadLabel.textContent = "Preparing\u2026";
+          try {
+            const buf = await decryptAttachmentBytes(msg, key, groupId);
+            if (!buf) throw new Error("unavailable");
             const blob = new Blob([buf]);
             const url = URL.createObjectURL(blob);
-            const a = document.createElement("a");
-            a.href = url;
-            a.download = msg.filename || "download";
-            a.click();
-            URL.revokeObjectURL(url);
-          });
-          textEl.appendChild(btn);
-        } else {
-          textEl.textContent = "File unavailable: " + (msg.filename || "file");
-        }
+            const anchor = document.createElement("a");
+            anchor.href = url;
+            anchor.download = msg.filename || "download";
+            anchor.click();
+            setTimeout(() => URL.revokeObjectURL(url), 0);
+            downloadLabel.textContent = "Downloaded";
+          } catch {
+            downloadLabel.textContent = "Retry";
+            showToast("File unavailable", "error");
+          } finally {
+            setTimeout(() => {
+              btn.disabled = false;
+              if (downloadLabel.textContent === "Downloaded") downloadLabel.textContent = "Download";
+            }, 1200);
+          }
+        });
+        textEl.appendChild(btn);
       }
       return;
     }
@@ -6197,7 +6398,7 @@
     evictChannelRowFront(memo);
     if (scroll !== false) {
       if (msg.senderId === currentUser.id) {
-        scrollToBottom(true);
+        if (wasNearBottom) scrollToBottom(true);
         applySearchVisibility();
         return row;
       }
@@ -6863,21 +7064,9 @@
         isDisappearing: parsedMessage.isDisappearing,
         disappearingDurationMs: parsedMessage.disappearingDurationMs
       };
-      if (parsedMessage.whisperRecipientIds && parsedMessage.whisperRecipientIds.length > 0) {
-        const whisperEnvelope = {
-          ...envelope,
-          whisperTo: parsedMessage.whisperRecipientIds
-        };
-        await putOutboxMutation(sendGroupId, messageId, whisperEnvelope);
-        socket.emit("send_whisper", whisperEnvelope, (ack = {}) => {
-          if (ack.ok) void deleteOutboxMutation(sendGroupId, messageId);
-        });
-      } else {
-        await putOutboxMutation(sendGroupId, messageId, envelope);
-        socket.emit("send_message", envelope, (ack = {}) => {
-          if (ack.ok) void deleteOutboxMutation(sendGroupId, messageId);
-        });
-      }
+      const isWhisper = !!(parsedMessage.whisperRecipientIds && parsedMessage.whisperRecipientIds.length > 0);
+      const outboundEnvelope = isWhisper ? { ...envelope, whisperTo: parsedMessage.whisperRecipientIds } : envelope;
+      await putOutboxMutation(sendGroupId, messageId, outboundEnvelope);
       appendOptimisticOwnMessage({
         id: messageId,
         groupId: sendGroupId,
@@ -6908,6 +7097,9 @@
         readCount: 0,
         _decryptedText: messageText,
         _optimistic: true
+      });
+      socket.emit(isWhisper ? "send_whisper" : "send_message", outboundEnvelope, (ack = {}) => {
+        if (ack.ok) void deleteOutboxMutation(sendGroupId, messageId);
       });
       resetComposerAfterSend();
     } catch (err) {
@@ -7403,6 +7595,8 @@
     updateConnectionTransport();
     renderDiagnosticsPanel();
     socket.on("connect", () => {
+      const isReconnect = socketHasConnected;
+      socketHasConnected = true;
       socketDiagnostics.connectionState = "connected";
       socketDiagnostics.lastConnectError = "";
       socketDiagnostics.lastConnectErrorAt = "";
@@ -7420,7 +7614,13 @@
       if (currentGroupId) socket.emit("join_room", currentGroupId);
       flushMarkReadEmits();
       void flushOutboxMutations();
-      void loadGroups().then(() => refreshCurrentGroupFromServer());
+      if (isReconnect) {
+        void loadGroups().then(() => refreshCurrentGroupFromServer());
+      } else if (initialBootstrapPromise) {
+        void initialBootstrapPromise.then(() => {
+          if (currentGroupId) socket.emit("join_room", currentGroupId);
+        });
+      }
       renderDiagnosticsPanel();
     });
     socket.on("disconnect", (reason) => {
@@ -8060,11 +8260,12 @@
     showToast("This chat is no longer available to you", "info");
   }
   function addSystemMessage(text) {
+    const shouldPinToBottom = isNearBottom();
     const div = document.createElement("div");
     div.className = "msg-system";
     div.textContent = text;
     messagesArea().appendChild(div);
-    scrollToBottom();
+    if (shouldPinToBottom) scrollToBottom();
   }
   function setupEmojiPicker() {
     const emojis = ["\u{1F600}", "\u{1F602}", "\u{1F970}", "\u{1F60D}", "\u{1F60E}", "\u{1F929}", "\u{1F973}", "\u{1F62D}", "\u{1F624}", "\u{1F914}", "\u{1F60F}", "\u{1F607}", "\u{1F644}", "\u{1F634}", "\u{1F917}", "\u{1F97A}", "\u{1F631}", "\u{1F61C}", "\u{1F92A}", "\u{1F61D}", "\u{1F911}", "\u{1F608}", "\u{1F479}", "\u{1F480}", "\u{1F4A9}", "\u{1F47D}", "\u{1F47B}", "\u{1F47E}", "\u{1F648}", "\u{1F436}", "\u{1F431}", "\u{1F42D}", "\u{1F430}", "\u{1F98A}", "\u{1F43B}", "\u{1F43C}", "\u{1F428}", "\u{1F42F}", "\u{1F981}", "\u{1F42E}", "\u{1F437}", "\u{1F438}", "\u{1F419}", "\u{1F98B}", "\u{1F33A}", "\u{1F338}", "\u{1F34E}", "\u{1F355}", "\u{1F382}", "\u{1F389}", "\u{1F38A}", "\u{1F381}", "\u2764\uFE0F", "\u{1F9E1}", "\u{1F49B}", "\u{1F49A}", "\u{1F499}", "\u{1F49C}", "\u{1F5A4}", "\u{1F494}", "\u2728", "\u2B50", "\u{1F31F}", "\u{1F525}", "\u{1F4AB}", "\u{1F308}", "\u2600\uFE0F", "\u{1F319}", "\u2744\uFE0F", "\u{1F3B5}", "\u{1F3B6}", "\u{1F3C6}", "\u{1F451}", "\u{1F48E}", "\u{1F5DD}\uFE0F", "\u{1F511}", "\u{1F30D}", "\u{1F680}", "\u{1F3AD}", "\u{1F44B}", "\u{1F91D}", "\u{1F44D}", "\u{1F44E}", "\u{1F64F}", "\u{1F4AA}", "\u270C\uFE0F", "\u{1F91E}", "\u{1F91F}", "\u{1F446}", "\u{1F447}", "\u{1F448}", "\u{1F449}"];
@@ -9230,11 +9431,16 @@
       manualReconnectSocket();
       void refreshDiagnosticsHealth();
     });
-    $("update-reload-btn").addEventListener("click", () => {
+    $("update-reload-btn").addEventListener("click", async () => {
       const banner = $("update-available-banner");
       if (banner) banner.hidden = true;
       hostedAppReloadPending = false;
-      void reloadAppShell();
+      const registration = await navigator.serviceWorker?.getRegistration?.("/");
+      if (registration?.waiting) {
+        window.dispatchEvent(new CustomEvent("gchat:apply-update"));
+        return;
+      }
+      await reloadAppShell();
     });
     $("diagnostics-refresh-btn").addEventListener("click", () => {
       updateConnectionTransport();
@@ -10217,11 +10423,13 @@
         });
         if (anchorRow) {
           const anchorId = String(anchorRow.dataset.msgId);
-          if (anchorId !== lastRecordedAnchor && currentGroupId) {
-            lastRecordedAnchor = anchorId;
+          const offsetFromTop = anchorRow.getBoundingClientRect().top - area.getBoundingClientRect().top;
+          const anchorSignature = `${getActiveTagTopic()}:${anchorId}:${Math.round(offsetFromTop)}`;
+          if (anchorSignature !== lastRecordedAnchor && currentGroupId) {
+            lastRecordedAnchor = anchorSignature;
             const cache = ensureGroupCacheEntry(currentGroupId);
             cache.channelAnchors = cache.channelAnchors || {};
-            cache.channelAnchors[getActiveTagTopic()] = anchorId;
+            cache.channelAnchors[getActiveTagTopic()] = { messageId: anchorId, offsetFromTop };
             scheduleLocalGroupCacheWrite(currentGroupId, cache);
           }
         }
@@ -10258,6 +10466,26 @@
       if (String(hint.groupId) !== String(currentGroupId)) {
         unreadCounts[hint.groupId] = Math.max(0, Number(unreadCounts[hint.groupId]) || 0) + Math.max(0, Number(hint.unreadDelta) || 0);
         updateUnreadBadge(hint.groupId, unreadCounts[hint.groupId]);
+      } else if (Number(hint.unreadDelta) > 0 && hint.channelKey) {
+        const eventKey = `${hint.groupId}:${hint.epoch}:${hint.latestSeq}`;
+        const tagKey = hint.channelKey === DEFAULT_TAG_TOPIC ? "" : String(hint.channelKey);
+        const countAtHint = Math.max(0, Number(channelUnreadCounts[tagKey]) || 0);
+        setTimeout(() => {
+          if (Math.max(0, Number(channelUnreadCounts[tagKey]) || 0) > countAtHint) return;
+          appliedSocketUnreadEvents.add(eventKey);
+          channelUnreadStateVersion += 1;
+          channelUnreadCounts[tagKey] = countAtHint + 1;
+          channelUnreadLoadedForGroup = String(hint.groupId);
+          renderTagFilters();
+          const topic = tagKey === "" ? DEFAULT_TAG_TOPIC : channelUnreadTopicByTagIndex.get(tagKey);
+          if (topic) {
+            const chip = $("chat-tag-filters")?.querySelector(`[data-tag-topic="${CSS.escape(topic)}"]`);
+            if (chip) {
+              chip.classList.add("has-unread");
+              chip.title = `${formatHashtagLabel(topic)} \u2014 ${channelUnreadCounts[tagKey]} unread`;
+            }
+          }
+        }, 100);
       }
     });
     socket.on("sync_event", (event = {}) => {
@@ -10298,41 +10526,46 @@
       });
     });
   }
-  async function loadOlderMessages(cursorOverride = null, retried = false) {
+  async function loadOlderMessages(cursorOverride = null) {
     const capturedGroupId = String(currentGroupId || "");
     const capturedTopic = getActiveTagTopic();
     const capturedGeneration = viewGeneration;
     const capturedCache = ensureGroupCacheEntry(capturedGroupId);
     capturedCache.channelCursors = capturedCache.channelCursors || {};
-    const cursor = cursorOverride || capturedCache.channelCursors[capturedTopic] || oldestMessageId;
+    const hasServerCursor = Object.prototype.hasOwnProperty.call(capturedCache.channelCursors, capturedTopic);
+    const serverCursor = typeof cursorOverride === "string" ? cursorOverride : hasServerCursor ? capturedCache.channelCursors[capturedTopic] : null;
+    const localCursor = oldestMessageId;
     const tagIndex = capturedTopic === DEFAULT_TAG_TOPIC ? null : await channelTagIndex(capturedTopic, capturedGroupId);
     const channelKey = tagIndex || DEFAULT_TAG_TOPIC;
     const isCapturedView = () => capturedGeneration === viewGeneration && capturedGroupId === String(currentGroupId) && capturedTopic === getActiveTagTopic();
-    if (loadingOlder || !cursor || !capturedGroupId || capturedTopic !== DEFAULT_TAG_TOPIC && !tagIndex) return;
+    if (loadingOlder || !localCursor && !serverCursor || !capturedGroupId || capturedTopic !== DEFAULT_TAG_TOPIC && !tagIndex) return;
     loadingOlder = true;
     const indicator = $("load-more-indicator");
     if (indicator) indicator.hidden = false;
     try {
-      if (!retried) {
-        const served = await prependHistoryMessagesOlderThan(cursor);
+      if (localCursor) {
+        const served = await prependHistoryMessagesOlderThan(localCursor);
         if (served) return;
       }
-      const params = new URLSearchParams({ channel: channelKey, before: cursor, limit: "50" });
+      if (typeof serverCursor !== "string" || !serverCursor) {
+        oldestMessageId = null;
+        return;
+      }
+      const params = new URLSearchParams({ channel: channelKey, before: serverCursor, limit: "50" });
       const url = `/api/groups/${encodeURIComponent(capturedGroupId)}/messages?${params}`;
       const res = await fetch(url, { signal: viewAbortController?.signal });
-      if (!res.ok) return;
+      if (!res.ok) {
+        if (res.status === 400) {
+          capturedCache.channelCursors[capturedTopic] = null;
+          oldestMessageId = null;
+        }
+        return;
+      }
       const page = await res.json();
       const rawMsgs = Array.isArray(page?.messages) ? page.messages : [];
       if (!isCapturedView()) return;
       if (!rawMsgs.length) {
-        if (!retried) {
-          const cache2 = ensureGroupCacheEntry(capturedGroupId);
-          const fallback = (cache2.messages || []).find((m) => String(m.id) !== String(cursor));
-          if (fallback) {
-            oldestMessageId = fallback.id;
-            return loadOlderMessages(fallback.id, true);
-          }
-        }
+        capturedCache.channelCursors[capturedTopic] = null;
         oldestMessageId = null;
         return;
       }

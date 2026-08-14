@@ -722,7 +722,7 @@ async function channelTagIndex(topic, groupId) {
 // stable local history layer: it survives reloads, reconnects, and localStorage
 // pressure, and it enables cheap incremental (`since`) syncs from the server.
 const HISTORY_DB_NAME = 'gchat-replica-v2';
-const HISTORY_DB_VERSION = 1;
+const HISTORY_DB_VERSION = 2;
 const HISTORY_MESSAGES_STORE = 'messages';
 const HISTORY_META_STORE = 'meta';
 const HISTORY_OUTBOX_STORE = 'outbox';
@@ -803,11 +803,20 @@ function openHistoryDb() {
     }
     request.onupgradeneeded = () => {
       const db = request.result;
+      let messageStore;
       if (!db.objectStoreNames.contains(HISTORY_MESSAGES_STORE)) {
-        const store = db.createObjectStore(HISTORY_MESSAGES_STORE, { keyPath: 'key' });
-        store.createIndex('groupKey', 'groupKey', { unique: false });
-        store.createIndex('channelKey', ['groupKey', 'channelKey'], { unique: false });
-        store.createIndex('lastAccessedAt', 'lastAccessedAt', { unique: false });
+        messageStore = db.createObjectStore(HISTORY_MESSAGES_STORE, { keyPath: 'key' });
+        messageStore.createIndex('groupKey', 'groupKey', { unique: false });
+        messageStore.createIndex('channelKey', ['groupKey', 'channelKey'], { unique: false });
+        messageStore.createIndex('lastAccessedAt', 'lastAccessedAt', { unique: false });
+      } else {
+        messageStore = request.transaction.objectStore(HISTORY_MESSAGES_STORE);
+      }
+      if (!messageStore.indexNames.contains('groupCreated')) {
+        messageStore.createIndex('groupCreated', ['groupKey', 'createdAt', 'key'], { unique: false });
+      }
+      if (!messageStore.indexNames.contains('groupChannelCreated')) {
+        messageStore.createIndex('groupChannelCreated', ['groupKey', 'channelKey', 'createdAt', 'key'], { unique: false });
       }
       if (!db.objectStoreNames.contains(HISTORY_META_STORE)) {
         db.createObjectStore(HISTORY_META_STORE, { keyPath: 'key' });
@@ -877,7 +886,6 @@ function persistHistoryMessages(groupId, messages) {
       }
       hydrated.push(msg);
     }
-    invalidateHistoryReadMemo(groupId);
     await runHistoryStore(HISTORY_MESSAGES_STORE, 'readwrite', (store) => {
       for (const msg of hydrated) {
         store.put({
@@ -890,11 +898,28 @@ function persistHistoryMessages(groupId, messages) {
         });
       }
     });
-    // v1.4.1: enforce the per-group history cap at WRITE time — it used to be
-    // applied only when reading, so the durable store (and the read memo)
-    // grew without bound on disk for active groups.
-    await pruneHistoryMessages(groupId);
+    const memoKey = String(groupId);
+    const memoized = historyReadMemo.get(memoKey);
+    if (memoized) {
+      const byId = new Map(memoized.map((msg) => [String(msg.id), msg]));
+      for (const msg of hydrated) byId.set(String(msg.id), msg);
+      historyReadMemo.set(memoKey, sortMessagesChronologically([...byId.values()]).slice(-HISTORY_RENDER_WINDOW));
+    }
+    scheduleHistoryPrune(groupId);
   })();
+}
+
+// Writes arrive in bursts during bootstrap and socket catch-up. Collapse their
+// maintenance into one bounded, one-shot pass instead of counting the store for
+// every individual message.
+const historyPruneTimers = new Map();
+function scheduleHistoryPrune(groupId) {
+  const key = String(groupId);
+  if (historyPruneTimers.has(key)) return;
+  historyPruneTimers.set(key, setTimeout(() => {
+    historyPruneTimers.delete(key);
+    void pruneHistoryMessages(key);
+  }, 750));
 }
 
 // v1.4.1: keep at most HISTORY_MAX_MESSAGES_PER_GROUP per group in the durable
@@ -916,7 +941,15 @@ async function pruneHistoryMessages(groupId) {
       await pruneGlobalHistoryMessages();
       return;
     }
-    const messages = await readHistoryMessages(groupId);
+    const rowsRequest = await runHistoryStore(HISTORY_MESSAGES_STORE, 'readonly', (store) => {
+      const request = store.index('groupKey').getAll(replicaGroupKey(key));
+      request.onsuccess = () => { request._rows = request.result || []; };
+      return request;
+    });
+    const messages = (rowsRequest?._rows || [])
+      .map((row) => row.msg)
+      .filter(Boolean)
+      .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')) || String(a.id).localeCompare(String(b.id)));
     const excess = messages.length - HISTORY_MAX_MESSAGES_PER_GROUP;
     if (excess <= 0) return;
     const excessIds = messages.slice(0, excess).map((m) => replicaMessageKey(groupId, m.id));
@@ -944,21 +977,36 @@ function readHistoryMessages(groupId) {
   const memoized = historyReadMemo.get(key);
   if (memoized) return Promise.resolve(memoized);
   return runHistoryStore(HISTORY_MESSAGES_STORE, 'readonly', (store) => {
-    const request = store.index('groupKey').getAll(replicaGroupKey(key));
+    let index;
+    try {
+      index = store.index('groupCreated');
+    } catch {
+      const fallback = store.index('groupKey').getAll(replicaGroupKey(key));
+      fallback.onsuccess = () => {
+        fallback._messages = (fallback.result || [])
+          .map((row) => row.msg)
+          .filter(Boolean)
+          .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')) || String(a.id).localeCompare(String(b.id)))
+          .slice(-HISTORY_RENDER_WINDOW);
+      };
+      return fallback;
+    }
+    const range = IDBKeyRange.bound(
+      [replicaGroupKey(key), '', ''],
+      [replicaGroupKey(key), '\uffff', '\uffff'],
+    );
+    const request = index.openCursor(range, 'prev');
+    const messages = [];
     request.onsuccess = () => {
-      const rows = request.result || [];
-      const messages = rows
-        .map((row) => row.msg)
-        .filter(Boolean)
-        .sort((a, b) => {
-          const timeDiff = String(a.createdAt || '').localeCompare(String(b.createdAt || ''));
-          return timeDiff !== 0 ? timeDiff : String(a.id).localeCompare(String(b.id));
-        });
-      if (messages.length > HISTORY_MAX_MESSAGES_PER_GROUP) {
-        messages.splice(0, messages.length - HISTORY_MAX_MESSAGES_PER_GROUP);
+      const cursor = request.result;
+      if (!cursor || messages.length >= HISTORY_RENDER_WINDOW) {
+        request._messages = messages.reverse();
+        return;
       }
-      request._messages = messages;
+      if (cursor.value?.msg) messages.push(cursor.value.msg);
+      cursor.continue();
     };
+    return request;
   }).then((request) => {
     if (request && request._messages) {
       historyReadMemo.set(key, request._messages);
@@ -1212,7 +1260,6 @@ async function clearCacheAndRestartApp() {
 // jitter spreads the reload burst so a deploy never slams the server with a
 // synchronized thundering herd of restarts.
 const LAST_SEEN_DEPLOY_KEY = 'gchat:last-seen-deploy';
-let autoResetScheduled = false;
 
 function readLastSeenDeploy() {
   try {
@@ -1235,7 +1282,7 @@ function writeLastSeenDeploy(version, buildFingerprint) {
 }
 
 function scheduleAutoResetClientCache(info) {
-  if (!info || autoResetScheduled) return;
+  if (!info) return;
   const lastSeen = readLastSeenDeploy();
   const lastFp = String((lastSeen && lastSeen.buildFingerprint) || '');
   const lastVer = String((lastSeen && lastSeen.version) || '');
@@ -1251,16 +1298,9 @@ function scheduleAutoResetClientCache(info) {
     ? lastFp === newFp && lastVer === newVer
     : lastVer === newVer && lastVer !== '';
   if (sameBuild) return;
-  autoResetScheduled = true;
   writeLastSeenDeploy(newVer, newFp);
-  const jitterMs = 1500 + Math.floor(Math.random() * 8000);
-  setTimeout(async () => {
-    try {
-      const registration = await navigator.serviceWorker?.getRegistration();
-      await registration?.update();
-    } catch { /* best effort */ }
-    await reloadAppShell();
-  }, jitterMs);
+  hostedAppReloadPending = true;
+  showUpdateAvailableBanner();
 }
 
 async function fetchAppVersionInfo() {
@@ -1277,16 +1317,16 @@ async function fetchAppVersionInfo() {
 async function checkForHostedAppUpdate() {
   const info = await fetchAppVersionInfo();
   if (!info) return false;
-  currentAppVersion = currentAppVersion || info.version;
+  const lastSeen = readLastSeenDeploy();
+  const changed = String(currentAppVersion || '') !== String(info.version || '')
+    || (String(info.buildFingerprint || '') && String(lastSeen?.buildFingerprint || '') !== String(info.buildFingerprint));
   appVersionLabel = 'v' + info.version;
   $('app-version-label').textContent = appVersionLabel;
-  if (currentAppVersion === info.version && hostedAppReloadPending) return false;
+  if (!changed) return false;
   currentAppVersion = info.version;
   hostedAppReloadPending = true;
-  // v1.3.13: no user-confirmed banner — a new build automatically clears the
-  // local cache and restarts (with jitter) so every client lands on the new
-  // bundle. The banner remains as a manual fallback on the reload button.
-  scheduleAutoResetClientCache(info);
+  writeLastSeenDeploy(info.version, info.buildFingerprint);
+  showUpdateAvailableBanner();
   return true;
 }
 
@@ -1302,6 +1342,11 @@ function startHostedAppUpdatePolling() {
   if (hostedAppUpdateTimer) clearInterval(hostedAppUpdateTimer);
   hostedAppUpdateTimer = null;
 }
+
+window.addEventListener('gchat:update-available', () => {
+  hostedAppReloadPending = true;
+  showUpdateAvailableBanner();
+});
 
 function createUploadId() {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
@@ -3260,6 +3305,13 @@ let imageViewerData = null;
 function revokeBlobUrlsIn(root) {
   if (!root) return;
   try {
+    const shells = root.matches?.('.msg-image-shell')
+      ? [root]
+      : Array.from(root.querySelectorAll?.('.msg-image-shell') || []);
+    for (const shell of shells) {
+      imageAttachmentObserver?.unobserve(shell);
+      attachmentLoadTokens.delete(shell);
+    }
     if (root.tagName === 'IMG' && (root.src || '').startsWith('blob:')) {
       URL.revokeObjectURL(root.src);
       root.removeAttribute('src');
@@ -3269,6 +3321,17 @@ function revokeBlobUrlsIn(root) {
       img.removeAttribute('src');
     }
   } catch { /* already-revoked or unusable URLs are harmless */ }
+}
+
+function disposeChannelRowMemo(memo) {
+  if (!memo?.rows) return;
+  for (const row of memo.rows) {
+    if (!row) continue;
+    if (readObserver) readObserver.unobserve(row);
+    revokeBlobUrlsIn(row);
+  }
+  memo.rows = [];
+  memo.byId?.clear?.();
 }
 
 function showImageViewer(blob, filename = 'image') {
@@ -3424,6 +3487,8 @@ let currentGroupData = null;
 let groups = [];
 let members = [];
 let socket = null;
+let initialBootstrapPromise = null;
+let socketHasConnected = false;
 let messageMode = 'normal'; // 'normal' | 'whisper' | 'disappearing' | 'ai'
 let whisperRecipients = [];
 let replyingTo = null;
@@ -3597,7 +3662,15 @@ async function syncServerChannels(groupId) {
         } catch { /* keep fallback */ }
       }
       topic = cached ? getMessageHashtagKey(cached) : null;
-      if (!topic && entry.sampleMessageId) {
+      if (!topic && Object.prototype.hasOwnProperty.call(entry, 'sampleMessage')) {
+        const msg = entry.sampleMessage;
+        if (msg && !getMessageHashtagKey(msg)) {
+          try { await hydrateMessageChannel(msg, groupId); } catch { /* keep fallback */ }
+        }
+        topic = msg ? getMessageHashtagKey(msg) : null;
+      } else if (!topic && entry.sampleMessageId) {
+        // Compatibility with pre-summary servers only. Current responses carry
+        // every sample envelope in the channel-list response.
         try {
           const msgRes = await fetch(`/api/groups/${groupId}/messages/${entry.sampleMessageId}`);
           if (msgRes.ok) {
@@ -3919,24 +3992,67 @@ async function applySyncEvents(groupId, events, cursor, { render = true } = {}) 
   await persistSyncBatch(groupId, ordered, cursor);
   const cache = ensureGroupCacheEntry(groupId);
   let nextMessages = [...(cache.messages || [])];
+  const affectedTopics = new Set();
+  let allChannelsAffected = false;
   for (const event of ordered) {
     if ((event.type === 'message.created' || event.type === 'message.edited') && event.message) {
+      const existingCreated = event.type === 'message.created'
+        ? nextMessages.find((message) => String(message.id) === String(event.message.id))
+        : null;
+      const optimistic = existingCreated?._optimistic ? existingCreated : null;
+      if (optimistic) {
+        reconcileOptimisticEcho(event.message);
+        nextMessages = sortMessagesChronologically(nextMessages);
+        continue;
+      }
+      // Equal-sequence socket packets and bounded resync pages can both carry
+      // the same create. If it is already cached, the row is authoritative and
+      // rebuilding the transcript would only disturb the viewport.
+      if (existingCreated) continue;
+      affectedTopics.add(resolveMessageTagTopic(event.message));
       const byId = new Map(nextMessages.map((message) => [String(message.id), message]));
       byId.set(String(event.message.id), event.message);
       nextMessages = sortMessagesChronologically([...byId.values()]);
     } else if (event.type === 'message.deleted') {
+      const removed = nextMessages.find((message) => String(message.id) === String(event.entityId));
+      if (removed) affectedTopics.add(resolveMessageTagTopic(removed));
       nextMessages = nextMessages.filter((message) => String(message.id) !== String(event.entityId));
     } else if (event.type === 'history.cleared') {
       const channelKey = event.auxiliary?.channelKey || event.channelKey;
+      if (channelKey === '*') {
+        allChannelsAffected = true;
+      } else {
+        const channelMessage = nextMessages.find((message) => (message.tagIndex || 'main') === channelKey);
+        if (channelMessage) affectedTopics.add(resolveMessageTagTopic(channelMessage));
+        if (channelKey === 'main') affectedTopics.add(DEFAULT_TAG_TOPIC);
+      }
       nextMessages = channelKey === '*'
         ? []
         : nextMessages.filter((message) => (message.tagIndex || 'main') !== channelKey);
     }
   }
   cache.messages = nextMessages;
-  cache.rowsDirty = true;
+  const activeTopic = String(currentGroupId) === String(groupId) ? getActiveTagTopic() : null;
+  const retiredActiveMemos = [];
+  if (cache.channelRows) {
+    if (allChannelsAffected) {
+      for (const [topic, memo] of Object.entries(cache.channelRows)) {
+        if (topic === activeTopic) retiredActiveMemos.push(memo);
+        else disposeChannelRowMemo(memo);
+      }
+      cache.channelRows = {};
+    } else {
+      for (const topic of affectedTopics) {
+        const memo = cache.channelRows[topic];
+        if (!memo) continue;
+        if (topic === activeTopic) retiredActiveMemos.push(memo);
+        else disposeChannelRowMemo(memo);
+        delete cache.channelRows[topic];
+      }
+    }
+  }
+  cache.rowsDirty = allChannelsAffected || affectedTopics.size > 0;
   cache.messageRows = null;
-  cache.channelRows = null;
   cache.oldestMessageId = nextMessages.length ? cache.oldestMessageId : null;
   writeLocalGroupCache(groupId, cache);
   if (render && String(currentGroupId) === String(groupId)) {
@@ -3949,7 +4065,10 @@ async function applySyncEvents(groupId, events, cursor, { render = true } = {}) 
       $('chat-member-count').textContent = members.length + ' member' + (members.length !== 1 ? 's' : '');
       refreshVisibleDeliveryTicks(groupId);
     }
-    await renderActiveChannelStream({ restoreScroll: true });
+    if (allChannelsAffected || affectedTopics.has(activeTopic)) {
+      await renderActiveChannelStream({ restoreScroll: true });
+      for (const memo of retiredActiveMemos) disposeChannelRowMemo(memo);
+    }
     renderTagFilters();
   }
 }
@@ -4771,11 +4890,16 @@ function restoreOrScrollToBottom() {
   const area = messagesArea();
   if (!area) return;
   const cache = ensureGroupCacheEntry(currentGroupId);
-  const anchorId = cache.channelAnchors?.[getActiveTagTopic()] || null;
+  const savedAnchor = cache.channelAnchors?.[getActiveTagTopic()] || null;
+  const anchorId = typeof savedAnchor === 'string' ? savedAnchor : savedAnchor?.messageId;
   if (anchorId) {
     const row = area.querySelector(`[data-msg-id="${CSS.escape(anchorId)}"]`);
     if (row) {
-      area.scrollTop = row.getBoundingClientRect().top - area.getBoundingClientRect().top + area.scrollTop;
+      const currentOffset = row.getBoundingClientRect().top - area.getBoundingClientRect().top;
+      const savedOffset = typeof savedAnchor === 'object' && Number.isFinite(savedAnchor.offsetFromTop)
+        ? savedAnchor.offsetFromTop
+        : 0;
+      area.scrollTop += currentOffset - savedOffset;
       updateFirstUnreadButton();
       return;
     }
@@ -6025,30 +6149,40 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('user-username').textContent = currentUser.username;
   renderCurrentUserAvatar(currentUser);
   loadMergedLocalSettings(currentUser.id);
-  await loadSettingsFromServer();
+  const settingsPromise = loadSettingsFromServer();
+  const versionPromise = fetchAppVersionInfo();
+  const historyMigrationPromise = migrateLocalCachesToHistory();
+  initialBootstrapPromise = loadGroups();
+  initSocket();
+  bindOnlineOfflineListeners();
+  setupEventListeners();
+  setupEmojiPicker();
+  setupKeyboardShortcuts();
+
+  const [, versionInfo] = await Promise.all([
+    settingsPromise,
+    versionPromise,
+    historyMigrationPromise,
+    initialBootstrapPromise,
+  ]);
   applyWallpaperFromSettings();
   wallpaperTheme?.applyTheme(appLocalSettings.theme);
   bindThemeToggleControl();
   writeLocalSettings(appLocalSettings, currentUser.id);
-  const versionInfo = await fetchAppVersionInfo();
   if (versionInfo) {
     currentAppVersion = versionInfo.version;
     appVersionLabel = 'v' + versionInfo.version;
     aiFeatureEnabled = versionInfo.aiEnabled === true;
-    // v1.3.13: if this boot sees a different deploy than the last one, clear the
-    // local cache and restart automatically (jittered) — see
-    // scheduleAutoResetClientCache. Fire-and-forget: never blocks boot.
+    // A changed deploy is surfaced through the existing user-confirmed banner.
     scheduleAutoResetClientCache(versionInfo);
   }
   $('app-version-label').textContent = appVersionLabel;
 
   syncAiFeatureVisibility();
   if (aiFeatureEnabled) {
-    await refreshAiUsageSummary();
+    void refreshAiUsageSummary();
     void loadAndRenderAiTones();
   }
-  await migrateLocalCachesToHistory();
-  await loadGroups();
   // v1.3.12: restore the last-open group after a reload so the app lands where
   // the user was (part of "history never disappears"). Only when the user
   // explicitly opened a group before — a fresh boot still lands on the group
@@ -6064,12 +6198,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       syncUnreadIndicators(pushStatus.totalUnreadCount);
     });
   }
-  initSocket();
-  bindOnlineOfflineListeners();
-  setupEventListeners();
   syncProfilePictureModeUI();
-  setupEmojiPicker();
-  setupKeyboardShortcuts();
   updateMessageModeBtn();
   syncResponsiveUiState();
   startHostedAppUpdatePolling();
@@ -7486,6 +7615,50 @@ const isReadByMe = isOwn || isMessageReadByCursor(msg, groupId, resolveMessageTa
   return row;
 }
 
+const ATTACHMENT_RENDER_CONCURRENCY = 3;
+const attachmentRenderQueue = [];
+let activeAttachmentRenders = 0;
+let imageAttachmentObserver = null;
+const attachmentLoadTokens = new WeakMap();
+
+function drainAttachmentRenderQueue() {
+  while (activeAttachmentRenders < ATTACHMENT_RENDER_CONCURRENCY && attachmentRenderQueue.length) {
+    const task = attachmentRenderQueue.shift();
+    activeAttachmentRenders += 1;
+    Promise.resolve().then(task).catch(() => {}).finally(() => {
+      activeAttachmentRenders -= 1;
+      drainAttachmentRenderQueue();
+    });
+  }
+}
+
+function enqueueAttachmentRender(task) {
+  attachmentRenderQueue.push(task);
+  drainAttachmentRenderQueue();
+}
+
+function observeImageAttachment(shell, load) {
+  if (typeof IntersectionObserver !== 'function') {
+    load();
+    return;
+  }
+  if (!imageAttachmentObserver) {
+    imageAttachmentObserver = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const token = attachmentLoadTokens.get(entry.target);
+        if (!token || token.started) continue;
+        token.started = true;
+        imageAttachmentObserver.unobserve(entry.target);
+        token.load();
+      }
+    }, { root: messagesArea(), rootMargin: '400px 0px' });
+  }
+  const token = { started: false, load };
+  attachmentLoadTokens.set(shell, token);
+  imageAttachmentObserver.observe(shell);
+}
+
 async function renderMsgContent(msg, textEl, bubble, groupId = currentGroupId) {
   const key = groupId ? getGroupKey(groupId) : null;
 
@@ -7496,31 +7669,50 @@ async function renderMsgContent(msg, textEl, bubble, groupId = currentGroupId) {
       locked.appendChild(createIcon('lock'));
       textEl.appendChild(locked);
     } else {
-      const buf = await decryptAttachmentBytes(msg, key, groupId);
-      if (buf) {
+      const shell = document.createElement('div');
+      shell.className = 'msg-image-shell';
+      shell.setAttribute('aria-label', 'Image loading');
+      const placeholder = document.createElement('span');
+      placeholder.className = 'msg-image-placeholder';
+      placeholder.appendChild(createIcon('image'));
+      shell.appendChild(placeholder);
+      textEl.appendChild(shell);
+      const load = () => enqueueAttachmentRender(async () => {
+        const loadGeneration = viewGeneration;
+        const buf = await decryptAttachmentBytes(msg, key, groupId);
+        const token = attachmentLoadTokens.get(shell);
+        if (!token) return;
+        if (String(currentGroupId) !== String(groupId) || viewGeneration !== loadGeneration) {
+          token.started = false;
+          imageAttachmentObserver?.observe(shell);
+          return;
+        }
+        if (!buf) {
+          shell.classList.add('is-error');
+          shell.setAttribute('aria-label', 'Image unavailable');
+          shell.replaceChildren(createIcon('lock'));
+          return;
+        }
         const mimeType = detectImageMime(buf) || 'image/jpeg';
         const blob = new Blob([buf], { type: mimeType });
         const url = URL.createObjectURL(blob);
         const img = document.createElement('img');
         img.className = 'msg-image';
         img.src = url;
-        img.alt = 'image';
-        img.style.cursor = 'pointer';
-        await new Promise((resolve) => {
-          img.addEventListener('load', resolve, { once: true });
-          img.addEventListener('error', resolve, { once: true });
-        });
-        img.addEventListener('click', (e) => {
-          e.stopPropagation();
+        img.alt = msg.filename || 'image';
+        img.addEventListener('click', (event) => {
+          event.stopPropagation();
           showImageViewer(blob, msg.filename || 'image');
         });
-        textEl.appendChild(img);
-      } else {
-        const locked = document.createElement('div');
-        locked.className = 'msg-image-locked';
-        locked.appendChild(createIcon('lock'));
-        textEl.appendChild(locked);
-      }
+        try { await img.decode(); } catch { /* the fixed shell remains stable */ }
+        if (attachmentLoadTokens.get(shell) !== token) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        shell.replaceChildren(img);
+        shell.removeAttribute('aria-label');
+      });
+      observeImageAttachment(shell, load);
     }
     return;
   }
@@ -7529,39 +7721,56 @@ async function renderMsgContent(msg, textEl, bubble, groupId = currentGroupId) {
     if (!key) {
       textEl.textContent = 'File unavailable: ' + (msg.filename || 'file');
     } else {
-      const buf = await decryptAttachmentBytes(msg, key, groupId);
-      if (buf) {
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'msg-file-btn';
-        const fileIcon = document.createElement('span');
-        fileIcon.className = 'msg-file-icon';
-        fileIcon.appendChild(createIcon('file'));
-        btn.appendChild(fileIcon);
-        const info = document.createElement('span');
-        info.className = 'msg-file-info';
-        const fileName = document.createElement('strong');
-        fileName.textContent = msg.filename || 'file';
-        const fileMeta = document.createElement('small');
-        const extension = (msg.filename || '').split('.').pop()?.toUpperCase() || 'FILE';
-        fileMeta.textContent = `${extension} · ${formatBytes(buf.byteLength)}`;
-        info.append(fileName, fileMeta);
-        btn.appendChild(info);
-        const downloadLabel = document.createElement('span');
-        downloadLabel.className = 'msg-file-download-label';
-        downloadLabel.textContent = 'Download';
-        btn.appendChild(downloadLabel);
-        btn.addEventListener('click', (e) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'msg-file-btn';
+      const fileIcon = document.createElement('span');
+      fileIcon.className = 'msg-file-icon';
+      fileIcon.appendChild(createIcon('file'));
+      btn.appendChild(fileIcon);
+      const info = document.createElement('span');
+      info.className = 'msg-file-info';
+      const fileName = document.createElement('strong');
+      fileName.textContent = msg.filename || 'file';
+      const fileMeta = document.createElement('small');
+      const extension = (msg.filename || '').split('.').pop()?.toUpperCase() || 'FILE';
+      const envelopeSize = Number(msg.attachmentSize || msg.size || msg.encryptedSize);
+      fileMeta.textContent = Number.isFinite(envelopeSize) && envelopeSize > 0
+        ? `${extension} · ${formatBytes(envelopeSize)}`
+        : extension;
+      info.append(fileName, fileMeta);
+      btn.appendChild(info);
+      const downloadLabel = document.createElement('span');
+      downloadLabel.className = 'msg-file-download-label';
+      downloadLabel.textContent = 'Download';
+      btn.appendChild(downloadLabel);
+      btn.addEventListener('click', async (event) => {
+        event.stopPropagation();
+        if (btn.disabled) return;
+        btn.disabled = true;
+        downloadLabel.textContent = 'Preparing…';
+        try {
+          const buf = await decryptAttachmentBytes(msg, key, groupId);
+          if (!buf) throw new Error('unavailable');
           const blob = new Blob([buf]);
           const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url; a.download = msg.filename || 'download';
-          a.click(); URL.revokeObjectURL(url);
-        });
-        textEl.appendChild(btn);
-      } else {
-        textEl.textContent = 'File unavailable: ' + (msg.filename || 'file');
-      }
+          const anchor = document.createElement('a');
+          anchor.href = url;
+          anchor.download = msg.filename || 'download';
+          anchor.click();
+          setTimeout(() => URL.revokeObjectURL(url), 0);
+          downloadLabel.textContent = 'Downloaded';
+        } catch {
+          downloadLabel.textContent = 'Retry';
+          showToast('File unavailable', 'error');
+        } finally {
+          setTimeout(() => {
+            btn.disabled = false;
+            if (downloadLabel.textContent === 'Downloaded') downloadLabel.textContent = 'Download';
+          }, 1200);
+        }
+      });
+      textEl.appendChild(btn);
     }
     return;
   }
@@ -7696,7 +7905,7 @@ async function appendMessageBubble(msg, scroll, groupId = currentGroupId) {
   // Scroll behavior
   if (scroll !== false) {
     if (msg.senderId === currentUser.id) {
-      scrollToBottom(true);
+      if (wasNearBottom) scrollToBottom(true);
       applySearchVisibility();
       return row;
     }
@@ -8431,21 +8640,11 @@ async function doSend(text) {
       disappearingDurationMs: parsedMessage.disappearingDurationMs,
     };
 
-    if (parsedMessage.whisperRecipientIds && parsedMessage.whisperRecipientIds.length > 0) {
-      const whisperEnvelope = {
-        ...envelope,
-        whisperTo: parsedMessage.whisperRecipientIds,
-      };
-      await putOutboxMutation(sendGroupId, messageId, whisperEnvelope);
-      socket.emit('send_whisper', whisperEnvelope, (ack = {}) => {
-        if (ack.ok) void deleteOutboxMutation(sendGroupId, messageId);
-      });
-    } else {
-      await putOutboxMutation(sendGroupId, messageId, envelope);
-      socket.emit('send_message', envelope, (ack = {}) => {
-        if (ack.ok) void deleteOutboxMutation(sendGroupId, messageId);
-      });
-    }
+    const isWhisper = !!(parsedMessage.whisperRecipientIds && parsedMessage.whisperRecipientIds.length > 0);
+    const outboundEnvelope = isWhisper
+      ? { ...envelope, whisperTo: parsedMessage.whisperRecipientIds }
+      : envelope;
+    await putOutboxMutation(sendGroupId, messageId, outboundEnvelope);
     // v1.3.13: optimistic render — the sent message appears instantly, even
     // while a large upload is hogging the transport (sends during an upload
     // used to land in the DB but never show until a reload). The socket echo
@@ -8482,6 +8681,12 @@ async function doSend(text) {
       readCount: 0,
       _decryptedText: messageText,
       _optimistic: true,
+    });
+    // Render before emitting. On a fast local socket the authoritative event
+    // can otherwise arrive first, trigger a full transcript rebuild, and then
+    // race the optimistic append—the source of click-time scroll jumps.
+    socket.emit(isWhisper ? 'send_whisper' : 'send_message', outboundEnvelope, (ack = {}) => {
+      if (ack.ok) void deleteOutboxMutation(sendGroupId, messageId);
     });
     resetComposerAfterSend();
   } catch(err) {
@@ -9054,6 +9259,8 @@ function initSocket() {
   renderDiagnosticsPanel();
 
   socket.on('connect', () => {
+    const isReconnect = socketHasConnected;
+    socketHasConnected = true;
     socketDiagnostics.connectionState = 'connected';
     socketDiagnostics.lastConnectError = '';
     socketDiagnostics.lastConnectErrorAt = '';
@@ -9072,7 +9279,15 @@ function initSocket() {
     // v1.3.9: flush any read receipts that were queued while offline.
     flushMarkReadEmits();
     void flushOutboxMutations();
-    void loadGroups().then(() => refreshCurrentGroupFromServer());
+    if (isReconnect) {
+      void loadGroups().then(() => refreshCurrentGroupFromServer());
+    } else if (initialBootstrapPromise) {
+      // The page initializer owns the first bootstrap. Reuse it here so the
+      // initial Socket.IO connection cannot duplicate bootstrap/key recovery.
+      void initialBootstrapPromise.then(() => {
+        if (currentGroupId) socket.emit('join_room', currentGroupId);
+      });
+    }
     renderDiagnosticsPanel();
   });
 
@@ -9812,11 +10027,12 @@ async function recoverFromMembershipLoss() {
 }
 
 function addSystemMessage(text) {
+  const shouldPinToBottom = isNearBottom();
   const div = document.createElement('div');
   div.className = 'msg-system';
   div.textContent = text;
   messagesArea().appendChild(div);
-  scrollToBottom();
+  if (shouldPinToBottom) scrollToBottom();
 }
 
 // ── Emoji picker ──────────────────────────────────────────────────────────────
@@ -11158,11 +11374,16 @@ function setupEventListeners() {
     manualReconnectSocket();
     void refreshDiagnosticsHealth();
   });
-  $('update-reload-btn').addEventListener('click', () => {
+  $('update-reload-btn').addEventListener('click', async () => {
     const banner = $('update-available-banner');
     if (banner) banner.hidden = true;
     hostedAppReloadPending = false;
-    void reloadAppShell();
+    const registration = await navigator.serviceWorker?.getRegistration?.('/');
+    if (registration?.waiting) {
+      window.dispatchEvent(new CustomEvent('gchat:apply-update'));
+      return;
+    }
+    await reloadAppShell();
   });
   $('diagnostics-refresh-btn').addEventListener('click', () => {
     updateConnectionTransport();
@@ -12196,11 +12417,13 @@ function setupEventListeners() {
       });
       if (anchorRow) {
         const anchorId = String(anchorRow.dataset.msgId);
-        if (anchorId !== lastRecordedAnchor && currentGroupId) {
-          lastRecordedAnchor = anchorId;
+        const offsetFromTop = anchorRow.getBoundingClientRect().top - area.getBoundingClientRect().top;
+        const anchorSignature = `${getActiveTagTopic()}:${anchorId}:${Math.round(offsetFromTop)}`;
+        if (anchorSignature !== lastRecordedAnchor && currentGroupId) {
+          lastRecordedAnchor = anchorSignature;
           const cache = ensureGroupCacheEntry(currentGroupId);
           cache.channelAnchors = cache.channelAnchors || {};
-          cache.channelAnchors[getActiveTagTopic()] = anchorId;
+          cache.channelAnchors[getActiveTagTopic()] = { messageId: anchorId, offsetFromTop };
           scheduleLocalGroupCacheWrite(currentGroupId, cache);
         }
       }
@@ -12251,6 +12474,29 @@ function setupEventListeners() {
     if (String(hint.groupId) !== String(currentGroupId)) {
       unreadCounts[hint.groupId] = Math.max(0, Number(unreadCounts[hint.groupId]) || 0) + Math.max(0, Number(hint.unreadDelta) || 0);
       updateUnreadBadge(hint.groupId, unreadCounts[hint.groupId]);
+    } else if (Number(hint.unreadDelta) > 0 && hint.channelKey) {
+      // A hint reaches every device room even if its group-room subscription
+      // briefly races a reconnect. Give the richer sync event first chance to
+      // apply, then use the hint exactly once as a bounded unread fallback.
+      const eventKey = `${hint.groupId}:${hint.epoch}:${hint.latestSeq}`;
+      const tagKey = hint.channelKey === DEFAULT_TAG_TOPIC ? '' : String(hint.channelKey);
+      const countAtHint = Math.max(0, Number(channelUnreadCounts[tagKey]) || 0);
+      setTimeout(() => {
+        if (Math.max(0, Number(channelUnreadCounts[tagKey]) || 0) > countAtHint) return;
+        appliedSocketUnreadEvents.add(eventKey);
+        channelUnreadStateVersion += 1;
+        channelUnreadCounts[tagKey] = countAtHint + 1;
+        channelUnreadLoadedForGroup = String(hint.groupId);
+        renderTagFilters();
+        const topic = tagKey === '' ? DEFAULT_TAG_TOPIC : channelUnreadTopicByTagIndex.get(tagKey);
+        if (topic) {
+          const chip = $('chat-tag-filters')?.querySelector(`[data-tag-topic="${CSS.escape(topic)}"]`);
+          if (chip) {
+            chip.classList.add('has-unread');
+            chip.title = `${formatHashtagLabel(topic)} — ${channelUnreadCounts[tagKey]} unread`;
+          }
+        }
+      }, 100);
     }
   });
 
@@ -12297,48 +12543,55 @@ function setupEventListeners() {
   });
 }
 
-async function loadOlderMessages(cursorOverride = null, retried = false) {
+async function loadOlderMessages(cursorOverride = null) {
   const capturedGroupId = String(currentGroupId || '');
   const capturedTopic = getActiveTagTopic();
   const capturedGeneration = viewGeneration;
   const capturedCache = ensureGroupCacheEntry(capturedGroupId);
   capturedCache.channelCursors = capturedCache.channelCursors || {};
-  const cursor = cursorOverride || capturedCache.channelCursors[capturedTopic] || oldestMessageId;
+  const hasServerCursor = Object.prototype.hasOwnProperty.call(capturedCache.channelCursors, capturedTopic);
+  const serverCursor = typeof cursorOverride === 'string'
+    ? cursorOverride
+    : (hasServerCursor ? capturedCache.channelCursors[capturedTopic] : null);
+  const localCursor = oldestMessageId;
   const tagIndex = capturedTopic === DEFAULT_TAG_TOPIC ? null : await channelTagIndex(capturedTopic, capturedGroupId);
   const channelKey = tagIndex || DEFAULT_TAG_TOPIC;
   const isCapturedView = () => capturedGeneration === viewGeneration
     && capturedGroupId === String(currentGroupId)
     && capturedTopic === getActiveTagTopic();
-  if (loadingOlder || !cursor || !capturedGroupId || (capturedTopic !== DEFAULT_TAG_TOPIC && !tagIndex)) return;
+  if (loadingOlder || (!localCursor && !serverCursor) || !capturedGroupId || (capturedTopic !== DEFAULT_TAG_TOPIC && !tagIndex)) return;
   loadingOlder = true;
   const indicator = $('load-more-indicator');
   if (indicator) indicator.hidden = false;
   try {
     // v1.3.12: IndexedDB-first — older history already cached locally is
     // prepended instantly, with no network round-trip.
-    if (!retried) {
-      const served = await prependHistoryMessagesOlderThan(cursor);
+    if (localCursor) {
+      const served = await prependHistoryMessagesOlderThan(localCursor);
       if (served) return;
     }
-    const params = new URLSearchParams({ channel: channelKey, before: cursor, limit: '50' });
+    // The v2 cursor is opaque and is deliberately kept separate from the local
+    // oldest-message UUID. A missing cursor means the initial page has not set
+    // pagination state yet; null means the server is exhausted.
+    if (typeof serverCursor !== 'string' || !serverCursor) {
+      oldestMessageId = null;
+      return;
+    }
+    const params = new URLSearchParams({ channel: channelKey, before: serverCursor, limit: '50' });
     const url = `/api/groups/${encodeURIComponent(capturedGroupId)}/messages?${params}`;
     const res = await fetch(url, { signal: viewAbortController?.signal });
-    if (!res.ok) return;
+    if (!res.ok) {
+      if (res.status === 400) {
+        capturedCache.channelCursors[capturedTopic] = null;
+        oldestMessageId = null;
+      }
+      return;
+    }
     const page = await res.json();
     const rawMsgs = Array.isArray(page?.messages) ? page.messages : [];
     if (!isCapturedView()) return;
     if (!rawMsgs.length) {
-      // v1.3.9: the cursor message may have been hard-deleted on the server,
-      // which makes the `before` query return nothing even though older
-      // messages exist. Re-derive the cursor from the cache and retry once.
-      if (!retried) {
-        const cache = ensureGroupCacheEntry(capturedGroupId);
-        const fallback = (cache.messages || []).find((m) => String(m.id) !== String(cursor));
-        if (fallback) {
-          oldestMessageId = fallback.id;
-          return loadOlderMessages(fallback.id, true);
-        }
-      }
+      capturedCache.channelCursors[capturedTopic] = null;
       oldestMessageId = null; // no more older messages
       return;
     }

@@ -1063,6 +1063,20 @@ img.gchat-global-icon {
   background: #111;
   -webkit-user-drag: none;
 }
+.msg-image-shell {
+  width: 220px;
+  height: 160px;
+  max-width: 100%;
+  overflow: hidden;
+  border-radius: 8px;
+  background: #111;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.msg-image-shell .msg-image { width: 100%; height: 100%; max-width: none; max-height: none; margin: 0; }
+.msg-image-placeholder { color: var(--text-muted); opacity: .72; }
+.msg-image-shell.is-error { color: var(--text-muted); }
 .msg-image-locked { background: #111; width: 220px; height: 120px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 28px; color: var(--text-muted); }
 .msg-image-locked .ui-icon { width: 32px; height: 32px; }
 
@@ -3365,6 +3379,7 @@ body.chat-body.mobile-layout .sidebar-overlay {
 
   /* Better message images on mobile */
   .msg-image { max-width: 200px; max-height: 140px; }
+  .msg-image-shell { width: 200px; height: 140px; }
   .msg-image-locked { width: 200px; height: 100px; }
 
   /* Better tap highlight */
