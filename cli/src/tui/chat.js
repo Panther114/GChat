@@ -33,7 +33,7 @@ const {
 const { looksLikeImagePath, readClipboardImage } = require('./clipboard-image');
 const { loadConfig, setConfigKey } = require('../store/config');
 const { normalizeTheme, nextTheme } = require('./theme');
-const { createScreenPainter, isAppleTerminal } = require('./paint');
+const { createScreenPainter } = require('./paint');
 const {
   decryptServerMessage,
   decryptAttachment,
@@ -75,7 +75,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
   let running = false;
   let pulseTimer = null;
   const screen = painter || createScreenPainter();
-  const PULSE_MS = isAppleTerminal() ? 80 : 50;
+  const PULSE_MS = 50;
   let coalescedMove = null;
   let coalesceTimer = null;
   let allowAutoLoad = true;
@@ -607,8 +607,31 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     return state.messages.find((m) => String(m.msg.id) === String(id)) || null;
   }
 
+  function clearHover() {
+    const had = !!(
+      state.hoverMessageId
+      || state.hoverAction
+      || state.hoverChannel
+      || state.hoverLogout
+      || state.hoverTheme
+      || state.hoverReply
+    );
+    if (!had && lastHoverKey === '') return false;
+    state.hoverMessageId = null;
+    state.hoverAction = null;
+    state.hoverChannel = null;
+    state.hoverLogout = false;
+    state.hoverTheme = false;
+    state.hoverReply = false;
+    lastHoverKey = '';
+    return had;
+  }
+
   function applyHover(hit) {
     if (state.overlay && state.overlay.type === 'delete') return false;
+    if (draggingScroll || channelDrag || (screen && typeof screen.isOverloaded === 'function' && screen.isOverloaded())) {
+      return clearHover();
+    }
     const nextId = hit && (hit.type === 'message' || hit.type === 'action' || hit.type === 'card' || hit.type === 'reply-ref')
       ? String(hit.type === 'reply-ref' ? hit.parentId : hit.id)
       : null;
@@ -1237,7 +1260,11 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     }
     const pending = flushCoalescedMove();
     let changed = false;
-    if (pending) changed = handleMouse(pending) || changed;
+    // A press/wheel/release is higher priority than a stale hover move.
+    // Keep a pending drag/scroll move; drop hover-only motion.
+    if (pending && (draggingScroll || channelDrag || mouse.kind === 'release' || mouse.kind === 'wheel')) {
+      changed = handleMouse(pending) || changed;
+    }
     changed = handleMouse(mouse) || changed;
     if (changed) draw();
   }
@@ -1294,6 +1321,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     }
 
     if (mouse.kind === 'move' && draggingScroll) {
+      clearHover();
       state.scrollOffset = scrollOffsetFromDrag(
         draggingScroll.startOffset,
         draggingScroll.startY,
@@ -1314,6 +1342,9 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
 
     if (mouse.kind === 'move') {
       if (state.overlay && state.overlay.type === 'delete') return false;
+      if (screen && typeof screen.isOverloaded === 'function' && screen.isOverloaded()) {
+        return clearHover();
+      }
       return applyHover(hit);
     }
 
@@ -1336,7 +1367,8 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
           startY: y,
           startOffset: state.scrollOffset || 0,
         };
-        return !onThumb;
+        const droppedHover = clearHover();
+        return !onThumb || droppedHover;
       }
       if (hit && hit.type === 'channel') {
         if (hit.name === 'main') {

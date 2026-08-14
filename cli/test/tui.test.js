@@ -113,7 +113,7 @@ test('landing frame: contains title, option and hint with art glyphs intact', ()
   assert.equal(frame.height, tier.art.length + landing.LOGO_PADDING);
   assert.equal(frame.originX, Math.floor((100 - frame.width) / 2));
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.match(plain, /Welcome to GChat CLI v0\.1/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r15/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
   // The braille glyphs themselves must be preserved exactly.
@@ -202,7 +202,7 @@ test('composeFrame: writes full-width rows without eraseLine', () => {
 test('composeFrame: content is written on each line', () => {
   const out = app.composeFrame(80, 24, 0);
   const plain = ansi.stripAnsi(out.replace(/\u001b\[\d+;\d+H/g, ''));
-  assert.match(plain, /Welcome to GChat CLI v0\.1/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r15/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
 });
@@ -652,7 +652,7 @@ test('codePointIndex and stepCodePoint do not split emoji', () => {
 test('chat frame: sidebar, channels, composer, and messages', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState());
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI v0.1'), 'sidebar title is the CLI version');
+  assert.ok(plain.includes('GChat CLI 0.1 r15'), 'sidebar title is the CLI version');
   assert.ok(!plain.includes('chats\n') && !/^\s*chats\s*$/m.test(plain.split('\n')[0]), 'old "chats" label is gone');
   assert.ok(plain.includes('team'), 'active group in sidebar');
   assert.ok(!plain.includes('●'), 'groups are not indented with a bullet');
@@ -850,14 +850,18 @@ test('WHEEL_LINES is a single line step', () => {
   assert.equal(chatLayout.WHEEL_LINES, 1);
 });
 
-test('sidebar groups are rounded boxes with unread badges', () => {
+test('sidebar groups are full-width rows with unread badges', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState({
     groups: [{ id: 'g1', name: 'team', unreadCount: 3 }],
   }));
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
   assert.ok(plain.includes('[3]'));
   const group = frame.hits.find((h) => h.type === 'group' && h.id === 'g1');
-  assert.ok(group && group.h === 3);
+  assert.ok(group && group.h === 1);
+  assert.equal(group.w, frame.regions.sidebar.w, 'group row spans the sidebar');
+  const row = ansi.stripAnsi(frame.lines[group.y]).slice(0, group.w);
+  assert.ok(row.includes('team'));
+  assert.ok(!row.includes('╭') && !row.includes('╰') && !row.includes('│'), 'sidebar rows are not rounded chips');
 });
 
 test('expanded channel chip exposes delete only, never on #main', () => {
@@ -1392,6 +1396,33 @@ test('clicking the scrollbar thumb starts a drag; clicking the track jumps', () 
     kind: 'move', button: 0, x: bar.x + 1, y: dragY, press: true, motion: true, wheel: 0,
   });
   assert.notEqual(jumped.state.scrollOffset, afterJump, 'unreleased move after a track jump keeps dragging');
+});
+
+test('scrollbar drag drops stale hover outlines', () => {
+  const many = Array.from({ length: 18 }, (_, i) => ({
+    msg: {
+      id: `s${i}`,
+      senderId: 'ada',
+      senderName: 'ada',
+      type: 'text',
+      createdAt: `2026-08-13T11:${String(i).padStart(2, '0')}:00.000Z`,
+    },
+    text: `message body ${i} with enough words`,
+    channel: 'main',
+  }));
+  const chat = makeController({ messages: many, scrollOffset: 4, hoverMessageId: 's3' });
+  const frame = chat.draw();
+  const thumb = frame.scrollbarThumb;
+  assert.ok(thumb);
+  chat.handleMouse({
+    kind: 'press', button: 0, x: thumb.x + 1, y: thumb.y + 1, press: true, motion: false, wheel: 0,
+  });
+  assert.equal(chat.state.hoverMessageId, null, 'starting a scrollbar drag clears hover');
+  chat.state.hoverMessageId = 's5';
+  chat.handleMouse({
+    kind: 'move', button: 0, x: thumb.x + 1, y: thumb.y + 4, press: true, motion: true, wheel: 0,
+  });
+  assert.equal(chat.state.hoverMessageId, null, 'drag motion does not restore hover');
 });
 
 test('scrollbar uses filled cells instead of box-drawing glyphs', () => {

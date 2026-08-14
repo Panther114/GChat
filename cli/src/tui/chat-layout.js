@@ -607,7 +607,7 @@ function filterMessages(messages, channel) {
 }
 
 function sidebarTitle() {
-  return `GChat CLI v${landing.TUI_VERSION}`;
+  return `GChat CLI ${landing.TUI_VERSION}`;
 }
 
 function profileProgress(state) {
@@ -632,7 +632,6 @@ function buildSidebar(state, width, height, nameY = null) {
   if (width <= 0 || height <= 0) return { lines, hits };
   lines.push(fillRow(`${' '.repeat(Math.min(1, PAD))}${sidebarTitle()}`, width, { fg: PALETTE.muted }));
   const list = state.groups || [];
-  const boxW = width;
   const progress = profileProgress(state);
   const eased = 1 - (1 - progress) * (1 - progress);
   const extra = Math.round(PROFILE_LIFT * eased);
@@ -641,23 +640,20 @@ function buildSidebar(state, width, height, nameY = null) {
   const logoutY = extra >= 2 ? barY + 2 : -1;
   const themeY = logoutY >= 0 && logoutY + 1 < profileNameY ? logoutY + 1 : -1;
   let y = 1;
-  for (let i = 0; i < list.length && y + 2 < barY; i += 1) {
+  for (let i = 0; i < list.length && y < barY; i += 1) {
     const group = list[i];
     const active = String(group.id) === String(state.activeGroupId);
-    const color = active ? PALETTE.title : PALETTE.muted;
     const unread = Number(group.unreadCount) || 0;
     const badge = unread > 0 ? `[${unread > 99 ? '99+' : unread}]` : '';
-    const nameW = Math.max(1, boxW - 2 - (badge ? ansi.width(badge) + 1 : 0));
-    const mid = `${padCells(String(group.name || '?'), nameW)}${badge ? ` ${badge}` : ''}`;
-    lines.push(fillRow(`╭${'─'.repeat(Math.max(0, boxW - 2))}╮`, width, { fg: color }));
-    lines.push(
-      `${ansi.fg(color)}│${ansi.reset()}`
-      + `${ansi.fg(active ? PALETTE.title : PALETTE.text)}${active ? ansi.bold() : ''}${padCells(mid, boxW - 2)}${ansi.reset()}`
-      + `${ansi.fg(color)}│${ansi.reset()}`
-    );
-    lines.push(fillRow(`╰${'─'.repeat(Math.max(0, boxW - 2))}╯`, width, { fg: color }));
-    hits.push({ type: 'group', id: group.id, x: 0, y, w: width, h: 3 });
-    y += 3;
+    const nameW = Math.max(1, width - 1 - (badge ? ansi.width(badge) + 1 : 0));
+    const label = ` ${padCells(String(group.name || '?'), nameW)}${badge ? ` ${badge}` : ''}`;
+    lines.push(fillRow(label, width, {
+      fg: active ? PALETTE.title : PALETTE.text,
+      bold: active,
+      bg: active ? PALETTE.activeBg : undefined,
+    }));
+    hits.push({ type: 'group', id: group.id, x: 0, y, w: width, h: 1 });
+    y += 1;
   }
   while (lines.length < height) lines.push(fillRow('', width, {}));
 

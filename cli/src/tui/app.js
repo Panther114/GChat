@@ -24,10 +24,10 @@ const {
 const { configPaths } = require('../store/paths');
 const { loadConfig } = require('../store/config');
 const { PALETTE, normalizeTheme, runWithTheme, paintCanvasLine } = require('./theme');
-const { createScreenPainter, composeFull, isAppleTerminal } = require('./paint');
+const { createScreenPainter, composeFull } = require('./paint');
 
-/** Milliseconds between landing animation frames. Terminal.app is slower. */
-const FRAME_MS = isAppleTerminal() ? 80 : 50;
+/** Milliseconds between landing animation frames. */
+const FRAME_MS = 50;
 
 /** How long a login failure message stays on the hint (ms). */
 const LOGIN_ERROR_MS = 3000;

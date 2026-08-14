@@ -15,7 +15,7 @@ const ansi = require('./ansi');
 const { PALETTE, DARK, runWithTheme } = require('./theme');
 
 /** Display version for the landing page (intentionally separate from package version). */
-const TUI_VERSION = '0.1';
+const TUI_VERSION = '0.1 r15';
 
 /**
  * Single adjustable padding number (in cells), used for both:
@@ -226,7 +226,7 @@ function styleArtLine(artLine, row, frame, shimmer = DEFAULT_SHIMMER) {
 }
 
 function buildTitle() {
-  return `${ansi.bold()}${ansi.fg(PALETTE.title)}Welcome to GChat CLI v${TUI_VERSION}${ansi.reset()}`;
+  return `${ansi.bold()}${ansi.fg(PALETTE.title)}Welcome to GChat CLI ${TUI_VERSION}${ansi.reset()}`;
 }
 
 function buildCheck() {

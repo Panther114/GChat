@@ -15,16 +15,20 @@
 const ansi = require('./ansi');
 const { runWithTheme, PALETTE, paintCanvasLine } = require('./theme');
 
+/** Paint cost (ms) above which we treat the TTY as behind. */
+const OVERLOAD_MS = 24;
+
 function isAppleTerminal() {
   return String(process.env.TERM_PROGRAM || '').toLowerCase() === 'apple_terminal';
 }
 
-function fullEveryMs() {
-  return isAppleTerminal() ? 4000 : 2000;
+function fullEveryMs(lastPaintMs) {
+  // When the last write was already expensive, do not pile on extra full frames.
+  return lastPaintMs >= OVERLOAD_MS ? 4000 : 2000;
 }
 
-function fullEveryFrames() {
-  return isAppleTerminal() ? 20 : 36;
+function fullEveryFrames(lastPaintMs) {
+  return lastPaintMs >= OVERLOAD_MS ? 20 : 36;
 }
 
 function createScreenPainter() {
@@ -34,6 +38,7 @@ function createScreenPainter() {
   let prevH = 0;
   let incremental = 0;
   let lastFullAt = 0;
+  let lastPaintMs = 0;
 
   function reset() {
     prev = [];
@@ -42,6 +47,11 @@ function createScreenPainter() {
     prevH = 0;
     incremental = 0;
     lastFullAt = 0;
+    lastPaintMs = 0;
+  }
+
+  function isOverloaded(limitMs = OVERLOAD_MS) {
+    return lastPaintMs >= limitMs;
   }
 
   function paint(lines, cols, rows, opts = {}) {
@@ -52,8 +62,8 @@ function createScreenPainter() {
     for (let y = 0; y < height; y += 1) next[y] = lines[y] || '';
 
     const sizeChanged = prevW !== width || prevH !== height;
-    const dueTime = lastFullAt > 0 && (now - lastFullAt >= fullEveryMs());
-    const dueFrames = incremental >= fullEveryFrames();
+    const dueTime = lastFullAt > 0 && (now - lastFullAt >= fullEveryMs(lastPaintMs));
+    const dueFrames = incremental >= fullEveryFrames(lastPaintMs);
     let force = !!(opts.force || sizeChanged || dueTime || dueFrames || prev.length === 0);
 
     let dirty = 0;
@@ -61,10 +71,14 @@ function createScreenPainter() {
       for (let y = 0; y < height; y += 1) {
         if (next[y] !== prev[y]) dirty += 1;
       }
-      if (dirty === 0) return '';
+      if (dirty === 0) {
+        lastPaintMs = 0;
+        return '';
+      }
       if (dirty > height * 0.6) force = true;
     }
 
+    const t0 = process.hrtime.bigint();
     let out = '';
     if (force) {
       out += ansi.cursorHide();
@@ -80,6 +94,7 @@ function createScreenPainter() {
       incremental += 1;
     }
 
+    lastPaintMs = Number(process.hrtime.bigint() - t0) / 1e6;
     prev = next;
     prevW = width;
     prevH = height;
@@ -118,6 +133,8 @@ function createScreenPainter() {
     paint,
     paintRaw,
     reset,
+    isOverloaded,
+    lastPaintMs: () => lastPaintMs,
   };
 }
 
@@ -131,4 +148,5 @@ module.exports = {
   isAppleTerminal,
   fullEveryMs,
   fullEveryFrames,
+  OVERLOAD_MS,
 };
