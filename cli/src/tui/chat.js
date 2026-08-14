@@ -448,27 +448,39 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
 
   async function start() {
     running = true;
+    state.status = 'connecting';
     state.username = client.user?.username || state.username;
     state.userId = client.user?.id || state.userId;
     state.iconColor = client.user?.iconColor || state.iconColor;
     client.onEvent = (event, payload) => {
       handleEvent(event, payload).catch(() => {});
     };
+    // Paint the chat chrome before any network so the TTY is never empty.
+    draw();
     try {
-      const me = client.user || await client.me();
-      state.username = me.username;
-      state.userId = me.id;
-      state.iconColor = me.iconColor || me.senderColor || state.iconColor;
+      const me = client.user || (typeof client.me === 'function' ? await client.me() : null);
+      if (me) {
+        state.username = me.username;
+        state.userId = me.id;
+        state.iconColor = me.iconColor || me.senderColor || state.iconColor;
+      }
     } catch {
       /* session may already be warm */
     }
     await refreshGroups();
-    try {
-      await client.connectSocket();
-      state.connected = true;
-    } catch (err) {
-      state.connected = false;
-      setError(err.message || 'socket failed');
+    state.status = '';
+    draw();
+    if (typeof client.connectSocket === 'function') {
+      client.connectSocket().then(() => {
+        if (!running) return;
+        state.connected = true;
+        draw();
+      }).catch((err) => {
+        if (!running) return;
+        state.connected = false;
+        setError(err.message || 'socket failed');
+        draw();
+      });
     }
     await loadGroup(null);
     if (needsPulse()) startPulse();

@@ -15,7 +15,7 @@ const ansi = require('./ansi');
 const { PALETTE, DARK, runWithTheme } = require('./theme');
 
 /** Display version for the landing page (intentionally separate from package version). */
-const TUI_VERSION = '0.1 r15';
+const TUI_VERSION = '0.1 r16';
 
 /**
  * Single adjustable padding number (in cells), used for both:

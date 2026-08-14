@@ -113,7 +113,7 @@ test('landing frame: contains title, option and hint with art glyphs intact', ()
   assert.equal(frame.height, tier.art.length + landing.LOGO_PADDING);
   assert.equal(frame.originX, Math.floor((100 - frame.width) / 2));
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r15/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r16/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
   // The braille glyphs themselves must be preserved exactly.
@@ -202,7 +202,7 @@ test('composeFrame: writes full-width rows without eraseLine', () => {
 test('composeFrame: content is written on each line', () => {
   const out = app.composeFrame(80, 24, 0);
   const plain = ansi.stripAnsi(out.replace(/\u001b\[\d+;\d+H/g, ''));
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r15/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r16/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
 });
@@ -216,6 +216,15 @@ test('composeFrame: every row is painted with the dark canvas', () => {
   for (const segment of segments) {
     assert.ok(segment.includes(canvas), 'row sits on the canvas');
   }
+});
+
+test('splash screen paints a themed canvas with a loading label', () => {
+  const lines = app.splashScreenLines(80, 24, 'dark', 'Loading…', 0);
+  assert.equal(lines.length, 24);
+  const plain = lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.ok(plain.includes('GChat CLI 0.1 r16'));
+  assert.ok(plain.includes('Loading'));
+  assert.ok(lines.join('').includes(ansi.bg(theme.DARK.canvas)));
 });
 
 test('screen painter writes only dirty rows and can force a full refresh', () => {
@@ -652,7 +661,7 @@ test('codePointIndex and stepCodePoint do not split emoji', () => {
 test('chat frame: sidebar, channels, composer, and messages', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState());
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r15'), 'sidebar title is the CLI version');
+  assert.ok(plain.includes('GChat CLI 0.1 r16'), 'sidebar title is the CLI version');
   assert.ok(!plain.includes('chats\n') && !/^\s*chats\s*$/m.test(plain.split('\n')[0]), 'old "chats" label is gone');
   assert.ok(plain.includes('team'), 'active group in sidebar');
   assert.ok(!plain.includes('●'), 'groups are not indented with a bullet');
@@ -852,16 +861,24 @@ test('WHEEL_LINES is a single line step', () => {
 
 test('sidebar groups are full-width rows with unread badges', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState({
-    groups: [{ id: 'g1', name: 'team', unreadCount: 3 }],
+    groups: [
+      { id: 'g1', name: 'team', unreadCount: 3 },
+      { id: 'g2', name: 'design', unreadCount: 0 },
+    ],
   }));
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
   assert.ok(plain.includes('[3]'));
   const group = frame.hits.find((h) => h.type === 'group' && h.id === 'g1');
+  const other = frame.hits.find((h) => h.type === 'group' && h.id === 'g2');
   assert.ok(group && group.h === 1);
   assert.equal(group.w, frame.regions.sidebar.w, 'group row spans the sidebar');
+  assert.equal(group.y, 2, 'a blank row sits under the sidebar title');
+  assert.ok(other && other.y === group.y + 2, 'a blank row sits between groups');
   const row = ansi.stripAnsi(frame.lines[group.y]).slice(0, group.w);
   assert.ok(row.includes('team'));
   assert.ok(!row.includes('╭') && !row.includes('╰') && !row.includes('│'), 'sidebar rows are not rounded chips');
+  const gap = ansi.stripAnsi(frame.lines[group.y + 1]).slice(0, group.w).trim();
+  assert.equal(gap, '', 'group rows have breathing room');
 });
 
 test('expanded channel chip exposes delete only, never on #main', () => {
@@ -1256,6 +1273,47 @@ test('canceling an edit restores the previous composer draft', () => {
   assert.equal(chat.state.composer, 'draft');
   assert.equal(chat.state.composerCaret, 5);
   assert.equal(chat.state.editingId, null);
+});
+
+test('chat start paints chrome before groups or the socket return', async () => {
+  let listed = false;
+  let connected = false;
+  const frames = [];
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-boot-'));
+  const chat = createChatController({
+    client: {
+      user: { id: 'me', username: 'will' },
+      listGroups: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        listed = true;
+        return [{ id: 'g1', name: 'team' }];
+      },
+      listMembers: async () => [],
+      openGroup: async () => ({ messages: [] }),
+      connectSocket: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        connected = true;
+      },
+      disconnectSocket: () => {},
+      setActiveGroup: () => {},
+      switchChannel: (_g, name) => name,
+      markRead: () => {},
+      getSecret: () => null,
+      emitTyping: () => {},
+      logout: async () => {},
+    },
+    paths: configPaths(dir),
+    stdout: { write() {}, columns: 80, rows: 24 },
+    getSize: () => ({ cols: 80, rows: 24 }),
+    onDraw: (frame) => frames.push(frame),
+  });
+  const started = chat.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(frames.length >= 1, 'a chat frame is painted before listGroups resolves');
+  assert.equal(listed, false, 'groups have not returned yet');
+  assert.equal(connected, false, 'socket is not awaited before the first paint');
+  await started;
+  assert.equal(listed, true);
 });
 
 test('startup does not open the first group', async () => {

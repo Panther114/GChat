@@ -20,6 +20,9 @@ const {
   USERNAME_FIELD_WIDTH,
   PASSWORD_FIELD_WIDTH,
   clampScroll,
+  selectTier,
+  styleArtLine,
+  TUI_VERSION,
 } = require('./landing');
 const { configPaths } = require('../store/paths');
 const { loadConfig } = require('../store/config');
@@ -71,6 +74,53 @@ function composeFrame(cols, rows, frame, ui) {
   return composeFull(landingScreenLines(cols, rows, frame, ui), cols, rows);
 }
 
+function yieldPaint() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+/**
+ * Themed boot splash: canvas + bird + version + Loading…
+ * Painted before any network or heavy require so the TTY is never empty.
+ */
+function splashScreenLines(cols, rows, theme, label, animFrame = 0) {
+  return runWithTheme(theme, () => {
+    const width = Math.max(1, cols);
+    const height = Math.max(1, rows);
+    const canvas = PALETTE.canvas;
+    const tier = selectTier(cols, rows);
+    const artW = Math.max(...tier.art.map((line) => ansi.width(line)));
+    const title = `GChat CLI ${TUI_VERSION}`;
+    const hint = label || 'Loading…';
+    const blockH = tier.art.length + 3;
+    const originY = Math.max(0, Math.floor((height - blockH) / 2));
+    const originX = Math.max(0, Math.floor((width - artW) / 2));
+    const lines = Array.from({ length: height }, () => paintCanvasLine('', width, 0, canvas));
+    tier.art.forEach((artLine, i) => {
+      const y = originY + i;
+      if (y < 0 || y >= height) return;
+      const styled = styleArtLine(artLine, i, animFrame, tier.shimmer);
+      lines[y] = paintCanvasLine(styled, width, originX, canvas);
+    });
+    const titleY = originY + tier.art.length + 1;
+    const hintY = titleY + 1;
+    if (titleY >= 0 && titleY < height) {
+      const x = Math.max(0, Math.floor((width - ansi.width(title)) / 2));
+      lines[titleY] = paintCanvasLine(
+        `${ansi.bold()}${ansi.fg(PALETTE.title)}${title}${ansi.reset()}`,
+        width, x, canvas
+      );
+    }
+    if (hintY >= 0 && hintY < height) {
+      const x = Math.max(0, Math.floor((width - ansi.width(hint)) / 2));
+      lines[hintY] = paintCanvasLine(
+        `${ansi.fg(PALETTE.hint)}${ansi.dim()}${hint}${ansi.reset()}`,
+        width, x, canvas
+      );
+    }
+    return lines;
+  });
+}
+
 /**
  * A geometry change means the terminal already re-wrapped the alternate
  * screen; glyphs outside the new frame box (plus wrapped remnants from the
@@ -99,10 +149,12 @@ async function runTui(options = {}) {
   let pendingKeys = '';
   let inputBuffer = '';
   let lastBounds = null;
-  let screen = 'landing'; // 'landing' | 'chat'
+  let screen = 'landing'; // 'landing' | 'splash' | 'chat'
   let chat = null;
   const ui = { ...DEFAULT_UI };
   const painter = createScreenPainter();
+  let splashTimer = null;
+  let splashLabel = 'Loading…';
 
   /** Apply one keystroke to the login form (inserts at the active caret). */
   function handleKey(ch) {
@@ -224,6 +276,7 @@ async function runTui(options = {}) {
     if (done) return;
     done = true;
     if (timer) clearInterval(timer);
+    if (splashTimer) clearInterval(splashTimer);
     if (chat) {
       try { chat.stop(); } catch { /* ignore */ }
     }
@@ -249,6 +302,10 @@ async function runTui(options = {}) {
     }
     lastCols = cols;
     lastRows = rows;
+    if (screen === 'splash') {
+      paintSplashNow();
+      return;
+    }
     if (screen === 'chat' && chat) {
       chat.draw();
       return;
@@ -272,6 +329,33 @@ async function runTui(options = {}) {
     const { GChatClient } = require('../client/api');
     client = new GChatClient({ server: options.server, paths });
     return client;
+  }
+
+  function paintSplashNow() {
+    const { cols, rows } = terminalSize();
+    const dots = '.'.repeat((Math.floor(frame / 8) % 3) + 1);
+    const label = `${splashLabel.replace(/\.+$/, '')}${dots}`;
+    const bytes = painter.paint(splashScreenLines(cols, rows, ui.theme, label, frame), cols, rows);
+    if (bytes) stdout.write(bytes);
+  }
+
+  function startSplash(label = 'Loading') {
+    splashLabel = label;
+    screen = 'splash';
+    paintSplashNow();
+    if (splashTimer) return;
+    splashTimer = setInterval(() => {
+      if (screen !== 'splash') return;
+      frame += 1;
+      paintSplashNow();
+    }, FRAME_MS);
+  }
+
+  function stopSplash() {
+    if (splashTimer) {
+      clearInterval(splashTimer);
+      splashTimer = null;
+    }
   }
 
   /** Map a login failure to a user-facing message (server errors pass through). */
@@ -325,6 +409,7 @@ async function runTui(options = {}) {
     ui.loggingIn = false;
     ui.error = null;
     ui.theme = normalizeTheme(loadConfig(paths).theme);
+    stopSplash();
     stdout.write(ansi.clearScreen());
     painter.reset();
     lastCols = null;
@@ -334,13 +419,14 @@ async function runTui(options = {}) {
   }
 
   async function enterChat() {
-    screen = 'chat';
     stopLandingTimer();
-    stdout.write(ansi.clearScreen());
-    painter.reset();
+    startSplash('Loading');
+    await yieldPaint();
+    const { createChatController } = require('./chat');
+    stopSplash();
+    screen = 'chat';
     lastCols = null;
     lastRows = null;
-    const { createChatController } = require('./chat');
     chat = createChatController({
       client: ensureClient(),
       paths,
@@ -351,7 +437,6 @@ async function runTui(options = {}) {
       painter,
     });
     await chat.start();
-    draw();
   }
 
   /** After a successful login, hand off to the chat screen. */
@@ -363,6 +448,7 @@ async function runTui(options = {}) {
         fields: [],
         message: (err && err.message) || "Couldn't open chat",
       };
+      stopSplash();
       screen = 'landing';
       startLandingTimer();
       draw();
@@ -391,7 +477,6 @@ async function runTui(options = {}) {
     try {
       const api = ensureClient();
       await api.login(username, password);
-      await api.listGroups().catch(() => []);
       finishLogin();
     } catch (err) {
       ui.loggingIn = false;
@@ -458,14 +543,19 @@ async function runTui(options = {}) {
       || (cookies && Object.keys(cookies).length > 0)
     );
     if (hasSession) {
+      startSplash('Loading');
+      await yieldPaint();
       const api = ensureClient();
       if (api.user || api.session?.user || (api.session && api.session.cookies && Object.keys(api.session.cookies).length > 0)) {
         await api.me();
         startOnChat = true;
+      } else {
+        stopSplash();
       }
     }
   } catch {
     startOnChat = false;
+    stopSplash();
   }
 
   if (startOnChat) {
@@ -485,5 +575,7 @@ module.exports = {
   terminalSize,
   composeFrame,
   landingScreenLines,
+  splashScreenLines,
+  yieldPaint,
   redrawRequired,
 };

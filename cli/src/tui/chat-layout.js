@@ -630,7 +630,8 @@ function buildSidebar(state, width, height, nameY = null) {
   const lines = [];
   const hits = [];
   if (width <= 0 || height <= 0) return { lines, hits };
-  lines.push(fillRow(`${' '.repeat(Math.min(1, PAD))}${sidebarTitle()}`, width, { fg: PALETTE.muted }));
+  const inset = Math.min(2, PAD);
+  lines.push(fillRow(`${' '.repeat(inset)}${sidebarTitle()}`, width, { fg: PALETTE.muted }));
   const list = state.groups || [];
   const progress = profileProgress(state);
   const eased = 1 - (1 - progress) * (1 - progress);
@@ -639,14 +640,15 @@ function buildSidebar(state, width, height, nameY = null) {
   const barY = Math.max(1, profileNameY - 2 - extra);
   const logoutY = extra >= 2 ? barY + 2 : -1;
   const themeY = logoutY >= 0 && logoutY + 1 < profileNameY ? logoutY + 1 : -1;
-  let y = 1;
+  lines.push(fillRow('', width, {}));
+  let y = 2;
   for (let i = 0; i < list.length && y < barY; i += 1) {
     const group = list[i];
     const active = String(group.id) === String(state.activeGroupId);
     const unread = Number(group.unreadCount) || 0;
     const badge = unread > 0 ? `[${unread > 99 ? '99+' : unread}]` : '';
-    const nameW = Math.max(1, width - 1 - (badge ? ansi.width(badge) + 1 : 0));
-    const label = ` ${padCells(String(group.name || '?'), nameW)}${badge ? ` ${badge}` : ''}`;
+    const nameW = Math.max(1, width - inset - (badge ? ansi.width(badge) + 1 : 0));
+    const label = `${' '.repeat(inset)}${padCells(String(group.name || '?'), nameW)}${badge ? ` ${badge}` : ''}`;
     lines.push(fillRow(label, width, {
       fg: active ? PALETTE.title : PALETTE.text,
       bold: active,
@@ -654,6 +656,10 @@ function buildSidebar(state, width, height, nameY = null) {
     }));
     hits.push({ type: 'group', id: group.id, x: 0, y, w: width, h: 1 });
     y += 1;
+    if (y < barY) {
+      lines.push(fillRow('', width, {}));
+      y += 1;
+    }
   }
   while (lines.length < height) lines.push(fillRow('', width, {}));
 
