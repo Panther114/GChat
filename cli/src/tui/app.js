@@ -106,9 +106,8 @@ function splashScreenLines(cols, rows, theme, label, animFrame = 0, originX = nu
     const canvas = PALETTE.canvas;
     const tier = selectTier(cols, rows);
     const artW = Math.max(...tier.art.map((line) => ansi.width(line)));
-    const title = `GChat CLI ${TUI_VERSION}`;
-    const hintPlain = String(label || 'Loading').replace(/\.+$/, '') || 'Loading';
-    const hint = pulseText(hintPlain, animFrame, PALETTE.title, PALETTE.hint);
+    const titlePlain = `GChat CLI ${TUI_VERSION}`;
+    const title = pulseText(titlePlain, animFrame, PALETTE.title, PALETTE.hint);
     const originY = sharedBirdY(height, tier.art.length);
     if (originX == null) originX = Math.max(0, Math.floor((width - artW) / 2));
     const lines = Array.from({ length: height }, () => paintCanvasLine('', width, 0, canvas));
@@ -119,17 +118,9 @@ function splashScreenLines(cols, rows, theme, label, animFrame = 0, originX = nu
       lines[y] = paintCanvasLine(styled, width, originX, canvas);
     });
     const titleY = originY + tier.art.length + 1;
-    const hintY = titleY + 1;
     if (titleY >= 0 && titleY < height) {
-      const x = Math.max(0, Math.floor((width - ansi.width(title)) / 2));
-      lines[titleY] = paintCanvasLine(
-        `${ansi.bold()}${ansi.fg(PALETTE.title)}${title}${ansi.reset()}`,
-        width, x, canvas
-      );
-    }
-    if (hintY >= 0 && hintY < height) {
-      const x = Math.max(0, Math.floor((width - ansi.width(hintPlain)) / 2));
-      lines[hintY] = paintCanvasLine(hint, width, x, canvas);
+      const x = Math.max(0, Math.floor((width - ansi.width(titlePlain)) / 2));
+      lines[titleY] = paintCanvasLine(title, width, x, canvas);
     }
     return lines;
   });

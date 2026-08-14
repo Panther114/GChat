@@ -113,7 +113,7 @@ test('landing frame: contains title, option and hint with art glyphs intact', ()
   assert.equal(frame.height, tier.art.length + landing.LOGO_PADDING);
   assert.equal(frame.originX, Math.floor((100 - frame.width) / 2));
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r25/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r26/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
   // The braille glyphs themselves must be preserved exactly.
@@ -202,7 +202,7 @@ test('composeFrame: writes full-width rows without eraseLine', () => {
 test('composeFrame: content is written on each line', () => {
   const out = app.composeFrame(80, 24, 0);
   const plain = ansi.stripAnsi(out.replace(/\u001b\[\d+;\d+H/g, ''));
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r25/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r26/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
 });
@@ -222,19 +222,19 @@ test('splash screen paints a themed canvas with a loading label', () => {
   const lines = app.splashScreenLines(80, 24, 'dark', 'Loading', 0);
   assert.equal(lines.length, 24);
   const plain = lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r25'));
-  assert.ok(plain.includes('Loading'));
-  assert.ok(!plain.includes('Loading..'), 'loading does not animate dots');
+  assert.ok(plain.includes('GChat CLI 0.1 r26'));
+  assert.ok(!plain.includes('Loading'), 'no separate Loading line');
   assert.ok(lines.join('').includes(ansi.bg(theme.DARK.canvas)));
 });
 
-test('splash loading label uses the confirm-delete shimmer', () => {
+test('splash shimmers the version title instead of a Loading line', () => {
   const a = app.splashScreenLines(80, 24, 'dark', 'Loading', 0);
   const b = app.splashScreenLines(80, 24, 'dark', 'Loading', 9);
   const plainA = a.map((l) => ansi.stripAnsi(l)).join('\n');
   const plainB = b.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.equal(plainA, plainB, 'the Loading letters do not change');
-  assert.notEqual(a.join('\n'), b.join('\n'), 'the label restyles as the shimmer moves');
+  assert.equal(plainA, plainB, 'the version letters do not change');
+  assert.ok(plainA.includes('GChat CLI 0.1 r26'));
+  assert.notEqual(a.join('\n'), b.join('\n'), 'the version restyles as the shimmer moves');
 });
 
 test('screen painter writes only dirty rows and can force a full refresh', () => {
@@ -679,7 +679,7 @@ test('codePointIndex and stepCodePoint do not split emoji', () => {
 test('chat frame: sidebar, channels, composer, and messages', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState());
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r25'), 'sidebar title is the CLI version');
+  assert.ok(plain.includes('GChat CLI 0.1 r26'), 'sidebar title is the CLI version');
   assert.ok(!plain.includes('chats\n') && !/^\s*chats\s*$/m.test(plain.split('\n')[0]), 'old "chats" label is gone');
   assert.ok(plain.includes('team'), 'active group in sidebar');
   assert.ok(!plain.includes('●'), 'groups are not indented with a bullet');
@@ -719,6 +719,7 @@ test('chat hover outlines without fill and does not show input shortcuts', () =>
   assert.ok(hint.includes('ctrl + reply') || hint.includes('ctrl+reply') || hint.includes('ctrl+r'));
   assert.ok(hint.includes('copy') || hint.includes('ctrl+c'));
   assert.ok(hint.includes('clear (esc)') || hint.includes('esc'));
+  assert.ok(hint.includes('(f)ocus') || hint.includes('focus'));
   assert.ok(selected.lines.join('').includes(ansi.bg(chatLayout.PALETTE.selectedBg)), 'selected uses a raised background');
   assert.ok(selPlain.join('\n').includes('↩'), 'selected own message keeps icons on the right');
 });
@@ -1102,7 +1103,7 @@ test('composer hints sit on the right; typing stays on the left', () => {
     hint.includes('ctrl + reply') || hint.includes('ctrl+reply') || hint.includes('ctrl+r'),
     'selected actions are ctrl-prefixed'
   );
-  assert.ok(/clear \(esc\)|esc\s*$/.test(hint.trimEnd()), 'action hints are rightmost');
+  assert.ok(/clear \(esc\)|esc|\(f\)ocus\s*$/.test(hint.trimEnd()), 'action hints are rightmost');
 
   const channel = chatLayout.buildChatFrame(80, 24, chatState({
     activeChannel: 'design',
@@ -1474,6 +1475,7 @@ test('composer scrollbar drag is not snapped back to the caret', () => {
   assert.equal(frame.composerMetrics.lineScroll, 2);
   const bar = frame.hits.find((h) => h.type === 'composer-scrollbar');
   assert.ok(bar);
+  assert.equal(bar.x, frame.regions.composer.x + frame.regions.composer.w - 2, 'hit is the thumb, not the box border');
   chat.handleMouse({
     kind: 'press', button: 0, x: bar.x + 1, y: bar.y + bar.h, press: true, motion: false, wheel: 0,
   });
@@ -1945,6 +1947,68 @@ test('plain letters type while a message is selected; ctrl+r replies', () => {
   assert.equal(chat.state.replyTo, null);
   chat.handleKey('\u0012');
   assert.ok(chat.state.replyTo, 'ctrl+r still replies');
+});
+
+test('composer hint includes (f)ocus when a chat is open', () => {
+  const idle = chatLayout.buildChatFrame(80, 24, chatState());
+  const plain = idle.lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.ok(plain.includes('(f)ocus'));
+  const styled = idle.lines.join('');
+  assert.ok(styled.includes(`${ansi.bold()}${ansi.fg(theme.DARK.theme)}f`), 'the f in (f)ocus is emphasized');
+});
+
+test('light-mode sensitivity fill uses light text on the dark track', () => {
+  const frame = chatLayout.buildChatFrame(80, 24, chatState({
+    theme: 'light',
+    profileOpen: true,
+    profileExpandFrame: chatLayout.PROFILE_FRAMES,
+    scrollSensitivity: 20,
+  }));
+  const sens = frame.hits.find((h) => h.type === 'sensitivity');
+  assert.ok(sens);
+  const row = frame.lines[sens.y];
+  assert.ok(row.includes(ansi.fg('#ffffff')), 'filled cells use light letters');
+});
+
+test('profile rule slides back down while closing', () => {
+  const open = chatLayout.buildChatFrame(80, 24, chatState({
+    username: 'will',
+    profileOpen: true,
+    profileExpandFrame: chatLayout.PROFILE_FRAMES,
+  }));
+  const closing = chatLayout.buildChatFrame(80, 24, chatState({
+    username: 'will',
+    profileOpen: true,
+    profileClosing: true,
+    profileCloseFrom: 1,
+    profileCloseFrame: 4,
+  }));
+  const ruleOf = (frame) => frame.hits.filter((h) => h.type === 'profile').map((h) => h.y).sort((a, b) => a - b)[0];
+  assert.ok(ruleOf(closing) > ruleOf(open), 'the rule descends on close');
+});
+
+test('up on the oldest selected message still scrolls to load more', () => {
+  const many = Array.from({ length: 18 }, (_, i) => ({
+    msg: {
+      id: `s${i}`,
+      senderId: 'ada',
+      senderName: 'ada',
+      type: 'text',
+      createdAt: `2026-08-13T11:${String(i).padStart(2, '0')}:00.000Z`,
+    },
+    text: `message body ${i} with enough words`,
+    channel: 'main',
+  }));
+  const chat = makeController({
+    messages: many,
+    selectedMessageId: 's0',
+    hasMoreHistory: true,
+    inputFocus: 'transcript',
+    scrollOffset: 0,
+  });
+  chat.draw();
+  chat.moveSelection(-1);
+  assert.ok(chat.state.scrollOffset > 0, 'another up nudge reveals older history');
 });
 
 test('ctrl+f toggles composer vs transcript arrow focus', () => {

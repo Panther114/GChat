@@ -31,6 +31,7 @@ const ACTIONS = {
   preview: { id: 'preview', key: 'p', glyph: '▣', word: 'preview', mod: 'ctrl', get color() { return PALETTE.keyP; } },
   copy: { id: 'copy', key: 'c', glyph: null, word: 'copy', mod: 'ctrl', get color() { return PALETTE.keyC; } },
   clear: { id: 'clear', key: 'Escape', glyph: null, word: 'clear (esc)', get color() { return PALETTE.muted; } },
+  focus: { id: 'focus', key: 'f', glyph: null, word: '(f)ocus', get color() { return PALETTE.theme; } },
 };
 
 const SIDEBAR_MIN = 20;
@@ -109,6 +110,7 @@ const DEFAULT_CHAT = {
   hoverReply: false,
   scrollTween: null,
   scrollBatch: 0,
+  scrollBatchTotal: 0,
   inputFocus: 'composer',
   flash: null,
   memberCount: 0,
@@ -316,7 +318,7 @@ function actionListFor(item, userId, mode = {}) {
 }
 
 function hintActionsFor(item, userId, mode = {}) {
-  return [...actionListFor(item, userId, mode), ACTIONS.copy, ACTIONS.clear];
+  return [...actionListFor(item, userId, mode), ACTIONS.copy, ACTIONS.clear, ACTIONS.focus];
 }
 
 const ACTION_SLOTS = ['reply', 'preview', 'edit', 'delete'];
@@ -407,8 +409,10 @@ function hintWord(action, compact = false) {
 function styleHotWord(action, compact = false) {
   const color = action.color || PALETTE.muted;
   const word = hintWord(action, compact);
-  const hot = action.mod === 'ctrl' ? String(action.key || '') : '';
-  if (!hot || compact) {
+  const hot = String(action.key || '');
+  const canHot = hot && hot.length === 1 && hot !== 'Escape';
+  if (!canHot) return `${ansi.fg(color)}${word}${ansi.reset()}`;
+  if (compact && action.mod === 'ctrl') {
     return `${ansi.bold()}${ansi.fg(color)}${word}${ansi.reset()}`;
   }
   const at = word.toLowerCase().indexOf(hot.toLowerCase());
@@ -434,10 +438,7 @@ function styleHint(actions, maxWidth = 0) {
       parts.push(prefix + styleHotWord(ctrl[0], compact));
       for (const action of ctrl.slice(1)) parts.push(styleHotWord(action, compact));
     }
-    for (const action of rest) {
-      const word = hintWord(action, compact);
-      parts.push(`${ansi.fg(action.color || PALETTE.muted)}${word}${ansi.reset()}`);
-    }
+    for (const action of rest) parts.push(styleHotWord(action, compact));
     return parts.join(gap);
   };
   const wide = render(false);
@@ -690,10 +691,7 @@ function profileEase(state) {
 }
 
 function profileLift(state) {
-  if (state && state.profileClosing) {
-    return Math.round(PROFILE_LIFT * Math.max(0, Number(state.profileCloseFrom) || 0));
-  }
-  return Math.round(PROFILE_LIFT * landing.easeOutCubic(profileProgress(state)));
+  return Math.round(PROFILE_LIFT * profileEase(state));
 }
 
 function profileLineFade(ease, lineIndex, lineCount = PROFILE_BUTTON_COUNT) {
@@ -745,6 +743,12 @@ function paintButtonLabel(word, innerW, frame, hover, fade, idleFg, hotFg) {
   return `${' '.repeat(padL)}${body}${tail}`;
 }
 
+function contrastOn(bgHex) {
+  const rgb = ansi.hexToRgb(bgHex) || [0, 0, 0];
+  const lum = (rgb[0] * 299 + rgb[1] * 587 + rgb[2] * 114) / 1000;
+  return lum < 165 ? '#ffffff' : '#1f2328';
+}
+
 function paintFillTrackWithLabel(innerW, value, fade, title) {
   const trackW = Math.max(1, innerW);
   const n = Math.max(1, Math.min(20, Math.round(Number(value) || 1)));
@@ -755,7 +759,7 @@ function paintFillTrackWithLabel(innerW, value, fade, title) {
     const on = i < filled;
     const bg = fadeHex(on ? PALETTE.thumb : PALETTE.track, fade);
     const ch = i < label.length ? label[i] : ' ';
-    const fg = on ? PALETTE.canvas : fadeHex(PALETTE.text, fade);
+    const fg = contrastOn(bg);
     out += `${ansi.bg(bg)}${ansi.fg(fg)}${ch}`;
   }
   return `${out}${ansi.reset()}`;
@@ -807,9 +811,9 @@ function buildSidebar(state, width, height, nameY = null) {
   const extra = profileLift(state);
   const profileNameY = Math.max(2, Math.min(height - 1, nameY == null ? profileNameRow(height) : nameY));
   const barY = Math.max(1, profileNameY - 2 - extra);
-  const logoutY = profileNameY - 6;
-  const themeY = profileNameY - 4;
-  const sensY = profileNameY - 2;
+  const logoutY = barY + 2;
+  const themeY = barY + 4;
+  const sensY = barY + 6;
   lines.push(fillRow('', width, {}));
   let y = 2;
   for (let i = 0; i < list.length && y < barY; i += 1) {
@@ -1340,6 +1344,9 @@ function buildComposerHint(state, width) {
       rightActions = hintActionsFor(item, state.userId, actionMode(state));
       right = styleHint(rightActions, hintRoom);
     }
+  } else if (state.activeGroupId) {
+    rightActions = [ACTIONS.focus];
+    right = styleHint(rightActions, hintRoom);
   }
 
   const rightW = ansi.width(right);
@@ -1792,7 +1799,7 @@ function buildChatFrameNow(cols, rows, state) {
     if (metrics.overflow) {
       hits.push({
         type: 'composer-scrollbar',
-        x: mainX + PAD + boxW - 1,
+        x: mainX + PAD + boxW - 2,
         y: composerY + 2,
         w: 1,
         h: metrics.innerH,

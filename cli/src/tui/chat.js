@@ -477,9 +477,21 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     return next !== before;
   }
 
+  function nextScrollStep(left, total) {
+    const absLeft = Math.abs(left);
+    const absTotal = Math.max(1, Math.abs(total));
+    const done = absTotal - absLeft;
+    const t = done / absTotal;
+    const peak = Math.max(1, Math.ceil(absTotal / 3));
+    const env = 1 - Math.abs(2 * t - 1);
+    const step = Math.max(1, Math.round(1 + (peak - 1) * env));
+    return Math.min(step, absLeft);
+  }
+
   function tickScrollBatch() {
     const left = Number(state.scrollBatch) || 0;
     if (!left) {
+      state.scrollBatchTotal = 0;
       if (scrollBatchTimer) {
         clearInterval(scrollBatchTimer);
         scrollBatchTimer = null;
@@ -487,14 +499,17 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       return false;
     }
     const dir = left > 0 ? 1 : -1;
-    if (!applyScroll(dir)) {
+    const step = nextScrollStep(left, Number(state.scrollBatchTotal) || left);
+    if (!applyScroll(dir * step)) {
       state.scrollBatch = 0;
+      state.scrollBatchTotal = 0;
     } else {
-      state.scrollBatch = left - dir;
+      state.scrollBatch = left - dir * step;
     }
     if (!state.scrollBatch && scrollBatchTimer) {
       clearInterval(scrollBatchTimer);
       scrollBatchTimer = null;
+      state.scrollBatchTotal = 0;
     }
     return true;
   }
@@ -508,6 +523,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     const rest = delta - dir;
     if (!rest) return;
     state.scrollBatch = (Number(state.scrollBatch) || 0) + rest;
+    state.scrollBatchTotal = Math.max(Math.abs(state.scrollBatch), Number(state.scrollBatchTotal) || 0);
     if (!scrollBatchTimer) {
       scrollBatchTimer = setInterval(() => {
         if (tickScrollBatch()) draw();
@@ -520,7 +536,17 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     if (!list.length) return;
     const idx = list.findIndex((m) => String(m.msg?.id) === String(state.selectedMessageId));
     const next = idx < 0 ? (delta > 0 ? 0 : list.length - 1) : idx + delta;
-    if (next < 0 || next >= list.length) return;
+    if (next < 0) {
+      allowAutoLoad = true;
+      if (!lastFrame) lastFrame = buildChatFrame(size().cols, size().rows, state);
+      if ((state.scrollOffset || 0) < lastFrame.maxScroll) {
+        applyScroll(1);
+      } else if (state.hasMoreHistory && !state.loadingMore) {
+        loadOlderMessages().then(() => draw()).catch(() => draw());
+      }
+      return;
+    }
+    if (next >= list.length) return;
     selectMessage(list[next]);
     lastFrame = buildChatFrame(size().cols, size().rows, state);
     if (lastFrame.selectedBounds) {
@@ -1417,6 +1443,10 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     }
     if (hit.type === 'theme') {
       toggleTheme();
+      return;
+    }
+    if (hit.type === 'focus') {
+      toggleInputFocus();
       return;
     }
     if (hit.type === 'sensitivity') {
