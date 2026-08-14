@@ -15,7 +15,7 @@ const ansi = require('./ansi');
 const { PALETTE, DARK, runWithTheme } = require('./theme');
 
 /** Display version for the landing page (intentionally separate from package version). */
-const TUI_VERSION = '0.1 r16';
+const TUI_VERSION = '0.1 r17';
 
 /**
  * Single adjustable padding number (in cells), used for both:
@@ -350,14 +350,18 @@ function renderBox(box, barCells, color, dimOn, caretCell = -1) {
  * stays put while the caret moves inside it and slides one cell at a time
  * only when the caret leaves it.
  */
-function buildField({ text, placeholder, active = false, width = 1, align = 'left', caret = 0, muted = false, bar = 1, scroll = 0 }) {
-  const has = String(text || '').length > 0;
-  const shown = String(has || muted ? text : placeholder || '');
+function buildField({ text, placeholder, active = false, width = 1, align = 'left', caret = 0, muted = false, bar = 1, scroll = 0, blankLine = false }) {
+  const rawText = String(text || '');
+  const has = rawText.length > 0;
+  const emptyActive = !!(active && !has && blankLine);
+  const shown = String(has || muted ? rawText : (emptyActive ? ' ' : (placeholder || '')));
   const chars = Array.from(shown);
   const len = chars.length;
-  const color = has && !muted ? PALETTE.label : PALETTE.placeholder;
-  const dimOn = !(has && !muted);
-  const at = active ? Math.max(0, Math.min(ansi.codePointIndex(shown, caret), has ? len : 0)) : 0;
+  const color = has && !muted ? PALETTE.label : (emptyActive ? PALETTE.label : PALETTE.placeholder);
+  const dimOn = !(has && !muted) && !emptyActive;
+  const at = active
+    ? Math.max(0, Math.min(ansi.codePointIndex(shown, caret), emptyActive ? len : (has ? len : 0)))
+    : 0;
 
   let cells = chars.slice();
   let caretCell = -1; // code-point index of the block-caret cell, -1 when none

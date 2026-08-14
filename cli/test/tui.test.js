@@ -113,7 +113,7 @@ test('landing frame: contains title, option and hint with art glyphs intact', ()
   assert.equal(frame.height, tier.art.length + landing.LOGO_PADDING);
   assert.equal(frame.originX, Math.floor((100 - frame.width) / 2));
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r16/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r17/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
   // The braille glyphs themselves must be preserved exactly.
@@ -202,7 +202,7 @@ test('composeFrame: writes full-width rows without eraseLine', () => {
 test('composeFrame: content is written on each line', () => {
   const out = app.composeFrame(80, 24, 0);
   const plain = ansi.stripAnsi(out.replace(/\u001b\[\d+;\d+H/g, ''));
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r16/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r17/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
 });
@@ -222,7 +222,7 @@ test('splash screen paints a themed canvas with a loading label', () => {
   const lines = app.splashScreenLines(80, 24, 'dark', 'Loading…', 0);
   assert.equal(lines.length, 24);
   const plain = lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r16'));
+  assert.ok(plain.includes('GChat CLI 0.1 r17'));
   assert.ok(plain.includes('Loading'));
   assert.ok(lines.join('').includes(ansi.bg(theme.DARK.canvas)));
 });
@@ -661,7 +661,7 @@ test('codePointIndex and stepCodePoint do not split emoji', () => {
 test('chat frame: sidebar, channels, composer, and messages', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState());
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r16'), 'sidebar title is the CLI version');
+  assert.ok(plain.includes('GChat CLI 0.1 r17'), 'sidebar title is the CLI version');
   assert.ok(!plain.includes('chats\n') && !/^\s*chats\s*$/m.test(plain.split('\n')[0]), 'old "chats" label is gone');
   assert.ok(plain.includes('team'), 'active group in sidebar');
   assert.ok(!plain.includes('●'), 'groups are not indented with a bullet');
@@ -739,6 +739,36 @@ test('wrapText wraps on word boundaries and hard-breaks long tokens', () => {
   assert.deepEqual(chatLayout.wrapText('hello world', 8), ['hello ', 'world']);
   const long = chatLayout.wrapText('abcdefghij', 4);
   assert.deepEqual(long, ['abcd', 'efgh', 'ij']);
+});
+
+test('wrapIndexed keeps blank and space-only lines', () => {
+  const lines = chatLayout.wrapIndexed('ddd\n\n\nddd', 40);
+  assert.equal(lines.length, 4);
+  assert.equal(lines[0].text, 'ddd');
+  assert.equal(lines[1].text, '');
+  assert.equal(lines[2].text, '');
+  assert.equal(lines[3].text, 'ddd');
+  const spaces = chatLayout.wrapIndexed('   ', 40);
+  assert.equal(spaces.length, 1);
+  assert.equal(spaces[0].text, '   ');
+});
+
+test('composer caret stays visible on blank lines', () => {
+  const blank = chatLayout.buildChatFrame(80, 24, chatState({
+    composer: '\n\n',
+    composerCaret: 1,
+  }));
+  assert.ok(blank.lines.join('').includes('█'), 'caret shows on a blank-only composer');
+  const mid = chatLayout.buildChatFrame(80, 24, chatState({
+    composer: 'ddd\n\n\nddd',
+    composerCaret: 4,
+  }));
+  assert.ok(mid.lines.join('').includes('█'), 'caret shows on a newline between paragraphs');
+  const spaces = chatLayout.buildChatFrame(80, 24, chatState({
+    composer: '   ',
+    composerCaret: 3,
+  }));
+  assert.ok(spaces.lines.join('').includes('█'), 'caret shows after spaces');
 });
 
 test('formatBytes and formatTime are bounded and readable', () => {
@@ -1125,6 +1155,20 @@ test('group load hides the channel bar behind the bird', () => {
   assert.ok(chatLayout.hideChannelBar({ activeGroupId: 'g1', loadingGroup: true }));
 });
 
+test('isAltBackspace recognizes Option/Ctrl-W word-delete encodings', () => {
+  assert.equal(ansi.isAltBackspace('\u001b\u007f'), true);
+  assert.equal(ansi.isAltBackspace('\u0017'), true);
+});
+
+test('light-theme idle bird is pale enough for the shimmer to read', () => {
+  const [lr, lg, lb] = ansi.hexToRgb(theme.LIGHT.artIdle);
+  const [hr, hg, hb] = ansi.hexToRgb(theme.LIGHT.artHot);
+  const idleLum = lr + lg + lb;
+  const hotLum = hr + hg + hb;
+  assert.ok(idleLum > 360, 'idle is a light gray on the white canvas');
+  assert.ok(idleLum - hotLum > 200, 'shimmer has a wide dark swing');
+});
+
 test('isAltEnter and isShiftEnter recognize modified Enter encodings', () => {
   assert.equal(ansi.isAltEnter('\u001b\r'), true);
   assert.equal(ansi.isAltEnter('\u001b[13;3u'), true);
@@ -1314,6 +1358,53 @@ test('chat start paints chrome before groups or the socket return', async () => 
   assert.equal(connected, false, 'socket is not awaited before the first paint');
   await started;
   assert.equal(listed, true);
+});
+
+test('a later group click discards a slower earlier load', async () => {
+  let finishSlow;
+  const slow = new Promise((resolve) => { finishSlow = resolve; });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-race-'));
+  const chat = createChatController({
+    client: {
+      user: { id: 'me', username: 'will' },
+      listGroups: async () => [{ id: 'a', name: 'alpha' }, { id: 'b', name: 'beta' }],
+      listMembers: async () => [],
+      openGroup: async (id) => {
+        if (String(id) === 'a') {
+          await slow;
+          return { messages: [{ id: 'stale', senderId: 'ada', senderName: 'ada', type: 'text', createdAt: '2026-08-13T10:00:00.000Z' }] };
+        }
+        return { messages: [{ id: 'fresh', senderId: 'ada', senderName: 'ada', type: 'text', createdAt: '2026-08-13T10:01:00.000Z' }] };
+      },
+      connectSocket: async () => {},
+      disconnectSocket: () => {},
+      setActiveGroup: () => {},
+      switchChannel: (_g, name) => name,
+      markRead: () => {},
+      getSecret: () => 'secret',
+      emitTyping: () => {},
+      logout: async () => {},
+    },
+    paths: configPaths(dir),
+    stdout: { write() {}, columns: 80, rows: 24 },
+    getSize: () => ({ cols: 80, rows: 24 }),
+  });
+  chat.state.groups = [{ id: 'a', name: 'alpha' }, { id: 'b', name: 'beta' }];
+  const first = chat.loadGroup({ id: 'a', name: 'alpha' });
+  await chat.loadGroup({ id: 'b', name: 'beta' });
+  finishSlow({ messages: [{ id: 'stale' }] });
+  await first;
+  assert.equal(String(chat.state.activeGroupId), 'b');
+  assert.ok(!chat.state.messages.some((m) => String(m.msg?.id) === 'stale'));
+});
+
+test('up and down move the composer caret across wrapped lines', () => {
+  const chat = makeController({ composer: 'one\ntwo\nthree', composerCaret: 0 });
+  chat.draw();
+  chat.pushInput('\u001b[B');
+  assert.ok(chat.state.composerCaret >= 4, 'down moves onto the next composer line');
+  chat.pushInput('\u001b[A');
+  assert.ok(chat.state.composerCaret < 4, 'up returns to the previous composer line');
 });
 
 test('startup does not open the first group', async () => {

@@ -42,6 +42,7 @@ const SCROLLBAR_W = 1;
 const WHEEL_LINES = 1;
 const FIELD_CARET = '█';
 const TRANSITION_MS = 480;
+const BIRD_FLIGHT_MS = 560;
 const CHANNEL_EXPAND_FRAMES = 8;
 const PROFILE_FRAMES = 8;
 const HISTORY_PAGE = 50;
@@ -64,6 +65,7 @@ const DEFAULT_CHAT = {
   composer: '',
   composerCaret: 0,
   composerScroll: 0,
+  birdFlight: null,
   replyTo: null,
   editingId: null,
   status: '',
@@ -229,13 +231,11 @@ function wrapIndexed(text, width) {
         continue;
       }
       if (lineW + tokenW > max && line) flush();
-      if (!(/^\s+$/.test(token) && !line)) {
-        line += token;
-        lineW += tokenW;
-      }
+      line += token;
+      lineW += tokenW;
       consumed += token.length;
     }
-    if (line || lines.length === 0) lines.push({ start: lineStart, text: line });
+    lines.push({ start: lineStart, text: line });
     i = paraEnd;
     if (nl !== -1) i += 1;
     else break;
@@ -907,27 +907,68 @@ function buildChannelBar(state, width, originX, originY) {
   return { lines, hits };
 }
 
-function buildBirdLines(width, height, frame, animate = true) {
-  const tier = (() => {
-    for (const candidate of landing.LOGO_TIERS) {
-      const w = Math.max(...candidate.art.map((line) => ansi.width(line)));
-      if (w <= Math.max(1, width - 2) && candidate.art.length <= Math.max(1, height - 2)) {
-        return candidate;
-      }
+function pickBirdTier(width, height) {
+  for (const candidate of landing.LOGO_TIERS) {
+    const w = Math.max(...candidate.art.map((line) => ansi.width(line)));
+    if (w <= Math.max(1, width - 2) && candidate.art.length <= Math.max(1, height - 2)) {
+      return candidate;
     }
-    return landing.LOGO_TIERS[landing.LOGO_TIERS.length - 1];
-  })();
+  }
+  return landing.LOGO_TIERS[landing.LOGO_TIERS.length - 1];
+}
+
+function buildBirdLines(width, height, frame, animate = true, origin = null) {
+  const tier = pickBirdTier(width, height);
   const artW = Math.max(...tier.art.map((line) => ansi.width(line)));
-  const left = Math.max(0, Math.floor((width - artW) / 2));
-  const top = Math.max(0, Math.floor((height - tier.art.length) / 2));
+  const left = origin && Number.isFinite(origin.x)
+    ? Math.round(origin.x)
+    : Math.max(0, Math.floor((width - artW) / 2));
+  const top = origin && Number.isFinite(origin.y)
+    ? Math.round(origin.y)
+    : Math.max(0, Math.floor((height - tier.art.length) / 2));
   const lines = Array.from({ length: height }, () => fillRow('', width, {}));
   tier.art.forEach((artLine, row) => {
     const y = top + row;
     if (y < 0 || y >= height) return;
+    const x = Math.max(0, left);
     const styled = landing.styleArtLine(artLine, row, frame, animate ? landing.BIRD_SHIMMER : false);
-    lines[y] = `${' '.repeat(left)}${styled}${' '.repeat(Math.max(0, width - left - ansi.width(artLine)))}`;
+    const lead = ' '.repeat(x);
+    const tail = ' '.repeat(Math.max(0, width - x - ansi.width(artLine)));
+    lines[y] = `${lead}${styled}${tail}`;
   });
   return lines;
+}
+
+function idleBirdOrigin(cols, rows, state = DEFAULT_CHAT) {
+  const width = Math.max(1, cols);
+  const height = Math.max(1, rows);
+  const sideW = sidebarWidth(width);
+  const mainX = sideW > 0 ? sideW + 1 : 0;
+  const contentW = Math.max(1, width - mainX - SCROLLBAR_W);
+  const hideBar = hideChannelBar(state);
+  const hideComp = !showComposer(state);
+  const composerH = hideComp ? 0 : COMPOSER_MIN_INNER + 4;
+  const birdH = hideBar ? height - composerH : Math.max(1, height - CHANNEL_ROWS - composerH);
+  const tier = pickBirdTier(contentW, birdH);
+  const artW = Math.max(...tier.art.map((line) => ansi.width(line)));
+  const artH = tier.art.length;
+  const left = Math.max(0, Math.floor((contentW - artW) / 2));
+  const top = Math.max(0, Math.floor((birdH - artH) / 2));
+  const yShift = hideBar ? CHANNEL_ROWS : 0;
+  return { x: mainX + left, y: top - yShift, artW, artH };
+}
+
+function birdFlightPlacement(state, cols, rows) {
+  const flight = state && state.birdFlight;
+  if (!flight) return null;
+  const raw = Math.min(1, Math.max(0, (Date.now() - Number(flight.at || 0)) / Math.max(1, Number(flight.ms) || BIRD_FLIGHT_MS)));
+  const eased = 1 - (1 - raw) * (1 - raw);
+  return {
+    x: Number(flight.fromX) + (Number(flight.toX) - Number(flight.fromX)) * eased,
+    y: Number(flight.fromY) + (Number(flight.toY) - Number(flight.fromY)) * eased,
+    progress: raw,
+    done: raw >= 1,
+  };
 }
 
 function scrollbarThumb(trackH, total, view, offset) {
@@ -1135,6 +1176,7 @@ function buildComposerBox(state, width, metrics) {
       width: metrics.textW,
       caret: onLine ? (placeholderOnly ? 0 : metrics.caretAt) : 0,
       bar: 0,
+      blankLine: !placeholderOnly && !(entry.text || ''),
     });
     const thumb = metrics.overflow ? paintScrollbarCell(bar[i]) : ' ';
     lines.push(boxRow(painted + thumb, width, color));
@@ -1242,12 +1284,17 @@ function buildChatFrameNow(cols, rows, state) {
   const selectedBounds = selectedId ? findMessageBounds(flat, selectedId) : null;
   const bird = showBird(state);
   const birdH = hideBar && bird ? composerY : transcriptH;
+  const flight = bird ? birdFlightPlacement(state, width, height) : null;
+  const birdOrigin = flight && !flight.done
+    ? { x: flight.x - mainX, y: flight.y + (hideBar ? CHANNEL_ROWS : 0) }
+    : null;
   const birdLines = bird
     ? buildBirdLines(
       contentW,
       birdH,
-      birdAnimated(state) ? (state.animFrame || 0) : 0,
-      birdAnimated(state)
+      (birdAnimated(state) || birdOrigin) ? (state.animFrame || 0) : 0,
+      !!(birdAnimated(state) || birdOrigin),
+      birdOrigin
     )
     : null;
   const bar = scrollbarGlyphs(transcriptH, bird ? 0 : totalLines, transcriptH, offset);
@@ -1525,6 +1572,7 @@ module.exports = {
   SCROLLBAR_W,
   WHEEL_LINES,
   TRANSITION_MS,
+  BIRD_FLIGHT_MS,
   GLIMMER,
   PROFILE_NAME_OFFSET,
   PROFILE_LIFT,
@@ -1561,6 +1609,8 @@ module.exports = {
   buildComposerHint,
   composerMetrics,
   buildBirdLines,
+  idleBirdOrigin,
+  birdFlightPlacement,
   nameColor,
   hashNameColor,
   buildChatFrame,

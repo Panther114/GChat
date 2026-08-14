@@ -82,6 +82,20 @@ function yieldPaint() {
  * Themed boot splash: canvas + bird + version + Loading…
  * Painted before any network or heavy require so the TTY is never empty.
  */
+function splashBirdOrigin(cols, rows) {
+  const width = Math.max(1, cols);
+  const height = Math.max(1, rows);
+  const tier = selectTier(width, height);
+  const artW = Math.max(...tier.art.map((line) => ansi.width(line)));
+  const blockH = tier.art.length + 3;
+  return {
+    x: Math.max(0, Math.floor((width - artW) / 2)),
+    y: Math.max(0, Math.floor((height - blockH) / 2)),
+    artW,
+    artH: tier.art.length,
+  };
+}
+
 function splashScreenLines(cols, rows, theme, label, animFrame = 0) {
   return runWithTheme(theme, () => {
     const width = Math.max(1, cols);
@@ -436,7 +450,8 @@ async function runTui(options = {}) {
       onLogout: returnToLogin,
       painter,
     });
-    await chat.start();
+    const { cols, rows } = terminalSize();
+    await chat.start({ birdFrom: splashBirdOrigin(cols, rows) });
   }
 
   /** After a successful login, hand off to the chat screen. */
@@ -576,6 +591,7 @@ module.exports = {
   composeFrame,
   landingScreenLines,
   splashScreenLines,
+  splashBirdOrigin,
   yieldPaint,
   redrawRequired,
 };

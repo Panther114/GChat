@@ -89,7 +89,7 @@ const LIGHT = Object.freeze({
   thumb: '#8c959f',
   faint: '#afb8c1',
   caretLetter: '#ffffff',
-  artIdle: '#8c959f',
+  artIdle: '#d0d7de',
   artHot: '#1f2328',
   logoutHot: '#a40e26',
   theme: '#0969da',

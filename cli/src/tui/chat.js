@@ -25,6 +25,9 @@ const {
   PROFILE_FRAMES,
   HISTORY_PAGE,
   SCROLL_TWEEN_MS,
+  BIRD_FLIGHT_MS,
+  idleBirdOrigin,
+  composerMetrics,
   offsetToShowMessage,
   nameColor,
   hashNameColor,
@@ -80,6 +83,8 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
   let coalesceTimer = null;
   let allowAutoLoad = true;
   let draggingScroll = null;
+  let draggingComposer = null;
+  let groupLoadSeq = 0;
   let channelDrag = null;
   let typingTimer = null;
   let typingSent = false;
@@ -97,6 +102,9 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
   function draw() {
     const { cols, rows } = size();
     lastFrame = buildChatFrame(cols, rows, state);
+    if (lastFrame.composerMetrics) {
+      state.composerScroll = lastFrame.composerMetrics.lineScroll;
+    }
     if (stdout) {
       const bytes = screen.paintRaw(lastFrame.lines, cols, rows, { theme: state.theme });
       if (bytes) stdout.write(bytes);
@@ -130,6 +138,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     if (state.overlay && state.overlay.type === 'delete') return true;
     if (state.loadingMore) return true;
     if (state.scrollTween) return true;
+    if (state.birdFlight) return true;
     if (state.hoverLogout && (state.profileOpen || state.profileExpandFrame)) return true;
     if (state.hoverTheme && (state.profileOpen || state.profileExpandFrame)) return true;
     if (state.profileClosing && (state.profileExpandFrame || 0) > 0) return true;
@@ -150,6 +159,12 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       }
       if (state.typing && state.typing.until && Date.now() >= state.typing.until) {
         state.typing = null;
+      }
+      if (state.birdFlight) {
+        const flight = state.birdFlight;
+        if (Date.now() >= Number(flight.at || 0) + Number(flight.ms || BIRD_FLIGHT_MS)) {
+          state.birdFlight = null;
+        }
       }
       if (state.scrollTween) {
         const tween = state.scrollTween;
@@ -244,6 +259,8 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       state.hasMoreHistory = false;
       return;
     }
+    const forGroup = String(state.activeGroupId);
+    const seq = groupLoadSeq;
     state.loadingMore = true;
     startPulse();
     const prevOffset = state.scrollOffset || 0;
@@ -252,9 +269,21 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
         limit: HISTORY_PAGE,
         before: oldest.msg.id,
       });
+      if (seq !== groupLoadSeq || String(state.activeGroupId) !== forGroup) {
+        state.loadingMore = false;
+        return;
+      }
       const incoming = [];
       for (const msg of page || []) {
+        if (seq !== groupLoadSeq || String(state.activeGroupId) !== forGroup) {
+          state.loadingMore = false;
+          return;
+        }
         incoming.push(await decorate(msg, state.activeGroupId));
+      }
+      if (seq !== groupLoadSeq || String(state.activeGroupId) !== forGroup) {
+        state.loadingMore = false;
+        return;
       }
       for (const item of incoming) upsertMessage(item);
       state.hasMoreHistory = (page || []).length >= HISTORY_PAGE;
@@ -311,6 +340,8 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
 
   async function loadGroup(group) {
     if (state.overlay && state.overlay.type === 'delete') return;
+    const seq = ++groupLoadSeq;
+    const stillCurrent = () => seq === groupLoadSeq;
     if (!group) {
       state.activeGroupId = null;
       state.messages = [];
@@ -348,11 +379,15 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     draw();
     try {
       const opened = await client.openGroup(group.id);
+      if (!stillCurrent()) return;
       await refreshMemberCount(group.id);
+      if (!stillCurrent()) return;
       const decrypted = [];
       for (const msg of opened.messages || []) {
+        if (!stillCurrent()) return;
         decrypted.push(await decorate(msg, group.id));
       }
+      if (!stillCurrent()) return;
       state.messages = decrypted;
       const prefs = loadPrefs(paths);
       for (const item of decrypted) {
@@ -362,6 +397,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       const nextChannels = listChannels(group.id, paths);
       const nextActive = getActiveChannel(group.id, paths) || 'main';
       await waitTransition();
+      if (!stillCurrent()) return;
       state.channels = nextChannels;
       state.activeChannel = nextActive;
       state.hasMoreHistory = (opened.messages || []).length >= HISTORY_PAGE;
@@ -370,6 +406,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       state.transition = null;
       markVisibleRead();
     } catch (err) {
+      if (!stillCurrent()) return;
       state.loadingGroup = false;
       state.transition = null;
       setError(err.message || String(err));
@@ -446,7 +483,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     }
   }
 
-  async function start() {
+  async function start(opts = {}) {
     running = true;
     state.status = 'connecting';
     state.username = client.user?.username || state.username;
@@ -455,6 +492,18 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     client.onEvent = (event, payload) => {
       handleEvent(event, payload).catch(() => {});
     };
+    if (opts.birdFrom && Number.isFinite(opts.birdFrom.x) && Number.isFinite(opts.birdFrom.y)) {
+      const dest = idleBirdOrigin(size().cols, size().rows, state);
+      state.birdFlight = {
+        fromX: opts.birdFrom.x,
+        fromY: opts.birdFrom.y,
+        toX: dest.x,
+        toY: dest.y,
+        at: Date.now(),
+        ms: BIRD_FLIGHT_MS,
+      };
+      startPulse();
+    }
     // Paint the chat chrome before any network so the TTY is never empty.
     draw();
     try {
@@ -1299,6 +1348,15 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     if (hit && hit.type === 'scrollbar') hit._y = y;
 
     if (mouse.kind === 'wheel') {
+      const comp = lastFrame.regions.composer;
+      const metrics = lastFrame.composerMetrics;
+      if (comp && metrics && metrics.overflow && x >= comp.x && x < comp.x + comp.w && y >= comp.y && y < comp.y + comp.h) {
+        const max = Math.max(0, metrics.total - metrics.innerH);
+        const next = Math.max(0, Math.min(max, (state.composerScroll || 0) + (mouse.wheel < 0 ? -1 : 1)));
+        if (next === (state.composerScroll || 0)) return false;
+        state.composerScroll = next;
+        return true;
+      }
       const region = lastFrame.regions.transcript;
       const bar = lastFrame.regions.scrollbar;
       const over = (region && x >= region.x && x < region.x + region.w && y >= region.y && y < region.y + region.h)
@@ -1312,6 +1370,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
 
     if (mouse.kind === 'release' && mouse.button === 0) {
       draggingScroll = null;
+      draggingComposer = null;
       if (channelDrag) {
         const dragged = channelDrag.moved;
         const name = channelDrag.name;
@@ -1327,6 +1386,18 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       if (Math.abs(x - channelDrag.startX) >= 2) {
         channelDrag.moved = true;
         reorderChannelsByX(x);
+        return true;
+      }
+      return false;
+    }
+
+    if (mouse.kind === 'move' && draggingComposer) {
+      const metrics = lastFrame.composerMetrics;
+      const region = lastFrame.regions.composer;
+      if (metrics && region) {
+        const max = Math.max(0, metrics.total - metrics.innerH);
+        const t = region.h <= 1 ? 0 : Math.max(0, Math.min(1, (y - region.y) / Math.max(1, region.h - 1)));
+        state.composerScroll = Math.round(t * max);
         return true;
       }
       return false;
@@ -1361,6 +1432,17 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     }
 
     if (mouse.kind === 'press' && mouse.button === 0) {
+      if (hit && hit.type === 'composer-scrollbar') {
+        const metrics = lastFrame.composerMetrics;
+        const region = lastFrame.regions.composer;
+        if (metrics && region) {
+          const max = Math.max(0, metrics.total - metrics.innerH);
+          const t = region.h <= 1 ? 0 : Math.max(0, Math.min(1, (y - region.y) / Math.max(1, region.h - 1)));
+          state.composerScroll = Math.round(t * max);
+          draggingComposer = true;
+          return true;
+        }
+      }
       if (hit && hit.type === 'scrollbar') {
         const thumb = lastFrame.scrollbarThumb;
         const onThumb = !!(thumb && y >= thumb.y && y < thumb.y + thumb.h);
@@ -1427,6 +1509,41 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       state.composer = state.composer.slice(0, prev) + state.composer.slice(at);
       state.composerCaret = prev;
     }
+  }
+
+  function composerBoxWidth() {
+    if (lastFrame && lastFrame.regions && lastFrame.regions.composer) return lastFrame.regions.composer.w;
+    const cols = size().cols;
+    return Math.max(8, cols - 24);
+  }
+
+  function composerUsesArrows() {
+    if (channelDraftEditing() || state.selectedMessageId) return false;
+    if (!state.activeGroupId || state.transition || state.loadingGroup) return false;
+    if (String(state.composer || '').includes('\n')) return true;
+    const metrics = lastFrame && lastFrame.composerMetrics
+      ? lastFrame.composerMetrics
+      : composerMetrics(state, composerBoxWidth());
+    return (metrics.total || 1) > 1;
+  }
+
+  function moveComposerLine(dir) {
+    const metrics = composerMetrics(state, composerBoxWidth());
+    const lines = metrics.wrapped || [];
+    if (!lines.length) return;
+    const nextLine = Math.max(0, Math.min(lines.length - 1, (metrics.caretLine || 0) + dir));
+    const line = lines[nextLine];
+    if (!line) return;
+    const targetCol = metrics.caretCol || 0;
+    let i = 0;
+    let used = 0;
+    for (const ch of String(line.text || '')) {
+      const w = ansi.charWidth(ch);
+      if (used + w > targetCol) break;
+      used += w;
+      i += ch.length;
+    }
+    state.composerCaret = (line.start || 0) + i;
   }
 
   function moveComposer(delta) {
@@ -1537,10 +1654,12 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
           else moveComposer(count);
         } else if (motion[2] === 'A') {
           if (channelDraftEditing()) { /* stay in the chip */ }
+          else if (composerUsesArrows()) moveComposerLine(-1);
           else if (state.selectedMessageId && !state.overlay) moveSelection(-1);
           else applyScroll(1);
         } else if (motion[2] === 'B') {
           if (channelDraftEditing()) { /* stay in the chip */ }
+          else if (composerUsesArrows()) moveComposerLine(1);
           else if (state.selectedMessageId && !state.overlay) moveSelection(1);
           else applyScroll(-1);
         }
@@ -1669,6 +1788,11 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     }
     if (ch === '\u007f' || ch === '\b') {
       backspaceComposer();
+      draw();
+      return;
+    }
+    if (ch === '\u0017') {
+      deleteWord();
       draw();
       return;
     }
