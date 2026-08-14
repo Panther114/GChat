@@ -32,9 +32,10 @@ const {
   nameColor,
   hashNameColor,
   WHEEL_LINES,
+  sensitivityFromX,
 } = require('./chat-layout');
 const { looksLikeImagePath, readClipboardImage } = require('./clipboard-image');
-const { loadConfig, setConfigKey } = require('../store/config');
+const { loadConfig, setConfigKey, normalizeScrollSensitivity } = require('../store/config');
 const { normalizeTheme, nextTheme } = require('./theme');
 const { createScreenPainter } = require('./paint');
 const {
@@ -63,12 +64,13 @@ function defaultChatState(over = {}) {
 }
 
 function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, onLogout, painter } = {}) {
-  const storedTheme = paths ? loadConfig(paths).theme : 'dark';
+  const stored = paths ? loadConfig(paths) : {};
   const state = defaultChatState({
     username: client?.user?.username || '',
     userId: client?.user?.id || null,
     status: 'connecting',
-    theme: normalizeTheme(storedTheme),
+    theme: normalizeTheme(stored.theme),
+    scrollSensitivity: normalizeScrollSensitivity(stored.scrollSensitivity),
   });
 
   let lastFrame = null;
@@ -84,6 +86,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
   let allowAutoLoad = true;
   let draggingScroll = null;
   let draggingComposer = null;
+  let draggingSensitivity = null;
   let selectMode = false;
   let textDrag = null;
   let groupLoadSeq = 0;
@@ -146,6 +149,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     if (state.birdFlight) return true;
     if (state.hoverLogout && (state.profileOpen || state.profileExpandFrame)) return true;
     if (state.hoverTheme && (state.profileOpen || state.profileExpandFrame)) return true;
+    if (state.hoverSensitivity && (state.profileOpen || state.profileExpandFrame)) return true;
     if (state.profileClosing && (state.profileExpandFrame || 0) > 0) return true;
     if (state.profileOpen && (state.profileExpandFrame || 0) < PROFILE_FRAMES) return true;
     if (state.channelClosing && (state.channelExpandFrame || 0) > 0) return true;
@@ -681,6 +685,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       || state.hoverChannel
       || state.hoverLogout
       || state.hoverTheme
+      || state.hoverSensitivity
       || state.hoverReply
     );
     if (!had && lastHoverKey === '') return false;
@@ -689,6 +694,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     state.hoverChannel = null;
     state.hoverLogout = false;
     state.hoverTheme = false;
+    state.hoverSensitivity = false;
     state.hoverReply = false;
     lastHoverKey = '';
     return had;
@@ -708,8 +714,9 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       : null;
     const nextLogout = !!(hit && hit.type === 'logout');
     const nextThemeHit = !!(hit && hit.type === 'theme');
+    const nextSensitivity = !!(hit && hit.type === 'sensitivity');
     const nextReply = !!(hit && hit.type === 'reply-ref');
-    const key = `${nextId || ''}:${nextAction || ''}:${nextChannel || ''}:${nextLogout ? 'out' : ''}:${nextThemeHit ? 'theme' : ''}:${nextReply ? 'reply' : ''}`;
+    const key = `${nextId || ''}:${nextAction || ''}:${nextChannel || ''}:${nextLogout ? 'out' : ''}:${nextThemeHit ? 'theme' : ''}:${nextSensitivity ? 'sens' : ''}:${nextReply ? 'reply' : ''}`;
     if (key === lastHoverKey) return false;
     lastHoverKey = key;
     state.hoverMessageId = nextId;
@@ -717,6 +724,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     state.hoverChannel = nextChannel;
     state.hoverLogout = nextLogout;
     state.hoverTheme = nextThemeHit;
+    state.hoverSensitivity = nextSensitivity;
     state.hoverReply = nextReply;
     if (nextLogout || nextThemeHit) startPulse();
     return true;
@@ -782,6 +790,21 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       if (paths) setConfigKey('theme', state.theme, paths);
     } catch {
       /* keep the in-session switch even if config cannot be written */
+    }
+  }
+
+  function applySensitivityHit(hit, x) {
+    const next = sensitivityFromX(x, hit);
+    if (next === state.scrollSensitivity) return false;
+    state.scrollSensitivity = next;
+    return true;
+  }
+
+  function persistSensitivity() {
+    try {
+      if (paths) setConfigKey('scrollSensitivity', state.scrollSensitivity, paths);
+    } catch {
+      /* keep the in-session value even if config cannot be written */
     }
   }
 
@@ -1227,6 +1250,9 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       toggleTheme();
       return;
     }
+    if (hit.type === 'sensitivity') {
+      return;
+    }
     if (hit.type === 'reply-ref') {
       beginScrollToMessage(hit.id);
       return;
@@ -1371,13 +1397,18 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       const over = (region && x >= region.x && x < region.x + region.w && y >= region.y && y < region.y + region.h)
         || (bar && x >= bar.x && x < bar.x + bar.w && y >= bar.y && y < bar.y + bar.h);
       if (over) {
-        applyScroll(mouse.wheel < 0 ? WHEEL_LINES : -WHEEL_LINES);
+        const step = Math.max(1, Number(state.scrollSensitivity) || WHEEL_LINES);
+        applyScroll(mouse.wheel < 0 ? step : -step);
         return true;
       }
       return false;
     }
 
     if (mouse.kind === 'release' && mouse.button === 0) {
+      if (draggingSensitivity) {
+        persistSensitivity();
+        draggingSensitivity = null;
+      }
       draggingScroll = null;
       draggingComposer = null;
       textDrag = null;
@@ -1412,6 +1443,11 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
         return true;
       }
       return false;
+    }
+
+    if (mouse.kind === 'move' && draggingSensitivity) {
+      const hit = (lastFrame && lastFrame.hits.find((h) => h.type === 'sensitivity')) || draggingSensitivity;
+      return applySensitivityHit(hit, x);
     }
 
     if (mouse.kind === 'move' && draggingScroll) {
@@ -1470,6 +1506,11 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       } else {
         textDrag = null;
         setSelectMode(false);
+      }
+      if (hit && hit.type === 'sensitivity') {
+        applySensitivityHit(hit, x);
+        draggingSensitivity = hit;
+        return true;
       }
       if (hit && hit.type === 'scrollbar') {
         const thumb = lastFrame.scrollbarThumb;

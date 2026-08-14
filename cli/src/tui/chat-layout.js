@@ -44,14 +44,15 @@ const FIELD_CARET = '█';
 const TRANSITION_MS = 480;
 const BIRD_FLIGHT_MS = landing.BIRD_FLIGHT_MS;
 const CHANNEL_EXPAND_FRAMES = 8;
-const PROFILE_FRAMES = 8;
+const PROFILE_FRAMES = 18;
 const HISTORY_PAGE = 50;
 const SCROLL_TWEEN_MS = 220;
 const GLIMMER = landing.TEXT_SHIMMER;
 const PROFILE_NAME_OFFSET = 3;
-/** Closed: rule + blank + name. Open: rule + pad + logout box + gap + theme box + pad + name. */
-const PROFILE_LIFT = 8;
 const PROFILE_BUTTON_ROWS = 3;
+const PROFILE_BUTTON_COUNT = 3;
+/** Closed: rule + blank + name. Open: rule + pad + three stacked boxes + pad + name. */
+const PROFILE_LIFT = 1 + PROFILE_BUTTON_COUNT * PROFILE_BUTTON_ROWS;
 
 const DEFAULT_CHAT = {
   groups: [],
@@ -97,7 +98,9 @@ const DEFAULT_CHAT = {
   profileExpandFrame: 0,
   hoverLogout: false,
   hoverTheme: false,
+  hoverSensitivity: false,
   theme: 'dark',
+  scrollSensitivity: 1,
   hoverReply: false,
   scrollTween: null,
   memberCount: 0,
@@ -613,6 +616,26 @@ function profileProgress(state) {
   return Math.min(1, Math.max(0, frame / frames));
 }
 
+function profileEase(state) {
+  return landing.easeOutCubic(profileProgress(state));
+}
+
+function profileLineFade(ease, lineIndex, lineCount = PROFILE_BUTTON_COUNT * PROFILE_BUTTON_ROWS) {
+  const count = Math.max(1, lineCount);
+  const start = (lineIndex / count) * 0.72;
+  const span = 0.28;
+  const raw = Math.min(1, Math.max(0, (ease - start) / span));
+  return landing.easeOutCubic(raw);
+}
+
+function sensitivityFromX(x, hit) {
+  if (!hit) return 1;
+  const w = Math.max(1, Number(hit.w) || 1);
+  const rel = Number(x) - Number(hit.x || 0);
+  const t = Math.max(0, Math.min(1, rel / Math.max(1, w - 1)));
+  return 1 + Math.round(t * 19);
+}
+
 function paintStripeLabel(text, frame, hover, idleColor, hotColor) {
   if (!hover) return `${ansi.fg(idleColor)}${text}${ansi.reset()}`;
   return pulseText(text, frame, hotColor, idleColor);
@@ -626,18 +649,67 @@ function insetSidebarRow(label, width, inset, opts = {}) {
   return `${fillRow('', pad, {})}${inner}${fillRow('', pad, {})}`;
 }
 
-function paintOutlinedButton(label, width, inset, frame, hover, idleFg, hotFg) {
+function fadeHex(target, fade) {
+  const t = Math.min(1, Math.max(0, Number(fade) || 0));
+  if (t <= 0) return PALETTE.canvas;
+  if (t >= 1) return target;
+  return landing.lerpHex(PALETTE.canvas, target, t);
+}
+
+function paintButtonLabel(word, innerW, frame, hover, fade, idleFg, hotFg) {
+  const label = String(word || '');
+  const padL = 1;
+  const room = Math.max(0, innerW - padL);
+  const shown = ansi.width(label) > room ? ansi.stripAnsi(ansi.truncate(label, room)) : label;
+  const color = hover ? (hotFg || idleFg) : idleFg;
+  let body;
+  if (hover && fade >= 1) body = pulseText(shown, frame, hotFg || color, idleFg);
+  else body = `${ansi.fg(fadeHex(color, fade))}${shown}${ansi.reset()}`;
+  const tail = ' '.repeat(Math.max(0, innerW - padL - ansi.width(shown)));
+  return `${' '.repeat(padL)}${body}${tail}`;
+}
+
+function paintFillTrack(innerW, value, fade) {
+  const trackW = Math.max(1, innerW);
+  const n = Math.max(1, Math.min(20, Math.round(Number(value) || 1)));
+  const filled = Math.max(1, Math.round((n / 20) * trackW));
+  const rest = Math.max(0, trackW - filled);
+  const on = fadeHex(PALETTE.thumb, fade);
+  const off = fadeHex(PALETTE.track, fade);
+  return `${ansi.bg(on)}${' '.repeat(filled)}${ansi.reset()}${ansi.bg(off)}${' '.repeat(rest)}${ansi.reset()}`;
+}
+
+function paintOutlinedButton({
+  label,
+  width,
+  inset,
+  frame,
+  hover,
+  idleFg,
+  hotFg,
+  fades = [1, 1, 1],
+  fillValue = null,
+}) {
   const pad = Math.max(0, Number(inset) || 0);
   const boxW = Math.max(3, width - pad * 2);
-  const outline = hover ? (hotFg || PALETTE.outlineStrong) : (idleFg || PALETTE.outline);
-  const fill = hover ? PALETTE.selectedBg : null;
-  const caption = padCells(` ${String(label || '').replace(/^\s+/, '')}`, Math.max(1, boxW - 2));
-  const styled = paintStripeLabel(caption, frame, hover, idleFg, hotFg);
+  const innerW = Math.max(1, boxW - 2);
+  const outlineTarget = hover ? (idleFg || PALETTE.outline) : PALETTE.outline;
   const side = fillRow('', pad, {});
+  const blank = fillRow('', width, {});
+  const line = (kind, fade, inner) => {
+    if (!(fade > 0)) return blank;
+    const outline = fadeHex(outlineTarget, fade);
+    if (kind === 'top') return `${side}${boxTop(boxW, outline)}${side}`;
+    if (kind === 'bot') return `${side}${boxBottom(boxW, outline)}${side}`;
+    return `${side}${boxRow(inner, boxW, outline)}${side}`;
+  };
+  const midInner = fillValue != null
+    ? paintFillTrack(innerW, fillValue, fades[1] || 0)
+    : paintButtonLabel(label, innerW, frame, hover, fades[1] || 0, idleFg, hotFg);
   return {
-    top: `${side}${boxTop(boxW, outline, fill)}${side}`,
-    mid: `${side}${boxRow(styled, boxW, outline, fill)}${side}`,
-    bot: `${side}${boxBottom(boxW, outline, fill)}${side}`,
+    top: line('top', fades[0] || 0),
+    mid: line('mid', fades[1] || 0, midInner),
+    bot: line('bot', fades[2] || 0),
   };
 }
 
@@ -652,13 +724,13 @@ function buildSidebar(state, width, height, nameY = null) {
   const inset = Math.min(2, PAD);
   lines.push(fillRow(`${' '.repeat(inset)}${sidebarTitle()}`, width, { fg: PALETTE.muted }));
   const list = state.groups || [];
-  const progress = profileProgress(state);
-  const eased = 1 - (1 - progress) * (1 - progress);
+  const eased = profileEase(state);
   const extra = Math.round(PROFILE_LIFT * eased);
   const profileNameY = Math.max(2, Math.min(height - 1, nameY == null ? profileNameRow(height) : nameY));
   const barY = Math.max(1, profileNameY - 2 - extra);
   const logoutTop = extra >= 4 ? barY + 2 : -1;
-  const themeTop = extra >= PROFILE_LIFT && logoutTop >= 0 ? logoutTop + PROFILE_BUTTON_ROWS + 1 : -1;
+  const themeTop = extra >= 4 + PROFILE_BUTTON_ROWS && logoutTop >= 0 ? logoutTop + PROFILE_BUTTON_ROWS : -1;
+  const sensTop = extra >= 4 + PROFILE_BUTTON_ROWS * 2 && themeTop >= 0 ? themeTop + PROFILE_BUTTON_ROWS : -1;
   lines.push(fillRow('', width, {}));
   let y = 2;
   for (let i = 0; i < list.length && y < barY; i += 1) {
@@ -690,38 +762,49 @@ function buildSidebar(state, width, height, nameY = null) {
   lines[barY] = fillRow('─'.repeat(Math.max(0, width)), width, { fg: PALETTE.rule });
   hits.push({ type: 'profile', x: 0, y: barY, w: width, h: 1 });
   const covered = new Set();
-  if (logoutTop >= 0 && logoutTop + PROFILE_BUTTON_ROWS <= height) {
-    const box = paintOutlinedButton(
-      'Log out', width, inset, state.animFrame || 0, !!state.hoverLogout, PALETTE.error, PALETTE.logoutHot
-    );
-    lines[logoutTop] = box.top;
-    lines[logoutTop + 1] = box.mid;
-    lines[logoutTop + 2] = box.bot;
-    hits.push({
-      type: 'logout',
-      x: inset,
-      y: logoutTop,
-      w: Math.max(1, width - inset * 2),
-      h: PROFILE_BUTTON_ROWS,
+  const placeButton = (top, type, opts, fadeStart) => {
+    if (top < 0 || top + PROFILE_BUTTON_ROWS > height) return;
+    const fades = [0, 1, 2].map((i) => profileLineFade(eased, fadeStart + i));
+    const box = paintOutlinedButton({
+      width,
+      inset,
+      frame: state.animFrame || 0,
+      fades,
+      ...opts,
     });
-    covered.add(logoutTop).add(logoutTop + 1).add(logoutTop + 2);
-  }
-  if (themeTop >= 0 && themeTop + PROFILE_BUTTON_ROWS <= height) {
-    const box = paintOutlinedButton(
-      'Theme', width, inset, state.animFrame || 0, !!state.hoverTheme, PALETTE.theme, PALETTE.themeHot
-    );
-    lines[themeTop] = box.top;
-    lines[themeTop + 1] = box.mid;
-    lines[themeTop + 2] = box.bot;
-    hits.push({
-      type: 'theme',
-      x: inset,
-      y: themeTop,
-      w: Math.max(1, width - inset * 2),
-      h: PROFILE_BUTTON_ROWS,
-    });
-    covered.add(themeTop).add(themeTop + 1).add(themeTop + 2);
-  }
+    lines[top] = box.top;
+    lines[top + 1] = box.mid;
+    lines[top + 2] = box.bot;
+    if (fades.some((f) => f > 0.45)) {
+      hits.push({
+        type,
+        x: inset,
+        y: top,
+        w: Math.max(1, width - inset * 2),
+        h: PROFILE_BUTTON_ROWS,
+      });
+    }
+    covered.add(top).add(top + 1).add(top + 2);
+  };
+  placeButton(logoutTop, 'logout', {
+    label: 'Log out',
+    hover: !!state.hoverLogout,
+    idleFg: PALETTE.error,
+    hotFg: PALETTE.logoutHot,
+  }, 0);
+  placeButton(themeTop, 'theme', {
+    label: 'Theme',
+    hover: !!state.hoverTheme,
+    idleFg: PALETTE.theme,
+    hotFg: PALETTE.themeHot,
+  }, PROFILE_BUTTON_ROWS);
+  placeButton(sensTop, 'sensitivity', {
+    label: '',
+    hover: !!state.hoverSensitivity,
+    idleFg: PALETTE.thumb,
+    hotFg: PALETTE.outlineStrong,
+    fillValue: state.scrollSensitivity,
+  }, PROFILE_BUTTON_ROWS * 2);
   for (let py = barY + 1; py < profileNameY; py += 1) {
     if (covered.has(py)) continue;
     hits.push({ type: 'profile', x: 0, y: py, w: width, h: 1 });
@@ -1703,6 +1786,7 @@ module.exports = {
   CHANNEL_EXPAND_FRAMES,
   PROFILE_FRAMES,
   PROFILE_BUTTON_ROWS,
+  PROFILE_BUTTON_COUNT,
   HISTORY_PAGE,
   SCROLL_TWEEN_MS,
   ACTION_SLOTS,
@@ -1721,6 +1805,9 @@ module.exports = {
   PROFILE_LIFT,
   DEFAULT_CHAT,
   profileNameRow,
+  profileEase,
+  profileLineFade,
+  sensitivityFromX,
   sidebarWidth,
   sidebarTitle,
   formatTime,

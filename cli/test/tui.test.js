@@ -113,7 +113,7 @@ test('landing frame: contains title, option and hint with art glyphs intact', ()
   assert.equal(frame.height, tier.art.length + landing.LOGO_PADDING);
   assert.equal(frame.originX, Math.floor((100 - frame.width) / 2));
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r22/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r23/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
   // The braille glyphs themselves must be preserved exactly.
@@ -202,7 +202,7 @@ test('composeFrame: writes full-width rows without eraseLine', () => {
 test('composeFrame: content is written on each line', () => {
   const out = app.composeFrame(80, 24, 0);
   const plain = ansi.stripAnsi(out.replace(/\u001b\[\d+;\d+H/g, ''));
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r22/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r23/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
 });
@@ -222,7 +222,7 @@ test('splash screen paints a themed canvas with a loading label', () => {
   const lines = app.splashScreenLines(80, 24, 'dark', 'Loading', 0);
   assert.equal(lines.length, 24);
   const plain = lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r22'));
+  assert.ok(plain.includes('GChat CLI 0.1 r23'));
   assert.ok(plain.includes('Loading'));
   assert.ok(!plain.includes('Loading..'), 'loading does not animate dots');
   assert.ok(lines.join('').includes(ansi.bg(theme.DARK.canvas)));
@@ -679,7 +679,7 @@ test('codePointIndex and stepCodePoint do not split emoji', () => {
 test('chat frame: sidebar, channels, composer, and messages', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState());
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r22'), 'sidebar title is the CLI version');
+  assert.ok(plain.includes('GChat CLI 0.1 r23'), 'sidebar title is the CLI version');
   assert.ok(!plain.includes('chats\n') && !/^\s*chats\s*$/m.test(plain.split('\n')[0]), 'old "chats" label is gone');
   assert.ok(plain.includes('team'), 'active group in sidebar');
   assert.ok(!plain.includes('●'), 'groups are not indented with a bullet');
@@ -1187,6 +1187,7 @@ test('light-theme idle bird is pale enough for the shimmer to read', () => {
   const idleLum = lr + lg + lb;
   const hotLum = hr + hg + hb;
   assert.ok(idleLum > 680, 'idle is a faint gray so the dark stripe can read');
+  assert.deepEqual(ansi.hexToRgb(theme.LIGHT.artHot), [0, 0, 0], 'light shimmer dips to black');
   assert.ok(idleLum - hotLum > 200, 'shimmer has a wide dark swing');
 });
 
@@ -1288,6 +1289,34 @@ test('Theme button toggles the palette and persists it', async () => {
   await chat.handleClick(light.hits.find((h) => h.type === 'theme'));
   assert.equal(chat.state.theme, 'dark');
   assert.equal(loadConfig(paths).theme, 'dark');
+});
+
+test('a higher scroll sensitivity moves more lines per wheel tick', () => {
+  const many = Array.from({ length: 18 }, (_, i) => ({
+    msg: {
+      id: `s${i}`,
+      senderId: 'ada',
+      senderName: 'ada',
+      type: 'text',
+      createdAt: `2026-08-13T11:${String(i).padStart(2, '0')}:00.000Z`,
+    },
+    text: `message body ${i} with enough words`,
+    channel: 'main',
+  }));
+  const slow = makeController({ messages: many, scrollOffset: 0, scrollSensitivity: 1 });
+  const frame = slow.draw();
+  assert.ok(frame.maxScroll > 4);
+  const region = frame.regions.transcript;
+  slow.handleMouse({
+    kind: 'wheel', button: 64, x: region.x + 2, y: region.y + 2, press: false, motion: false, wheel: -1,
+  });
+  assert.equal(slow.state.scrollOffset, 1, 'default sensitivity is one line');
+  const fast = makeController({ messages: many, scrollOffset: 0, scrollSensitivity: 5 });
+  fast.draw();
+  fast.handleMouse({
+    kind: 'wheel', button: 64, x: region.x + 2, y: region.y + 2, press: false, motion: false, wheel: -1,
+  });
+  assert.equal(fast.state.scrollOffset, 5, 'sensitivity 5 moves five lines');
 });
 
 test('clicking a selected message deselects it', async () => {
@@ -1814,7 +1843,7 @@ test('sidebar profile name stays pinned with a thin rule and padded logout', () 
   const openRuleY = open.hits.filter((h) => h.type === 'profile').map((h) => h.y).sort((a, b) => a - b)[0];
   assert.ok(logout);
   assert.equal(openName.y, pinnedY, 'name stays pinned when Log out opens');
-  assert.equal(openRuleY, nameHit.y - 2 - chatLayout.PROFILE_LIFT, 'rule lifts to fit both outlined buttons');
+  assert.equal(openRuleY, nameHit.y - 2 - chatLayout.PROFILE_LIFT, 'rule lifts to fit the stacked settings boxes');
   assert.equal(logout.y, openRuleY + 2, 'Log out sits under a pad below the rule');
   assert.equal(logout.h, chatLayout.PROFILE_BUTTON_ROWS, 'Log out is a three-line outlined button');
   assert.ok(logout.y + logout.h < openName.y - 1, 'Log out has padding above the name');
@@ -1829,7 +1858,7 @@ test('sidebar profile name stays pinned with a thin rule and padded logout', () 
 
   const themeHit = open.hits.find((h) => h.type === 'theme');
   assert.ok(themeHit, 'Theme sits in the open profile menu');
-  assert.equal(themeHit.y, logout.y + logout.h + 1, 'Theme sits below Log out with a gap');
+  assert.equal(themeHit.y, logout.y + logout.h, 'Theme stacks against Log out like message outlines');
   assert.equal(themeHit.h, chatLayout.PROFILE_BUTTON_ROWS, 'Theme is a three-line outlined button');
   assert.ok(themeHit.y < openName.y, 'Theme stays above the pinned name');
   const themeTop = ansi.stripAnsi(open.lines[themeHit.y]).slice(0, sideW);
@@ -1837,6 +1866,44 @@ test('sidebar profile name stays pinned with a thin rule and padded logout', () 
   assert.ok(themeTop.includes('╭'), 'Theme has an outline');
   assert.ok(themeMid.includes('Theme'));
   assert.ok(themeTop.startsWith(' '), 'Theme has horizontal padding');
+
+  const hovered = chatLayout.buildChatFrame(80, 24, chatState({
+    username: 'will',
+    profileOpen: true,
+    profileExpandFrame: chatLayout.PROFILE_FRAMES,
+    hoverLogout: true,
+  }));
+  const hotTop = hovered.lines[logout.y];
+  assert.ok(hotTop.includes(ansi.fg(theme.DARK.error)), 'Log out outline turns red on hover');
+  assert.ok(!ansi.stripAnsi(hotTop).includes('Log out'), 'shimmer stays on the label row, not the border');
+
+  const sens = open.hits.find((h) => h.type === 'sensitivity');
+  assert.ok(sens, 'scroll sensitivity sits in the profile menu');
+  assert.equal(sens.y, themeHit.y + themeHit.h, 'sensitivity stacks under Theme');
+  const sensMid = open.lines[sens.y + 1];
+  assert.ok(
+    sensMid.includes(ansi.bg(theme.DARK.thumb)) && sensMid.includes(ansi.bg(theme.DARK.track)),
+    'sensitivity is a left-to-right fill'
+  );
+});
+
+test('profile buttons ease out and fade in line by line', () => {
+  const early = chatLayout.profileLineFade(0.1, 8);
+  const first = chatLayout.profileLineFade(0.2, 0);
+  const last = chatLayout.profileLineFade(0.2, 8);
+  assert.ok(first > last, 'later button lines wait their turn');
+  assert.ok(early < 0.2, 'late lines are still fading at the start');
+  assert.equal(chatLayout.profileEase({ profileExpandFrame: 0 }), 0);
+  assert.equal(chatLayout.profileEase({ profileExpandFrame: chatLayout.PROFILE_FRAMES }), 1);
+  const mid = chatLayout.profileEase({ profileExpandFrame: Math.round(chatLayout.PROFILE_FRAMES / 2) });
+  assert.ok(mid > 0.5, 'ease-out cubic is ahead of linear at the midpoint');
+});
+
+test('scroll sensitivity maps a drag across the control to 1-20', () => {
+  const hit = { x: 10, w: 20, y: 5, h: 3 };
+  assert.equal(chatLayout.sensitivityFromX(10, hit), 1);
+  assert.equal(chatLayout.sensitivityFromX(29, hit), 20);
+  assert.equal(chatLayout.sensitivityFromX(19, hit), 10);
 });
 
 test('offsetToShowMessage keeps the target in view', () => {

@@ -47,6 +47,18 @@ test('config set theme normalizes to dark or light', () => {
   assert.equal(loadConfig(paths).theme, 'dark');
 });
 
+test('config set scrollSensitivity clamps to 1-20', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-sens-'));
+  const paths = configPaths(dir);
+  assert.equal(loadConfig(paths).scrollSensitivity, 1);
+  setConfigKey('scrollSensitivity', '8', paths);
+  assert.equal(loadConfig(paths).scrollSensitivity, 8);
+  setConfigKey('scrollSensitivity', 99, paths);
+  assert.equal(loadConfig(paths).scrollSensitivity, 20);
+  setConfigKey('scrollSensitivity', 0, paths);
+  assert.equal(loadConfig(paths).scrollSensitivity, 1);
+});
+
 test('vault put/get/list/remove', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-vault-'));
   const paths = configPaths(dir);
