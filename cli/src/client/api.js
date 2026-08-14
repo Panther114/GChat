@@ -4,7 +4,6 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cryptoV2 = require('../crypto-v2');
 const { HttpClient } = require('./http');
-const { SocketClient } = require('./socket');
 const {
   encryptTextEnvelope,
   decryptServerMessage,
@@ -349,6 +348,7 @@ class GChatClient {
 
   ensureSocket() {
     if (!this.socket) {
+      const { SocketClient } = require('./socket');
       this.socket = new SocketClient({
         server: this.server,
         session: this.http.session,

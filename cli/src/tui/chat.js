@@ -15,7 +15,6 @@ const ansi = require('./ansi');
 const {
   DEFAULT_CHAT,
   buildChatFrame,
-  composeChatFrame,
   hitTest,
   TRANSITION_MS,
   scrollOffsetFromDrag,
@@ -34,6 +33,7 @@ const {
 const { looksLikeImagePath, readClipboardImage } = require('./clipboard-image');
 const { loadConfig, setConfigKey } = require('../store/config');
 const { normalizeTheme, nextTheme } = require('./theme');
+const { createScreenPainter, isAppleTerminal } = require('./paint');
 const {
   decryptServerMessage,
   decryptAttachment,
@@ -59,7 +59,7 @@ function defaultChatState(over = {}) {
   return { ...DEFAULT_CHAT, ...over };
 }
 
-function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, onLogout } = {}) {
+function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, onLogout, painter } = {}) {
   const storedTheme = paths ? loadConfig(paths).theme : 'dark';
   const state = defaultChatState({
     username: client?.user?.username || '',
@@ -74,6 +74,10 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
   let escTimer = null;
   let running = false;
   let pulseTimer = null;
+  const screen = painter || createScreenPainter();
+  const PULSE_MS = isAppleTerminal() ? 80 : 50;
+  let coalescedMove = null;
+  let coalesceTimer = null;
   let allowAutoLoad = true;
   let draggingScroll = null;
   let channelDrag = null;
@@ -93,7 +97,10 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
   function draw() {
     const { cols, rows } = size();
     lastFrame = buildChatFrame(cols, rows, state);
-    if (stdout) stdout.write(composeChatFrame(cols, rows, state));
+    if (stdout) {
+      const bytes = screen.paintRaw(lastFrame.lines, cols, rows, { theme: state.theme });
+      if (bytes) stdout.write(bytes);
+    }
     if (typeof onDraw === 'function') onDraw(lastFrame);
     if (lastFrame.shouldLoadMore && allowAutoLoad && !state.loadingMore) {
       allowAutoLoad = false;
@@ -174,7 +181,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
         pulseTimer = null;
       }
       draw();
-    }, 50);
+    }, PULSE_MS);
   }
 
   function beginTransition(kind = 'group') {
@@ -474,6 +481,11 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       clearInterval(pulseTimer);
       pulseTimer = null;
     }
+    if (coalesceTimer) {
+      clearImmediate(coalesceTimer);
+      coalesceTimer = null;
+    }
+    coalescedMove = null;
     if (escTimer) {
       clearTimeout(escTimer);
       escTimer = null;
@@ -1200,6 +1212,36 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     }
   }
 
+  function flushCoalescedMove() {
+    if (coalesceTimer) {
+      clearImmediate(coalesceTimer);
+      coalesceTimer = null;
+    }
+    const pending = coalescedMove;
+    coalescedMove = null;
+    return pending;
+  }
+
+  function queueMouse(mouse) {
+    if (mouse.kind === 'move') {
+      coalescedMove = mouse;
+      if (!coalesceTimer) {
+        coalesceTimer = setImmediate(() => {
+          coalesceTimer = null;
+          const pending = coalescedMove;
+          coalescedMove = null;
+          if (pending && handleMouse(pending)) draw();
+        });
+      }
+      return;
+    }
+    const pending = flushCoalescedMove();
+    let changed = false;
+    if (pending) changed = handleMouse(pending) || changed;
+    changed = handleMouse(mouse) || changed;
+    if (changed) draw();
+  }
+
   function handleMouse(mouse) {
     if (isFrozen()) {
       if (!lastFrame) lastFrame = buildChatFrame(size().cols, size().rows, state);
@@ -1279,15 +1321,22 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       if (hit && hit.type === 'scrollbar') {
         const thumb = lastFrame.scrollbarThumb;
         const onThumb = !!(thumb && y >= thumb.y && y < thumb.y + thumb.h);
-        if (onThumb) {
-          draggingScroll = {
-            startY: y,
-            startOffset: state.scrollOffset || 0,
-          };
-          return false;
+        if (!onThumb) {
+          state.scrollOffset = scrollOffsetFromY(y, lastFrame.regions.scrollbar, lastFrame.maxScroll);
+          if (state.overlay && state.overlay.type === 'delete') {
+            state.scrollOffset = clampScrollForMessage(
+              state.scrollOffset,
+              lastFrame.messageBounds,
+              lastFrame.totalLines,
+              lastFrame.regions.transcript.h
+            );
+          }
         }
-        state.scrollOffset = scrollOffsetFromY(y, lastFrame.regions.scrollbar, lastFrame.maxScroll);
-        return true;
+        draggingScroll = {
+          startY: y,
+          startOffset: state.scrollOffset || 0,
+        };
+        return !onThumb;
       }
       if (hit && hit.type === 'channel') {
         if (hit.name === 'main') {
@@ -1425,10 +1474,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     const seq = match[0];
     if (seq.startsWith('\u001b[<')) {
       const mouse = ansi.parseSgrMouse(seq);
-      if (mouse) {
-        const changed = handleMouse(mouse);
-        if (changed) draw();
-      }
+      if (mouse) queueMouse(mouse);
     } else if (ansi.isAltEnter(seq)) {
       insertNewline();
       draw();

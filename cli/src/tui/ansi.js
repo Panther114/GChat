@@ -222,6 +222,10 @@ function detectTruecolor() {
 
 const TRUE_COLOR = detectTruecolor();
 
+function isAppleTerminal() {
+  return String(process.env.TERM_PROGRAM || '').toLowerCase() === 'apple_terminal';
+}
+
 /** Map an rgb triplet to the nearest xterm-256 color index (0-255). */
 function rgbTo256(r, g, b) {
   if (r === g && g === b) {
@@ -401,6 +405,7 @@ module.exports = {
   strikethrough,
   reset,
   detectTruecolor,
+  isAppleTerminal,
   rgbTo256,
   hexToRgb,
   fg,

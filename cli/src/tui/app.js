@@ -21,14 +21,13 @@ const {
   PASSWORD_FIELD_WIDTH,
   clampScroll,
 } = require('./landing');
-const { GChatClient } = require('../client/api');
 const { configPaths } = require('../store/paths');
-const { createChatController } = require('./chat');
 const { loadConfig } = require('../store/config');
 const { PALETTE, normalizeTheme, runWithTheme, paintCanvasLine } = require('./theme');
+const { createScreenPainter, composeFull, isAppleTerminal } = require('./paint');
 
-/** Milliseconds between animation frames (~20 fps). */
-const FRAME_MS = 50;
+/** Milliseconds between landing animation frames. Terminal.app is slower. */
+const FRAME_MS = isAppleTerminal() ? 80 : 50;
 
 /** How long a login failure message stays on the hint (ms). */
 const LOGIN_ERROR_MS = 3000;
@@ -45,30 +44,31 @@ function terminalSize() {
 }
 
 /**
- * Pure: build the exact byte output for one frame at a given terminal size.
- * Kept separate from draw() so the render pipeline is unit-testable and the
- * erase-before-content invariant is enforced in one place.
- *
- * Invariant: each line is (eraseLine → full-width canvas row). Erase must
- * come FIRST — eraseLine wipes the current line to the terminal default,
- * so writing it after content would blank the frame. Every cell is then
- * painted with the theme canvas so a light terminal profile cannot leak.
+ * Build full-width canvas-backed landing rows (no cursor codes).
  */
-function composeFrame(cols, rows, frame, ui) {
+function landingScreenLines(cols, rows, frame, ui, built) {
   const view = ui || DEFAULT_UI;
   return runWithTheme(view.theme, () => {
-    const { lines, originX, originY } = buildLandingFrame(cols, rows, frame, view);
+    const { lines, originX, originY } = built || buildLandingFrame(cols, rows, frame, view);
     const canvas = PALETTE.canvas;
     const width = Math.max(1, cols);
     const height = Math.max(1, rows);
-    let out = ansi.cursorHide();
+    const out = new Array(height);
     for (let y = 0; y < height; y += 1) {
       const local = y - originY;
       const content = (local >= 0 && local < lines.length) ? lines[local] : '';
-      out += ansi.cursorTo(0, y) + ansi.eraseLine() + paintCanvasLine(content, width, originX, canvas);
+      out[y] = paintCanvasLine(content, width, originX, canvas);
     }
     return out;
   });
+}
+
+/**
+ * Pure: full dump of one landing frame. The live loop uses a diffing
+ * painter so only dirty rows hit the TTY.
+ */
+function composeFrame(cols, rows, frame, ui) {
+  return composeFull(landingScreenLines(cols, rows, frame, ui), cols, rows);
 }
 
 /**
@@ -102,6 +102,7 @@ async function runTui(options = {}) {
   let screen = 'landing'; // 'landing' | 'chat'
   let chat = null;
   const ui = { ...DEFAULT_UI };
+  const painter = createScreenPainter();
 
   /** Apply one keystroke to the login form (inserts at the active caret). */
   function handleKey(ch) {
@@ -244,6 +245,7 @@ async function runTui(options = {}) {
     const { cols, rows } = terminalSize();
     if (redrawRequired(lastCols, lastRows, cols, rows)) {
       stdout.write(ansi.clearScreen());
+      painter.reset();
     }
     lastCols = cols;
     lastRows = rows;
@@ -257,12 +259,20 @@ async function runTui(options = {}) {
     ui.passwordScroll = clampScroll(ui.passwordScroll, ui.passwordCaret, ui.password.length, PASSWORD_FIELD_WIDTH);
     const built = buildLandingFrame(cols, rows, frame, ui);
     lastBounds = built.fieldBounds;
-    stdout.write(composeFrame(cols, rows, frame, ui));
+    const bytes = painter.paint(landingScreenLines(cols, rows, frame, ui, built), cols, rows);
+    if (bytes) stdout.write(bytes);
   }
 
   const paths = options.paths || configPaths(options.configDir);
-  const client = options.client || new GChatClient({ server: options.server, paths });
   ui.theme = normalizeTheme(loadConfig(paths).theme);
+  let client = options.client || null;
+
+  function ensureClient() {
+    if (client) return client;
+    const { GChatClient } = require('../client/api');
+    client = new GChatClient({ server: options.server, paths });
+    return client;
+  }
 
   /** Map a login failure to a user-facing message (server errors pass through). */
   function mapLoginError(err) {
@@ -316,6 +326,7 @@ async function runTui(options = {}) {
     ui.error = null;
     ui.theme = normalizeTheme(loadConfig(paths).theme);
     stdout.write(ansi.clearScreen());
+    painter.reset();
     lastCols = null;
     lastRows = null;
     startLandingTimer();
@@ -326,15 +337,18 @@ async function runTui(options = {}) {
     screen = 'chat';
     stopLandingTimer();
     stdout.write(ansi.clearScreen());
+    painter.reset();
     lastCols = null;
     lastRows = null;
+    const { createChatController } = require('./chat');
     chat = createChatController({
-      client,
+      client: ensureClient(),
       paths,
       stdout,
       getSize: terminalSize,
       onQuit: () => exit(0),
       onLogout: returnToLogin,
+      painter,
     });
     await chat.start();
     draw();
@@ -375,8 +389,9 @@ async function runTui(options = {}) {
     }
     ui.loggingIn = true;
     try {
-      await client.login(username, password);
-      await client.listGroups().catch(() => []);
+      const api = ensureClient();
+      await api.login(username, password);
+      await api.listGroups().catch(() => []);
       finishLogin();
     } catch (err) {
       ui.loggingIn = false;
@@ -434,10 +449,20 @@ async function runTui(options = {}) {
   // --- start: restore a session into chat, otherwise play the landing ------
   let startOnChat = false;
   try {
-    const cookies = client.session && client.session.cookies;
-    if (client.user || client.session?.user || (cookies && Object.keys(cookies).length > 0)) {
-      await client.me();
-      startOnChat = true;
+    const { loadSession } = require('../store/session');
+    const stored = loadSession(paths);
+    const cookies = stored && stored.cookies;
+    const hasSession = !!(
+      (options.client && (options.client.user || options.client.session?.user))
+      || (stored && stored.user)
+      || (cookies && Object.keys(cookies).length > 0)
+    );
+    if (hasSession) {
+      const api = ensureClient();
+      if (api.user || api.session?.user || (api.session && api.session.cookies && Object.keys(api.session.cookies).length > 0)) {
+        await api.me();
+        startOnChat = true;
+      }
     }
   } catch {
     startOnChat = false;
@@ -459,5 +484,6 @@ module.exports = {
   FRAME_MS,
   terminalSize,
   composeFrame,
+  landingScreenLines,
   redrawRequired,
 };

@@ -190,29 +190,18 @@ test('shimmerHeat fades the band edges instead of a hard cut', () => {
   assert.ok(mid > 0.9, 'the plateau stays near full heat');
 });
 
-test('composeFrame: eraseLine precedes content on every line (never after)', () => {
+test('composeFrame: writes full-width rows without eraseLine', () => {
   const out = app.composeFrame(80, 24, 0);
-  // Each cursorTo starts a line segment. A line must begin with eraseLine and
-  // must NOT end with eraseLine — otherwise the content just written is wiped.
+  assert.ok(!out.includes('\u001b[2K'), 'eraseLine is not used; rows overwrite in place');
   const segments = out.split(/\u001b\[\d+;\d+H/).filter((s) => s.length > 0);
   assert.ok(segments.length >= landing.ART.length, 'one segment per art line');
-  // First segment is the leading cursorHide prefix; the rest are per-line writes.
-  for (const segment of segments.slice(1)) {
-    assert.ok(segment.startsWith('\u001b[2K'), `line should start with eraseLine: ${JSON.stringify(segment.slice(0, 20))}`);
-    // Blank padding lines are exactly (eraseLine) with no content; any other
-    // line must not end with eraseLine (would blank the content just written).
-    const content = segment.slice('\u001b[2K'.length);
-    assert.ok(!content.endsWith('\u001b[2K'), 'line must not end with eraseLine (would blank content)');
-  }
-  // The art glyphs survive in the composed bytes (first line of the tier
-  // that was selected for this terminal size).
   const selected = landing.selectTier(80, 24);
   assert.ok(ansi.stripAnsi(out).includes(selected.art[0]), 'first art line present in composed output');
 });
 
-test('composeFrame: content is written on each line after the erase', () => {
+test('composeFrame: content is written on each line', () => {
   const out = app.composeFrame(80, 24, 0);
-  const plain = ansi.stripAnsi(out.replace(/\u001b\[\d+;\d+H/g, '').replace(/\u001b\[2K/g, ''));
+  const plain = ansi.stripAnsi(out.replace(/\u001b\[\d+;\d+H/g, ''));
   assert.match(plain, /Welcome to GChat CLI v0\.1/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
@@ -225,8 +214,20 @@ test('composeFrame: every row is painted with the dark canvas', () => {
   const segments = out.split(/\u001b\[\d+;\d+H/).slice(1);
   assert.equal(segments.length, 24, 'one write per terminal row');
   for (const segment of segments) {
-    assert.ok(segment.includes(canvas), 'row sits on the canvas after erase');
+    assert.ok(segment.includes(canvas), 'row sits on the canvas');
   }
+});
+
+test('screen painter writes only dirty rows and can force a full refresh', () => {
+  const { createScreenPainter } = require('../src/tui/paint');
+  const painter = createScreenPainter();
+  const a = ['one', 'two', 'three'];
+  const first = painter.paint(a, 8, 3, { force: true });
+  assert.equal(first.split(/\u001b\[\d+;\d+H/).slice(1).length, 3);
+  assert.equal(painter.paint(a, 8, 3), '', 'identical frame is a no-op');
+  const changed = painter.paint(['one', 'TWO', 'three'], 8, 3);
+  assert.ok(changed.includes('TWO'));
+  assert.equal(changed.split(/\u001b\[\d+;\d+H/).slice(1).length, 1, 'only the dirty row is rewritten');
 });
 
 test('composeFrame: light theme uses the light canvas and dark art', () => {
@@ -1385,6 +1386,35 @@ test('clicking the scrollbar thumb starts a drag; clicking the track jumps', () 
     kind: 'press', button: 0, x: bar.x + 1, y: trackY + 1, press: true, motion: false, wheel: 0,
   });
   assert.notEqual(jumped.state.scrollOffset, 4, 'clicking the track jumps the viewport');
+  const afterJump = jumped.state.scrollOffset;
+  const dragY = trackY + 1 + 6 < bar.y + bar.h ? trackY + 1 + 6 : Math.max(bar.y, trackY - 6);
+  jumped.handleMouse({
+    kind: 'move', button: 0, x: bar.x + 1, y: dragY, press: true, motion: true, wheel: 0,
+  });
+  assert.notEqual(jumped.state.scrollOffset, afterJump, 'unreleased move after a track jump keeps dragging');
+});
+
+test('scrollbar uses filled cells instead of box-drawing glyphs', () => {
+  const many = Array.from({ length: 18 }, (_, i) => ({
+    msg: {
+      id: `s${i}`,
+      senderId: 'ada',
+      senderName: 'ada',
+      type: 'text',
+      createdAt: `2026-08-13T11:${String(i).padStart(2, '0')}:00.000Z`,
+    },
+    text: `message body ${i} with enough words`,
+    channel: 'main',
+  }));
+  const frame = chatLayout.buildChatFrame(80, 24, chatState({ messages: many, scrollOffset: 4 }));
+  const y = frame.regions.transcript.y;
+  const row = frame.lines[y];
+  const plain = ansi.stripAnsi(row);
+  assert.equal(plain.slice(-1), ' ', 'bar cell is a space, not │ or █');
+  assert.ok(
+    row.includes(ansi.bg(theme.DARK.track)) || row.includes(ansi.bg(theme.DARK.thumb)),
+    'bar is a background fill so Terminal.app has no row gaps'
+  );
 });
 
 test('preview hint has no icon glyph', () => {

@@ -200,15 +200,28 @@ function isHot(row, col, frame, shimmer = DEFAULT_SHIMMER) {
 /** Style one art line at frame `frame` using the tier's shimmer params. */
 function styleArtLine(artLine, row, frame, shimmer = DEFAULT_SHIMMER) {
   let out = '';
+  let run = '';
+  let runColor = null;
+  let runBold = false;
+  const flush = () => {
+    if (!run) return;
+    out += runBold
+      ? `${ansi.fg(runColor)}${ansi.bold()}${run}${ansi.reset()}`
+      : `${ansi.fg(runColor)}${run}${ansi.reset()}`;
+    run = '';
+  };
   const animate = shimmer !== false && shimmer != null;
   for (let col = 0; col < artLine.length; col += 1) {
     const ch = artLine[col];
     const heat = animate ? shimmerHeat(row, col, frame, shimmer) : 0;
     const color = heat > 0 ? lerpHex(PALETTE.artIdle, PALETTE.artHot, heat) : PALETTE.artIdle;
-    out += heat >= 0.55
-      ? `${ansi.fg(color)}${ansi.bold()}${ch}${ansi.reset()}`
-      : `${ansi.fg(color)}${ch}${ansi.reset()}`;
+    const bold = heat >= 0.55;
+    if (runColor !== null && (color !== runColor || bold !== runBold)) flush();
+    runColor = color;
+    runBold = bold;
+    run += ch;
   }
+  flush();
   return out;
 }
 

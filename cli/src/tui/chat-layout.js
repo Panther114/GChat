@@ -18,6 +18,7 @@ const {
   withBg,
   paintCanvasLine,
 } = require('./theme');
+const { composeFull } = require('./paint');
 
 const CARET_LETTER = DARK.caretLetter;
 
@@ -570,13 +571,23 @@ function boxRow(inner, width, color) {
 
 function pulseText(text, frame, hotColor, idleColor) {
   let out = '';
+  let run = '';
+  let runColor = null;
+  const flush = () => {
+    if (!run) return;
+    out += `${ansi.bold()}${ansi.fg(runColor)}${run}${ansi.reset()}`;
+    run = '';
+  };
   let i = 0;
   for (const ch of String(text || '')) {
     const heat = landing.shimmerHeat(0, i, frame || 0, GLIMMER);
     const color = heat > 0 ? landing.lerpHex(idleColor, hotColor, heat) : idleColor;
-    out += `${ansi.bold()}${ansi.fg(color)}${ch}${ansi.reset()}`;
+    if (runColor !== null && color !== runColor) flush();
+    runColor = color;
+    run += ch;
     i += 1;
   }
+  flush();
   return out;
 }
 
@@ -926,13 +937,21 @@ function scrollbarThumb(trackH, total, view, offset) {
   return { fromTop, thumbH };
 }
 
+function paintScrollbarCell(kind) {
+  if (kind === 'thumb') return `${ansi.bg(PALETTE.thumb)} ${ansi.reset()}`;
+  if (kind === 'track') return `${ansi.bg(PALETTE.track)} ${ansi.reset()}`;
+  return ' ';
+}
+
 function scrollbarGlyphs(trackH, total, view, offset) {
-  const cells = Array.from({ length: Math.max(0, trackH) }, () => '│');
+  // Background-colored spaces fill the whole cell. Box-drawing │ and █
+  // leave a gap between rows in Apple Terminal.app (a dotted bar).
+  const cells = Array.from({ length: Math.max(0, trackH) }, () => 'track');
   const thumb = scrollbarThumb(trackH, total, view, offset);
   if (!thumb) return cells;
   for (let i = 0; i < thumb.thumbH; i += 1) {
     const idx = thumb.fromTop + i;
-    if (idx >= 0 && idx < trackH) cells[idx] = '█';
+    if (idx >= 0 && idx < trackH) cells[idx] = 'thumb';
   }
   return cells;
 }
@@ -1115,9 +1134,7 @@ function buildComposerBox(state, width, metrics) {
       caret: onLine ? (placeholderOnly ? 0 : metrics.caretAt) : 0,
       bar: 0,
     });
-    const thumb = metrics.overflow
-      ? (bar[i] === '█' ? `${ansi.fg(PALETTE.thumb)}█${ansi.reset()}` : `${ansi.fg(PALETTE.track)}│${ansi.reset()}`)
-      : ' ';
+    const thumb = metrics.overflow ? paintScrollbarCell(bar[i]) : ' ';
     lines.push(boxRow(painted + thumb, width, color));
   });
   lines.push(boxBottom(width, color));
@@ -1236,12 +1253,9 @@ function buildChatFrameNow(cols, rows, state) {
   const protectedRows = new Set();
   const confirmHits = [];
 
-  const join = (left, mid, barGlyph) => {
+  const join = (left, mid, barKind) => {
     const divider = sideW > 0 ? `${ansi.fg(PALETTE.border)}│${ansi.reset()}` : '';
-    const thumb = barGlyph === '█';
-    const barCell = thumb
-      ? `${ansi.fg(PALETTE.thumb)}${barGlyph}${ansi.reset()}`
-      : `${ansi.fg(PALETTE.track)}${barGlyph || ' '}${ansi.reset()}`;
+    const barCell = paintScrollbarCell(barKind);
     return (left || '') + divider + padCells(mid, contentW) + barCell;
   };
 
@@ -1474,17 +1488,17 @@ function paintErrorToast(lines, cols, rows, overlay) {
   return [{ type: 'overlay', x, y, w, h: 1 }];
 }
 
-function composeChatFrame(cols, rows, state) {
+function composeChatFrame(cols, rows, state, built) {
+  const frame = built || buildChatFrame(cols, rows, state);
+  const width = Math.max(1, cols);
+  const height = Math.max(1, rows);
   return runWithTheme(state && state.theme, () => {
-    const { lines } = buildChatFrame(cols, rows, state);
     const canvas = PALETTE.canvas;
-    const width = Math.max(1, cols);
-    const height = Math.max(1, rows);
-    let out = ansi.cursorHide();
+    const wrapped = new Array(height);
     for (let i = 0; i < height; i += 1) {
-      out += ansi.cursorTo(0, i) + ansi.eraseLine() + paintCanvasLine(lines[i] || '', width, 0, canvas);
+      wrapped[i] = paintCanvasLine(frame.lines[i] || '', width, 0, canvas);
     }
-    return out;
+    return composeFull(wrapped, width, height);
   });
 }
 
@@ -1549,4 +1563,5 @@ module.exports = {
   hashNameColor,
   buildChatFrame,
   composeChatFrame,
+  paintScrollbarCell,
 };
