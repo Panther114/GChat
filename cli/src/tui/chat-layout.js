@@ -42,7 +42,7 @@ const SCROLLBAR_W = 1;
 const WHEEL_LINES = 1;
 const FIELD_CARET = '█';
 const TRANSITION_MS = 480;
-const BIRD_FLIGHT_MS = 560;
+const BIRD_FLIGHT_MS = landing.BIRD_FLIGHT_MS;
 const CHANNEL_EXPAND_FRAMES = 8;
 const PROFILE_FRAMES = 8;
 const HISTORY_PAGE = 50;
@@ -944,7 +944,7 @@ function pickBirdTier(width, height) {
 }
 
 function buildBirdLines(width, height, frame, animate = true, origin = null) {
-  const tier = pickBirdTier(width, height);
+  const tier = (origin && origin.tier) || pickBirdTier(width, height);
   const artW = Math.max(...tier.art.map((line) => ansi.width(line)));
   const left = origin && Number.isFinite(origin.x)
     ? Math.round(origin.x)
@@ -971,19 +971,17 @@ function idleBirdOrigin(cols, rows, state = DEFAULT_CHAT) {
   const sideW = sidebarWidth(width);
   const mainX = sideW > 0 ? sideW + 1 : 0;
   const contentW = Math.max(1, width - mainX - SCROLLBAR_W);
-  const hideBar = hideChannelBar(state);
-  const hideComp = !showComposer(state);
-  const composerH = hideComp ? 0 : COMPOSER_MIN_INNER + 4;
-  const birdH = hideBar ? height - composerH : Math.max(1, height - CHANNEL_ROWS - composerH);
-  const tier = pickBirdTier(contentW, birdH);
+  // Same art as login/loading so the bird can hop left → middle → right
+  // without changing size (a larger idle bird on 80×24 sat near center).
+  const tier = landing.selectTier(width, height);
   const artW = Math.max(...tier.art.map((line) => ansi.width(line)));
-  const loginTier = landing.selectTier(width, height);
   const left = Math.max(0, Math.floor((contentW - artW) / 2));
   return {
     x: mainX + left,
-    y: landing.sharedBirdY(height, loginTier.art.length),
+    y: landing.sharedBirdY(height, tier.art.length),
     artW,
     artH: tier.art.length,
+    tier,
   };
 }
 
@@ -1354,8 +1352,8 @@ function buildChatFrameNow(cols, rows, state) {
   const perch = bird ? idleBirdOrigin(width, height, state) : null;
   const flight = bird ? birdFlightPlacement(state, width, height) : null;
   const birdOrigin = !bird ? null : (flight && !flight.done
-    ? { x: flight.x - mainX, y: flight.y }
-    : { x: perch.x - mainX, y: perch.y });
+    ? { x: flight.x - mainX, y: flight.y, tier: perch.tier }
+    : { x: perch.x - mainX, y: perch.y, tier: perch.tier });
   const birdLines = bird
     ? buildBirdLines(
       contentW,

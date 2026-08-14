@@ -25,6 +25,7 @@ const {
   sharedBirdY,
   loginBirdOrigin,
   TUI_VERSION,
+  BIRD_FLIGHT_MS,
 } = require('./landing');
 const { configPaths } = require('../store/paths');
 const { loadConfig } = require('../store/config');
@@ -333,7 +334,9 @@ async function runTui(options = {}) {
     ui.passwordScroll = clampScroll(ui.passwordScroll, ui.passwordCaret, ui.password.length, PASSWORD_FIELD_WIDTH);
     const built = buildLandingFrame(cols, rows, frame, ui);
     lastBounds = built.fieldBounds;
-    const bytes = painter.paint(landingScreenLines(cols, rows, frame, ui, built), cols, rows);
+    const bytes = painter.paint(landingScreenLines(cols, rows, frame, ui, built), cols, rows, {
+      scene: 'landing',
+    });
     if (bytes) stdout.write(bytes);
   }
 
@@ -348,29 +351,53 @@ async function runTui(options = {}) {
     return client;
   }
 
-  function paintSplashNow() {
+  function beginScene() {
+    stdout.write(ansi.clearScreen());
+    painter.reset();
+    lastCols = null;
+    lastRows = null;
+  }
+
+  function paintSplashNow(opts = {}) {
     const { cols, rows } = terminalSize();
     const dest = splashBirdOrigin(cols, rows);
-    const t = Math.min(1, (Date.now() - splashFlyAt) / 420);
+    const t = Math.min(1, (Date.now() - splashFlyAt) / BIRD_FLIGHT_MS);
     const eased = 1 - (1 - t) * (1 - t);
     const fromX = splashFromX == null ? dest.x : splashFromX;
     const toX = splashToX == null ? dest.x : splashToX;
     const birdX = Math.round(fromX + (toX - fromX) * eased);
     const dots = '.'.repeat((Math.floor(frame / 8) % 3) + 1);
     const label = `${splashLabel.replace(/\.+$/, '')}${dots}`;
-    const bytes = painter.paint(splashScreenLines(cols, rows, ui.theme, label, frame, birdX), cols, rows);
+    const bytes = painter.paint(
+      splashScreenLines(cols, rows, ui.theme, label, frame, birdX),
+      cols, rows,
+      { force: !!opts.force, scene: 'splash' }
+    );
     if (bytes) stdout.write(bytes);
+  }
+
+  function waitSplashFly() {
+    if (splashFromX == null || splashToX == null || splashFromX === splashToX) {
+      return yieldPaint();
+    }
+    const left = Math.max(0, splashFlyAt + BIRD_FLIGHT_MS - Date.now());
+    return new Promise((resolve) => setTimeout(resolve, left));
   }
 
   function startSplash(label = 'Loading') {
     splashLabel = label;
     const { cols, rows } = terminalSize();
     const dest = splashBirdOrigin(cols, rows);
-    splashToX = dest.x;
-    splashFromX = screen === 'landing' ? loginBirdOrigin(cols, rows).x : dest.x;
-    splashFlyAt = Date.now();
-    screen = 'splash';
-    paintSplashNow();
+    if (screen !== 'splash') {
+      // Landing is left-ish; already-logged-in boots start there too so
+      // the bird always travels left → middle before the idle hop.
+      splashFromX = screen === 'landing' ? loginBirdOrigin(cols, rows).x : dest.x;
+      splashToX = dest.x;
+      splashFlyAt = Date.now();
+      beginScene();
+      screen = 'splash';
+      paintSplashNow({ force: true });
+    }
     if (splashTimer) return;
     splashTimer = setInterval(() => {
       if (screen !== 'splash') return;
@@ -438,10 +465,7 @@ async function runTui(options = {}) {
     ui.error = null;
     ui.theme = normalizeTheme(loadConfig(paths).theme);
     stopSplash();
-    stdout.write(ansi.clearScreen());
-    painter.reset();
-    lastCols = null;
-    lastRows = null;
+    beginScene();
     startLandingTimer();
     draw();
   }
@@ -451,10 +475,6 @@ async function runTui(options = {}) {
     startSplash('Loading');
     await yieldPaint();
     const { createChatController } = require('./chat');
-    stopSplash();
-    screen = 'chat';
-    lastCols = null;
-    lastRows = null;
     chat = createChatController({
       client: ensureClient(),
       paths,
@@ -464,8 +484,14 @@ async function runTui(options = {}) {
       onLogout: returnToLogin,
       painter,
     });
+    // Finish left → middle on the loading scene before swapping to idle.
+    await waitSplashFly();
+    stopSplash();
+    beginScene();
+    screen = 'chat';
     const { cols, rows } = terminalSize();
-    await chat.start({ birdFrom: splashBirdOrigin(cols, rows) });
+    const mid = splashBirdOrigin(cols, rows);
+    await chat.start({ birdFrom: { x: mid.x, y: mid.y }, forcePaint: true });
   }
 
   /** After a successful login, hand off to the chat screen. */

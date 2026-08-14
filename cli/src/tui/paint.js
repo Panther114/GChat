@@ -39,6 +39,7 @@ function createScreenPainter() {
   let incremental = 0;
   let lastFullAt = 0;
   let lastPaintMs = 0;
+  let sceneKey = '';
 
   function reset() {
     prev = [];
@@ -48,6 +49,7 @@ function createScreenPainter() {
     incremental = 0;
     lastFullAt = 0;
     lastPaintMs = 0;
+    sceneKey = '';
   }
 
   function isOverloaded(limitMs = OVERLOAD_MS) {
@@ -62,9 +64,11 @@ function createScreenPainter() {
     for (let y = 0; y < height; y += 1) next[y] = lines[y] || '';
 
     const sizeChanged = prevW !== width || prevH !== height;
+    const sceneChanged = !!(opts.scene && opts.scene !== sceneKey);
+    if (opts.scene) sceneKey = opts.scene;
     const dueTime = lastFullAt > 0 && (now - lastFullAt >= fullEveryMs(lastPaintMs));
     const dueFrames = incremental >= fullEveryFrames(lastPaintMs);
-    let force = !!(opts.force || sizeChanged || dueTime || dueFrames || prev.length === 0);
+    let force = !!(opts.force || sizeChanged || sceneChanged || dueTime || dueFrames || prev.length === 0);
 
     let dirty = 0;
     if (!force) {
@@ -111,7 +115,8 @@ function createScreenPainter() {
     const theme = opts.theme;
     const originX = opts.originX || 0;
     const sizeChanged = prevW !== width || prevH !== height;
-    const forceWrap = !!(opts.force || sizeChanged || prevRaw.length !== height);
+    const sceneChanged = !!(opts.scene && opts.scene !== sceneKey);
+    const forceWrap = !!(opts.force || sizeChanged || sceneChanged || prevRaw.length !== height);
 
     return runWithTheme(theme, () => {
       const canvas = opts.canvas || PALETTE.canvas;

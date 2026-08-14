@@ -113,7 +113,7 @@ test('landing frame: contains title, option and hint with art glyphs intact', ()
   assert.equal(frame.height, tier.art.length + landing.LOGO_PADDING);
   assert.equal(frame.originX, Math.floor((100 - frame.width) / 2));
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r19/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r20/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
   // The braille glyphs themselves must be preserved exactly.
@@ -202,7 +202,7 @@ test('composeFrame: writes full-width rows without eraseLine', () => {
 test('composeFrame: content is written on each line', () => {
   const out = app.composeFrame(80, 24, 0);
   const plain = ansi.stripAnsi(out.replace(/\u001b\[\d+;\d+H/g, ''));
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r19/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r20/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
 });
@@ -222,7 +222,7 @@ test('splash screen paints a themed canvas with a loading label', () => {
   const lines = app.splashScreenLines(80, 24, 'dark', 'Loading…', 0);
   assert.equal(lines.length, 24);
   const plain = lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r19'));
+  assert.ok(plain.includes('GChat CLI 0.1 r20'));
   assert.ok(plain.includes('Loading'));
   assert.ok(lines.join('').includes(ansi.bg(theme.DARK.canvas)));
 });
@@ -237,6 +237,14 @@ test('screen painter writes only dirty rows and can force a full refresh', () =>
   const changed = painter.paint(['one', 'TWO', 'three'], 8, 3);
   assert.ok(changed.includes('TWO'));
   assert.equal(changed.split(/\u001b\[\d+;\d+H/).slice(1).length, 1, 'only the dirty row is rewritten');
+});
+
+test('screen painter full-refreshes when the scene changes', () => {
+  const { createScreenPainter } = require('../src/tui/paint');
+  const painter = createScreenPainter();
+  painter.paint(['one', 'two', 'three'], 8, 3, { scene: 'splash' });
+  const next = painter.paint(['one', 'two', 'three'], 8, 3, { scene: 'chat' });
+  assert.equal(next.split(/\u001b\[\d+;\d+H/).slice(1).length, 3, 'a new scene rewrites every row');
 });
 
 test('composeFrame: light theme uses the light canvas and dark art', () => {
@@ -661,7 +669,7 @@ test('codePointIndex and stepCodePoint do not split emoji', () => {
 test('chat frame: sidebar, channels, composer, and messages', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState());
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r19'), 'sidebar title is the CLI version');
+  assert.ok(plain.includes('GChat CLI 0.1 r20'), 'sidebar title is the CLI version');
   assert.ok(!plain.includes('chats\n') && !/^\s*chats\s*$/m.test(plain.split('\n')[0]), 'old "chats" label is gone');
   assert.ok(plain.includes('team'), 'active group in sidebar');
   assert.ok(!plain.includes('●'), 'groups are not indented with a bullet');
@@ -1325,20 +1333,21 @@ test('canceling an edit restores the previous composer draft', () => {
 test('chat start paints chrome before groups or the socket return', async () => {
   let listed = false;
   let connected = false;
+  let releaseGroups;
+  const groupsGate = new Promise((resolve) => { releaseGroups = resolve; });
   const frames = [];
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-boot-'));
   const chat = createChatController({
     client: {
       user: { id: 'me', username: 'will' },
       listGroups: async () => {
-        await new Promise((resolve) => setTimeout(resolve, 30));
+        await groupsGate;
         listed = true;
         return [{ id: 'g1', name: 'team' }];
       },
       listMembers: async () => [],
       openGroup: async () => ({ messages: [] }),
       connectSocket: async () => {
-        await new Promise((resolve) => setTimeout(resolve, 30));
         connected = true;
       },
       disconnectSocket: () => {},
@@ -1359,6 +1368,7 @@ test('chat start paints chrome before groups or the socket return', async () => 
   assert.ok(frames.length >= 1, 'a chat frame is painted before listGroups resolves');
   assert.equal(listed, false, 'groups have not returned yet');
   assert.equal(connected, false, 'socket is not awaited before the first paint');
+  releaseGroups();
   await started;
   assert.equal(listed, true);
 });
@@ -1520,6 +1530,53 @@ test('login, splash, and idle birds share a Y', () => {
   const idle = chatLayout.idleBirdOrigin(80, 24, chatState({ activeGroupId: null }));
   assert.equal(login.y, splash.y);
   assert.equal(splash.y, idle.y);
+});
+
+test('the bird hops left-ish → middle → right at the same size', () => {
+  for (const [cols, rows] of [[80, 24], [100, 30], [120, 40]]) {
+    const login = landing.loginBirdOrigin(cols, rows);
+    const splash = app.splashBirdOrigin(cols, rows);
+    const idle = chatLayout.idleBirdOrigin(cols, rows, chatState({ activeGroupId: null }));
+    assert.equal(login.artW, splash.artW, `${cols}x${rows} keeps the same bird width`);
+    assert.equal(splash.artW, idle.artW, `${cols}x${rows} idle bird matches splash`);
+    assert.equal(login.artH, idle.artH, `${cols}x${rows} keeps the same bird height`);
+    assert.ok(login.x < splash.x, `${cols}x${rows} login is left of loading`);
+    assert.ok(splash.x < idle.x, `${cols}x${rows} idle perches right of loading`);
+  }
+});
+
+test('chat start flies the same bird from the loading perch to the idle perch', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-bird-'));
+  const splash = app.splashBirdOrigin(80, 24);
+  const idle = chatLayout.idleBirdOrigin(80, 24, chatState({ activeGroupId: null }));
+  const chat = createChatController({
+    client: {
+      user: { id: 'me', username: 'will' },
+      listGroups: async () => [],
+      listMembers: async () => [],
+      openGroup: async () => ({ messages: [] }),
+      connectSocket: async () => {},
+      disconnectSocket: () => {},
+      setActiveGroup: () => {},
+      switchChannel: (_g, name) => name,
+      markRead: () => {},
+      getSecret: () => null,
+      emitTyping: () => {},
+      logout: async () => {},
+    },
+    paths: configPaths(dir),
+    stdout: { write() {}, columns: 80, rows: 24 },
+    getSize: () => ({ cols: 80, rows: 24 }),
+  });
+  const started = chat.start({ birdFrom: { x: splash.x, y: splash.y }, forcePaint: true });
+  assert.ok(chat.state.birdFlight, 'a hop is armed on the first idle frame');
+  assert.equal(chat.state.birdFlight.fromX, splash.x);
+  assert.equal(chat.state.birdFlight.toX, idle.x);
+  assert.equal(chat.state.birdFlight.fromY, idle.y);
+  assert.equal(chat.state.birdFlight.toY, idle.y);
+  assert.ok(chat.state.birdFlight.toX > chat.state.birdFlight.fromX, 'second hop travels right');
+  await started;
+  chat.stop();
 });
 
 test('composer uses the login block caret', () => {

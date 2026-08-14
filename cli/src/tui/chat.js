@@ -101,14 +101,18 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     };
   }
 
-  function draw() {
+  function draw(opts = {}) {
     const { cols, rows } = size();
     lastFrame = buildChatFrame(cols, rows, state);
     if (lastFrame.composerMetrics) {
       state.composerScroll = lastFrame.composerMetrics.lineScroll;
     }
     if (stdout) {
-      const bytes = screen.paintRaw(lastFrame.lines, cols, rows, { theme: state.theme });
+      const bytes = screen.paintRaw(lastFrame.lines, cols, rows, {
+        theme: state.theme,
+        force: !!opts.force,
+        scene: 'chat',
+      });
       if (bytes) stdout.write(bytes);
     }
     if (typeof onDraw === 'function') onDraw(lastFrame);
@@ -497,7 +501,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       const dest = idleBirdOrigin(size().cols, size().rows, state);
       state.birdFlight = {
         fromX: opts.birdFrom.x,
-        fromY: opts.birdFrom.y,
+        fromY: dest.y,
         toX: dest.x,
         toY: dest.y,
         at: Date.now(),
@@ -505,8 +509,8 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       };
       startPulse();
     }
-    // Paint the chat chrome before any network so the TTY is never empty.
-    draw();
+    // Clean first chrome paint, then the bird hops middle → right.
+    draw({ force: !!opts.forcePaint });
     try {
       const me = client.user || (typeof client.me === 'function' ? await client.me() : null);
       if (me) {

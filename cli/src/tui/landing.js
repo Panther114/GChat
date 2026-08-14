@@ -15,7 +15,9 @@ const ansi = require('./ansi');
 const { PALETTE, DARK, runWithTheme } = require('./theme');
 
 /** Display version for the landing page (intentionally separate from package version). */
-const TUI_VERSION = '0.1 r19';
+const TUI_VERSION = '0.1 r20';
+/** Shared duration for login→loading and loading→idle bird hops. */
+const BIRD_FLIGHT_MS = 560;
 
 /**
  * Single adjustable padding number (in cells), used for both:
@@ -607,6 +609,7 @@ function buildLandingFrameNow(cols, rows, frame, ui) {
 
 module.exports = {
   TUI_VERSION,
+  BIRD_FLIGHT_MS,
   LOGO_PADDING,
   LOGO_TIERS,
   TRANSITION_FRAMES,
