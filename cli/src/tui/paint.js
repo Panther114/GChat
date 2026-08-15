@@ -129,7 +129,8 @@ function createScreenPainter() {
           wrapped[y] = paintCanvasLine(raw, width, originX, canvas);
         }
       }
-      prevRaw = Array.from({ length: height }, (_, y) => rawLines[y] || '');
+      if (prevRaw.length !== height) prevRaw = new Array(height);
+      for (let y = 0; y < height; y += 1) prevRaw[y] = rawLines[y] || '';
       return paint(wrapped, width, height, opts);
     });
   }

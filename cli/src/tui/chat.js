@@ -823,6 +823,12 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     state.hoverSensitivity = nextSensitivity;
     state.hoverReply = nextReply;
     state.hoverGroupId = nextGroup;
+    if (state.profileCursor != null) {
+      if (nextQuit) state.profileCursor = 0;
+      else if (nextLogout) state.profileCursor = 1;
+      else if (nextThemeHit) state.profileCursor = 2;
+      else if (nextSensitivity) state.profileCursor = 3;
+    }
     if (nextLogout || nextQuit || nextThemeHit) startPulse();
     return true;
   }
@@ -1027,11 +1033,6 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     } catch {
       /* keep the in-session value even if config cannot be written */
     }
-  }
-
-  function shortcutsArmed() {
-    return !!(state.selectedMessageId && !state.composer && !state.editingId
-      && !state.creatingChannel && !state.overlay && !state.channelMenu);
   }
 
   async function beginReply(item) {

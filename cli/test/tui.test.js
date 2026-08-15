@@ -113,7 +113,7 @@ test('landing frame: contains title, option and hint with art glyphs intact', ()
   assert.equal(frame.height, tier.art.length + landing.LOGO_PADDING);
   assert.equal(frame.originX, Math.floor((100 - frame.width) / 2));
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r29/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r30/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
   // The braille glyphs themselves must be preserved exactly.
@@ -203,7 +203,7 @@ test('composeFrame: writes full-width rows without eraseLine', () => {
 test('composeFrame: content is written on each line', () => {
   const out = app.composeFrame(80, 24, 0);
   const plain = ansi.stripAnsi(out.replace(/\u001b\[\d+;\d+H/g, ''));
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r29/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r30/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
 });
@@ -223,7 +223,7 @@ test('splash screen paints a themed canvas with a loading label', () => {
   const lines = app.splashScreenLines(80, 24, 'dark', 'Loading', 0);
   assert.equal(lines.length, 24);
   const plain = lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r29'));
+  assert.ok(plain.includes('GChat CLI 0.1 r30'));
   assert.ok(!plain.includes('Loading'), 'no separate Loading line');
   assert.ok(lines.join('').includes(ansi.bg(theme.DARK.canvas)));
 });
@@ -234,7 +234,7 @@ test('splash shimmers the version title instead of a Loading line', () => {
   const plainA = a.map((l) => ansi.stripAnsi(l)).join('\n');
   const plainB = b.map((l) => ansi.stripAnsi(l)).join('\n');
   assert.equal(plainA, plainB, 'the version letters do not change');
-  assert.ok(plainA.includes('GChat CLI 0.1 r29'));
+  assert.ok(plainA.includes('GChat CLI 0.1 r30'));
   assert.notEqual(a.join('\n'), b.join('\n'), 'the version restyles as the shimmer moves');
 });
 
@@ -680,7 +680,7 @@ test('codePointIndex and stepCodePoint do not split emoji', () => {
 test('chat frame: sidebar, channels, composer, and messages', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState());
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r29'), 'sidebar title is the CLI version');
+  assert.ok(plain.includes('GChat CLI 0.1 r30'), 'sidebar title is the CLI version');
   assert.ok(!plain.includes('chats\n') && !/^\s*chats\s*$/m.test(plain.split('\n')[0]), 'old "chats" label is gone');
   assert.ok(plain.includes('team'), 'active group in sidebar');
   assert.ok(!plain.includes('●'), 'groups are not indented with a bullet');
@@ -2370,4 +2370,59 @@ test('dark-mode sensitivity fill uses dark text on the bright thumb', () => {
   const sens = frame.hits.find((h) => h.type === 'sensitivity');
   assert.ok(sens);
   assert.ok(frame.lines[sens.y].includes(ansi.fg(theme.DARK.thumbFg)));
+});
+
+test('profile mouse hover overrides the keyboard box', () => {
+  const frame = chatLayout.buildChatFrame(80, 24, chatState({
+    profileOpen: true,
+    profileExpandFrame: chatLayout.PROFILE_FRAMES,
+    profileCursor: 2,
+    hoverQuit: true,
+  }));
+  const quit = frame.hits.find((h) => h.type === 'quit');
+  const themeHit = frame.hits.find((h) => h.type === 'theme');
+  assert.ok(quit && themeHit);
+  const sideW = frame.regions.sidebar.w;
+  const side = (y) => ansi.stripAnsi(frame.lines[y]).slice(0, sideW);
+  assert.ok(side(quit.y).includes('│'), 'mouse target is boxed');
+  assert.ok(!side(themeHit.y).includes('│'), 'keyboard box is not also shown');
+});
+
+test('group name stays put when the hover box appears', () => {
+  const groups = [{ id: 'g1', name: 'team' }, { id: 'g2', name: 'ops' }];
+  const idle = chatLayout.buildChatFrame(80, 24, chatState({
+    activeGroupId: null,
+    highlightedGroupId: null,
+    groups,
+  }));
+  const hot = chatLayout.buildChatFrame(80, 24, chatState({
+    activeGroupId: null,
+    highlightedGroupId: 'g1',
+    groups,
+  }));
+  const nameAt = (frame) => {
+    const line = frame.lines.find((l) => {
+      const p = ansi.stripAnsi(l);
+      return p.includes('team') && !p.includes('GChat');
+    });
+    return ansi.stripAnsi(line).indexOf('team');
+  };
+  assert.equal(nameAt(idle), nameAt(hot), 'hover chrome does not shift the name');
+});
+
+test('mouse hover on a profile button moves the keyboard cursor', () => {
+  const chat = makeController({
+    profileOpen: true,
+    profileExpandFrame: chatLayout.PROFILE_FRAMES,
+    profileCursor: 2,
+    inputFocus: 'profile',
+  });
+  const frame = chat.draw();
+  const quit = frame.hits.find((h) => h.type === 'quit');
+  assert.ok(quit);
+  chat.handleMouse({
+    kind: 'move', button: 3, x: quit.x + 1, y: quit.y + 1, press: false, motion: true, wheel: 0,
+  });
+  assert.equal(chat.state.profileCursor, 0);
+  assert.equal(chat.state.hoverQuit, true);
 });
