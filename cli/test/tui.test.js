@@ -113,7 +113,7 @@ test('landing frame: contains title, option and hint with art glyphs intact', ()
   assert.equal(frame.height, tier.art.length + landing.LOGO_PADDING);
   assert.equal(frame.originX, Math.floor((100 - frame.width) / 2));
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r26/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r27/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
   // The braille glyphs themselves must be preserved exactly.
@@ -202,7 +202,7 @@ test('composeFrame: writes full-width rows without eraseLine', () => {
 test('composeFrame: content is written on each line', () => {
   const out = app.composeFrame(80, 24, 0);
   const plain = ansi.stripAnsi(out.replace(/\u001b\[\d+;\d+H/g, ''));
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r26/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r27/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
 });
@@ -222,7 +222,7 @@ test('splash screen paints a themed canvas with a loading label', () => {
   const lines = app.splashScreenLines(80, 24, 'dark', 'Loading', 0);
   assert.equal(lines.length, 24);
   const plain = lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r26'));
+  assert.ok(plain.includes('GChat CLI 0.1 r27'));
   assert.ok(!plain.includes('Loading'), 'no separate Loading line');
   assert.ok(lines.join('').includes(ansi.bg(theme.DARK.canvas)));
 });
@@ -233,7 +233,7 @@ test('splash shimmers the version title instead of a Loading line', () => {
   const plainA = a.map((l) => ansi.stripAnsi(l)).join('\n');
   const plainB = b.map((l) => ansi.stripAnsi(l)).join('\n');
   assert.equal(plainA, plainB, 'the version letters do not change');
-  assert.ok(plainA.includes('GChat CLI 0.1 r26'));
+  assert.ok(plainA.includes('GChat CLI 0.1 r27'));
   assert.notEqual(a.join('\n'), b.join('\n'), 'the version restyles as the shimmer moves');
 });
 
@@ -679,7 +679,7 @@ test('codePointIndex and stepCodePoint do not split emoji', () => {
 test('chat frame: sidebar, channels, composer, and messages', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState());
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r26'), 'sidebar title is the CLI version');
+  assert.ok(plain.includes('GChat CLI 0.1 r27'), 'sidebar title is the CLI version');
   assert.ok(!plain.includes('chats\n') && !/^\s*chats\s*$/m.test(plain.split('\n')[0]), 'old "chats" label is gone');
   assert.ok(plain.includes('team'), 'active group in sidebar');
   assert.ok(!plain.includes('●'), 'groups are not indented with a bullet');
@@ -718,8 +718,9 @@ test('chat hover outlines without fill and does not show input shortcuts', () =>
   assert.ok(hint, 'selection shows ctrl-prefixed actions on the hint row');
   assert.ok(hint.includes('ctrl + reply') || hint.includes('ctrl+reply') || hint.includes('ctrl+r'));
   assert.ok(hint.includes('copy') || hint.includes('ctrl+c'));
-  assert.ok(hint.includes('clear (esc)') || hint.includes('esc'));
-  assert.ok(hint.includes('(f)ocus') || hint.includes('focus'));
+  assert.ok(hint.includes('focus'));
+  assert.ok(!hint.includes('clear (esc)') && !/\besc\b/.test(hint), 'selected hints no longer include clear (esc)');
+  assert.ok(!hint.includes('(f)ocus'));
   assert.ok(selected.lines.join('').includes(ansi.bg(chatLayout.PALETTE.selectedBg)), 'selected uses a raised background');
   assert.ok(selPlain.join('\n').includes('↩'), 'selected own message keeps icons on the right');
 });
@@ -834,13 +835,24 @@ test('reply preview only undims when the reply text itself is hovered', () => {
   assert.ok(ref.w < body.w, 'quote hit is narrower than the message row');
 });
 
-test('sending messages are grayed and labeled', () => {
+test('sending messages are grayed and labeled next to the ticks', () => {
   const state = chatState({
     animFrame: 0,
-    messages: [{ ...chatState().messages[1], sending: true }],
+    memberCount: 3,
+    messages: [{
+      ...chatState().messages[1],
+      sending: true,
+      msg: { ...chatState().messages[1].msg, totalRecipients: 2 },
+    }],
   });
-  const plain = chatLayout.buildChatFrame(80, 24, state).lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('sending'));
+  const frame = chatLayout.buildChatFrame(80, 24, state);
+  const row = frame.lines.map((l) => ansi.stripAnsi(l)).find((l) => l.includes('on it') && l.includes('sending'));
+  assert.ok(row, 'sending... sits on the message row');
+  assert.ok(row.indexOf('on it') < row.indexOf('sending'), 'sending... is to the right of the body');
+  const ticksAt = Math.max(row.lastIndexOf('✓'), row.lastIndexOf('·'));
+  if (ticksAt > 0) {
+    assert.ok(row.indexOf('sending') < ticksAt, 'sending... sits immediately left of the ticks');
+  }
 });
 
 test('empty group selection paints a static bird and hides the composer', () => {
@@ -871,7 +883,8 @@ test('delete confirm flashes a red hint and paints the message red', () => {
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
   assert.ok(plain.includes('confirm deletion? (enter)'));
   assert.ok(plain.includes('on it'));
-  assert.ok(plain.includes('clear (esc)'));
+  assert.ok(plain.includes('cancel'));
+  assert.ok(!plain.includes('clear (esc)'));
   assert.ok(frame.lines.join('').includes(ansi.bg(chatLayout.PALETTE.deleteBg)), 'target message uses a red fill');
   assert.ok(plain.includes('╭') && plain.includes('╰') && plain.includes('│'), 'delete fill includes the message rectangle');
   assert.ok(!frame.hits.some((h) => h.type === 'confirm-delete'));
@@ -1103,7 +1116,8 @@ test('composer hints sit on the right; typing stays on the left', () => {
     hint.includes('ctrl + reply') || hint.includes('ctrl+reply') || hint.includes('ctrl+r'),
     'selected actions are ctrl-prefixed'
   );
-  assert.ok(/clear \(esc\)|esc|\(f\)ocus\s*$/.test(hint.trimEnd()), 'action hints are rightmost');
+  assert.ok(/focus\s*$/.test(hint.trimEnd()), 'action hints are rightmost');
+  assert.ok(!hint.includes('clear (esc)'));
 
   const channel = chatLayout.buildChatFrame(80, 24, chatState({
     activeChannel: 'design',
@@ -1235,6 +1249,7 @@ function makeController(over = {}) {
       getSecret: () => null,
       emitTyping: () => {},
       logout: async () => {},
+      deleteMessage: async () => {},
     },
     paths: configPaths(dir),
     stdout: { write() {}, columns: 80, rows: 24 },
@@ -1331,9 +1346,9 @@ test('a higher scroll sensitivity moves more lines per wheel tick', () => {
     kind: 'wheel', button: 64, x: region.x + 2, y: region.y + 2, press: false, motion: false, wheel: -1,
   });
   assert.equal(fast.state.scrollOffset, 1, 'the first line applies immediately');
-  assert.equal(fast.state.scrollBatch, 4, 'the rest of the batch stays one-line steps');
+  assert.equal(fast.state.scrollBatch, 4, 'the rest of the batch is queued');
   fast.tickScrollBatch();
-  assert.equal(fast.state.scrollOffset, 2, 'each tick advances one line');
+  assert.equal(fast.state.scrollOffset, 2, 'the batch eases in from a one-line step');
 });
 
 test('clicking a selected message deselects it', async () => {
@@ -1932,12 +1947,13 @@ test('selected actions share one ctrl + prefix', () => {
     chatLayout.ACTIONS.reply,
     chatLayout.ACTIONS.edit,
     chatLayout.ACTIONS.copy,
-    chatLayout.ACTIONS.clear,
+    chatLayout.ACTIONS.focus,
   ]);
   const plain = ansi.stripAnsi(styled);
   assert.match(plain, /^ctrl \+ reply/);
   assert.equal((plain.match(/ctrl/g) || []).length, 1, 'ctrl appears once');
-  assert.ok(plain.includes('edit') && plain.includes('copy') && plain.includes('clear (esc)'));
+  assert.ok(plain.includes('edit') && plain.includes('copy') && plain.includes('focus'));
+  assert.ok(!plain.includes('clear (esc)'));
 });
 
 test('plain letters type while a message is selected; ctrl+r replies', () => {
@@ -1949,12 +1965,17 @@ test('plain letters type while a message is selected; ctrl+r replies', () => {
   assert.ok(chat.state.replyTo, 'ctrl+r still replies');
 });
 
-test('composer hint includes (f)ocus when a chat is open', () => {
+test('composer hint includes focus with the ctrl keys only when a message is selected', () => {
   const idle = chatLayout.buildChatFrame(80, 24, chatState());
-  const plain = idle.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('(f)ocus'));
-  const styled = idle.lines.join('');
-  assert.ok(styled.includes(`${ansi.bold()}${ansi.fg(theme.DARK.theme)}f`), 'the f in (f)ocus is emphasized');
+  const idlePlain = idle.lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.ok(!idlePlain.includes('focus'), 'focus is not always on the hint row');
+
+  const selected = chatLayout.buildChatFrame(80, 24, chatState({ selectedMessageId: 'm2' }));
+  const hint = selected.lines.map((l) => ansi.stripAnsi(l)).find((l) => l.includes('ctrl'));
+  assert.ok(hint && hint.includes('focus'));
+  assert.ok(!hint.includes('(f)ocus'));
+  assert.ok(!hint.includes('clear (esc)'));
+  assert.ok(selected.lines.join('').includes(`${ansi.bold()}${ansi.fg(theme.DARK.theme)}f`), 'the f in focus is emphasized');
 });
 
 test('light-mode sensitivity fill uses light text on the dark track', () => {
@@ -2069,4 +2090,168 @@ test('beginEdit keeps emoji in the composer', () => {
   assert.equal(chat.state.composer, 'ok 👍');
   const drawn = chat.draw().lines.map((l) => ansi.stripAnsi(l)).join('\n');
   assert.ok(drawn.includes('👍'));
+});
+
+test('altLetter and altArrow parse ESC+letter and CSI encodings', () => {
+  assert.equal(ansi.altLetter('\u001br'), 'r');
+  assert.equal(ansi.altLetter('\u001b[100;3u'), 'd');
+  assert.equal(ansi.altLetter('\u001b[27;3;101~'), 'e');
+  assert.equal(ansi.altLetter('\u001b[A'), null);
+  assert.equal(ansi.altArrow('\u001b[1;3B'), 'down');
+  assert.equal(ansi.altArrow('\u001b[1;3D'), 'left');
+  assert.equal(ansi.altArrow('\u001b[1;3C'), 'right');
+  assert.equal(ansi.altArrow('\u001b[1;9A'), 'up');
+  assert.equal(ansi.altArrow('\u001b[A'), null);
+});
+
+test('scroll batch eases in and out with the fastest step in the middle', () => {
+  const total = 20;
+  const steps = [];
+  let left = total;
+  while (left > 0) {
+    const step = chatLayout.nextScrollStep(left, total);
+    assert.ok(step >= 1 && step <= left);
+    steps.push(step);
+    left -= step;
+  }
+  const mid = steps[Math.floor(steps.length / 2)];
+  assert.ok(steps[0] < mid, 'starts slower than the middle');
+  assert.ok(steps[steps.length - 1] < mid, 'ends slower than the middle');
+  assert.equal(steps.reduce((sum, n) => sum + n, 0), total);
+});
+
+test('idle sidebar underlines the highlighted group', () => {
+  const frame = chatLayout.buildChatFrame(80, 24, chatState({
+    activeGroupId: null,
+    highlightedGroupId: 'g1',
+    groups: [{ id: 'g1', name: 'team' }, { id: 'g2', name: 'ops' }],
+  }));
+  const teamRow = frame.lines.find((l) => ansi.stripAnsi(l).includes('team'));
+  const opsRow = frame.lines.find((l) => ansi.stripAnsi(l).includes('ops'));
+  assert.ok(teamRow && teamRow.includes(ansi.underline()), 'the highlighted group is underlined');
+  assert.ok(opsRow && !opsRow.includes(ansi.underline()), 'other groups stay plain');
+});
+
+test('up/down on the idle screen walk groups and wrap at the ends', () => {
+  const chat = makeController({
+    activeGroupId: null,
+    highlightedGroupId: 'g1',
+    groups: [{ id: 'g1', name: 'team' }, { id: 'g2', name: 'ops' }],
+    inputFocus: 'groups',
+    messages: [],
+  });
+  chat.pushInput('\u001b[B');
+  assert.equal(chat.state.highlightedGroupId, 'g2');
+  chat.pushInput('\u001b[B');
+  assert.equal(chat.state.highlightedGroupId, 'g1', 'down on the last group wraps');
+  chat.pushInput('\u001b[A');
+  assert.equal(chat.state.highlightedGroupId, 'g2', 'up on the first group wraps');
+});
+
+test('enter opens the underlined group; escape returns to the underline', async () => {
+  const chat = makeController({
+    activeGroupId: null,
+    highlightedGroupId: 'g1',
+    groups: [{ id: 'g1', name: 'team' }, { id: 'g2', name: 'ops' }],
+    inputFocus: 'groups',
+    messages: [],
+  });
+  await chat.enterHighlightedGroup();
+  assert.equal(chat.state.activeGroupId, 'g1');
+  assert.equal(chat.state.inputFocus, 'composer');
+  await chat.focusGroupsPane();
+  assert.equal(chat.state.activeGroupId, null);
+  assert.equal(chat.state.highlightedGroupId, 'g1');
+  assert.equal(chat.state.inputFocus, 'groups');
+});
+
+test('alt left/right move focus between the group list and content', async () => {
+  const chat = makeController({
+    activeGroupId: 'g1',
+    highlightedGroupId: 'g1',
+    inputFocus: 'transcript',
+  });
+  await chat.focusGroupsPane();
+  assert.equal(chat.state.activeGroupId, null);
+  assert.equal(chat.state.highlightedGroupId, 'g1');
+  await chat.focusContentPane();
+  assert.equal(chat.state.activeGroupId, 'g1');
+  assert.equal(chat.state.inputFocus, 'transcript');
+});
+
+test('alt+down scrolls the transcript to the bottom', () => {
+  const chat = makeController({ scrollOffset: 8, inputFocus: 'transcript' });
+  chat.scrollToBottom();
+  assert.equal(chat.state.scrollTween.to, 0);
+  assert.equal(chat.state.scrollTween.from, 8);
+});
+
+test('up/down with no selection pick a message instead of line-scrolling', () => {
+  const chat = makeController({
+    selectedMessageId: null,
+    inputFocus: 'transcript',
+    scrollOffset: 0,
+  });
+  const before = chat.state.scrollOffset;
+  chat.pushInput('\u001b[A');
+  assert.equal(chat.state.selectedMessageId, 'm3', 'up selects the newest message');
+  assert.equal(chat.state.scrollOffset, before, 'arrows no longer nudge one line');
+  chat.state.selectedMessageId = null;
+  chat.pushInput('\u001b[B');
+  assert.equal(chat.state.selectedMessageId, 'm3', 'down also starts on the newest');
+});
+
+test('left/right while focused on messages cycle channels', async () => {
+  const chat = makeController({
+    selectedMessageId: 'm2',
+    inputFocus: 'transcript',
+    activeChannel: 'main',
+    channels: ['main', 'design'],
+  });
+  chat.pushInput('\u001b[C');
+  await Promise.resolve();
+  assert.equal(chat.state.activeChannel, 'design');
+});
+
+test('alt+r replies when the transcript is focused', () => {
+  const chat = makeController({
+    selectedMessageId: 'm2',
+    inputFocus: 'transcript',
+    composer: '',
+  });
+  chat.pushInput('\u001br');
+  assert.ok(chat.state.replyTo, 'alt+r replies from content focus');
+  assert.equal(chat.state.composer, '', 'alt+r does not type into the composer');
+});
+
+test('content-focused hints use alt for actions and ctrl for copy/focus', () => {
+  const frame = chatLayout.buildChatFrame(80, 24, chatState({
+    selectedMessageId: 'm2',
+    inputFocus: 'transcript',
+  }));
+  const hint = frame.lines.map((l) => ansi.stripAnsi(l)).find((l) => l.includes('reply') && l.includes('focus'));
+  assert.ok(hint);
+  assert.match(hint, /alt \+ reply|alt\+r/);
+  assert.match(hint, /ctrl \+ copy|ctrl\+c/);
+  assert.ok(hint.includes('focus'));
+});
+
+test('a deleting message is dimmed with deleting... next to the ticks', () => {
+  const state = chatState({
+    animFrame: 0,
+    memberCount: 3,
+    messages: [{
+      ...chatState().messages[1],
+      deleting: true,
+      msg: { ...chatState().messages[1].msg, totalRecipients: 2 },
+    }],
+  });
+  const frame = chatLayout.buildChatFrame(80, 24, state);
+  const row = frame.lines.find((l) => ansi.stripAnsi(l).includes('deleting'));
+  assert.ok(row, 'deleting... sits on the message');
+  const plain = ansi.stripAnsi(row);
+  assert.ok(plain.indexOf('on it') < plain.indexOf('deleting'));
+  assert.ok(row.includes('\u001b[2m'), 'the message is dimmed');
+  const hint = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.ok(!hint.includes('deleting...\n') || !/^\s*deleting/.test(hint), 'deleting is not a left-side flash');
 });

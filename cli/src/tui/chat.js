@@ -34,6 +34,7 @@ const {
   WHEEL_LINES,
   sensitivityFromX,
   profileEase,
+  nextScrollStep,
 } = require('./chat-layout');
 const { looksLikeImagePath, readClipboardImage } = require('./clipboard-image');
 const { loadConfig, setConfigKey, normalizeScrollSensitivity } = require('../store/config');
@@ -160,7 +161,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     if (state.channelMenu && !state.channelClosing && (state.channelExpandFrame || 0) < CHANNEL_EXPAND_FRAMES) {
       return true;
     }
-    return (state.messages || []).some((item) => item.sending);
+    return (state.messages || []).some((item) => item.sending || item.deleting);
   }
 
   function startPulse() {
@@ -362,6 +363,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     const seq = ++groupLoadSeq;
     const stillCurrent = () => seq === groupLoadSeq;
     if (!group) {
+      if (state.activeGroupId) state.highlightedGroupId = state.activeGroupId;
       state.activeGroupId = null;
       state.messages = [];
       state.channels = ['main'];
@@ -374,12 +376,15 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       state.hasMoreHistory = false;
       state.loadingMore = false;
       state.transition = null;
+      state.inputFocus = 'groups';
+      ensureGroupHighlight();
       const prefs = loadPrefs(paths);
       prefs.activeGroupId = null;
       savePrefs(prefs, paths);
       return;
     }
     state.activeGroupId = group.id;
+    state.highlightedGroupId = group.id;
     state.messages = [];
     state.channels = [];
     state.hoverMessageId = null;
@@ -477,17 +482,6 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     return next !== before;
   }
 
-  function nextScrollStep(left, total) {
-    const absLeft = Math.abs(left);
-    const absTotal = Math.max(1, Math.abs(total));
-    const done = absTotal - absLeft;
-    const t = done / absTotal;
-    const peak = Math.max(1, Math.ceil(absTotal / 3));
-    const env = 1 - Math.abs(2 * t - 1);
-    const step = Math.max(1, Math.round(1 + (peak - 1) * env));
-    return Math.min(step, absLeft);
-  }
-
   function tickScrollBatch() {
     const left = Number(state.scrollBatch) || 0;
     if (!left) {
@@ -522,8 +516,17 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     applyScroll(dir);
     const rest = delta - dir;
     if (!rest) return;
-    state.scrollBatch = (Number(state.scrollBatch) || 0) + rest;
-    state.scrollBatchTotal = Math.max(Math.abs(state.scrollBatch), Number(state.scrollBatchTotal) || 0);
+    const prevLeft = Number(state.scrollBatch) || 0;
+    const prevTotal = Number(state.scrollBatchTotal) || 0;
+    const prevDone = Math.max(0, prevTotal - Math.abs(prevLeft));
+    const sameDir = !prevLeft || ((prevLeft > 0) === (rest > 0));
+    if (!sameDir) {
+      state.scrollBatch = rest;
+      state.scrollBatchTotal = Math.abs(rest);
+    } else {
+      state.scrollBatch = prevLeft + rest;
+      state.scrollBatchTotal = Math.abs(state.scrollBatch) + prevDone;
+    }
     if (!scrollBatchTimer) {
       scrollBatchTimer = setInterval(() => {
         if (tickScrollBatch()) draw();
@@ -535,7 +538,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     const list = filterMessages(state.messages, state.activeChannel);
     if (!list.length) return;
     const idx = list.findIndex((m) => String(m.msg?.id) === String(state.selectedMessageId));
-    const next = idx < 0 ? (delta > 0 ? 0 : list.length - 1) : idx + delta;
+    const next = idx < 0 ? list.length - 1 : idx + delta;
     if (next < 0) {
       allowAutoLoad = true;
       if (!lastFrame) lastFrame = buildChatFrame(size().cols, size().rows, state);
@@ -602,6 +605,8 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       /* session may already be warm */
     }
     await refreshGroups();
+    ensureGroupHighlight();
+    if (!state.activeGroupId) state.inputFocus = 'groups';
     state.status = '';
     draw();
     if (typeof client.connectSocket === 'function') {
@@ -821,6 +826,72 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     if (!item) return;
     state.selectedMessageId = String(item.msg.id);
     state.inputFocus = 'transcript';
+  }
+
+  function ensureGroupHighlight() {
+    const list = state.groups || [];
+    if (!list.length) {
+      state.highlightedGroupId = null;
+      return;
+    }
+    if (!list.some((group) => String(group.id) === String(state.highlightedGroupId))) {
+      state.highlightedGroupId = list[0].id;
+    }
+  }
+
+  function moveGroupHighlight(delta) {
+    const list = state.groups || [];
+    if (!list.length) return;
+    let idx = list.findIndex((group) => String(group.id) === String(state.highlightedGroupId));
+    if (idx < 0) idx = 0;
+    else idx = (idx + delta + list.length) % list.length;
+    state.highlightedGroupId = list[idx].id;
+  }
+
+  async function enterHighlightedGroup({ contentFocus = false } = {}) {
+    ensureGroupHighlight();
+    const group = (state.groups || []).find((item) => String(item.id) === String(state.highlightedGroupId));
+    if (!group) return;
+    await loadGroup(group);
+    state.inputFocus = contentFocus ? 'transcript' : 'composer';
+  }
+
+  async function focusGroupsPane() {
+    if (state.activeGroupId) {
+      state.highlightedGroupId = state.activeGroupId;
+      await loadGroup(null);
+    } else {
+      state.inputFocus = 'groups';
+      ensureGroupHighlight();
+    }
+  }
+
+  async function focusContentPane() {
+    if (!state.activeGroupId) {
+      await enterHighlightedGroup({ contentFocus: true });
+      return;
+    }
+    state.inputFocus = 'transcript';
+  }
+
+  function scrollToBottom() {
+    if (!state.activeGroupId || isFrozen()) return;
+    const from = state.scrollOffset || 0;
+    if (from === 0) {
+      state.scrollTween = null;
+      return;
+    }
+    state.scrollTween = { from, to: 0, at: Date.now(), ms: SCROLL_TWEEN_MS };
+    startPulse();
+  }
+
+  function groupNavActive() {
+    return !state.activeGroupId && !state.overlay;
+  }
+
+  function transcriptFocused() {
+    return !!(state.activeGroupId && state.inputFocus === 'transcript'
+      && !state.overlay && !state.creatingChannel && !state.channelMenu);
   }
 
   function beginScrollToMessage(id) {
@@ -1111,13 +1182,14 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
   async function performDelete(messageId) {
     closeOverlay();
     clearSelection();
-    setFlash('deleting...', 30000, PALETTE.error, PALETTE.deletePulse);
+    const item = findMessage(messageId);
+    if (item) item.deleting = true;
+    startPulse();
     try {
       await client.deleteMessage(state.activeGroupId, messageId);
       state.messages = state.messages.filter((m) => String(m.msg.id) !== String(messageId));
-      state.flash = null;
     } catch (err) {
-      state.flash = null;
+      if (item) item.deleting = false;
       state.overlay = { type: 'error', message: err.message || String(err) };
     }
   }
@@ -1223,6 +1295,10 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       clearSelection();
       return;
     }
+    if (action === 'focus') {
+      toggleInputFocus();
+      return;
+    }
     if (!item) return;
     if (action === 'reply') await beginReply(item);
     else if (action === 'edit') beginEdit(item);
@@ -1326,6 +1402,34 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     return false;
   }
 
+  function handleAltLetter(letter) {
+    const key = String(letter || '').toLowerCase();
+    if (state.overlay || state.channelMenu || state.creatingChannel) return false;
+    if (state.activeGroupId && state.inputFocus !== 'composer' && state.selectedMessageId) {
+      const item = findMessage(state.selectedMessageId);
+      if (key === 'r') { runAction('reply', item).then(() => draw()); return true; }
+      if (key === 'e') { runAction('edit', item).then(() => draw()); return true; }
+      if (key === 'd') { runAction('delete', item).then(() => draw()); return true; }
+      if (key === 'p') { runAction('preview', item).then(() => draw()); return true; }
+    }
+    return false;
+  }
+
+  function handleAltArrow(dir) {
+    if (state.overlay) return;
+    if (dir === 'down') {
+      scrollToBottom();
+      return;
+    }
+    if (dir === 'left') {
+      focusGroupsPane().then(() => draw()).catch(() => draw());
+      return;
+    }
+    if (dir === 'right') {
+      focusContentPane().then(() => draw()).catch(() => draw());
+    }
+  }
+
   function snapCloseChannelMenu() {
     state.channelMenu = null;
     state.channelClosing = false;
@@ -1427,7 +1531,11 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     }
     if (hit.type === 'group') {
       const group = state.groups.find((g) => String(g.id) === String(hit.id));
-      if (group) await loadGroup(group);
+      if (group) {
+        state.highlightedGroupId = group.id;
+        await loadGroup(group);
+        state.inputFocus = 'composer';
+      }
       return;
     }
     if (hit.type === 'sidebar-empty') {
@@ -1941,6 +2049,11 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       if (mouse) queueMouse(mouse);
     } else if (ansi.ctrlLetter(seq)) {
       handleCtrlLetter(ansi.ctrlLetter(seq));
+    } else if (ansi.altLetter(seq)) {
+      handleAltLetter(ansi.altLetter(seq));
+    } else if (ansi.altArrow(seq)) {
+      handleAltArrow(ansi.altArrow(seq));
+      draw();
     } else if (ansi.isAltEnter(seq)) {
       insertNewline();
       draw();
@@ -1953,20 +2066,22 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
         const count = motion[1] ? Number(motion[1]) : 1;
         if (motion[2] === 'D') {
           if (channelDraftEditing()) moveChannelDraft(-count);
+          else if (transcriptFocused()) cycleChannel(-1).then(() => draw()).catch(() => draw());
           else moveComposer(-count);
         } else if (motion[2] === 'C') {
           if (channelDraftEditing()) moveChannelDraft(count);
+          else if (transcriptFocused()) cycleChannel(1).then(() => draw()).catch(() => draw());
           else moveComposer(count);
         } else if (motion[2] === 'A') {
           if (channelDraftEditing()) { /* stay in the chip */ }
+          else if (groupNavActive()) moveGroupHighlight(-1);
           else if (composerUsesArrows()) moveComposerLine(-1);
-          else if (state.selectedMessageId && !state.overlay) moveSelection(-1);
-          else applyScroll(1);
+          else if (!state.overlay) moveSelection(-1);
         } else if (motion[2] === 'B') {
           if (channelDraftEditing()) { /* stay in the chip */ }
+          else if (groupNavActive()) moveGroupHighlight(1);
           else if (composerUsesArrows()) moveComposerLine(1);
-          else if (state.selectedMessageId && !state.overlay) moveSelection(1);
-          else applyScroll(-1);
+          else if (!state.overlay) moveSelection(1);
         }
         draw();
       } else if (seq === '\u001b[H') {
@@ -2080,6 +2195,10 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       return;
     }
     if (ch === '\r') {
+      if (!state.activeGroupId) {
+        enterHighlightedGroup().then(() => draw()).catch(() => draw());
+        return;
+      }
       submitComposer().then(() => draw()).catch((err) => {
         setError(err.message || String(err));
         draw();
@@ -2111,6 +2230,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       return;
     }
     if (ch < ' ') return;
+    if (!state.activeGroupId) return;
     pokeTyping();
     insertComposer(ch);
     draw();
@@ -2178,6 +2298,12 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       const consumed = consumeEscape(rest);
       if (consumed === 0) {
         if (rest.startsWith('\u001b') && rest.length > 1 && rest[1] !== '[') {
+          const alt = ansi.altLetter(rest.slice(0, 2));
+          if (alt) {
+            handleAltLetter(alt);
+            rest = rest.slice(2);
+            continue;
+          }
           handleKey('\u001b');
           rest = rest.slice(1);
           continue;
@@ -2211,6 +2337,13 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     findMessage,
     toggleTheme,
     tickScrollBatch,
+    moveGroupHighlight,
+    enterHighlightedGroup,
+    focusGroupsPane,
+    focusContentPane,
+    scrollToBottom,
+    handleAltLetter,
+    handleAltArrow,
   };
 }
 

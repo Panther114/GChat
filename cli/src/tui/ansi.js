@@ -154,6 +154,41 @@ function ctrlLetter(sequence) {
   return null;
 }
 
+function letterFromCode(code) {
+  const n = Number(code);
+  if (n >= 65 && n <= 90) return String.fromCharCode(n + 32);
+  if (n >= 97 && n <= 122) return String.fromCharCode(n);
+  return null;
+}
+
+/** Letter for Alt+key: ESC+letter, CSI-u, or modifyOtherKeys. */
+function altLetter(sequence) {
+  const seq = String(sequence);
+  if (seq.length === 2 && seq[0] === '\u001b') {
+    const ch = seq[1];
+    if (ch >= 'a' && ch <= 'z') return ch;
+    if (ch >= 'A' && ch <= 'Z') return ch.toLowerCase();
+    return null;
+  }
+  const csiu = seq.match(/^\u001b\[(\d+);3u$/);
+  if (csiu) return letterFromCode(csiu[1]);
+  const other = seq.match(/^\u001b\[27;3;(\d+)~$/);
+  if (other) return letterFromCode(other[1]);
+  return null;
+}
+
+const ALT_ARROW = { A: 'up', B: 'down', C: 'right', D: 'left' };
+
+/** Alt+arrow: xterm `ESC[1;3A` / `ESC[1;9A` (Option), or CSI-u. */
+function altArrow(sequence) {
+  const seq = String(sequence);
+  const modified = seq.match(/^\u001b\[(?:1;)?([39])([ABCD])$/);
+  if (modified) return ALT_ARROW[modified[2]];
+  const csiu = seq.match(/^\u001b\[([ABCD]);3u$/);
+  if (csiu) return ALT_ARROW[csiu[1]];
+  return null;
+}
+
 /** Alt+Backspace: ESC+DEL/BS, plus xterm/Kitty modified-key forms. */
 function isAltBackspace(sequence) {
   const seq = String(sequence);
@@ -421,6 +456,8 @@ module.exports = {
   isAltEnter,
   isAltBackspace,
   ctrlLetter,
+  altLetter,
+  altArrow,
   bold,
   dim,
   italic,

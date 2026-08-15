@@ -31,7 +31,8 @@ const ACTIONS = {
   preview: { id: 'preview', key: 'p', glyph: '▣', word: 'preview', mod: 'ctrl', get color() { return PALETTE.keyP; } },
   copy: { id: 'copy', key: 'c', glyph: null, word: 'copy', mod: 'ctrl', get color() { return PALETTE.keyC; } },
   clear: { id: 'clear', key: 'Escape', glyph: null, word: 'clear (esc)', get color() { return PALETTE.muted; } },
-  focus: { id: 'focus', key: 'f', glyph: null, word: '(f)ocus', get color() { return PALETTE.theme; } },
+  cancel: { id: 'clear', key: 'Escape', glyph: null, word: 'cancel', get color() { return PALETTE.muted; } },
+  focus: { id: 'focus', key: 'f', glyph: null, word: 'focus', mod: 'ctrl', get color() { return PALETTE.theme; } },
 };
 
 const SIDEBAR_MIN = 20;
@@ -112,6 +113,7 @@ const DEFAULT_CHAT = {
   scrollBatch: 0,
   scrollBatchTotal: 0,
   inputFocus: 'composer',
+  highlightedGroupId: null,
   flash: null,
   memberCount: 0,
   now: null,
@@ -276,9 +278,10 @@ function fillRow(plain, width, opts = {}) {
   const fg = opts.fg || null;
   const bold = !!opts.bold;
   const dim = !!opts.dim;
+  const underlineOn = !!opts.underline;
   const clipped = ansi.width(plain) > width ? ansi.stripAnsi(ansi.truncate(plain, width)) : plain;
   const pad = ' '.repeat(Math.max(0, width - ansi.width(clipped)));
-  const style = `${bg ? ansi.bg(bg) : ''}${fg ? ansi.fg(fg) : ''}${bold ? ansi.bold() : ''}${dim ? ansi.dim() : ''}`;
+  const style = `${bg ? ansi.bg(bg) : ''}${fg ? ansi.fg(fg) : ''}${bold ? ansi.bold() : ''}${dim ? ansi.dim() : ''}${underlineOn ? ansi.underline() : ''}`;
   return `${style}${clipped}${pad}${ansi.reset()}`;
 }
 
@@ -318,7 +321,11 @@ function actionListFor(item, userId, mode = {}) {
 }
 
 function hintActionsFor(item, userId, mode = {}) {
-  return [...actionListFor(item, userId, mode), ACTIONS.copy, ACTIONS.clear, ACTIONS.focus];
+  const actionMod = mode.actionMod || 'ctrl';
+  const actions = actionListFor(item, userId, mode).map((action) => (
+    action.mod ? { ...action, mod: actionMod } : action
+  ));
+  return [...actions, ACTIONS.copy, ACTIONS.focus];
 }
 
 const ACTION_SLOTS = ['reply', 'preview', 'edit', 'delete'];
@@ -422,21 +429,39 @@ function styleHotWord(action, compact = false) {
     + `${ansi.fg(PALETTE.muted)}${word.slice(at + 1)}${ansi.reset()}`;
 }
 
-function styleHint(actions, maxWidth = 0) {
-  const list = actions || [];
-  const render = (compact) => {
-    const ctrl = [];
-    const rest = [];
-    for (const action of list) {
-      if (action.mod === 'ctrl') ctrl.push(action);
-      else rest.push(action);
+function groupHintActions(list) {
+  const groups = [];
+  const rest = [];
+  const byMod = new Map();
+  for (const action of list || []) {
+    if (action.mod) {
+      if (!byMod.has(action.mod)) {
+        const bucket = [];
+        byMod.set(action.mod, bucket);
+        groups.push({ mod: action.mod, actions: bucket });
+      }
+      byMod.get(action.mod).push(action);
+    } else {
+      rest.push(action);
     }
+  }
+  return { groups, rest };
+}
+
+function modPrefix(mod, compact = false) {
+  const name = String(mod || 'ctrl');
+  return compact ? `${name}+` : `${name} + `;
+}
+
+function styleHint(actions, maxWidth = 0) {
+  const render = (compact) => {
+    const { groups, rest } = groupHintActions(actions);
     const gap = compact ? ' ' : '  ';
     const parts = [];
-    if (ctrl.length) {
-      const prefix = `${ansi.fg(PALETTE.muted)}${compact ? 'ctrl+' : 'ctrl + '}${ansi.reset()}`;
-      parts.push(prefix + styleHotWord(ctrl[0], compact));
-      for (const action of ctrl.slice(1)) parts.push(styleHotWord(action, compact));
+    for (const group of groups) {
+      const prefix = `${ansi.fg(PALETTE.muted)}${modPrefix(group.mod, compact)}${ansi.reset()}`;
+      parts.push(prefix + styleHotWord(group.actions[0], compact));
+      for (const action of group.actions.slice(1)) parts.push(styleHotWord(action, compact));
     }
     for (const action of rest) parts.push(styleHotWord(action, compact));
     return parts.join(gap);
@@ -449,18 +474,18 @@ function styleHint(actions, maxWidth = 0) {
 function hintHits(actions, originX, originY, rowWidth) {
   const compact = ansi.width(styleHint(actions, 0)) > Math.max(1, rowWidth - 1);
   const gap = compact ? 1 : 2;
-  const prefix = actions.some((action) => action.mod === 'ctrl')
-    ? (compact ? 'ctrl+' : 'ctrl + ')
-    : '';
+  const { groups, rest } = groupHintActions(actions);
   const parts = [];
-  let prefixed = false;
-  for (const action of actions) {
-    let w = ansi.width(hintWord(action, compact));
-    if (action.mod === 'ctrl' && !prefixed) {
-      w += ansi.width(prefix);
-      prefixed = true;
-    }
-    parts.push({ action, w });
+  for (const group of groups) {
+    const prefix = modPrefix(group.mod, compact);
+    group.actions.forEach((action, i) => {
+      let w = ansi.width(hintWord(action, compact));
+      if (i === 0) w += ansi.width(prefix);
+      parts.push({ action, w });
+    });
+  }
+  for (const action of rest) {
+    parts.push({ action, w: ansi.width(hintWord(action, compact)) });
   }
   const total = parts.reduce((sum, p) => sum + p.w, 0) + Math.max(0, parts.length - 1) * gap;
   let x = originX + Math.max(0, rowWidth - total - 1);
@@ -580,12 +605,18 @@ function sendingLabel(frame) {
   return pulseText('sending...', frame, PALETTE.title, PALETTE.muted);
 }
 
+function deletingLabel(frame) {
+  return pulseText('deleting...', frame, PALETTE.error, PALETTE.deletePulse);
+}
+
 function paintMessageRow(plain, width, {
   raised, deleting, isMeta, isReply, isIconRow, showIcons, hoverAction, actions, sending,
   animFrame, isImageRow, nameTint, stamp, ticks, item, replyHot,
 }) {
-  const bg = deleting ? PALETTE.deleteBg : (raised ? PALETTE.selectedBg : PALETTE.canvas);
+  const pendingDelete = !!item?.deleting;
+  const bg = deleting ? PALETTE.deleteBg : (raised && !pendingDelete ? PALETTE.selectedBg : PALETTE.canvas);
   const bgOn = bg ? ansi.bg(bg) : '';
+  const finish = (row) => (pendingDelete && !deleting ? dimLine(row) : row);
 
   if (isMeta) {
     const stampText = stamp || '';
@@ -594,39 +625,44 @@ function paintMessageRow(plain, width, {
     const name = ansi.stripAnsi(ansi.truncate(String(plain || ''), nameMax));
     const nameW = ansi.width(name);
     const mid = Math.max(0, width - nameW - stampW);
-    const left = `${bgOn}${ansi.fg(nameTint || PALETTE.text)}${ansi.bold()}${name}${ansi.reset()}`;
+    const nameFg = pendingDelete ? PALETTE.muted : (nameTint || PALETTE.text);
+    const left = `${bgOn}${ansi.fg(nameFg)}${ansi.bold()}${name}${ansi.reset()}`;
     const gap = `${bgOn}${' '.repeat(mid)}`;
     const right = stampText ? `${bgOn}${ansi.fg(PALETTE.muted)}${stampText}${ansi.reset()}` : '';
-    return withBg(`${left}${gap}${right}`, bg);
+    return finish(withBg(`${left}${gap}${right}`, bg));
   }
 
   if (isReply) {
-    return paintReplyPreview(item, width, { hot: !!replyHot, bg });
+    return finish(paintReplyPreview(item, width, { hot: !!replyHot, bg }));
   }
 
-  const gutterW = CONTENT_GUTTER;
+  const statusPlain = sending ? 'sending...' : (pendingDelete ? 'deleting...' : '');
+  const statusOnRow = !!(statusPlain && isIconRow);
+  const shown = isIconRow && showIcons && !statusOnRow ? visibleActions(actions) : [];
+  const actionW = statusOnRow ? ansi.width(statusPlain) : packedActionWidth(shown);
+  const need = (actionW ? actionW + 1 : 0) + TICK_GUTTER;
+  const steal = Math.max(0, need - CONTENT_GUTTER);
+  const gutterW = CONTENT_GUTTER + steal;
   const bodyW = Math.max(1, width - gutterW);
-  let body = isImageRow ? '[Image]' : String(plain || '');
-  if (sending && !isImageRow) {
-    const label = sendingLabel(animFrame);
-    const room = Math.max(1, bodyW - ansi.width(label) - 1);
-    const cut = ansi.width(body) > room ? ansi.stripAnsi(ansi.truncate(body, room)) : body;
-    body = cut + ' '.repeat(Math.max(0, room - ansi.width(cut))) + label;
+  const body = isImageRow ? '[Image]' : String(plain || '');
+  const bodyFg = isImageRow ? PALETTE.image : (sending || pendingDelete ? PALETTE.muted : PALETTE.text);
+  let actionStyled = '';
+  if (statusOnRow) {
+    const label = sending ? sendingLabel(animFrame) : deletingLabel(animFrame);
+    actionStyled = `${bgOn}${label}${ansi.reset()}`;
+  } else {
+    actionStyled = shown.map((action) => {
+      const hot = hoverAction === action.id;
+      return `${bgOn}${hot ? ansi.bold() : ''}${ansi.fg(action.color)}${action.glyph}${ansi.reset()}`;
+    }).join(`${bgOn}${' '.repeat(ACTION_GAP)}`);
   }
-  const bodyFg = isImageRow ? PALETTE.image : (sending ? PALETTE.muted : PALETTE.text);
-  const shown = isIconRow && showIcons ? visibleActions(actions) : [];
-  const actionW = packedActionWidth(shown);
-  const actionStyled = shown.map((action) => {
-    const hot = hoverAction === action.id;
-    return `${bgOn}${hot ? ansi.bold() : ''}${ansi.fg(action.color)}${action.glyph}${ansi.reset()}`;
-  }).join(`${bgOn}${' '.repeat(ACTION_GAP)}`);
   const tickText = isIconRow ? padStartCells(ticks || '', TICK_GUTTER) : ''.padStart(TICK_GUTTER, ' ');
   const midW = Math.max(0, gutterW - (actionW ? actionW + 1 : 0) - TICK_GUTTER);
-  const bodyStyled = `${bgOn}${ansi.fg(bodyFg)}${padCells(isImageRow ? '[Image]' : body, bodyW)}${ansi.reset()}`;
+  const bodyStyled = `${bgOn}${ansi.fg(bodyFg)}${padCells(body, bodyW)}${ansi.reset()}`;
   const gutterStyled = `${bgOn}${' '.repeat(midW)}`
     + (actionW ? `${actionStyled}${bgOn} ` : '')
     + `${tickText}${ansi.reset()}`;
-  return withBg(bodyStyled + gutterStyled, bg);
+  return finish(withBg(bodyStyled + gutterStyled, bg));
 }
 
 function boxTop(width, color, fill = null, title = '') {
@@ -819,6 +855,7 @@ function buildSidebar(state, width, height, nameY = null) {
   for (let i = 0; i < list.length && y < barY; i += 1) {
     const group = list[i];
     const active = String(group.id) === String(state.activeGroupId);
+    const highlighted = !active && String(group.id) === String(state.highlightedGroupId);
     const unread = Number(group.unreadCount) || 0;
     const badge = unread > 0 ? `[${unread > 99 ? '99+' : unread}]` : '';
     const innerW = Math.max(1, width - inset * 2);
@@ -828,6 +865,7 @@ function buildSidebar(state, width, height, nameY = null) {
       fg: active ? PALETTE.title : PALETTE.text,
       bold: active,
       bg: active ? PALETTE.activeBg : undefined,
+      underline: highlighted,
     }));
     hits.push({ type: 'group', id: group.id, x: 0, y, w: width, h: 1 });
     y += 1;
@@ -1243,6 +1281,20 @@ function scrollbarGlyphs(trackH, total, view, offset) {
   return cells;
 }
 
+/** Ease-in-out velocity for a remaining scroll batch. Fastest in the middle. */
+function nextScrollStep(left, total) {
+  const absLeft = Math.abs(Number(left) || 0);
+  if (!absLeft) return 0;
+  const absTotal = Math.max(absLeft, Math.abs(Number(total) || 0), 1);
+  const done = Math.max(0, absTotal - absLeft);
+  const t = Math.min(1, done / absTotal);
+  const env = Math.sin(Math.PI * t);
+  const peak = Math.max(1, Math.round(absTotal / 4));
+  let step = Math.max(1, Math.round(1 + (peak - 1) * env));
+  if (t >= 0.5) step = Math.min(step, Math.max(1, Math.ceil(absLeft / 2)));
+  return Math.min(step, absLeft);
+}
+
 function scrollOffsetFromY(y, region, maxScroll) {
   if (!region || region.h <= 1) return 0;
   const view = region.h;
@@ -1333,7 +1385,7 @@ function buildComposerHint(state, width) {
   let rightActions = [];
   if (state.overlay && state.overlay.type === 'delete') {
     const label = pulseText('confirm deletion? (enter)', state.animFrame, PALETTE.error, PALETTE.deletePulse);
-    rightActions = [ACTIONS.clear];
+    rightActions = [ACTIONS.cancel];
     right = `${label}   ${styleHint(rightActions, Math.max(8, hintRoom - ansi.width(label) - 3))}`;
   } else if (state.channelMenu) {
     rightActions = channelHintActions(state.channelMenu);
@@ -1341,12 +1393,12 @@ function buildComposerHint(state, width) {
   } else if (state.selectedMessageId) {
     const item = (state.messages || []).find((m) => String(m.msg?.id) === String(state.selectedMessageId));
     if (item) {
-      rightActions = hintActionsFor(item, state.userId, actionMode(state));
+      rightActions = hintActionsFor(item, state.userId, {
+        ...actionMode(state),
+        actionMod: state.inputFocus === 'composer' ? 'ctrl' : 'alt',
+      });
       right = styleHint(rightActions, hintRoom);
     }
-  } else if (state.activeGroupId) {
-    rightActions = [ACTIONS.focus];
-    right = styleHint(rightActions, hintRoom);
   }
 
   const rightW = ansi.width(right);
@@ -1669,8 +1721,9 @@ function buildChatFrameNow(cols, rows, state) {
     const selected = selectedId !== null && id === selectedId;
     const deleting = !!(state.overlay && state.overlay.type === 'delete'
       && String(state.overlay.messageId) === id);
-    const color = deleting ? PALETTE.error : outlineColor(hover && !deleting);
-    const showIcons = (hover || selected) && !deleting;
+    const pendingDelete = !!entry.item.deleting;
+    const color = deleting ? PALETTE.error : outlineColor(hover && !deleting && !pendingDelete);
+    const showIcons = (hover || selected) && !deleting && !pendingDelete && !entry.item.sending;
     const painted = paintMessageRow(entry.row, textW, {
       raised: selected,
       deleting,
@@ -1937,6 +1990,7 @@ module.exports = {
   clampScrollForMessage,
   offsetToShowMessage,
   actionMode,
+  nextScrollStep,
   replyPreviewText,
   buildComposerHint,
   composerMetrics,
