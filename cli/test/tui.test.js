@@ -113,7 +113,7 @@ test('landing frame: contains title, option and hint with art glyphs intact', ()
   assert.equal(frame.height, tier.art.length + landing.LOGO_PADDING);
   assert.equal(frame.originX, Math.floor((100 - frame.width) / 2));
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r28/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r29/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
   // The braille glyphs themselves must be preserved exactly.
@@ -179,10 +179,11 @@ test('landing frame: isHot sweeps a diagonal band', () => {
 
 test('shimmerHeat fades the band edges instead of a hard cut', () => {
   const stripe = chatLayout.GLIMMER;
-  assert.equal(landing.shimmerHeat(0, 4, 0, stripe), 0, 'outside the band is idle');
+  const width = Number(stripe.width);
+  assert.equal(landing.shimmerHeat(0, width + 0.2, 0, stripe), 0, 'outside the band is idle');
   const edge = landing.shimmerHeat(0, 0.2, 0, stripe);
-  const mid = landing.shimmerHeat(0, 2, 0, stripe);
-  const far = landing.shimmerHeat(0, 3.7, 0, stripe);
+  const mid = landing.shimmerHeat(0, width / 2, 0, stripe);
+  const far = landing.shimmerHeat(0, width - 0.3, 0, stripe);
   assert.ok(mid > edge, 'center is hotter than the leading edge');
   assert.ok(mid > far, 'center is hotter than the trailing edge');
   assert.ok(edge > 0 && edge < 1, 'leading edge is a partial fade');
@@ -202,7 +203,7 @@ test('composeFrame: writes full-width rows without eraseLine', () => {
 test('composeFrame: content is written on each line', () => {
   const out = app.composeFrame(80, 24, 0);
   const plain = ansi.stripAnsi(out.replace(/\u001b\[\d+;\d+H/g, ''));
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r28/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r29/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
 });
@@ -222,7 +223,7 @@ test('splash screen paints a themed canvas with a loading label', () => {
   const lines = app.splashScreenLines(80, 24, 'dark', 'Loading', 0);
   assert.equal(lines.length, 24);
   const plain = lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r28'));
+  assert.ok(plain.includes('GChat CLI 0.1 r29'));
   assert.ok(!plain.includes('Loading'), 'no separate Loading line');
   assert.ok(lines.join('').includes(ansi.bg(theme.DARK.canvas)));
 });
@@ -233,7 +234,7 @@ test('splash shimmers the version title instead of a Loading line', () => {
   const plainA = a.map((l) => ansi.stripAnsi(l)).join('\n');
   const plainB = b.map((l) => ansi.stripAnsi(l)).join('\n');
   assert.equal(plainA, plainB, 'the version letters do not change');
-  assert.ok(plainA.includes('GChat CLI 0.1 r28'));
+  assert.ok(plainA.includes('GChat CLI 0.1 r29'));
   assert.notEqual(a.join('\n'), b.join('\n'), 'the version restyles as the shimmer moves');
 });
 
@@ -679,7 +680,7 @@ test('codePointIndex and stepCodePoint do not split emoji', () => {
 test('chat frame: sidebar, channels, composer, and messages', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState());
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r28'), 'sidebar title is the CLI version');
+  assert.ok(plain.includes('GChat CLI 0.1 r29'), 'sidebar title is the CLI version');
   assert.ok(!plain.includes('chats\n') && !/^\s*chats\s*$/m.test(plain.split('\n')[0]), 'old "chats" label is gone');
   assert.ok(plain.includes('team'), 'active group in sidebar');
   assert.ok(!plain.includes('●'), 'groups are not indented with a bullet');
@@ -1250,6 +1251,7 @@ function makeController(over = {}) {
       emitTyping: () => {},
       logout: async () => {},
       deleteMessage: async () => {},
+      editMessage: async () => {},
     },
     paths: configPaths(dir),
     stdout: { write() {}, columns: 80, rows: 24 },
@@ -1877,10 +1879,16 @@ test('sidebar profile name stays pinned with a thin rule and padded logout', () 
   assert.ok(logout);
   assert.equal(openName.y, pinnedY, 'name stays pinned when Log out opens');
   assert.equal(openRuleY, nameHit.y - 2 - chatLayout.PROFILE_LIFT, 'rule lifts to fit the stacked settings');
-  assert.equal(logout.y, openRuleY + 2, 'Log out sits under a pad below the rule');
+  const quit = open.hits.find((h) => h.type === 'quit');
+  assert.ok(quit, 'Quit sits at the top of the profile menu');
+  assert.equal(quit.y, openRuleY + 2, 'Quit sits under a pad below the rule');
+  assert.equal(logout.y, quit.y + 2, 'Log out sits under Quit');
   assert.equal(logout.h, 1, 'Log out is a single content row until hover');
   assert.ok(logout.y < openName.y - 1, 'Log out has padding above the name');
-  assert.ok(open.lines.map((l) => ansi.stripAnsi(l)).join('\n').includes('Log out'));
+  const openPlain = open.lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.ok(openPlain.includes('Log out'));
+  assert.ok(openPlain.includes('Quit'));
+  assert.ok(openPlain.includes('ctrl q'));
   const logoutMid = ansi.stripAnsi(open.lines[logout.y]).slice(0, sideW);
   assert.ok(logoutMid.includes('Log out'));
   assert.ok(!logoutMid.includes('╭') && !logoutMid.includes('│'), 'resting Log out has no box chrome');
@@ -2103,21 +2111,50 @@ test('scroll batch eases in and out with the fastest step in the middle', () => 
     left -= step;
   }
   const mid = steps[Math.floor(steps.length / 2)];
-  assert.ok(steps[0] < mid, 'starts slower than the middle');
-  assert.ok(steps[steps.length - 1] < mid, 'ends slower than the middle');
+  assert.ok(steps[0] <= mid, 'starts no faster than the middle');
+  assert.ok(steps[steps.length - 1] <= mid, 'ends no faster than the middle');
+  assert.ok(steps.length <= chatLayout.SCROLL_BATCH_FRAMES, 'higher distance uses a fixed frame budget');
   assert.equal(steps.reduce((sum, n) => sum + n, 0), total);
+  const small = [];
+  let remain = 1;
+  while (remain > 0) {
+    const step = chatLayout.nextScrollStep(remain, 1);
+    small.push(step);
+    remain -= step;
+  }
+  assert.deepEqual(small, [1], 'lowest sensitivity is one increment');
+  const count = (n) => {
+    let leftN = n;
+    let frames = 0;
+    while (leftN > 0) {
+      leftN -= chatLayout.nextScrollStep(leftN, n);
+      frames += 1;
+    }
+    return frames;
+  };
+  assert.ok(count(20) <= chatLayout.SCROLL_BATCH_FRAMES);
+  assert.ok(count(8) <= chatLayout.SCROLL_BATCH_FRAMES, 'smaller distances stay in the same frame budget');
 });
 
-test('idle sidebar underlines the highlighted group', () => {
+test('idle sidebar outlines the highlighted group', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState({
     activeGroupId: null,
     highlightedGroupId: 'g1',
     groups: [{ id: 'g1', name: 'team' }, { id: 'g2', name: 'ops' }],
   }));
-  const teamRow = frame.lines.find((l) => ansi.stripAnsi(l).includes('team'));
+  const teamIdx = frame.lines.findIndex((l) => {
+    const p = ansi.stripAnsi(l);
+    return p.includes('team') && !p.includes('GChat');
+  });
+  assert.ok(teamIdx > 0);
+  const sideW = frame.regions.sidebar.w;
+  const side = (line) => ansi.stripAnsi(line).slice(0, sideW);
+  assert.ok(side(frame.lines[teamIdx - 1]).includes('╭'), 'highlight uses a rounded top');
+  assert.ok(side(frame.lines[teamIdx]).includes('│'), 'highlight wraps the name');
+  assert.ok(side(frame.lines[teamIdx + 1]).includes('╰'), 'highlight uses a rounded bottom');
+  assert.ok(!frame.lines[teamIdx].includes(ansi.underline()), 'underline is gone');
   const opsRow = frame.lines.find((l) => ansi.stripAnsi(l).includes('ops'));
-  assert.ok(teamRow && teamRow.includes(ansi.underline()), 'the highlighted group is underlined');
-  assert.ok(opsRow && !opsRow.includes(ansi.underline()), 'other groups stay plain');
+  assert.ok(opsRow && !side(opsRow).includes('│'), 'other groups stay plain');
 });
 
 test('up/down on the idle screen walk groups and wrap at the ends', () => {
@@ -2212,12 +2249,13 @@ test('a deleting message is dimmed with deleting... next to the ticks', () => {
   assert.ok(!hint.includes('deleting...\n') || !/^\s*deleting/.test(hint), 'deleting is not a left-side flash');
 });
 
-test('username row shows a ctrl+a hint', () => {
+test('username row shows a ctrl a hint', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState({ username: 'will' }));
   const nameY = chatLayout.profileNameRow(24);
   const row = ansi.stripAnsi(frame.lines[nameY]);
   assert.ok(row.includes('will'));
-  assert.ok(row.includes('ctrl+a'));
+  assert.ok(row.includes('ctrl a'));
+  assert.ok(!row.includes('ctrl+a'));
   assert.ok(frame.lines[nameY].includes(`${ansi.bold()}${ansi.fg(theme.DARK.theme)}a`));
 });
 
@@ -2243,6 +2281,8 @@ test('ctrl+a opens profile focus; arrows move; esc returns', () => {
   assert.equal(chat.state.profileCursor, 1);
   chat.moveProfileCursor(1);
   assert.equal(chat.state.profileCursor, 2);
+  chat.moveProfileCursor(1);
+  assert.equal(chat.state.profileCursor, 3);
   chat.nudgeSensitivity(3);
   assert.equal(chat.state.scrollSensitivity, 4);
   chat.handleKey('\u001b');
@@ -2284,6 +2324,41 @@ test('active channel chip and selected message use a fill', () => {
   assert.ok(light.lines.join('').includes(ansi.bg(theme.LIGHT.activeBg)));
   const dark = chatLayout.buildChatFrame(80, 24, chatState({ selectedMessageId: 'm2' }));
   assert.ok(dark.lines.join('').includes(ansi.bg(theme.DARK.selectedBg)));
+});
+
+test('edited tag sits dim next to the timestamp', () => {
+  const frame = chatLayout.buildChatFrame(80, 24, chatState({
+    messages: [{
+      ...chatState().messages[1],
+      msg: { ...chatState().messages[1].msg, editedAt: '2026-08-13T10:04:00.000Z' },
+    }],
+  }));
+  const row = frame.lines.find((l) => {
+    const p = ansi.stripAnsi(l);
+    return p.includes('will') && p.includes('edited') && p.includes('10:03');
+  });
+  assert.ok(row, 'edited and the timestamp share the name row');
+  const plain = ansi.stripAnsi(row);
+  const editedAt = plain.indexOf('edited');
+  const timeAt = plain.indexOf('10:03');
+  assert.ok(editedAt < timeAt, 'edited sits to the left of the time');
+  assert.ok(timeAt - editedAt <= 8, 'edited is right next to the timestamp');
+  assert.ok(row.includes(ansi.dim()), 'edited is subtle');
+});
+
+test('enter on an edit clears the composer and shows editing...', () => {
+  const chat = makeController({
+    editingId: 'm2',
+    composer: 'new text',
+    composerCaret: 8,
+  });
+  chat.handleKey('\r');
+  assert.equal(chat.state.composer, '');
+  assert.equal(chat.state.editingId, null);
+  const item = chat.state.messages.find((m) => m.msg.id === 'm2');
+  assert.equal(item.editing, true);
+  const plain = chat.draw().lines.map((l) => ansi.stripAnsi(l)).join('\n');
+  assert.ok(plain.includes('editing...'));
 });
 
 test('dark-mode sensitivity fill uses dark text on the bright thumb', () => {

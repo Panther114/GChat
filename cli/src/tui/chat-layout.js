@@ -53,9 +53,9 @@ const SCROLL_TWEEN_MS = 220;
 const GLIMMER = landing.TEXT_SHIMMER;
 const PROFILE_NAME_OFFSET = 3;
 const PROFILE_BUTTON_ROWS = 1;
-const PROFILE_BUTTON_COUNT = 3;
+const PROFILE_BUTTON_COUNT = 4;
 const PROFILE_BUTTON_GAP = 1;
-/** Closed: rule + blank + name. Open: rule + pad + three 1-line controls with a gap + pad + name. */
+/** Closed: rule + blank + name. Open: rule + pad + four 1-line controls with a gap + pad + name. */
 const PROFILE_LIFT = 1 + PROFILE_BUTTON_COUNT * PROFILE_BUTTON_ROWS
   + (PROFILE_BUTTON_COUNT - 1) * PROFILE_BUTTON_GAP;
 
@@ -104,8 +104,10 @@ const DEFAULT_CHAT = {
   profileCloseFrom: 0,
   profileCloseFrame: 0,
   hoverLogout: false,
+  hoverQuit: false,
   hoverTheme: false,
   hoverSensitivity: false,
+  hoverGroupId: null,
   theme: 'dark',
   scrollSensitivity: 1,
   profileCursor: null,
@@ -326,7 +328,8 @@ function hintActionsFor(item, userId, mode = {}) {
   return [...actionListFor(item, userId, mode), ACTIONS.copy, ACTIONS.focus];
 }
 
-const PROFILE_ITEMS = ['logout', 'theme', 'sensitivity'];
+const PROFILE_ITEMS = ['quit', 'logout', 'theme', 'sensitivity'];
+const SCROLL_BATCH_FRAMES = 9;
 
 const ACTION_SLOTS = ['reply', 'preview', 'edit', 'delete'];
 const ACTION_SLOT_W = 1;
@@ -512,9 +515,7 @@ function bodyText(item) {
 }
 
 function metaLine(item) {
-  const name = item.msg?.senderName || item.msg?.senderId || '?';
-  const edited = item.msg?.editedAt ? '  edited' : '';
-  return `${name}${edited}`;
+  return item.msg?.senderName || item.msg?.senderId || '?';
 }
 
 function replyPreviewText(item) {
@@ -602,11 +603,15 @@ function layoutMessage(item, width, userId, mode = {}) {
 }
 
 function sendingLabel(frame) {
-  return pulseText('sending...', frame, PALETTE.title, PALETTE.muted);
+  return shimmerText('sending...', frame, PALETTE.title, PALETTE.muted);
 }
 
 function deletingLabel(frame) {
-  return pulseText('deleting...', frame, PALETTE.error, PALETTE.deletePulse);
+  return shimmerText('deleting...', frame, PALETTE.error, PALETTE.deletePulse);
+}
+
+function editingLabel(frame) {
+  return shimmerText('editing...', frame, PALETTE.title, PALETTE.muted);
 }
 
 function paintMessageRow(plain, width, {
@@ -614,21 +619,28 @@ function paintMessageRow(plain, width, {
   animFrame, isImageRow, nameTint, stamp, ticks, item, replyHot,
 }) {
   const pendingDelete = !!item?.deleting;
+  const pendingEdit = !!item?.editing;
   const bg = deleting ? PALETTE.deleteBg : (raised && !pendingDelete ? PALETTE.selectedBg : PALETTE.canvas);
   const bgOn = bg ? ansi.bg(bg) : '';
-  const finish = (row) => (pendingDelete && !deleting ? dimLine(row) : row);
+  const finish = (row) => ((pendingDelete || pendingEdit) && !deleting ? dimLine(row) : row);
 
   if (isMeta) {
     const stampText = stamp || '';
-    const stampW = ansi.width(stampText);
-    const nameMax = Math.max(1, width - stampW - (stampW ? 1 : 0));
+    const edited = item?.msg?.editedAt ? 'edited' : '';
+    const editedBit = edited ? `${ansi.dim()}${ansi.fg(PALETTE.muted)}${edited}${ansi.reset()}` : '';
+    const stampBit = stampText ? `${bgOn}${ansi.fg(PALETTE.muted)}${stampText}${ansi.reset()}` : '';
+    const rightPlain = `${edited}${edited && stampText ? ' ' : ''}${stampText}`;
+    const rightW = ansi.width(rightPlain);
+    const nameMax = Math.max(1, width - rightW - (rightW ? 1 : 0));
     const name = ansi.stripAnsi(ansi.truncate(String(plain || ''), nameMax));
     const nameW = ansi.width(name);
-    const mid = Math.max(0, width - nameW - stampW);
-    const nameFg = pendingDelete ? PALETTE.muted : (nameTint || PALETTE.text);
+    const mid = Math.max(0, width - nameW - rightW);
+    const nameFg = pendingDelete || pendingEdit ? PALETTE.muted : (nameTint || PALETTE.text);
     const left = `${bgOn}${ansi.fg(nameFg)}${ansi.bold()}${name}${ansi.reset()}`;
     const gap = `${bgOn}${' '.repeat(mid)}`;
-    const right = stampText ? `${bgOn}${ansi.fg(PALETTE.muted)}${stampText}${ansi.reset()}` : '';
+    const right = edited
+      ? `${bgOn}${editedBit}${stampBit ? `${bgOn} ${stampBit}` : ''}`
+      : stampBit;
     return finish(withBg(`${left}${gap}${right}`, bg));
   }
 
@@ -636,7 +648,7 @@ function paintMessageRow(plain, width, {
     return finish(paintReplyPreview(item, width, { hot: !!replyHot, bg }));
   }
 
-  const statusPlain = sending ? 'sending...' : (pendingDelete ? 'deleting...' : '');
+  const statusPlain = sending ? 'sending...' : (pendingDelete ? 'deleting...' : (pendingEdit ? 'editing...' : ''));
   const statusOnRow = !!(statusPlain && isIconRow);
   const shown = isIconRow && showIcons && !statusOnRow ? visibleActions(actions) : [];
   const actionW = statusOnRow ? ansi.width(statusPlain) : packedActionWidth(shown);
@@ -645,10 +657,12 @@ function paintMessageRow(plain, width, {
   const gutterW = CONTENT_GUTTER + steal;
   const bodyW = Math.max(1, width - gutterW);
   const body = isImageRow ? '[Image]' : String(plain || '');
-  const bodyFg = isImageRow ? PALETTE.image : (sending || pendingDelete ? PALETTE.muted : PALETTE.text);
+  const bodyFg = isImageRow ? PALETTE.image : (sending || pendingDelete || pendingEdit ? PALETTE.muted : PALETTE.text);
   let actionStyled = '';
   if (statusOnRow) {
-    const label = sending ? sendingLabel(animFrame) : deletingLabel(animFrame);
+    const label = sending
+      ? sendingLabel(animFrame)
+      : (pendingDelete ? deletingLabel(animFrame) : editingLabel(animFrame));
     actionStyled = `${bgOn}${label}${ansi.reset()}`;
   } else {
     actionStyled = shown.map((action) => {
@@ -685,8 +699,12 @@ function boxRow(inner, width, color, fill = null) {
   return `${bgOn}${ansi.fg(color)}│${reset}${bgOn}${padCells(inner, Math.max(0, width - 2))}${bgOn}${ansi.fg(color)}│${reset}`;
 }
 
+function shimmerText(text, frame, hotColor, idleColor) {
+  return landing.shimmerText(text, frame, hotColor, idleColor, GLIMMER);
+}
+
 function pulseText(text, frame, hotColor, idleColor) {
-  return landing.pulseText(text, frame, hotColor, idleColor, GLIMMER);
+  return shimmerText(text, frame, hotColor, idleColor);
 }
 
 function hitTest(hits, x, y) {
@@ -766,17 +784,22 @@ function fadeHex(target, fade) {
   return landing.lerpHex(PALETTE.canvas, target, t);
 }
 
-function paintButtonLabel(word, innerW, frame, hover, fade, idleFg, hotFg) {
+function paintButtonLabel(word, innerW, frame, hover, fade, idleFg, hotFg, hint = '') {
   const label = String(word || '');
+  const hintText = String(hint || '');
   const padL = 1;
-  const room = Math.max(0, innerW - padL);
+  const hintW = hintText ? ansi.width(hintText) + 1 : 0;
+  const room = Math.max(0, innerW - padL - hintW);
   const shown = ansi.width(label) > room ? ansi.stripAnsi(ansi.truncate(label, room)) : label;
   const color = hover ? (hotFg || idleFg) : idleFg;
   let body;
-  if (hover && fade >= 1) body = pulseText(shown, frame, hotFg || color, idleFg);
+  if (hover && fade >= 1) body = shimmerText(shown, frame, hotFg || color, idleFg);
   else body = `${ansi.fg(fadeHex(color, fade))}${shown}${ansi.reset()}`;
-  const tail = ' '.repeat(Math.max(0, innerW - padL - ansi.width(shown)));
-  return `${' '.repeat(padL)}${body}${tail}`;
+  const hintStyled = hintText
+    ? `${ansi.dim()}${ansi.fg(fadeHex(PALETTE.muted, fade))}${hintText}${ansi.reset()}`
+    : '';
+  const mid = ' '.repeat(Math.max(0, innerW - padL - ansi.width(shown) - ansi.width(hintText)));
+  return `${' '.repeat(padL)}${body}${mid}${hintStyled}`;
 }
 
 function contrastOn(bgHex) {
@@ -813,6 +836,7 @@ function paintSidebarControl({
   hotFg,
   fade = 1,
   fillValue = null,
+  hint = '',
 }) {
   const pad = Math.max(0, Number(inset) || 0);
   const boxW = Math.max(3, width - pad * 2);
@@ -822,7 +846,7 @@ function paintSidebarControl({
   if (!(fade > 0)) return { top: blank, mid: blank, bot: blank };
   const inner = fillValue != null
     ? paintFillTrackWithLabel(innerW, fillValue, fade, label || 'Sensitivity')
-    : paintButtonLabel(label, innerW, frame, hover, fade, idleFg, hotFg);
+    : paintButtonLabel(label, innerW, frame, hover, fade, idleFg, hotFg, hint);
   const outline = hover ? (idleFg || PALETTE.outline) : null;
   const mid = outline
     ? `${side}${boxRow(inner, boxW, outline)}${side}`
@@ -841,13 +865,13 @@ function profileNameRow(height) {
 function paintProfileNameRow(username, userColor, width, inset) {
   const pad = Math.max(0, Number(inset) || 0);
   const innerW = Math.max(1, width - pad * 2);
-  const hintPlain = 'ctrl+a';
+  const hintPlain = 'ctrl a';
   const hintW = ansi.width(hintPlain);
   const nameBudget = Math.max(1, innerW - hintW - 1);
   const name = ansi.stripAnsi(ansi.truncate(` ${String(username || 'you')}`, nameBudget));
   const namePad = Math.max(0, nameBudget - ansi.width(name));
   const nameStyled = `${ansi.bold()}${ansi.fg(userColor)}${name}${' '.repeat(namePad)}${ansi.reset()}`;
-  const hintStyled = `${ansi.fg(PALETTE.muted)}ctrl+${ansi.reset()}`
+  const hintStyled = `${ansi.fg(PALETTE.muted)}ctrl ${ansi.reset()}`
     + `${ansi.bold()}${ansi.fg(PALETTE.theme)}a${ansi.reset()}`;
   const inner = `${nameStyled} ${hintStyled}`;
   if (pad <= 0) return `${inner}${ansi.reset()}`;
@@ -865,15 +889,18 @@ function buildSidebar(state, width, height, nameY = null) {
   const extra = profileLift(state);
   const profileNameY = Math.max(2, Math.min(height - 1, nameY == null ? profileNameRow(height) : nameY));
   const barY = Math.max(1, profileNameY - 2 - extra);
-  const logoutY = barY + 2;
-  const themeY = barY + 4;
-  const sensY = barY + 6;
+  const quitY = barY + 2;
+  const logoutY = barY + 4;
+  const themeY = barY + 6;
+  const sensY = barY + 8;
   lines.push(fillRow('', width, {}));
   let y = 2;
+  const groupRows = [];
   for (let i = 0; i < list.length && y < barY; i += 1) {
     const group = list[i];
     const active = String(group.id) === String(state.activeGroupId);
-    const highlighted = !active && String(group.id) === String(state.highlightedGroupId);
+    const highlighted = String(group.id) === String(state.highlightedGroupId);
+    const hover = String(group.id) === String(state.hoverGroupId);
     const unread = Number(group.unreadCount) || 0;
     const badge = unread > 0 ? `[${unread > 99 ? '99+' : unread}]` : '';
     const innerW = Math.max(1, width - inset * 2);
@@ -883,13 +910,30 @@ function buildSidebar(state, width, height, nameY = null) {
       fg: active ? PALETTE.title : PALETTE.text,
       bold: active,
       bg: active ? PALETTE.activeBg : undefined,
-      underline: highlighted,
     }));
     hits.push({ type: 'group', id: group.id, x: 0, y, w: width, h: 1 });
+    groupRows.push({ y, label, active, highlighted, hover });
     y += 1;
     if (y < barY) {
       lines.push(fillRow('', width, {}));
       y += 1;
+    }
+  }
+  const side = fillRow('', inset, {});
+  const boxW = Math.max(3, width - inset * 2);
+  for (const row of groupRows) {
+    const outlined = row.hover || (row.highlighted && !row.active);
+    if (!outlined) continue;
+    const color = row.hover ? PALETTE.outline : PALETTE.outlineStrong;
+    const fill = row.active ? PALETTE.activeBg : null;
+    const inner = padCells(row.label, Math.max(1, boxW - 2));
+    const styled = `${row.active ? ansi.bold() : ''}${ansi.fg(row.active ? PALETTE.title : PALETTE.text)}${inner}${ansi.reset()}`;
+    if (row.y - 1 >= 1 && row.y - 1 < barY) {
+      lines[row.y - 1] = `${side}${boxTop(boxW, color, fill)}${side}`;
+    }
+    lines[row.y] = `${side}${boxRow(styled, boxW, color, fill)}${side}`;
+    if (row.y + 1 < barY && row.y + 1 < height) {
+      lines[row.y + 1] = `${side}${boxBottom(boxW, color, fill)}${side}`;
     }
   }
   while (lines.length < height) lines.push(fillRow('', width, {}));
@@ -933,25 +977,32 @@ function buildSidebar(state, width, height, nameY = null) {
       covered.add(midY + 1);
     }
   };
+  placeButton(quitY, 'quit', {
+    label: 'Quit',
+    hint: 'ctrl q',
+    hover: !!state.hoverQuit || (profileFocused && state.profileCursor === 0),
+    idleFg: PALETTE.muted,
+    hotFg: PALETTE.title,
+  }, 0);
   placeButton(logoutY, 'logout', {
     label: 'Log out',
-    hover: !!state.hoverLogout || (profileFocused && state.profileCursor === 0),
+    hover: !!state.hoverLogout || (profileFocused && state.profileCursor === 1),
     idleFg: PALETTE.error,
     hotFg: PALETTE.logoutHot,
-  }, 0);
+  }, 1);
   placeButton(themeY, 'theme', {
     label: 'Theme',
-    hover: !!state.hoverTheme || (profileFocused && state.profileCursor === 1),
+    hover: !!state.hoverTheme || (profileFocused && state.profileCursor === 2),
     idleFg: PALETTE.theme,
     hotFg: PALETTE.themeHot,
-  }, 1);
+  }, 2);
   placeButton(sensY, 'sensitivity', {
     label: 'Sensitivity',
-    hover: !!state.hoverSensitivity || (profileFocused && state.profileCursor === 2),
+    hover: !!state.hoverSensitivity || (profileFocused && state.profileCursor === 3),
     idleFg: PALETTE.thumb,
     hotFg: PALETTE.outlineStrong,
     fillValue: state.scrollSensitivity,
-  }, 2);
+  }, 3);
   for (let py = barY + 1; py < profileNameY; py += 1) {
     if (covered.has(py)) continue;
     hits.push({ type: 'profile', x: 0, y: py, w: width, h: 1 });
@@ -1310,17 +1361,41 @@ function easeInOutCubic(t) {
   return x < 0.5 ? 4 * x * x * x : 1 - ((-2 * x + 2) ** 3) / 2;
 }
 
-/** Cubic ease-in-out over a fixed tick count. Slow at both ends, fastest in the middle. */
+function scrollStepPlan(total) {
+  const absTotal = Math.max(1, Math.round(Math.abs(Number(total) || 0)));
+  if (absTotal <= 1) return [1];
+  const n = SCROLL_BATCH_FRAMES;
+  const raw = [];
+  for (let i = 0; i < n; i += 1) {
+    raw.push((easeInOutCubic((i + 1) / n) - easeInOutCubic(i / n)) * absTotal);
+  }
+  const steps = raw.map((value) => Math.max(0, Math.floor(value)));
+  let used = steps.reduce((sum, value) => sum + value, 0);
+  const order = raw
+    .map((value, i) => ({ i, frac: value - steps[i] }))
+    .sort((a, b) => b.frac - a.frac);
+  let k = 0;
+  while (used < absTotal) {
+    steps[order[k % n].i] += 1;
+    used += 1;
+    k += 1;
+  }
+  return steps;
+}
+
+/** Fixed-frame ease-in-out: more lines, same number of updates. */
 function nextScrollStep(left, total) {
   const absLeft = Math.abs(Number(left) || 0);
   if (!absLeft) return 0;
   const absTotal = Math.max(absLeft, Math.abs(Number(total) || 0), 1);
-  const done = Math.max(0, absTotal - absLeft);
-  const ticks = Math.max(12, absTotal);
-  const t0 = done / absTotal;
-  const t1 = Math.min(1, t0 + (1 / ticks));
-  const step = Math.max(1, Math.round((easeInOutCubic(t1) - easeInOutCubic(t0)) * absTotal));
-  return Math.min(step, absLeft);
+  const plan = scrollStepPlan(absTotal);
+  const done = absTotal - absLeft;
+  let acc = 0;
+  for (const step of plan) {
+    if (acc >= done && step > 0) return Math.min(step, absLeft);
+    acc += step;
+  }
+  return Math.min(1, absLeft);
 }
 
 function scrollOffsetFromY(y, region, maxScroll) {
@@ -1394,13 +1469,15 @@ function buildComposerHint(state, width) {
   const flash = state.flash && Number(state.flash.until) > Date.now() ? state.flash : null;
   if (state.error) left = `${ansi.fg(PALETTE.error)}${state.error}${ansi.reset()}`;
   else if (flash) {
-    left = pulseText(
+    left = shimmerText(
       flash.text || '',
       state.animFrame,
       flash.hot || PALETTE.title,
       flash.idle || PALETTE.muted
     );
-  } else if (state.editingId) left = `${ansi.fg(PALETTE.muted)}editing${ansi.reset()}`;
+  } else if (state.editingId) {
+    left = shimmerText('editing', state.animFrame, PALETTE.title, PALETTE.muted);
+  }
   else if (state.replyTo) left = `${ansi.fg(PALETTE.muted)}↩  ${state.replyTo.name || 'reply'}${ansi.reset()}`;
   else if (state.typing && state.typing.username) {
     const pulse = Math.floor((state.animFrame || 0) / 8) % 2 === 0;
@@ -1412,7 +1489,7 @@ function buildComposerHint(state, width) {
   let right = '';
   let rightActions = [];
   if (state.overlay && state.overlay.type === 'delete') {
-    const label = pulseText('confirm deletion? (enter)', state.animFrame, PALETTE.error, PALETTE.deletePulse);
+    const label = shimmerText('confirm deletion? (enter)', state.animFrame, PALETTE.error, PALETTE.deletePulse);
     rightActions = [ACTIONS.cancel];
     right = `${label}   ${styleHint(rightActions, Math.max(8, hintRoom - ansi.width(label) - 3))}`;
   } else if (state.channelMenu) {
@@ -1700,7 +1777,7 @@ function buildChatFrameNow(cols, rows, state) {
 
     if (entry && entry.kind === 'more') {
       const label = 'Loading more...';
-      const pulsed = pulseText(label, state.animFrame, PALETTE.title, PALETTE.muted);
+      const pulsed = shimmerText(label, state.animFrame, PALETTE.title, PALETTE.muted);
       const padL = Math.max(0, Math.floor((contentW - ansi.width(label)) / 2));
       lines[screenY] = join(left, `${' '.repeat(padL)}${pulsed}`, bar[i]);
       continue;
@@ -1748,7 +1825,8 @@ function buildChatFrameNow(cols, rows, state) {
       && String(state.overlay.messageId) === id);
     const pendingDelete = !!entry.item.deleting;
     const color = deleting ? PALETTE.error : outlineColor(hover && !deleting && !pendingDelete);
-    const showIcons = (hover || selected) && !deleting && !pendingDelete && !entry.item.sending;
+    const showIcons = (hover || selected) && !deleting && !pendingDelete
+      && !entry.item.sending && !entry.item.editing;
     const painted = paintMessageRow(entry.row, textW, {
       raised: selected,
       deleting,
@@ -2016,8 +2094,10 @@ module.exports = {
   offsetToShowMessage,
   actionMode,
   PROFILE_ITEMS,
+  SCROLL_BATCH_FRAMES,
   easeInOutCubic,
   nextScrollStep,
+  shimmerText,
   replyPreviewText,
   buildComposerHint,
   composerMetrics,

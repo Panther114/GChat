@@ -15,7 +15,7 @@ const ansi = require('./ansi');
 const { PALETTE, DARK, runWithTheme } = require('./theme');
 
 /** Display version for the landing page (intentionally separate from package version). */
-const TUI_VERSION = '0.1 r28';
+const TUI_VERSION = '0.1 r29';
 /** Shared duration for login→loading and loading→idle bird hops. */
 const BIRD_FLIGHT_MS = 560;
 
@@ -227,29 +227,37 @@ function styleArtLine(artLine, row, frame, shimmer = DEFAULT_SHIMMER) {
   return out;
 }
 
-/** Soft sweep used by Loading / confirm-delete (not the bird band). */
-const TEXT_SHIMMER = { speed: 0.6, width: 4, period: 18 };
+/** Soft sweep used by status labels, profile hovers, and the loading title. */
+const TEXT_SHIMMER = { speed: 0.55, width: 5, period: 20 };
 
-function pulseText(text, frame, hotColor, idleColor, shimmer = TEXT_SHIMMER) {
+/** Shared text shimmer: hot stripe, idle elsewhere, bold only on the peak. */
+function shimmerText(text, frame, hotColor, idleColor, shimmer = TEXT_SHIMMER) {
   let out = '';
   let run = '';
   let runColor = null;
+  let runBold = false;
   const flush = () => {
     if (!run) return;
-    out += `${ansi.bold()}${ansi.fg(runColor)}${run}${ansi.reset()}`;
+    out += `${runBold ? ansi.bold() : ''}${ansi.fg(runColor)}${run}${ansi.reset()}`;
     run = '';
   };
   let i = 0;
   for (const ch of String(text || '')) {
     const heat = shimmerHeat(0, i, frame || 0, shimmer);
     const color = heat > 0 ? lerpHex(idleColor, hotColor, heat) : idleColor;
-    if (runColor !== null && color !== runColor) flush();
+    const bold = heat >= 0.55;
+    if (runColor !== null && (color !== runColor || bold !== runBold)) flush();
     runColor = color;
+    runBold = bold;
     run += ch;
     i += 1;
   }
   flush();
   return out;
+}
+
+function pulseText(text, frame, hotColor, idleColor, shimmer = TEXT_SHIMMER) {
+  return shimmerText(text, frame, hotColor, idleColor, shimmer);
 }
 
 function buildTitle() {
@@ -657,6 +665,7 @@ module.exports = {
   shimmerHeat,
   lerpHex,
   pulseText,
+  shimmerText,
   easeOutCubic,
   selectTier,
   styleArtLine,

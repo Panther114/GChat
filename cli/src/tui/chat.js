@@ -151,9 +151,11 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     if (state.loadingMore) return true;
     if (state.scrollTween) return true;
     if (state.birdFlight) return true;
+    if (state.hoverQuit && (state.profileOpen || state.profileExpandFrame)) return true;
     if (state.hoverLogout && (state.profileOpen || state.profileExpandFrame)) return true;
     if (state.hoverTheme && (state.profileOpen || state.profileExpandFrame)) return true;
     if (state.hoverSensitivity && (state.profileOpen || state.profileExpandFrame)) return true;
+    if (state.editingId) return true;
     if (state.flash && Date.now() < Number(state.flash.until || 0)) return true;
     if (state.profileClosing && (state.profileCloseFrame || 0) < PROFILE_FRAMES) return true;
     if (state.profileOpen && (state.profileExpandFrame || 0) < PROFILE_FRAMES) return true;
@@ -161,7 +163,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     if (state.channelMenu && !state.channelClosing && (state.channelExpandFrame || 0) < CHANNEL_EXPAND_FRAMES) {
       return true;
     }
-    return (state.messages || []).some((item) => item.sending || item.deleting);
+    return (state.messages || []).some((item) => item.sending || item.deleting || item.editing);
   }
 
   function startPulse() {
@@ -771,18 +773,22 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       || state.hoverAction
       || state.hoverChannel
       || state.hoverLogout
+      || state.hoverQuit
       || state.hoverTheme
       || state.hoverSensitivity
       || state.hoverReply
+      || state.hoverGroupId
     );
     if (!had && lastHoverKey === '') return false;
     state.hoverMessageId = null;
     state.hoverAction = null;
     state.hoverChannel = null;
     state.hoverLogout = false;
+    state.hoverQuit = false;
     state.hoverTheme = false;
     state.hoverSensitivity = false;
     state.hoverReply = false;
+    state.hoverGroupId = null;
     lastHoverKey = '';
     return had;
   }
@@ -800,20 +806,24 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       ? String(hit.name || '+')
       : null;
     const nextLogout = !!(hit && hit.type === 'logout');
+    const nextQuit = !!(hit && hit.type === 'quit');
     const nextThemeHit = !!(hit && hit.type === 'theme');
     const nextSensitivity = !!(hit && hit.type === 'sensitivity');
     const nextReply = !!(hit && hit.type === 'reply-ref');
-    const key = `${nextId || ''}:${nextAction || ''}:${nextChannel || ''}:${nextLogout ? 'out' : ''}:${nextThemeHit ? 'theme' : ''}:${nextSensitivity ? 'sens' : ''}:${nextReply ? 'reply' : ''}`;
+    const nextGroup = hit && hit.type === 'group' ? String(hit.id) : null;
+    const key = `${nextId || ''}:${nextAction || ''}:${nextChannel || ''}:${nextLogout ? 'out' : ''}:${nextQuit ? 'quit' : ''}:${nextThemeHit ? 'theme' : ''}:${nextSensitivity ? 'sens' : ''}:${nextReply ? 'reply' : ''}:${nextGroup || ''}`;
     if (key === lastHoverKey) return false;
     lastHoverKey = key;
     state.hoverMessageId = nextId;
     state.hoverAction = nextAction;
     state.hoverChannel = nextChannel;
     state.hoverLogout = nextLogout;
+    state.hoverQuit = nextQuit;
     state.hoverTheme = nextThemeHit;
     state.hoverSensitivity = nextSensitivity;
     state.hoverReply = nextReply;
-    if (nextLogout || nextThemeHit) startPulse();
+    state.hoverGroupId = nextGroup;
+    if (nextLogout || nextQuit || nextThemeHit) startPulse();
     return true;
   }
 
@@ -956,7 +966,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
   }
 
   function moveProfileCursor(delta) {
-    const count = 3;
+    const count = 4;
     const cur = Number.isInteger(state.profileCursor) ? state.profileCursor : 0;
     state.profileCursor = (cur + delta + count) % count;
     if (!state.profileOpen || state.profileClosing) enterProfileFocus();
@@ -973,12 +983,15 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
   async function activateProfileItem() {
     const which = Number.isInteger(state.profileCursor) ? state.profileCursor : 0;
     if (which === 0) {
-      await logout();
+      if (typeof onQuit === 'function') onQuit();
       return;
     }
     if (which === 1) {
-      toggleTheme();
+      await logout();
       return;
+    }
+    if (which === 2) {
+      toggleTheme();
     }
   }
 
@@ -1044,6 +1057,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     state.editingId = item.msg.id;
     state.composer = item.text || '';
     state.composerCaret = state.composer.length;
+    startPulse();
   }
 
   function isAttach(item) {
@@ -1258,14 +1272,30 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     }
     try {
       if (state.editingId) {
-        await client.editMessage(state.activeGroupId, state.editingId, text);
-        const item = findMessage(state.editingId);
-        if (item) item.text = text;
+        const editId = state.editingId;
+        const item = findMessage(editId);
         state.editingId = null;
-        const prev = state.composerBeforeEdit;
-        state.composer = prev ? prev.text : '';
-        state.composerCaret = prev ? prev.caret : 0;
+        state.composer = '';
+        state.composerCaret = 0;
         state.composerBeforeEdit = null;
+        if (item) item.editing = true;
+        startPulse();
+        try {
+          await client.editMessage(state.activeGroupId, editId, text);
+          const live = findMessage(editId);
+          if (live) {
+            live.text = text;
+            live.editing = false;
+            live.msg.editedAt = live.msg.editedAt || new Date().toISOString();
+          }
+        } catch (err) {
+          const live = findMessage(editId);
+          if (live) live.editing = false;
+          state.editingId = editId;
+          state.composer = text;
+          state.composerCaret = text.length;
+          throw err;
+        }
         return;
       }
       const replyTo = state.replyTo;
@@ -1576,6 +1606,10 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     }
     if (hit.type === 'profile') {
       toggleProfile();
+      return;
+    }
+    if (hit.type === 'quit') {
+      if (typeof onQuit === 'function') onQuit();
       return;
     }
     if (hit.type === 'logout') {
@@ -2094,12 +2128,12 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
         const count = motion[1] ? Number(motion[1]) : 1;
         if (motion[2] === 'D') {
           if (channelDraftEditing()) moveChannelDraft(-count);
-          else if (profileNavActive() && state.profileCursor === 2) nudgeSensitivity(-count);
+          else if (profileNavActive() && state.profileCursor === 3) nudgeSensitivity(-count);
           else if (transcriptFocused()) cycleChannel(-1).then(() => draw()).catch(() => draw());
           else if (!profileNavActive()) moveComposer(-count);
         } else if (motion[2] === 'C') {
           if (channelDraftEditing()) moveChannelDraft(count);
-          else if (profileNavActive() && state.profileCursor === 2) nudgeSensitivity(count);
+          else if (profileNavActive() && state.profileCursor === 3) nudgeSensitivity(count);
           else if (transcriptFocused()) cycleChannel(1).then(() => draw()).catch(() => draw());
           else if (!profileNavActive()) moveComposer(count);
         } else if (motion[2] === 'A') {
