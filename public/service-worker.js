@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_CACHE = 'gchat-pwa-v145';
+const APP_CACHE = 'gchat-pwa-v145-stability-1';
 const APP_SHELL_ASSETS = [
   '/',
   '/index.html',
@@ -81,6 +81,10 @@ self.addEventListener('activate', (event) => {
   );
 });
 
+self.addEventListener('message', (event) => {
+  if (event.data?.type === 'SKIP_WAITING') self.skipWaiting();
+});
+
 async function cacheResponse(cacheKey, response) {
   if (!isCacheableResponse(response)) return response;
   const cache = await caches.open(APP_CACHE);
@@ -88,28 +92,29 @@ async function cacheResponse(cacheKey, response) {
   return response;
 }
 
-async function handleNavigation(request) {
-  const url = new URL(request.url);
-
+async function handleNavigation(request, event) {
+  const cache = await caches.open(APP_CACHE);
+  const cachedResponse = await cache.match(request);
+  const refresh = fetch(request).then((response) => cacheResponse(request, response));
+  if (cachedResponse) {
+    event.waitUntil(refresh.catch(() => {}));
+    return cachedResponse;
+  }
   try {
-    const response = await fetch(request);
-    return await cacheResponse(url.pathname, response);
+    return await refresh;
   } catch {
-    const cache = await caches.open(APP_CACHE);
     return (await cache.match('/offline.html'));
   }
 }
 
 async function handleAsset(request) {
-  const url = new URL(request.url);
-
+  const cache = await caches.open(APP_CACHE);
+  const cachedResponse = await cache.match(request);
+  if (cachedResponse) return cachedResponse;
   try {
     const response = await fetch(request);
-    return await cacheResponse(url.pathname, response);
+    return await cacheResponse(request, response);
   } catch {
-    const cache = await caches.open(APP_CACHE);
-    const cachedResponse = await cache.match(url.pathname);
-    if (cachedResponse) return cachedResponse;
     if (request.destination === 'image') {
       return (await cache.match('/gchat_icon.png')) || Response.error();
     }
@@ -127,7 +132,7 @@ self.addEventListener('fetch', (event) => {
   if (url.pathname === '/service-worker.js') return;
 
   if (request.mode === 'navigate') {
-    event.respondWith(handleNavigation(request));
+    event.respondWith(handleNavigation(request, event));
     return;
   }
 

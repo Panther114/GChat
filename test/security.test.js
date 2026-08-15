@@ -3,10 +3,23 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
+const fs = require('node:fs');
+const path = require('node:path');
 const { hashJoinCode, isValidKeyCommitment, normalizeJoinCode } = require('../src/server/group-security');
 const { decryptEscrowPayload, encryptEscrowPayload, parseEscrowMasterKey } = require('../src/server/group-key-escrow');
 const { validateEditEnvelope, validateV2MessageEnvelope } = require('../src/server/message-contract');
 const { readConfig } = require('../src/server/config');
+
+test('PWA updates wait for explicit user approval and preserve full request cache keys', () => {
+  const pwa = fs.readFileSync(path.join(__dirname, '../public/pwa.js'), 'utf8');
+  const worker = fs.readFileSync(path.join(__dirname, '../public/service-worker.js'), 'utf8');
+  assert.match(pwa, /if \(!reloadRequested\) return;/);
+  assert.match(pwa, /postMessage\(\{ type: 'SKIP_WAITING' \}\)/);
+  assert.doesNotMatch(pwa, /shouldReloadForControllerChange/);
+  assert.match(worker, /event\.data\?\.type === 'SKIP_WAITING'/);
+  assert.match(worker, /cacheResponse\(request, response\)/);
+  assert.doesNotMatch(worker, /cacheResponse\(url\.pathname/);
+});
 
 test('v1.4 production config enables AI only via the AI_ENABLED flag and uses the stable session secret as the join-code pepper', () => {
   const sessionSecret = 's'.repeat(32);

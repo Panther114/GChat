@@ -150,8 +150,15 @@ function rebuildChannelSummaries(db) {
                  PARTITION BY group_id, tag_index
                  ORDER BY created_at DESC, id DESC
                ) AS rn
-        FROM messages
-        WHERE deleted_at IS NULL
+        FROM messages m
+        WHERE m.deleted_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM group_history_boundaries boundary
+            WHERE boundary.group_id = m.group_id
+              AND boundary.channel_key IN ('*', COALESCE(m.tag_index, 'main'))
+              AND ((m.created_seq > 0 AND m.created_seq <= boundary.cleared_seq)
+                OR (m.created_seq = 0 AND m.created_at <= boundary.cleared_at))
+          )
       )
       WHERE rn = 1
     `).run().changes;
@@ -242,6 +249,63 @@ function createSyncService(db, { install = true } = {}) {
       last_message_at = excluded.last_message_at,
       message_count = group_channels.message_count + 1
   `);
+  const getChannelSummaryStmt = db.prepare(`
+    SELECT last_message_id, message_count FROM group_channels
+    WHERE group_id = ? AND channel_key = ?
+  `);
+  const deleteChannelSummaryStmt = db.prepare('DELETE FROM group_channels WHERE group_id = ? AND channel_key = ?');
+  const deleteGroupChannelSummariesStmt = db.prepare('DELETE FROM group_channels WHERE group_id = ?');
+  const decrementChannelSummaryStmt = db.prepare(`
+    UPDATE group_channels SET message_count = MAX(0, message_count - 1)
+    WHERE group_id = ? AND channel_key = ?
+  `);
+  const replaceChannelSummaryTailStmt = db.prepare(`
+    UPDATE group_channels
+    SET last_message_id = ?, last_message_at = ?, message_count = MAX(0, message_count - 1)
+    WHERE group_id = ? AND channel_key = ?
+  `);
+  const getLatestVisibleChannelMessageStmt = db.prepare(`
+    SELECT m.id, m.created_at
+    FROM messages m
+    WHERE m.group_id = @groupId
+      AND m.deleted_at IS NULL
+      AND ((@tagIndex IS NULL AND m.tag_index IS NULL) OR m.tag_index = @tagIndex)
+      AND NOT EXISTS (
+        SELECT 1 FROM group_history_boundaries boundary
+        WHERE boundary.group_id = m.group_id
+          AND boundary.channel_key IN ('*', @channelKey)
+          AND ((m.created_seq > 0 AND m.created_seq <= boundary.cleared_seq)
+            OR (m.created_seq = 0 AND m.created_at <= boundary.cleared_at))
+      )
+    ORDER BY m.created_at DESC, m.id DESC
+    LIMIT 1
+  `);
+
+  function removeMessageFromChannelSummary(groupId, channelKey, messageId) {
+    const normalizedChannel = normalizeChannelKey(channelKey) || MAIN_CHANNEL;
+    const summary = getChannelSummaryStmt.get(groupId, normalizedChannel);
+    if (!summary) return;
+    if (Number(summary.message_count) <= 1) {
+      deleteChannelSummaryStmt.run(groupId, normalizedChannel);
+      return;
+    }
+    if (String(summary.last_message_id) !== String(messageId)) {
+      decrementChannelSummaryStmt.run(groupId, normalizedChannel);
+      return;
+    }
+    const latest = getLatestVisibleChannelMessageStmt.get({
+      groupId,
+      channelKey: normalizedChannel,
+      tagIndex: channelKeyToTagIndex(normalizedChannel),
+    });
+    if (!latest) deleteChannelSummaryStmt.run(groupId, normalizedChannel);
+    else replaceChannelSummaryTailStmt.run(latest.id, latest.created_at, groupId, normalizedChannel);
+  }
+
+  function clearChannelSummaries(groupId, channelKey = GROUP_CLEAR_CHANNEL) {
+    if (channelKey === GROUP_CLEAR_CHANNEL) deleteGroupChannelSummariesStmt.run(groupId);
+    else deleteChannelSummaryStmt.run(groupId, normalizeChannelKey(channelKey) || MAIN_CHANNEL);
+  }
 
   const commitTx = db.transaction((options) => {
     const now = options.createdAt || new Date().toISOString();
@@ -430,12 +494,14 @@ function createSyncService(db, { install = true } = {}) {
   }
 
   return {
+    clearChannelSummaries,
     commit,
     ensureState,
     etagForBootstrap,
     getChannelHistory,
     getEvents,
     getMessagesByIds,
+    removeMessageFromChannelSummary,
   };
 }
 

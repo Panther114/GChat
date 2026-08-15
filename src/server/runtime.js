@@ -30,6 +30,7 @@ const {
   createSyncService,
   initializeSyncBaselines,
   normalizeChannelKey,
+  rebuildChannelSummaries,
 } = require('./sync-v2');
 
 const packageJson = require('../../package.json');
@@ -1409,6 +1410,7 @@ const stmts = {
                  ON dms.message_id = m.id AND dms.user_id = gm.user_id
                WHERE m.group_id = g.id
                  AND m.sender_id != gm.user_id
+                 AND m.deleted_at IS NULL
                  AND (
                    m.type != 'whisper'
                    OR EXISTS(
@@ -1418,6 +1420,13 @@ const stmts = {
                    )
                  )
                  AND (m.is_disappearing = 0 OR dms.hidden_at IS NULL)
+                 AND NOT EXISTS (
+                   SELECT 1 FROM group_history_boundaries ghb
+                   WHERE ghb.group_id = m.group_id
+                     AND ghb.channel_key IN ('*', COALESCE(m.tag_index, 'main'))
+                     AND ((m.created_seq > 0 AND m.created_seq <= ghb.cleared_seq)
+                       OR (m.created_seq = 0 AND m.created_at <= ghb.cleared_at))
+                 )
                  AND NOT EXISTS (
                    SELECT 1
                    FROM channel_read_cursors crc
@@ -1511,21 +1520,40 @@ const stmts = {
   `),
   getTotalUnreadCountForUser: db.prepare(`
     SELECT COUNT(*) AS count
-    FROM messages m
-    JOIN group_members gm ON gm.group_id = m.group_id AND gm.user_id = ?
-    LEFT JOIN message_reads mr ON mr.message_id = m.id AND mr.user_id = gm.user_id
-    LEFT JOIN disappearing_message_states dms ON dms.message_id = m.id AND dms.user_id = gm.user_id
-    WHERE m.sender_id != gm.user_id
-      AND mr.message_id IS NULL
-      AND (
-        m.type != 'whisper'
-        OR EXISTS(
-          SELECT 1
-          FROM json_each(COALESCE(m.whisper_to, '[]')) AS whisper_recipient
-          WHERE whisper_recipient.value = CAST(gm.user_id AS TEXT)
+    FROM (
+      SELECT 1
+      FROM messages m
+      JOIN group_members gm ON gm.group_id = m.group_id AND gm.user_id = ?
+      LEFT JOIN disappearing_message_states dms ON dms.message_id = m.id AND dms.user_id = gm.user_id
+      WHERE m.sender_id != gm.user_id
+        AND m.deleted_at IS NULL
+        AND (
+          m.type != 'whisper'
+          OR EXISTS(
+            SELECT 1
+            FROM json_each(COALESCE(m.whisper_to, '[]')) AS whisper_recipient
+            WHERE whisper_recipient.value = CAST(gm.user_id AS TEXT)
+          )
         )
-      )
-      AND (m.is_disappearing = 0 OR dms.hidden_at IS NULL)
+        AND (m.is_disappearing = 0 OR dms.hidden_at IS NULL)
+        AND NOT EXISTS (
+          SELECT 1 FROM group_history_boundaries ghb
+          WHERE ghb.group_id = m.group_id
+            AND ghb.channel_key IN ('*', COALESCE(m.tag_index, 'main'))
+            AND ((m.created_seq > 0 AND m.created_seq <= ghb.cleared_seq)
+              OR (m.created_seq = 0 AND m.created_at <= ghb.cleared_at))
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM channel_read_cursors crc
+          WHERE crc.group_id = m.group_id
+            AND crc.user_id = gm.user_id
+            AND crc.tag_index IS m.tag_index
+            AND (m.created_at < crc.last_read_created_at
+              OR (m.created_at = crc.last_read_created_at AND m.id <= crc.last_read_id))
+        )
+      ORDER BY m.created_at DESC, m.id DESC
+      LIMIT 1000
+    )
   `),
   upsertPushSubscription: db.prepare(`
     INSERT INTO push_subscriptions (user_id, endpoint, subscription_json, user_agent, platform, created_at, updated_at)
@@ -1588,28 +1616,27 @@ const stmts = {
      ORDER BY m.created_at DESC, m.id DESC
      LIMIT @limit
    `),
-  // v1.4.3: per-group channel identity from blind tag indexes — one bounded
-  // windowed query returns every distinct channel (newest message as the
-  // sample for client-side name resolution) plus its message count.
+  // Channel discovery is served from the maintained summary table. Joining the
+  // summary tail keeps cleared/deleted rows from resurrecting stale channels.
   getGroupChannelIndexes: db.prepare(`
-    SELECT tag_index AS tagIndex,
-           sample_id,
-           created_at AS lastMessageAt,
-           cnt AS messageCount
-    FROM (
-      SELECT tag_index,
-             id AS sample_id,
-             created_at,
-             COUNT(*) OVER (PARTITION BY tag_index) AS cnt,
-             ROW_NUMBER() OVER (
-               PARTITION BY tag_index
-               ORDER BY created_at DESC, id DESC
-             ) AS rn
-      FROM messages
-      WHERE group_id = ? AND tag_index IS NOT NULL
-    )
-    WHERE rn = 1
-    ORDER BY created_at DESC, sample_id DESC
+    SELECT gc.channel_key AS tagIndex,
+           gc.last_message_id AS sample_id,
+           gc.last_message_at AS lastMessageAt,
+           gc.message_count AS messageCount
+    FROM group_channels gc
+    JOIN messages m ON m.group_id = gc.group_id AND m.id = gc.last_message_id
+    WHERE gc.group_id = @groupId
+      AND gc.channel_key != 'main'
+      AND gc.message_count > 0
+      AND m.deleted_at IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM group_history_boundaries boundary
+        WHERE boundary.group_id = gc.group_id
+          AND boundary.channel_key IN ('*', gc.channel_key)
+          AND ((m.created_seq > 0 AND m.created_seq <= boundary.cleared_seq)
+            OR (m.created_seq = 0 AND m.created_at <= boundary.cleared_at))
+      )
+    ORDER BY gc.last_message_at DESC, gc.last_message_id DESC
     LIMIT 50
   `),
   getMessagesBefore: db.prepare(`
@@ -1826,6 +1853,7 @@ const stmts = {
         ON dms.message_id = m.id AND dms.user_id = @viewerId
       WHERE m.group_id = @groupId
         AND m.sender_id != @viewerId
+        AND m.deleted_at IS NULL
         AND (
           m.type != 'whisper'
           OR EXISTS(
@@ -1835,6 +1863,13 @@ const stmts = {
           )
         )
         AND (m.is_disappearing = 0 OR dms.hidden_at IS NULL)
+        AND NOT EXISTS (
+          SELECT 1 FROM group_history_boundaries ghb
+          WHERE ghb.group_id = m.group_id
+            AND ghb.channel_key IN ('*', COALESCE(m.tag_index, 'main'))
+            AND ((m.created_seq > 0 AND m.created_seq <= ghb.cleared_seq)
+              OR (m.created_seq = 0 AND m.created_at <= ghb.cleared_at))
+        )
         AND NOT EXISTS (
           SELECT 1
           FROM channel_read_cursors crc
@@ -1858,6 +1893,7 @@ const stmts = {
       WHERE m.group_id = @groupId
         AND m.sender_id != @viewerId
         AND m.tag_index IS @tagIndex
+        AND m.deleted_at IS NULL
         AND (
           m.type != 'whisper'
           OR EXISTS(
@@ -1867,6 +1903,13 @@ const stmts = {
           )
         )
         AND (m.is_disappearing = 0 OR dms.hidden_at IS NULL)
+        AND NOT EXISTS (
+          SELECT 1 FROM group_history_boundaries ghb
+          WHERE ghb.group_id = m.group_id
+            AND ghb.channel_key IN ('*', COALESCE(m.tag_index, 'main'))
+            AND ((m.created_seq > 0 AND m.created_seq <= ghb.cleared_seq)
+              OR (m.created_seq = 0 AND m.created_at <= ghb.cleared_at))
+        )
         AND NOT EXISTS (
           SELECT 1
           FROM channel_read_cursors crc
@@ -2127,6 +2170,9 @@ const groupCode = 'inca01';
     );
     db.prepare('UPDATE messages SET created_at = ?, edited_at = ? WHERE id = ?').run(fixture.createdAt, fixture.editedAt || null, fixture.id);
   }
+  // The disposable local fixture is rebuilt in-place on each dev boot, so keep
+  // its additive channel summary consistent without touching hosted data.
+  rebuildChannelSummaries(db);
 
   console.log('Local debug data ready: root/root with Increment A Playground fixtures.');
 }
@@ -3780,12 +3826,17 @@ app.get('/api/groups/:groupId/channels', (req, res) => {
   if (!stmts.isMember.get(groupId, userId)) {
     return res.status(403).json({ error: 'Not a member of this group' });
   }
-  const rows = stmts.getGroupChannelIndexes.all(groupId);
+  const rows = stmts.getGroupChannelIndexes.all({ groupId });
+  const samples = syncService.getMessagesByIds(groupId, rows.map((row) => row.sample_id));
   res.json({
     ok: true,
     channels: rows.map((row) => ({
       tagIndex: row.tagIndex,
       sampleMessageId: row.sample_id,
+      sampleMessage: (() => {
+        const sample = samples.get(String(row.sample_id));
+        return sample && canUserAccessMessage(sample, userId) ? formatMessage(sample) : null;
+      })(),
       messageCount: Number(row.messageCount) || 0,
       lastMessageAt: row.lastMessageAt,
     })),
@@ -3847,14 +3898,18 @@ app.delete('/api/groups/:groupId/messages', (req, res) => {
     clientMutationId,
     createdAt: clearedAt,
     auxiliary: { channelKey: GROUP_CLEAR_CHANNEL, clearedAt },
-    apply: ({ seq }) => db.prepare(`
-      INSERT INTO group_history_boundaries (group_id, channel_key, cleared_at, cleared_seq, cleared_by)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(group_id, channel_key) DO UPDATE SET
-        cleared_at = excluded.cleared_at,
-        cleared_seq = excluded.cleared_seq,
-        cleared_by = excluded.cleared_by
-    `).run(groupId, GROUP_CLEAR_CHANNEL, clearedAt, seq, userId),
+    apply: ({ seq }) => {
+      const result = db.prepare(`
+        INSERT INTO group_history_boundaries (group_id, channel_key, cleared_at, cleared_seq, cleared_by)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(group_id, channel_key) DO UPDATE SET
+          cleared_at = excluded.cleared_at,
+          cleared_seq = excluded.cleared_seq,
+          cleared_by = excluded.cleared_by
+      `).run(groupId, GROUP_CLEAR_CHANNEL, clearedAt, seq, userId);
+      syncService.clearChannelSummaries(groupId);
+      return result;
+    },
   });
   emitSyncCommit(groupId, userId, commit, 'history.cleared', null, { channelKey: GROUP_CLEAR_CHANNEL, clearedAt });
   res.json({ ok: true, epoch: commit.epoch, seq: commit.seq, clientMutationId });
@@ -3891,14 +3946,18 @@ app.delete('/api/groups/:groupId/tags/:tagIndex/messages', (req, res) => {
     clientMutationId,
     createdAt: clearedAt,
     auxiliary: { channelKey: tagIndex, clearedAt },
-    apply: ({ seq }) => db.prepare(`
-      INSERT INTO group_history_boundaries (group_id, channel_key, cleared_at, cleared_seq, cleared_by)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(group_id, channel_key) DO UPDATE SET
-        cleared_at = excluded.cleared_at,
-        cleared_seq = excluded.cleared_seq,
-        cleared_by = excluded.cleared_by
-    `).run(groupId, tagIndex, clearedAt, seq, userId),
+    apply: ({ seq }) => {
+      const result = db.prepare(`
+        INSERT INTO group_history_boundaries (group_id, channel_key, cleared_at, cleared_seq, cleared_by)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(group_id, channel_key) DO UPDATE SET
+          cleared_at = excluded.cleared_at,
+          cleared_seq = excluded.cleared_seq,
+          cleared_by = excluded.cleared_by
+      `).run(groupId, tagIndex, clearedAt, seq, userId);
+      syncService.clearChannelSummaries(groupId, tagIndex);
+      return result;
+    },
   });
   emitSyncCommit(groupId, userId, commit, 'history.cleared', null, { channelKey: tagIndex, clearedAt });
   res.json({ ok: true, epoch: commit.epoch, seq: commit.seq, clientMutationId });
@@ -3935,10 +3994,14 @@ app.delete('/api/groups/:groupId/messages/:messageId', (req, res) => {
     clientMutationId,
     createdAt: deletedAt,
     auxiliary: { messageId, deletedAt, revision: nextRevision, channelKey: message.tag_index || MAIN_CHANNEL },
-    apply: () => db.prepare(`
-      UPDATE messages SET deleted_at = ?, deleted_by = ?, revision = ?
-      WHERE id = ? AND deleted_at IS NULL
-    `).run(deletedAt, userId, nextRevision, messageId),
+    apply: () => {
+      const result = db.prepare(`
+        UPDATE messages SET deleted_at = ?, deleted_by = ?, revision = ?
+        WHERE id = ? AND deleted_at IS NULL
+      `).run(deletedAt, userId, nextRevision, messageId);
+      syncService.removeMessageFromChannelSummary(groupId, message.tag_index || MAIN_CHANNEL, messageId);
+      return result;
+    },
   });
   emitSyncCommit(groupId, userId, commit, 'message.deleted', null, {
     messageId, deletedAt, revision: nextRevision, channelKey: message.tag_index || MAIN_CHANNEL,
@@ -4902,8 +4965,15 @@ function emitSyncCommit(groupId, actorUserId, commit, eventType, message = null,
   };
   io.to(groupId).emit('sync_event', event);
   const memberIds = stmts.getGroupMemberIds.all(groupId);
-  const hint = { groupId, epoch: commit.epoch, latestSeq: commit.seq, unreadDelta: eventType === 'message.created' ? 1 : 0 };
-  for (const row of memberIds) io.to(`user:${row.user_id}`).emit('sync_hint', hint);
+  for (const row of memberIds) {
+    io.to(`user:${row.user_id}`).emit('sync_hint', {
+      groupId,
+      epoch: commit.epoch,
+      latestSeq: commit.seq,
+      channelKey: event.channelKey,
+      unreadDelta: eventType === 'message.created' && String(row.user_id) !== String(actorUserId) ? 1 : 0,
+    });
+  }
 }
 
 function emitPrivateSyncCommit(groupId, actorUserId, recipientUserIds, commit, eventType, message) {
@@ -4934,6 +5004,7 @@ function emitPrivateSyncCommit(groupId, actorUserId, recipientUserIds, commit, e
       groupId,
       epoch: commit.epoch,
       latestSeq: commit.seq,
+      channelKey: event.channelKey,
       unreadDelta: authorized.has(memberId) && memberId !== String(actorUserId) ? 1 : 0,
     });
   }

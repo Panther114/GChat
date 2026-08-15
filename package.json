@@ -11,6 +11,7 @@
     "build:web": "node scripts/build-web.js",
     "migrate:group-invite-codes": "node scripts/migrate-group-invite-codes.js",
     "migrate:sync-v2": "node scripts/migrate-sync-v2.js",
+    "reconcile:channel-summaries": "node scripts/reconcile-channel-summaries.js",
     "purge:pre-escrow-groups": "node scripts/purge-pre-escrow-groups.js",
     "lint": "eslint server.js src/server src-tauri/src/bridge.js src-desktop-win/src/bridge.js electron scripts test",
     "test": "node --test test/security.test.js test/web-crypto.test.js test/ai-agent.test.js test/sync-v2.test.js test/integration.test.js test/electron-runtime.test.js test/desktop-packaging.test.js",

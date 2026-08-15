@@ -37,6 +37,32 @@ async function openGroup(page, name = GROUP_NAME) {
   await expect(page.locator('#chat-group-name')).toHaveText(name);
 }
 
+async function registerFreshUser(page, prefix = 'anchor') {
+  await page.goto('/');
+  await page.locator('.auth-tab[data-tab=signup]').click();
+  const username = `${prefix}${Date.now() % 100000}`;
+  await page.locator('#signup-username').fill(username);
+  await page.locator('#signup-password').fill('probe-pass');
+  await page.locator('#signup-confirm').fill('probe-pass');
+  await page.locator('#signup-btn').click();
+  await page.locator('#group-list').first().waitFor({ timeout: 15_000 });
+  await page.locator('#join-group-btn').click();
+  await page.locator('#join-group-code').fill('inca01');
+  await page.locator('#join-confirm-btn').click();
+  await page.waitForTimeout(800);
+}
+
+test('initial chat startup issues exactly one bootstrap request', async ({ page }) => {
+  let bootstrapRequests = 0;
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname === '/api/sync/bootstrap') bootstrapRequests += 1;
+  });
+  await signInAsRoot(page);
+  await page.locator('#group-list').first().waitFor({ timeout: 15_000 });
+  await page.waitForTimeout(500);
+  expect(bootstrapRequests).toBe(1);
+});
+
 function transcriptState(page) {
   return page.evaluate(() => {
     const area = globalThis.document.getElementById('messages-area');
@@ -261,8 +287,56 @@ test('scrolling stays put: switching groups and resyncing never moves the transc
     return row ? String(row.dataset.msgId) : null;
   });
 
-  // The exact first-visible message is preserved, and the scroll offset may
-  // only drift by the height of a few rows (anchored to the message).
+  // The exact first-visible message and its pixel offset are preserved.
   expect(firstVisibleMsgIdAfter, 'first visible message must not change across the switch').toBe(firstVisibleMsgId);
-  expect(Math.abs(scrollAfter - scrollBefore)).toBeLessThan(400);
+  expect(Math.abs(scrollAfter - scrollBefore)).toBeLessThanOrEqual(1);
+});
+
+test('inactive-channel traffic preserves the active transcript pixel offset', async ({ browser }) => {
+  const rootContext = await browser.newContext();
+  const friendContext = await browser.newContext();
+  const rootPage = await rootContext.newPage();
+  const friendPage = await friendContext.newPage();
+  await signInAsRoot(rootPage);
+  await registerFreshUser(friendPage);
+  await openGroup(rootPage);
+  await openGroup(friendPage);
+
+  for (let i = 0; i < 18; i += 1) {
+    await rootPage.locator('#message-input').fill(`inactive-anchor-${i}`);
+    await rootPage.locator('#message-input').press('Enter');
+  }
+  await rootPage.evaluate(() => {
+    const area = globalThis.document.getElementById('messages-area');
+    area.scrollTop = Math.round(area.scrollHeight / 3);
+  });
+  await rootPage.waitForTimeout(500);
+  const before = await rootPage.locator('#messages-area').evaluate((area) => area.scrollTop);
+
+  await friendPage.locator('.chat-tag-filter-btn', { hasText: '#visual-qa' }).click();
+  await friendPage.locator('#message-input').fill(`inactive-anchor-event-${Date.now()}`);
+  await friendPage.locator('#message-input').press('Enter');
+  await rootPage.waitForTimeout(800);
+
+  const after = await rootPage.locator('#messages-area').evaluate((area) => area.scrollTop);
+  expect(Math.abs(after - before)).toBeLessThanOrEqual(1);
+  await rootContext.close();
+  await friendContext.close();
+});
+
+test('exhausted channel history never requests a raw message UUID cursor', async ({ page }) => {
+  await signInAsRoot(page);
+  await openGroup(page);
+  const badRequests = [];
+  page.on('response', (response) => {
+    const url = response.url();
+    if (/\/messages\?channel=.*&before=[0-9a-f-]{36}/i.test(url)) {
+      badRequests.push({ url, status: response.status() });
+    }
+  });
+  await page.locator('.chat-tag-filter-btn', { hasText: '#visual-qa' }).click();
+  await page.locator('.chat-tag-filter-btn', { hasText: '#main' }).click();
+  await page.locator('#messages-area').evaluate((area) => { area.scrollTop = 0; });
+  await page.waitForTimeout(500);
+  expect(badRequests).toEqual([]);
 });
