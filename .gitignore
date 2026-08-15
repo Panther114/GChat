@@ -12,6 +12,9 @@ AGENTS.md
 quickrun.bat
 scripts/ui-screenshot.js
 
+# CLI standalone binaries
+cli/build/
+
 # Desktop build output
 dist/
 !src-tauri/dist/

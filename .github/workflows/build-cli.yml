@@ -1,0 +1,118 @@
+name: Build CLI releases
+
+# Trigger:
+#   - Push a tag:     git tag cli-v0.1.30 && git push origin cli-v0.1.30
+#   - Manual:         Actions → Build CLI releases → Run workflow
+# Desktop stays on v* tags / its own dispatch. Do not push v* if you only want CLI.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish (example cli-v0.1.30)
+        required: true
+        default: cli-v0.1.30
+  push:
+    tags:
+      - 'cli-v*'
+
+concurrency:
+  group: build-cli-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: cli/package-lock.json
+      - run: npm ci
+      - run: npm run test:unit
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: bun-darwin-arm64
+            outfile: gchat-macos-arm64
+          - os: macos-latest
+            target: bun-darwin-x64
+            outfile: gchat-macos-x64
+          - os: windows-latest
+            target: bun-windows-x64
+            outfile: gchat-windows-x64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: cli/package-lock.json
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Install CLI dependencies
+        working-directory: cli
+        run: npm ci
+      - name: Compile standalone binary
+        working-directory: cli
+        shell: bash
+        run: |
+          mkdir -p build
+          bun build --compile --bytecode --minify --sourcemap=none \
+            --no-compile-autoload-dotenv --no-compile-autoload-bunfig \
+            --asset=package.json \
+            --target="${{ matrix.target }}" \
+            --outfile="build/${{ matrix.outfile }}" \
+            ./bin/gchat.js
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.outfile }}
+          path: cli/build/${{ matrix.outfile }}
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          TITLE="GChat CLI ${TAG#cli-v}"
+          ls -la release
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            gh release create "$TAG" release/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --generate-notes \
+              --title "$TITLE" \
+              --latest
+          else
+            gh release create "$TAG" release/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --generate-notes \
+              --title "$TITLE" \
+              --latest
+          fi
