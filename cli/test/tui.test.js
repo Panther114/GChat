@@ -113,7 +113,7 @@ test('landing frame: contains title, option and hint with art glyphs intact', ()
   assert.equal(frame.height, tier.art.length + landing.LOGO_PADDING);
   assert.equal(frame.originX, Math.floor((100 - frame.width) / 2));
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r27/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r28/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
   // The braille glyphs themselves must be preserved exactly.
@@ -202,7 +202,7 @@ test('composeFrame: writes full-width rows without eraseLine', () => {
 test('composeFrame: content is written on each line', () => {
   const out = app.composeFrame(80, 24, 0);
   const plain = ansi.stripAnsi(out.replace(/\u001b\[\d+;\d+H/g, ''));
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r27/);
+  assert.match(plain, /Welcome to GChat CLI 0\.1 r28/);
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
 });
@@ -222,7 +222,7 @@ test('splash screen paints a themed canvas with a loading label', () => {
   const lines = app.splashScreenLines(80, 24, 'dark', 'Loading', 0);
   assert.equal(lines.length, 24);
   const plain = lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r27'));
+  assert.ok(plain.includes('GChat CLI 0.1 r28'));
   assert.ok(!plain.includes('Loading'), 'no separate Loading line');
   assert.ok(lines.join('').includes(ansi.bg(theme.DARK.canvas)));
 });
@@ -233,7 +233,7 @@ test('splash shimmers the version title instead of a Loading line', () => {
   const plainA = a.map((l) => ansi.stripAnsi(l)).join('\n');
   const plainB = b.map((l) => ansi.stripAnsi(l)).join('\n');
   assert.equal(plainA, plainB, 'the version letters do not change');
-  assert.ok(plainA.includes('GChat CLI 0.1 r27'));
+  assert.ok(plainA.includes('GChat CLI 0.1 r28'));
   assert.notEqual(a.join('\n'), b.join('\n'), 'the version restyles as the shimmer moves');
 });
 
@@ -679,7 +679,7 @@ test('codePointIndex and stepCodePoint do not split emoji', () => {
 test('chat frame: sidebar, channels, composer, and messages', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState());
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r27'), 'sidebar title is the CLI version');
+  assert.ok(plain.includes('GChat CLI 0.1 r28'), 'sidebar title is the CLI version');
   assert.ok(!plain.includes('chats\n') && !/^\s*chats\s*$/m.test(plain.split('\n')[0]), 'old "chats" label is gone');
   assert.ok(plain.includes('team'), 'active group in sidebar');
   assert.ok(!plain.includes('●'), 'groups are not indented with a bullet');
@@ -2092,18 +2092,6 @@ test('beginEdit keeps emoji in the composer', () => {
   assert.ok(drawn.includes('👍'));
 });
 
-test('altLetter and altArrow parse ESC+letter and CSI encodings', () => {
-  assert.equal(ansi.altLetter('\u001br'), 'r');
-  assert.equal(ansi.altLetter('\u001b[100;3u'), 'd');
-  assert.equal(ansi.altLetter('\u001b[27;3;101~'), 'e');
-  assert.equal(ansi.altLetter('\u001b[A'), null);
-  assert.equal(ansi.altArrow('\u001b[1;3B'), 'down');
-  assert.equal(ansi.altArrow('\u001b[1;3D'), 'left');
-  assert.equal(ansi.altArrow('\u001b[1;3C'), 'right');
-  assert.equal(ansi.altArrow('\u001b[1;9A'), 'up');
-  assert.equal(ansi.altArrow('\u001b[A'), null);
-});
-
 test('scroll batch eases in and out with the fastest step in the middle', () => {
   const total = 20;
   const steps = [];
@@ -2165,27 +2153,6 @@ test('enter opens the underlined group; escape returns to the underline', async 
   assert.equal(chat.state.inputFocus, 'groups');
 });
 
-test('alt left/right move focus between the group list and content', async () => {
-  const chat = makeController({
-    activeGroupId: 'g1',
-    highlightedGroupId: 'g1',
-    inputFocus: 'transcript',
-  });
-  await chat.focusGroupsPane();
-  assert.equal(chat.state.activeGroupId, null);
-  assert.equal(chat.state.highlightedGroupId, 'g1');
-  await chat.focusContentPane();
-  assert.equal(chat.state.activeGroupId, 'g1');
-  assert.equal(chat.state.inputFocus, 'transcript');
-});
-
-test('alt+down scrolls the transcript to the bottom', () => {
-  const chat = makeController({ scrollOffset: 8, inputFocus: 'transcript' });
-  chat.scrollToBottom();
-  assert.equal(chat.state.scrollTween.to, 0);
-  assert.equal(chat.state.scrollTween.from, 8);
-});
-
 test('up/down with no selection pick a message instead of line-scrolling', () => {
   const chat = makeController({
     selectedMessageId: null,
@@ -2213,26 +2180,15 @@ test('left/right while focused on messages cycle channels', async () => {
   assert.equal(chat.state.activeChannel, 'design');
 });
 
-test('alt+r replies when the transcript is focused', () => {
-  const chat = makeController({
-    selectedMessageId: 'm2',
-    inputFocus: 'transcript',
-    composer: '',
-  });
-  chat.pushInput('\u001br');
-  assert.ok(chat.state.replyTo, 'alt+r replies from content focus');
-  assert.equal(chat.state.composer, '', 'alt+r does not type into the composer');
-});
-
-test('content-focused hints use alt for actions and ctrl for copy/focus', () => {
+test('content-focused hints keep the ctrl prefix', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState({
     selectedMessageId: 'm2',
     inputFocus: 'transcript',
   }));
   const hint = frame.lines.map((l) => ansi.stripAnsi(l)).find((l) => l.includes('reply') && l.includes('focus'));
   assert.ok(hint);
-  assert.match(hint, /alt \+ reply|alt\+r/);
-  assert.match(hint, /ctrl \+ copy|ctrl\+c/);
+  assert.match(hint, /ctrl \+ reply|ctrl\+r/);
+  assert.ok(!hint.includes('alt +'), 'alt action hints are gone');
   assert.ok(hint.includes('focus'));
 });
 
@@ -2254,4 +2210,89 @@ test('a deleting message is dimmed with deleting... next to the ticks', () => {
   assert.ok(row.includes('\u001b[2m'), 'the message is dimmed');
   const hint = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
   assert.ok(!hint.includes('deleting...\n') || !/^\s*deleting/.test(hint), 'deleting is not a left-side flash');
+});
+
+test('username row shows a ctrl+a hint', () => {
+  const frame = chatLayout.buildChatFrame(80, 24, chatState({ username: 'will' }));
+  const nameY = chatLayout.profileNameRow(24);
+  const row = ansi.stripAnsi(frame.lines[nameY]);
+  assert.ok(row.includes('will'));
+  assert.ok(row.includes('ctrl+a'));
+  assert.ok(frame.lines[nameY].includes(`${ansi.bold()}${ansi.fg(theme.DARK.theme)}a`));
+});
+
+test('clicking an open profile starts the close animation from the open ease', async () => {
+  const chat = makeController({
+    profileOpen: true,
+    profileExpandFrame: chatLayout.PROFILE_FRAMES,
+  });
+  const frame = chat.draw();
+  const nameHit = frame.hits.filter((h) => h.type === 'profile').at(-1);
+  await chat.handleClick(nameHit);
+  assert.equal(chat.state.profileClosing, true);
+  assert.ok(chat.state.profileCloseFrom > 0.8, 'close starts from the open position');
+});
+
+test('ctrl+a opens profile focus; arrows move; esc returns', () => {
+  const chat = makeController({ inputFocus: 'composer' });
+  chat.handleKey('\u0001');
+  assert.equal(chat.state.inputFocus, 'profile');
+  assert.equal(chat.state.profileCursor, 0);
+  assert.equal(chat.state.profileOpen, true);
+  chat.moveProfileCursor(1);
+  assert.equal(chat.state.profileCursor, 1);
+  chat.moveProfileCursor(1);
+  assert.equal(chat.state.profileCursor, 2);
+  chat.nudgeSensitivity(3);
+  assert.equal(chat.state.scrollSensitivity, 4);
+  chat.handleKey('\u001b');
+  assert.equal(chat.state.profileCursor, null);
+  assert.equal(chat.state.profileClosing, true);
+  assert.equal(chat.state.inputFocus, 'composer');
+});
+
+test('ctrl+q quits', () => {
+  let quit = 0;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-quit-'));
+  const quitter = createChatController({
+    client: {
+      user: { id: 'me', username: 'will' },
+      listGroups: async () => [],
+      openGroup: async () => ({ messages: [] }),
+      connectSocket: async () => {},
+      disconnectSocket: () => {},
+      setActiveGroup: () => {},
+      switchChannel: (_g, name) => name,
+      getSecret: () => null,
+    },
+    paths: configPaths(dir),
+    stdout: { write() {}, columns: 80, rows: 24 },
+    getSize: () => ({ cols: 80, rows: 24 }),
+    onQuit: () => { quit += 1; },
+  });
+  Object.assign(quitter.state, chatState());
+  quitter.handleKey('\u0011');
+  assert.equal(quit, 1);
+});
+
+test('active channel chip and selected message use a fill', () => {
+  const light = chatLayout.buildChatFrame(80, 24, chatState({
+    theme: 'light',
+    selectedMessageId: 'm2',
+  }));
+  assert.ok(light.lines.join('').includes(ansi.bg(theme.LIGHT.selectedBg)));
+  assert.ok(light.lines.join('').includes(ansi.bg(theme.LIGHT.activeBg)));
+  const dark = chatLayout.buildChatFrame(80, 24, chatState({ selectedMessageId: 'm2' }));
+  assert.ok(dark.lines.join('').includes(ansi.bg(theme.DARK.selectedBg)));
+});
+
+test('dark-mode sensitivity fill uses dark text on the bright thumb', () => {
+  const frame = chatLayout.buildChatFrame(80, 24, chatState({
+    profileOpen: true,
+    profileExpandFrame: chatLayout.PROFILE_FRAMES,
+    scrollSensitivity: 20,
+  }));
+  const sens = frame.hits.find((h) => h.type === 'sensitivity');
+  assert.ok(sens);
+  assert.ok(frame.lines[sens.y].includes(ansi.fg(theme.DARK.thumbFg)));
 });

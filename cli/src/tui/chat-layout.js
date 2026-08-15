@@ -108,6 +108,8 @@ const DEFAULT_CHAT = {
   hoverSensitivity: false,
   theme: 'dark',
   scrollSensitivity: 1,
+  profileCursor: null,
+  inputFocusBeforeProfile: null,
   hoverReply: false,
   scrollTween: null,
   scrollBatch: 0,
@@ -321,12 +323,10 @@ function actionListFor(item, userId, mode = {}) {
 }
 
 function hintActionsFor(item, userId, mode = {}) {
-  const actionMod = mode.actionMod || 'ctrl';
-  const actions = actionListFor(item, userId, mode).map((action) => (
-    action.mod ? { ...action, mod: actionMod } : action
-  ));
-  return [...actions, ACTIONS.copy, ACTIONS.focus];
+  return [...actionListFor(item, userId, mode), ACTIONS.copy, ACTIONS.focus];
 }
+
+const PROFILE_ITEMS = ['logout', 'theme', 'sensitivity'];
 
 const ACTION_SLOTS = ['reply', 'preview', 'edit', 'delete'];
 const ACTION_SLOT_W = 1;
@@ -795,7 +795,9 @@ function paintFillTrackWithLabel(innerW, value, fade, title) {
     const on = i < filled;
     const bg = fadeHex(on ? PALETTE.thumb : PALETTE.track, fade);
     const ch = i < label.length ? label[i] : ' ';
-    const fg = contrastOn(bg);
+    const fg = on
+      ? (PALETTE.thumbFg || contrastOn(bg))
+      : (PALETTE.trackFg || contrastOn(bg));
     out += `${ansi.bg(bg)}${ansi.fg(fg)}${ch}`;
   }
   return `${out}${ansi.reset()}`;
@@ -834,6 +836,22 @@ function paintSidebarControl({
 
 function profileNameRow(height) {
   return Math.max(2, (height || 1) - PROFILE_NAME_OFFSET);
+}
+
+function paintProfileNameRow(username, userColor, width, inset) {
+  const pad = Math.max(0, Number(inset) || 0);
+  const innerW = Math.max(1, width - pad * 2);
+  const hintPlain = 'ctrl+a';
+  const hintW = ansi.width(hintPlain);
+  const nameBudget = Math.max(1, innerW - hintW - 1);
+  const name = ansi.stripAnsi(ansi.truncate(` ${String(username || 'you')}`, nameBudget));
+  const namePad = Math.max(0, nameBudget - ansi.width(name));
+  const nameStyled = `${ansi.bold()}${ansi.fg(userColor)}${name}${' '.repeat(namePad)}${ansi.reset()}`;
+  const hintStyled = `${ansi.fg(PALETTE.muted)}ctrl+${ansi.reset()}`
+    + `${ansi.bold()}${ansi.fg(PALETTE.theme)}a${ansi.reset()}`;
+  const inner = `${nameStyled} ${hintStyled}`;
+  if (pad <= 0) return `${inner}${ansi.reset()}`;
+  return `${fillRow('', pad, {})}${inner}${fillRow('', Math.max(0, width - pad - innerW), {})}`;
 }
 
 function buildSidebar(state, width, height, nameY = null) {
@@ -882,6 +900,7 @@ function buildSidebar(state, width, height, nameY = null) {
   const uname = String(state.username || 'you');
   lines[barY] = fillRow('─'.repeat(Math.max(0, width)), width, { fg: PALETTE.rule });
   hits.push({ type: 'profile', x: 0, y: barY, w: width, h: 1 });
+  const profileFocused = state.profileCursor != null;
   const covered = new Set();
   const placeButton = (midY, type, opts, fadeIndex) => {
     if (midY <= barY || midY >= profileNameY || midY < 0 || midY >= height) return;
@@ -916,19 +935,19 @@ function buildSidebar(state, width, height, nameY = null) {
   };
   placeButton(logoutY, 'logout', {
     label: 'Log out',
-    hover: !!state.hoverLogout,
+    hover: !!state.hoverLogout || (profileFocused && state.profileCursor === 0),
     idleFg: PALETTE.error,
     hotFg: PALETTE.logoutHot,
   }, 0);
   placeButton(themeY, 'theme', {
     label: 'Theme',
-    hover: !!state.hoverTheme,
+    hover: !!state.hoverTheme || (profileFocused && state.profileCursor === 1),
     idleFg: PALETTE.theme,
     hotFg: PALETTE.themeHot,
   }, 1);
   placeButton(sensY, 'sensitivity', {
     label: 'Sensitivity',
-    hover: !!state.hoverSensitivity,
+    hover: !!state.hoverSensitivity || (profileFocused && state.profileCursor === 2),
     idleFg: PALETTE.thumb,
     hotFg: PALETTE.outlineStrong,
     fillValue: state.scrollSensitivity,
@@ -938,7 +957,7 @@ function buildSidebar(state, width, height, nameY = null) {
     hits.push({ type: 'profile', x: 0, y: py, w: width, h: 1 });
   }
   if (profileNameY >= 0 && profileNameY < height) {
-    lines[profileNameY] = insetSidebarRow(` ${uname}`, width, inset, { fg: userColor, bold: true });
+    lines[profileNameY] = paintProfileNameRow(uname, userColor, width, inset);
     hits.push({ type: 'profile', x: 0, y: profileNameY, w: width, h: 1 });
   }
 
@@ -966,15 +985,16 @@ function channelExpandProgress(state, name) {
   return Math.min(1, Math.max(0, frame / frames));
 }
 
-function paintBoxChip(innerStyled, w, color, { bold = false, dim = false } = {}) {
+function paintBoxChip(innerStyled, w, color, { bold = false, dim = false, fill = null } = {}) {
   const innerW = Math.max(1, w - 2);
   const inner = padCells(innerStyled, innerW);
+  const bgOn = fill ? ansi.bg(fill) : '';
   const fg = `${dim ? ansi.dim() : ''}${ansi.fg(color)}`;
   const reset = ansi.reset();
   return {
-    top: `${fg}╭${'─'.repeat(innerW)}╮${reset}`,
-    mid: `${fg}│${reset}${fg}${bold ? ansi.bold() : ''}${inner}${reset}${fg}│${reset}`,
-    bot: `${fg}╰${'─'.repeat(innerW)}╯${reset}`,
+    top: `${bgOn}${fg}╭${'─'.repeat(innerW)}╮${reset}`,
+    mid: `${bgOn}${fg}│${reset}${bgOn}${fg}${bold ? ansi.bold() : ''}${inner}${reset}${bgOn}${fg}│${reset}`,
+    bot: `${bgOn}${fg}╰${'─'.repeat(innerW)}╯${reset}`,
     innerW,
   };
 }
@@ -1116,7 +1136,11 @@ function buildChannelBar(state, width, originX, originY) {
       });
       inner = padCells(left, room) + cross;
     }
-    const box = paintBoxChip(inner, chip.w, color, { bold: chip.active && !isCreate, dim: isCreate && !chip.hover });
+    const box = paintBoxChip(inner, chip.w, color, {
+      bold: chip.active && !isCreate,
+      dim: isCreate && !chip.hover,
+      fill: chip.active && !isCreate ? PALETTE.activeBg : null,
+    });
     styled[0] += box.top;
     styled[1] += box.mid;
     styled[2] += box.bot;
@@ -1281,17 +1305,21 @@ function scrollbarGlyphs(trackH, total, view, offset) {
   return cells;
 }
 
-/** Ease-in-out velocity for a remaining scroll batch. Fastest in the middle. */
+function easeInOutCubic(t) {
+  const x = Math.min(1, Math.max(0, Number(t) || 0));
+  return x < 0.5 ? 4 * x * x * x : 1 - ((-2 * x + 2) ** 3) / 2;
+}
+
+/** Cubic ease-in-out over a fixed tick count. Slow at both ends, fastest in the middle. */
 function nextScrollStep(left, total) {
   const absLeft = Math.abs(Number(left) || 0);
   if (!absLeft) return 0;
   const absTotal = Math.max(absLeft, Math.abs(Number(total) || 0), 1);
   const done = Math.max(0, absTotal - absLeft);
-  const t = Math.min(1, done / absTotal);
-  const env = Math.sin(Math.PI * t);
-  const peak = Math.max(1, Math.round(absTotal / 4));
-  let step = Math.max(1, Math.round(1 + (peak - 1) * env));
-  if (t >= 0.5) step = Math.min(step, Math.max(1, Math.ceil(absLeft / 2)));
+  const ticks = Math.max(12, absTotal);
+  const t0 = done / absTotal;
+  const t1 = Math.min(1, t0 + (1 / ticks));
+  const step = Math.max(1, Math.round((easeInOutCubic(t1) - easeInOutCubic(t0)) * absTotal));
   return Math.min(step, absLeft);
 }
 
@@ -1393,10 +1421,7 @@ function buildComposerHint(state, width) {
   } else if (state.selectedMessageId) {
     const item = (state.messages || []).find((m) => String(m.msg?.id) === String(state.selectedMessageId));
     if (item) {
-      rightActions = hintActionsFor(item, state.userId, {
-        ...actionMode(state),
-        actionMod: state.inputFocus === 'composer' ? 'ctrl' : 'alt',
-      });
+      rightActions = hintActionsFor(item, state.userId, actionMode(state));
       right = styleHint(rightActions, hintRoom);
     }
   }
@@ -1990,6 +2015,8 @@ module.exports = {
   clampScrollForMessage,
   offsetToShowMessage,
   actionMode,
+  PROFILE_ITEMS,
+  easeInOutCubic,
   nextScrollStep,
   replyPreviewText,
   buildComposerHint,
