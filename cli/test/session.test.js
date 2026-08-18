@@ -8,8 +8,12 @@ const { test } = require('node:test');
 const { configPaths } = require('../src/store/paths');
 const { loadSession, saveSession, cookieHeader, storeSetCookieHeaders, clearSession } = require('../src/store/session');
 const { loadConfig, setConfigKey } = require('../src/store/config');
+const { setChannelOrder, listChannels, forgetChannel, rememberChannel, loadPrefs, savePrefs } = require('../src/store/prefs');
 const { putVaultEntry, getVaultEntry, listVaultEntries, removeVaultEntry } = require('../src/store/vault');
 const { HttpClient } = require('../src/client/http');
+const { looksLikeImagePath } = require('../src/tui/clipboard-image');
+const { socketIoOptions } = require('../src/client/socket');
+const { SYNC_PROTOCOL_HEADER, SYNC_PROTOCOL_VERSION } = require('../src/version');
 
 test('session cookie jar persists and formats Cookie header', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-sess-'));
@@ -31,6 +35,30 @@ test('config set server persists', () => {
   assert.equal(loadConfig(paths).server, 'http://127.0.0.1:4400');
 });
 
+test('config set theme normalizes to dark or light', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-theme-'));
+  const paths = configPaths(dir);
+  assert.equal(loadConfig(paths).theme, 'dark');
+  setConfigKey('theme', 'light', paths);
+  assert.equal(loadConfig(paths).theme, 'light');
+  setConfigKey('theme', 'DARK', paths);
+  assert.equal(loadConfig(paths).theme, 'dark');
+  setConfigKey('theme', 'nope', paths);
+  assert.equal(loadConfig(paths).theme, 'dark');
+});
+
+test('config set scrollSensitivity clamps to 1-20', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-sens-'));
+  const paths = configPaths(dir);
+  assert.equal(loadConfig(paths).scrollSensitivity, 1);
+  setConfigKey('scrollSensitivity', '8', paths);
+  assert.equal(loadConfig(paths).scrollSensitivity, 8);
+  setConfigKey('scrollSensitivity', 99, paths);
+  assert.equal(loadConfig(paths).scrollSensitivity, 20);
+  setConfigKey('scrollSensitivity', 0, paths);
+  assert.equal(loadConfig(paths).scrollSensitivity, 1);
+});
+
 test('vault put/get/list/remove', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-vault-'));
   const paths = configPaths(dir);
@@ -41,10 +69,107 @@ test('vault put/get/list/remove', () => {
   assert.equal(getVaultEntry('g1', paths), null);
 });
 
+test('looksLikeImagePath only accepts existing image files', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-img-'));
+  const file = path.join(dir, 'shot.png');
+  fs.writeFileSync(file, 'x');
+  assert.equal(looksLikeImagePath(file), file);
+  assert.equal(looksLikeImagePath('not-a-path'), false);
+  assert.equal(looksLikeImagePath('/tmp/nope.txt'), false);
+});
+
 test('HttpClient builds absolute URLs from configured server', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-http-'));
   const paths = configPaths(dir);
   setConfigKey('server', 'http://example.test/', paths);
   const client = new HttpClient({ paths });
   assert.equal(client.server, 'http://example.test');
+});
+
+test('HttpClient sends X-GChat-Sync-Protocol on every request', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-proto-'));
+  const paths = configPaths(dir);
+  setConfigKey('server', 'http://example.test', paths);
+  const client = new HttpClient({ paths });
+  const seen = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    seen.push({ url: String(url), headers: opts.headers, method: opts.method });
+    return {
+      ok: true,
+      status: 200,
+      headers: { getSetCookie: () => [], get: () => null },
+      text: async () => '{"ok":true}',
+    };
+  };
+  try {
+    await client.post('/api/groups/create', { name: 'x' });
+    await client.get('/api/groups/mine');
+  } finally {
+    globalThis.fetch = original;
+  }
+  assert.equal(seen.length, 2);
+  for (const req of seen) {
+    assert.equal(req.headers[SYNC_PROTOCOL_HEADER], String(SYNC_PROTOCOL_VERSION));
+  }
+});
+
+test('socket handshake advertises sync protocol 2', () => {
+  const opts = socketIoOptions({ cookies: { 'connect.sid': 'abc' } });
+  assert.deepEqual(opts.auth, { protocol: SYNC_PROTOCOL_VERSION });
+  assert.equal(opts.extraHeaders[SYNC_PROTOCOL_HEADER], String(SYNC_PROTOCOL_VERSION));
+  assert.equal(opts.transportOptions.polling.extraHeaders[SYNC_PROTOCOL_HEADER], String(SYNC_PROTOCOL_VERSION));
+  assert.match(opts.extraHeaders.Cookie, /connect\.sid=abc/);
+});
+
+test('HttpClient maps 426 protocol_upgrade_required to a versioned error', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-426-'));
+  const paths = configPaths(dir);
+  setConfigKey('server', 'http://example.test', paths);
+  const client = new HttpClient({ paths });
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 426,
+    headers: { getSetCookie: () => [], get: () => null },
+    text: async () => JSON.stringify({ error: 'protocol_upgrade_required', requiredProtocol: 2 }),
+  });
+  try {
+    await assert.rejects(
+      () => client.post('/api/groups/create', { name: 'x' }),
+      (err) => {
+        assert.equal(err.status, 426);
+        assert.match(err.message, /protocol_upgrade_required/);
+        assert.match(err.message, /need 2/);
+        return true;
+      }
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('setChannelOrder preserves custom order and keeps main', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-ch-'));
+  const paths = configPaths(dir);
+  const ordered = setChannelOrder('g1', ['design', 'main', 'random'], paths);
+  assert.deepEqual(ordered, ['main', 'design', 'random']);
+  assert.deepEqual(listChannels('g1', paths), ['main', 'design', 'random']);
+});
+
+test('forgetChannel drops a topic and rememberChannel does not revive it', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-forget-'));
+  const paths = configPaths(dir);
+  setChannelOrder('g1', ['main', 'design'], paths);
+  assert.deepEqual(forgetChannel('g1', 'design', paths), ['main']);
+  const prefs = loadPrefs(paths);
+  rememberChannel('g1', 'design', prefs);
+  savePrefs(prefs, paths);
+  assert.deepEqual(listChannels('g1', paths), ['main']);
+  rememberChannel('g1', 'design', loadPrefs(paths), { force: true });
+  savePrefs(loadPrefs(paths), paths);
+  const forced = loadPrefs(paths);
+  rememberChannel('g1', 'design', forced, { force: true });
+  savePrefs(forced, paths);
+  assert.ok(listChannels('g1', paths).includes('design'));
 });

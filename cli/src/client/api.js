@@ -4,7 +4,6 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cryptoV2 = require('../crypto-v2');
 const { HttpClient } = require('./http');
-const { SocketClient } = require('./socket');
 const {
   encryptTextEnvelope,
   decryptServerMessage,
@@ -349,6 +348,7 @@ class GChatClient {
 
   ensureSocket() {
     if (!this.socket) {
+      const { SocketClient } = require('./socket');
       this.socket = new SocketClient({
         server: this.server,
         session: this.http.session,
@@ -394,6 +394,7 @@ class GChatClient {
     text,
     channel,
     replyToId,
+    replyPreview,
     whisperTo,
     isDisappearing,
     disappearingDurationMs,
@@ -410,6 +411,7 @@ class GChatClient {
       type,
       channel: activeChannel,
       replyToId: replyToId || null,
+      replyPreview: replyPreview || null,
       isDisappearing: !!isDisappearing,
       disappearingDurationMs: isDisappearing
         ? (parseDurationToMs(disappearingDurationMs) || parseDurationToMs('5s') || 5000)
@@ -499,8 +501,9 @@ class GChatClient {
   announceChannel(groupId, channel, action = 'create') {
     const sock = this.ensureSocket();
     sock.joinRoom(groupId);
-    sock.emit('channel_announce', { groupId, channel, action });
-    if (action === 'create') {
+    const nextAction = action === 'delete' || action === 'remove' ? 'remove' : 'add';
+    sock.emit('channel_announce', { groupId, channel, action: nextAction });
+    if (nextAction === 'add') {
       setActiveChannel(groupId, channel, this.paths);
     }
   }

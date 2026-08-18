@@ -7,6 +7,7 @@ const {
   cookieHeader,
   storeSetCookieHeaders,
 } = require('../store/session');
+const { SYNC_PROTOCOL_HEADER, SYNC_PROTOCOL_VERSION } = require('../version');
 
 class HttpClient {
   constructor({ server, paths, session } = {}) {
@@ -32,6 +33,7 @@ class HttpClient {
     const reqHeaders = {
       Accept: 'application/json',
       ...(headers || {}),
+      [SYNC_PROTOCOL_HEADER]: String(SYNC_PROTOCOL_VERSION),
     };
     const cookie = cookieHeader(this.session);
     if (cookie) reqHeaders.Cookie = cookie;
@@ -86,7 +88,11 @@ class HttpClient {
       }
     }
     if (!response.ok) {
-      const message = data?.error || data?.message || `HTTP ${response.status}`;
+      let message = data?.error || data?.message || `HTTP ${response.status}`;
+      if (response.status === 426 || message === 'protocol_upgrade_required') {
+        const need = data?.requiredProtocol || SYNC_PROTOCOL_VERSION;
+        message = `protocol_upgrade_required (need ${need}; CLI speaks ${SYNC_PROTOCOL_VERSION})`;
+      }
       const err = new Error(message);
       err.status = response.status;
       err.body = data;

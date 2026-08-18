@@ -9,7 +9,17 @@ const DEFAULT_CONFIG = {
   bell: true,
   notify: false,
   adminSecret: null,
+  scrollSensitivity: 1,
 };
+
+const SCROLL_SENSITIVITY_MIN = 1;
+const SCROLL_SENSITIVITY_MAX = 20;
+
+function normalizeScrollSensitivity(value) {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n)) return SCROLL_SENSITIVITY_MIN;
+  return Math.max(SCROLL_SENSITIVITY_MIN, Math.min(SCROLL_SENSITIVITY_MAX, n));
+}
 
 function loadConfig(paths) {
   const p = paths || configPaths();
@@ -37,12 +47,21 @@ function setConfigKey(key, value, paths) {
   if (key === 'adminSecret' && (value === 'null' || value === 'clear' || value === '')) {
     parsed = null;
   }
+  if (key === 'theme') {
+    parsed = String(value || '').trim().toLowerCase() === 'light' ? 'light' : 'dark';
+  }
+  if (key === 'scrollSensitivity') {
+    parsed = normalizeScrollSensitivity(value);
+  }
   current[key] = parsed;
   return saveConfig(current, paths);
 }
 
 module.exports = {
   DEFAULT_CONFIG,
+  SCROLL_SENSITIVITY_MIN,
+  SCROLL_SENSITIVITY_MAX,
+  normalizeScrollSensitivity,
   loadConfig,
   saveConfig,
   setConfigKey,
