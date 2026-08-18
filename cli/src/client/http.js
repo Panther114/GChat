@@ -32,8 +32,8 @@ class HttpClient {
     const url = `${this.server}${apiPath.startsWith('/') ? apiPath : `/${apiPath}`}`;
     const reqHeaders = {
       Accept: 'application/json',
-      [SYNC_PROTOCOL_HEADER]: String(SYNC_PROTOCOL_VERSION),
       ...(headers || {}),
+      [SYNC_PROTOCOL_HEADER]: String(SYNC_PROTOCOL_VERSION),
     };
     const cookie = cookieHeader(this.session);
     if (cookie) reqHeaders.Cookie = cookie;
