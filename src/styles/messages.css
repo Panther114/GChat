@@ -21,6 +21,89 @@
   overflow-anchor: none;
 }
 
+.messages-viewport {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  overflow: hidden;
+}
+
+.messages-viewport > .messages-area {
+  width: 100%;
+}
+
+.messages-area.is-loading {
+  filter: blur(4px) !important;
+  opacity: .48;
+  transform: scale(.997);
+  transition: filter 180ms var(--ease-tech), opacity 180ms var(--ease-tech), transform 180ms var(--ease-tech);
+}
+
+.message-loading-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 10px;
+  padding: 24px;
+  color: var(--chat-text);
+  background: color-mix(in srgb, var(--chat-canvas) 68%, transparent);
+  border: 1px solid color-mix(in srgb, var(--chat-border-strong) 55%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  pointer-events: auto;
+  user-select: none;
+  transition: opacity 180ms var(--ease-tech), background-color 180ms var(--ease-tech);
+}
+
+.message-loading-overlay[hidden] {
+  display: none;
+}
+
+.message-loading-overlay::after {
+  content: '';
+  width: min(180px, 55%);
+  height: 2px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, var(--chat-accent), transparent);
+  background-size: 220% 100%;
+  animation: gchat-loading-progress 1.15s ease-in-out infinite;
+}
+
+.message-loading-spinner {
+  width: 24px;
+  height: 24px;
+  display: inline-block;
+  border: 2px solid color-mix(in srgb, currentColor 28%, transparent);
+  border-top-color: var(--chat-accent);
+  border-right-color: var(--chat-accent-strong, var(--chat-accent));
+  border-radius: 50%;
+  animation: gchat-loading-spin .72s linear infinite;
+}
+
+.message-loading-overlay > span:last-child,
+.auth-loading-overlay > span:last-child {
+  font-size: var(--type-sm);
+  font-weight: 600;
+  letter-spacing: .01em;
+}
+
+@keyframes gchat-loading-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes gchat-loading-progress {
+  0% { background-position: 120% 0; opacity: .35; }
+  50% { opacity: 1; }
+  100% { background-position: -120% 0; opacity: .35; }
+}
+
 .messages-area .msg-row[hidden],
 .messages-area .msg-system[hidden],
 .messages-area .msg-date-divider[hidden] {

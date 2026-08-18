@@ -47,6 +47,23 @@ test('auth theme toggle swaps the GChat logo for the active theme', async ({ pag
   await expect(logo).toHaveAttribute('src', /gchat_icon\.png\?v=20\d{6}-v\d+$/);
 });
 
+test('login shows the loading overlay while authentication is pending', async ({ page }) => {
+  await page.goto('/index.html');
+  await page.route('**/api/auth/login', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 650));
+    await route.continue();
+  });
+  await page.locator('#signin-username').fill('root');
+  await page.locator('#signin-password').fill('root');
+  await page.locator('#signin-btn').click();
+
+  await expect(page.locator('#auth-loading-overlay')).toBeVisible({ timeout: 1_000 });
+  await expect(page.locator('.auth-card')).toHaveAttribute('aria-busy', 'true');
+  await expect(page.locator('#auth-loading-label')).toHaveText('Signing in…');
+  await page.waitForURL(/chat\.html/);
+  await page.unroute('**/api/auth/login');
+});
+
 test('auth screen renders a theme-aware animated dot canvas behind the card', async ({ page }) => {
   await page.goto('/index.html');
   const canvas = page.locator('#auth-wave-canvas');

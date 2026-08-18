@@ -1179,6 +1179,8 @@ const migrations = [
   "ALTER TABLE group_chats ADD COLUMN key_escrow_version INTEGER",
   "CREATE TABLE IF NOT EXISTS _config (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
   "ALTER TABLE users ADD COLUMN profile_picture TEXT",
+  "ALTER TABLE users ADD COLUMN profile_picture_version TEXT",
+  "UPDATE users SET profile_picture_version = lower(hex(randomblob(16))) WHERE profile_picture IS NOT NULL AND profile_picture_version IS NULL",
   "ALTER TABLE users ADD COLUMN client_settings TEXT NOT NULL DEFAULT '{}'",
   `ALTER TABLE users ADD COLUMN ai_daily_token_limit INTEGER NOT NULL DEFAULT ${USER_AI_DAILY_TOKEN_LIMIT_MIGRATION_DEFAULT}`,
   "ALTER TABLE messages ADD COLUMN edited_at TEXT",
@@ -1332,8 +1334,22 @@ const SESSION_SECRET = getOrCreateSessionSecret();
 // ── Prepared Statements ───────────────────────────────────────────────────────
 const stmts = {
   // Users
-  findUserByUsername: db.prepare('SELECT * FROM users WHERE username = ?'),
+  findUserByUsername: db.prepare('SELECT id, username, password_hash FROM users WHERE username = ?'),
   findUserById: db.prepare('SELECT * FROM users WHERE id = ?'),
+  findUserIdentityById: db.prepare(`
+    SELECT id, username, icon_color, profile_picture_version,
+           (profile_picture IS NOT NULL) AS has_profile_picture,
+           client_settings
+    FROM users
+    WHERE id = ?
+  `),
+  findUserCredentialsByUsername: db.prepare(`
+    SELECT id, username, password_hash, icon_color, profile_picture_version,
+           (profile_picture IS NOT NULL) AS has_profile_picture,
+           client_settings
+    FROM users
+    WHERE username = ?
+  `),
   insertUser: db.prepare(
     'INSERT INTO users (id, username, password_hash, icon_color) VALUES (?, ?, ?, ?)'
   ),
@@ -1349,6 +1365,9 @@ const stmts = {
       END
     WHERE id = @userId
   `),
+  updateUserProfilePictureVersion: db.prepare(
+    'UPDATE users SET profile_picture_version = ? WHERE id = ?'
+  ),
   updateUserSettings: db.prepare('UPDATE users SET client_settings = ? WHERE id = ?'),
   deleteUser: db.prepare('DELETE FROM users WHERE id = ?'),
   deleteUserMemberships: db.prepare('DELETE FROM group_members WHERE user_id = ?'),
@@ -1397,6 +1416,13 @@ const stmts = {
   isMember: db.prepare(
     'SELECT is_admin FROM group_members WHERE group_id = ? AND user_id = ?'
   ),
+  canViewProfilePicture: db.prepare(`
+    SELECT 1 AS ok
+    FROM group_members viewer
+    JOIN group_members target ON target.group_id = viewer.group_id
+    WHERE viewer.user_id = ? AND target.user_id = ?
+    LIMIT 1
+  `),
   getUserGroups: db.prepare(`
     SELECT g.id, g.name, g.code, g.created_by, g.created_at, g.allow_member_clear, g.allow_member_clear_tag, g.allow_member_export, g.allow_member_kick, g.allow_member_invite, g.ai_enabled, g.group_color, g.group_icon, g.key_commitment, g.encryption_version, gm.is_admin,
            (
@@ -1475,7 +1501,8 @@ const stmts = {
     LIMIT 101
   `),
   getGroupMembers: db.prepare(`
-    SELECT u.id, u.username, u.icon_color, u.profile_picture, gm.is_admin
+    SELECT u.id, u.username, u.icon_color, u.profile_picture_version,
+           (u.profile_picture IS NOT NULL) AS has_profile_picture, gm.is_admin
     FROM users u
     JOIN group_members gm ON u.id = gm.user_id
     WHERE gm.group_id = ?
@@ -1489,7 +1516,9 @@ const stmts = {
 
   // Admin
   getAllUsers: db.prepare(`
-    SELECT id, username, icon_color, profile_picture, created_at, ai_daily_token_limit
+    SELECT id, username, icon_color, profile_picture_version,
+           (profile_picture IS NOT NULL) AS has_profile_picture,
+           created_at, ai_daily_token_limit
     FROM users
     ORDER BY created_at DESC
   `),
@@ -2359,6 +2388,27 @@ app.get('/api/health', (req, res) => {
 });
 
 // ── Helper: format objects ────────────────────────────────────────────────────
+function profilePictureVersionFor(user) {
+  if (!user?.profile_picture && !user?.has_profile_picture) return null;
+  return String(user.profile_picture_version || `legacy-${user.id}`);
+}
+
+function formatAvatarReference(user) {
+  const hasProfilePicture = !!user?.profile_picture || !!user?.has_profile_picture;
+  const profilePictureVersion = profilePictureVersionFor(user);
+  return {
+    // User avatars are fetched lazily from the authenticated binary endpoint.
+    // Keep the legacy field for clients that still expect it, but never put
+    // the multi-megabyte data URL into an identity payload.
+    profilePicture: null,
+    profilePictureUrl: hasProfilePicture
+      ? `/api/profile-pictures/${encodeURIComponent(String(user.id))}?v=${encodeURIComponent(profilePictureVersion)}`
+      : null,
+    hasProfilePicture,
+    profilePictureVersion,
+  };
+}
+
 function formatUser(user) {
   let clientSettings = {};
   try { clientSettings = JSON.parse(user.client_settings || '{}'); } catch { clientSettings = {}; }
@@ -2366,8 +2416,18 @@ function formatUser(user) {
     id: user.id,
     username: user.username,
     iconColor: user.icon_color,
-    profilePicture: user.profile_picture || null,
+    ...formatAvatarReference(user),
     clientSettings: normalizeClientSettings(clientSettings),
+  };
+}
+
+function formatMemberSummary(user) {
+  return {
+    id: user.id,
+    username: user.username,
+    iconColor: user.icon_color,
+    ...formatAvatarReference(user),
+    isAdministrator: !!user.is_admin,
   };
 }
 
@@ -2528,7 +2588,7 @@ function formatManagedUser(user, usageWindow) {
     id: user.id,
     username: user.username,
     iconColor: user.icon_color,
-    profilePicture: user.profile_picture || null,
+    ...formatAvatarReference(user),
     createdAt: user.created_at,
     aiDailyTokenLimit: dailyLimit,
     aiTokensUsedToday: usedTokens,
@@ -2700,7 +2760,7 @@ app.get('/api/auth/me', (req, res) => {
   if (!req.session.userId) {
     return res.status(401).json({ error: 'Not authenticated' });
   }
-  const user = stmts.findUserById.get(req.session.userId);
+  const user = stmts.findUserIdentityById.get(req.session.userId);
   if (!user) {
     req.session.destroy(() => {});
     return res.status(401).json({ error: 'Not authenticated' });
@@ -2708,8 +2768,41 @@ app.get('/api/auth/me', (req, res) => {
   res.json(formatUser(user));
 });
 
+// Avatars remain private user data, but are served separately from identity
+// payloads so a large legacy data URL never delays login, preload, or history.
+app.get('/api/profile-pictures/:userId', (req, res) => {
+  const viewerId = req.session.userId;
+  if (!viewerId) return res.status(401).json({ error: 'Not authenticated' });
+
+  const target = stmts.findUserById.get(req.params.userId);
+  if (!target) return res.status(404).json({ error: 'Profile picture not found' });
+  const isSelf = String(viewerId) === String(target.id);
+  if (!isSelf && !stmts.canViewProfilePicture.get(viewerId, target.id)) {
+    return res.status(403).json({ error: 'Not authorized to view this profile picture' });
+  }
+  if (!target.profile_picture) return res.status(404).json({ error: 'Profile picture not found' });
+
+  const parsedPicture = parseImageDataUrl(target.profile_picture, MAX_PROFILE_PICTURE_BYTES);
+  if (!parsedPicture.ok) return res.status(404).json({ error: 'Profile picture not found' });
+
+  const version = profilePictureVersionFor(target);
+  const etag = `"gchat-avatar-${target.id}-${version}"`;
+  res.setHeader('Cache-Control', 'private, max-age=300, must-revalidate');
+  res.setHeader('Vary', 'Cookie');
+  res.setHeader('ETag', etag);
+  const requestEtags = String(req.headers['if-none-match'] || '')
+    .split(',')
+    .map((value) => value.trim());
+  if (requestEtags.includes(etag)) return res.status(304).end();
+
+  const base64 = parsedPicture.dataUrl.slice(parsedPicture.dataUrl.indexOf(',') + 1);
+  res.setHeader('Content-Type', parsedPicture.mime);
+  res.setHeader('Content-Length', String(Buffer.byteLength(base64, 'base64')));
+  return res.end(Buffer.from(base64, 'base64'));
+});
+
 app.get('/api/auth/settings', (req, res) => {
-  const user = stmts.findUserById.get(req.session.userId);
+  const user = stmts.findUserIdentityById.get(req.session.userId);
   if (!user) return res.status(401).json({ error: 'Not authenticated' });
   let settings = {};
   try { settings = JSON.parse(user.client_settings || '{}'); } catch { settings = {}; }
@@ -2803,11 +2896,14 @@ app.post('/api/auth/register', async (req, res) => {
       username,
       iconColor: color,
       profilePicture: null,
+      profilePictureUrl: null,
+      hasProfilePicture: false,
+      profilePictureVersion: null,
       groupId: GLOBAL_GROUP_ID,
     });
     clearRegisterAttempts(clientIp);
 
-    const user = stmts.findUserById.get(id);
+    const user = stmts.findUserIdentityById.get(id);
     if (!user) {
       console.error('Registered user record could not be retrieved after registration.');
       return res.status(500).json({ error: 'Internal server error' });
@@ -2844,7 +2940,7 @@ app.post('/api/auth/login', async (req, res) => {
     return res.status(429).json({ error: 'Too many failed login attempts. Please try again later.' });
   }
 
-  const user = stmts.findUserByUsername.get(username);
+  const user = stmts.findUserCredentialsByUsername.get(username);
   if (!user) {
     recordFailedLogin(clientIp);
     return res.status(401).json({ error: 'Invalid username or password' });
@@ -2919,6 +3015,7 @@ app.patch('/api/auth/profile', (req, res) => {
   }
 
   try {
+    const profilePictureVersion = hasProfilePictureUpdate && profilePicture ? crypto.randomUUID() : null;
     stmts.updateUser.run({
       username: username || null,
       iconColor: iconColor || null,
@@ -2927,7 +3024,10 @@ app.patch('/api/auth/profile', (req, res) => {
       hasProfilePicture: hasProfilePictureUpdate ? 1 : 0,
       userId,
     });
-    const user = stmts.findUserById.get(userId);
+    if (hasProfilePictureUpdate) {
+      stmts.updateUserProfilePictureVersion.run(profilePictureVersion, userId);
+    }
+    const user = stmts.findUserIdentityById.get(userId);
     // Update in-memory socket state for all connected sockets of this user
     for (const [, s] of io.sockets.sockets) {
       if (s.userId === userId) {
@@ -3186,7 +3286,7 @@ app.delete('/api/users/:userId', (req, res) => {
       userId: viewer.id,
       username: viewer.username,
       iconColor: viewer.icon_color,
-      profilePicture: viewer.profile_picture || null,
+      ...formatAvatarReference(viewer),
       groupId,
     });
   }
@@ -3314,12 +3414,12 @@ app.post('/api/groups/join', (req, res) => {
 
   // Emit member_joined to the group room
   if (joined.changes > 0) {
-    const user = stmts.findUserById.get(userId);
+    const user = stmts.findUserIdentityById.get(userId);
     io.to(group.id).emit('member_joined', {
       userId,
       username: user.username,
       iconColor: user.icon_color,
-      profilePicture: user.profile_picture || null,
+      ...formatAvatarReference(user),
       groupId: group.id,
     });
     emitSyncCommit(group.id, userId, membershipCommit, 'member.joined', null, { userId });
@@ -3494,13 +3594,7 @@ app.get('/api/groups/preload', (req, res) => {
         .reverse()
         .map(formatMessage);
       const decoratedRows = decorateReplyTargetState(rows);
-      const members = stmts.getGroupMembers.all(g.id).map((u) => ({
-        id: u.id,
-        username: u.username,
-        iconColor: u.icon_color,
-        profilePicture: u.profile_picture || null,
-        isAdministrator: !!u.is_admin,
-      }));
+      const members = stmts.getGroupMembers.all(g.id).map(formatMemberSummary);
       return {
         ...buildGroupPayload(g, { is_admin: g.is_admin }, g.unread_count),
         preloaded: {
@@ -3600,7 +3694,7 @@ app.post('/api/groups/:groupId/invite', (req, res) => {
       userId: targetUserId,
       username: target.username,
       iconColor: target.icon_color,
-      profilePicture: target.profile_picture || null,
+      ...formatAvatarReference(target),
       groupId,
     });
     emitSyncCommit(groupId, userId, commit, 'member.joined', null, { userId: targetUserId });
@@ -4120,7 +4214,7 @@ app.delete('/api/groups/:groupId/leave', (req, res) => {
     },
   });
 
-  const user = stmts.findUserById.get(userId);
+  const user = stmts.findUserIdentityById.get(userId);
   io.to(groupId).emit('member_left', {
     userId,
     username: user ? user.username : 'Unknown',
@@ -4142,15 +4236,7 @@ app.get('/api/groups/:groupId/members', (req, res) => {
   }
 
   const members = stmts.getGroupMembers.all(groupId);
-  res.json(
-    members.map((u) => ({
-      id: u.id,
-      username: u.username,
-      iconColor: u.icon_color,
-      profilePicture: u.profile_picture || null,
-      isAdministrator: !!u.is_admin,
-    }))
-  );
+  res.json(members.map(formatMemberSummary));
 });
 
 // PATCH /api/groups/:groupId/members/:userId/administrator — owner-only role management
@@ -4255,7 +4341,7 @@ app.post('/api/groups/:groupId/upload', uploadRawBodyParser, (req, res) => {
   }
   const msgId = messageId;
   const createdAt = new Date().toISOString();
-  const user = stmts.findUserById.get(userId);
+  const user = stmts.findUserIdentityById.get(userId);
   const totalRecipients = Math.max(0, (stmts.countGroupMembers.get(groupId)?.count || 0) - 1);
 
   // v1.4.3: uploads can reply to a message, same as text sends.

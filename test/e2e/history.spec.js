@@ -186,6 +186,112 @@ test('channel switches are instant and never blank the transcript', async ({ pag
   expect(glitches, `transcript blanked/placeholder during switch: ${JSON.stringify(glitches)}`).toEqual([]);
 });
 
+test('delayed channel history shows a scoped loader while stale content stays covered', async ({ page }) => {
+  await signInAsRoot(page);
+  await openGroup(page);
+  await expect(page.locator('#messages-area .msg-row', { hasText: WELCOME_TEXT })).toBeVisible({ timeout: 10_000 });
+
+  let delayedRequest = true;
+  await page.route('**/api/groups/*/messages*', async (route) => {
+    if (delayedRequest) {
+      delayedRequest = false;
+      await new Promise((resolve) => setTimeout(resolve, 650));
+    }
+    await route.continue();
+  });
+
+  await page.locator('.chat-tag-filter-btn', { hasText: '#visual-qa' }).click();
+  await expect(page.locator('#message-loading-overlay')).toBeVisible({ timeout: 1_000 });
+  const loadingState = await page.evaluate(() => {
+    const area = globalThis.document.getElementById('messages-area');
+    const overlay = globalThis.document.getElementById('message-loading-overlay');
+    return {
+      busy: area?.getAttribute('aria-busy'),
+      filter: globalThis.getComputedStyle(area).filter,
+      staleMessageStillMounted: !!area?.querySelector('.msg-row'),
+      overlayLabel: globalThis.document.getElementById('message-loading-label')?.textContent,
+      overlayHidden: overlay?.hidden,
+    };
+  });
+  expect(loadingState.busy).toBe('true');
+  expect(loadingState.filter).toContain('blur');
+  expect(loadingState.staleMessageStillMounted).toBe(true);
+  expect(loadingState.overlayLabel).toContain('#visual-qa');
+  expect(loadingState.overlayHidden).toBe(false);
+
+  await expect(page.locator('#messages-area .msg-row', { hasText: QA_TEXT })).toBeVisible({ timeout: 5_000 });
+  await expect(page.locator('#message-loading-overlay')).toBeHidden();
+  await page.unroute('**/api/groups/*/messages*');
+});
+
+test('rapid channel switching keeps the final transcript scoped to the selected channel', async ({ page }) => {
+  await signInAsRoot(page);
+  await openGroup(page);
+  await expect(page.locator('#messages-area .msg-row', { hasText: WELCOME_TEXT })).toBeVisible({ timeout: 10_000 });
+
+  let firstChannelRequest = true;
+  await page.route('**/api/groups/*/messages*', async (route) => {
+    if (firstChannelRequest) {
+      firstChannelRequest = false;
+      await new Promise((resolve) => setTimeout(resolve, 700));
+    }
+    await route.continue();
+  });
+
+  await page.locator('.chat-tag-filter-btn', { hasText: '#visual-qa' }).click();
+  await page.locator('.chat-tag-filter-btn', { hasText: '#main' }).click();
+  await expect(page.locator('.chat-tag-filter-btn', { hasText: '#main' })).toHaveClass(/active/);
+  await expect(page.locator('#messages-area .msg-row', { hasText: WELCOME_TEXT })).toBeVisible({ timeout: 5_000 });
+  await page.waitForTimeout(900);
+
+  const finalState = await page.evaluate(() => ({
+    active: globalThis.document.querySelector('.chat-tag-filter-btn.active')?.textContent?.trim(),
+    text: Array.from(globalThis.document.querySelectorAll('#messages-area .msg-row')).map((row) => row.textContent || '').join('|'),
+    busy: globalThis.document.getElementById('messages-area')?.getAttribute('aria-busy'),
+  }));
+  expect(finalState.active).toBe('#main');
+  expect(finalState.text).toContain(WELCOME_TEXT);
+  expect(finalState.text).not.toContain(QA_TEXT);
+  expect(finalState.busy).toBe('false');
+  await page.unroute('**/api/groups/*/messages*');
+});
+
+test('web avatar uploads submit a 256px thumbnail', async ({ page }) => {
+  await signInAsRoot(page);
+  await page.locator('#sidebar-user-btn').click();
+  await expect(page.locator('#profile-modal')).toBeVisible();
+  await page.locator('#profile-mode-image-label').click();
+
+  const sourceDataUrl = await page.evaluate(() => {
+    const canvas = globalThis.document.createElement('canvas');
+    canvas.width = 512;
+    canvas.height = 512;
+    const context = canvas.getContext('2d');
+    context.fillStyle = '#2b65d9';
+    context.fillRect(0, 0, 512, 512);
+    return canvas.toDataURL('image/png');
+  });
+  const requestBodies = [];
+  page.on('request', (request) => {
+    if (request.url().includes('/api/auth/profile') && request.method() === 'PATCH') {
+      try { requestBodies.push(request.postDataJSON()); } catch { /* ignore unrelated malformed bodies */ }
+    }
+  });
+  await page.locator('#profile-picture-input').setInputFiles({
+    name: 'large-avatar.png',
+    mimeType: 'image/png',
+    buffer: Buffer.from(sourceDataUrl.split(',')[1], 'base64'),
+  });
+  await expect(page.locator('#profile-picture-preview')).toBeVisible({ timeout: 5_000 });
+  await expect.poll(() => page.locator('#profile-picture-preview-img').evaluate((img) => [img.naturalWidth, img.naturalHeight]))
+    .toEqual([256, 256]);
+  await page.locator('#profile-save-picture').click();
+  await expect.poll(() => requestBodies.length).toBeGreaterThan(0);
+  const body = requestBodies[requestBodies.length - 1];
+  expect(body.profilePicture).toMatch(/^data:image\/(?:webp|jpeg);base64,/);
+  expect(body.profilePicture.length).toBeLessThan(100_000);
+});
+
 test('sent messages persist across a reload', async ({ page }) => {
   await signInAsRoot(page);
   await openGroup(page);

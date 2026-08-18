@@ -2288,7 +2288,10 @@ button.is-loading {
   body.chat-body.mobile-layout .chat-topbar {
     display: grid;
     grid-template-columns: 34px minmax(0, 1fr) 34px;
-    grid-template-rows: minmax(34px, auto) auto;
+    /* Keep the second-row channel controls below the full action-button hit
+       area, including fractional mobile viewport/font metrics. */
+    grid-template-rows: minmax(44px, auto) auto;
+    min-height: 80px;
     column-gap: 10px;
     row-gap: 8px;
   }

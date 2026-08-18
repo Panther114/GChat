@@ -80,6 +80,85 @@ test('group API never returns the plaintext join code and stores only its HMAC',
   assert.match(stored.code, /^[a-f0-9]{64}$/);
 });
 
+test('identity payloads keep avatars compact and protected avatar bytes are cacheable', async () => {
+  const picture = 'data:image/png;base64,aW1hZ2UtYnl0ZXM=';
+  const ownerCsrf = await csrf(owner);
+  const updated = await owner
+    .patch('/api/auth/profile')
+    .set('X-CSRF-Token', ownerCsrf)
+    .send({ profilePicture: picture })
+    .expect(200);
+
+  const assertCompact = (payload) => {
+    const json = JSON.stringify(payload);
+    assert.equal(json.includes(picture), false);
+    assert.equal(json.includes('image-bytes'), false);
+  };
+
+  assertCompact(updated.body);
+  assert.equal(updated.body.profilePicture, null);
+  assert.equal(updated.body.hasProfilePicture, true);
+  assert.match(updated.body.profilePictureUrl, /^\/api\/profile-pictures\/.+\?v=/);
+  assert.ok(updated.body.profilePictureVersion);
+
+  const loginAgent = request.agent(app);
+  const login = await loginAgent
+    .post('/api/auth/login')
+    .send({ username: 'owner-test', password: 'secure-password-123' })
+    .expect(200);
+  assertCompact(login.body);
+  assertCompact((await owner.get('/api/auth/me').expect(200)).body);
+
+  const members = await member.get(`/api/groups/${group.id}/members`).expect(200);
+  assertCompact(members.body);
+  const ownerMember = members.body.find((entry) => entry.id === ownerResponseId());
+  assert.ok(ownerMember);
+  assert.equal(ownerMember.profilePicture, null);
+  assert.equal(ownerMember.profilePictureUrl, updated.body.profilePictureUrl);
+  assert.ok(Buffer.byteLength(JSON.stringify(members.body)) < 32 * 1024);
+
+  const preload = await owner.get('/api/groups/preload?limit=1').expect(200);
+  assertCompact(preload.body);
+  assert.ok(Buffer.byteLength(JSON.stringify(preload.body)) < 64 * 1024);
+
+  process.env.ADMIN_SECRET = 'integration-admin-secret';
+  try {
+    const admin = await owner
+      .get('/api/admin/users')
+      .set('Authorization', 'Bearer integration-admin-secret')
+      .expect(200);
+    assertCompact(admin.body);
+  } finally {
+    delete process.env.ADMIN_SECRET;
+  }
+
+  const management = await owner.get('/api/users/management').expect(200);
+  assertCompact(management.body);
+
+  const avatar = await member.get(updated.body.profilePictureUrl).expect(200);
+  assert.equal(avatar.headers['content-type'], 'image/png');
+  assert.match(avatar.headers['cache-control'], /private/);
+  assert.ok(avatar.headers.etag);
+  assert.deepEqual(avatar.body, Buffer.from('image-bytes'));
+  await member
+    .get(updated.body.profilePictureUrl)
+    .set('If-None-Match', avatar.headers.etag)
+    .expect(304);
+
+  const outsider = request.agent(app);
+  const outsiderResponse = await register(outsider, 'picture-outsider-test');
+  // Every normal account is in GChat Global; remove the test account from the
+  // shared room so this assertion exercises the authorization boundary itself.
+  stmts.deleteMember.run('gchat-global', outsiderResponse.body.id);
+  await outsider.get(updated.body.profilePictureUrl).expect(403);
+  await owner.get('/api/profile-pictures/not-a-user').expect(404);
+  await request(app).get(updated.body.profilePictureUrl).expect(401);
+});
+
+function ownerResponseId() {
+  return stmts.findUserByUsername.get('owner-test').id;
+}
+
 test('sync-v2 bootstrap is summary-only, bounded, and conditionally cacheable', async () => {
   const response = await owner.get('/api/sync/bootstrap').expect(200);
   assert.equal(response.body.protocol, 2);
@@ -936,6 +1015,10 @@ test('new GChat Global registrations announce a member_joined event to the globa
   const join = joins.find((j) => j.username === 'global-newcomer-test' && j.groupId === 'gchat-global');
   assert.ok(join, 'global room must announce the new registration');
   assert.equal(join.userId, stmts.findUserByUsername.get('global-newcomer-test').id);
+  assert.equal(join.profilePicture, null);
+  assert.equal(join.profilePictureUrl, null);
+  assert.equal(join.hasProfilePicture, false);
+  assert.equal(join.profilePictureVersion, null);
 
   watcherSocket.close();
 });

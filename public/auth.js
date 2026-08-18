@@ -215,6 +215,22 @@ function authHeaders() {
   return h;
 }
 
+function setAuthLoading(loading, label = 'Signing in…') {
+  const card = document.querySelector('.auth-card');
+  const overlay = document.getElementById('auth-loading-overlay');
+  const labelEl = document.getElementById('auth-loading-label');
+  const isLoading = !!loading;
+  if (labelEl && label) labelEl.textContent = label;
+  if (card) {
+    card.classList.toggle('is-loading', isLoading);
+    card.setAttribute('aria-busy', String(isLoading));
+  }
+  if (overlay) {
+    overlay.hidden = !isLoading;
+    overlay.setAttribute('aria-busy', String(isLoading));
+  }
+}
+
 // ── Tab switching ────────────────────────────────────────────────────────
 document.querySelectorAll('.auth-tab').forEach((tab) => {
   tab.addEventListener('click', () => {
@@ -241,6 +257,8 @@ document.getElementById('signin-form').addEventListener('submit', async (e) => {
   errorEl.textContent = '';
   btn.disabled = true;
   btn.textContent = 'Signing in…';
+  setAuthLoading(true, 'Signing in…');
+  let redirecting = false;
 
   const username = document.getElementById('signin-username').value.trim();
   const password = document.getElementById('signin-password').value;
@@ -257,6 +275,7 @@ document.getElementById('signin-form').addEventListener('submit', async (e) => {
       errorEl.textContent = data.error || 'Sign in failed';
     } else {
       persistUserWallpaperSettings(data);
+      redirecting = true;
       window.location.href = chatRedirectUrl();
     }
   } catch {
@@ -264,6 +283,7 @@ document.getElementById('signin-form').addEventListener('submit', async (e) => {
   } finally {
     btn.disabled = false;
     btn.textContent = 'Sign In';
+    if (!redirecting) setAuthLoading(false);
   }
 });
 
@@ -286,6 +306,8 @@ document.getElementById('signup-form').addEventListener('submit', async (e) => {
 
   btn.disabled = true;
   btn.textContent = 'Creating account…';
+  setAuthLoading(true, 'Creating account…');
+  let redirecting = false;
 
   try {
     const res = await fetch('/api/auth/register', {
@@ -298,6 +320,7 @@ document.getElementById('signup-form').addEventListener('submit', async (e) => {
       errorEl.textContent = data.error || 'Registration failed';
     } else {
       persistUserWallpaperSettings(data);
+      redirecting = true;
       window.location.href = chatRedirectUrl();
     }
   } catch {
@@ -305,6 +328,7 @@ document.getElementById('signup-form').addEventListener('submit', async (e) => {
   } finally {
     btn.disabled = false;
     btn.textContent = 'Create Account';
+    if (!redirecting) setAuthLoading(false);
   }
 });
 

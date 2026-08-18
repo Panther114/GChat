@@ -93,8 +93,14 @@
         <button class="btn-secondary update-action-btn" id="update-reload-btn" type="button">Reload now</button>
       </div>
 
-      <div class="messages-area" id="messages-area">
-        <div class="load-more-indicator" id="load-more-indicator" hidden>Loading older messages…</div>
+      <div class="messages-viewport" id="messages-viewport">
+        <div class="messages-area" id="messages-area">
+          <div class="load-more-indicator" id="load-more-indicator" hidden>Loading older messages…</div>
+        </div>
+        <div class="message-loading-overlay" id="message-loading-overlay" hidden role="status" aria-live="polite" aria-busy="false">
+          <span class="message-loading-spinner" aria-hidden="true"></span>
+          <span id="message-loading-label">Loading messages…</span>
+        </div>
       </div>
 
       <button class="scroll-bottom-btn" id="scroll-bottom-btn" hidden aria-label="Scroll to latest messages">

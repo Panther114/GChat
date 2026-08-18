@@ -192,6 +192,37 @@ body.auth-body::after {
   overscroll-behavior: contain;
 }
 
+.auth-card.is-loading > :not(.auth-loading-overlay) {
+  filter: blur(3px);
+  opacity: .46;
+  pointer-events: none;
+  transition: filter 180ms var(--ease-tech), opacity 180ms var(--ease-tech);
+}
+
+.auth-loading-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 10px;
+  padding: 24px;
+  color: var(--text-primary);
+  background: rgba(12, 12, 24, .42);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border-radius: inherit;
+  pointer-events: auto;
+  user-select: none;
+  transition: opacity 180ms var(--ease-tech), background-color 180ms var(--ease-tech);
+}
+
+.auth-loading-overlay[hidden] {
+  display: none;
+}
+
 .auth-logo { text-align: center; margin-bottom: 24px; }
 .auth-logo-icon {
   width: 56px;

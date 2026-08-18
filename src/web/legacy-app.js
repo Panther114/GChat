@@ -140,6 +140,53 @@ async function compressImage(file) {
   });
 }
 
+// New web avatar uploads are deliberately tiny. Legacy CLI clients can still
+// submit the original data URL, but the browser never sends a multi-megabyte
+// source image when a 256px thumbnail is sufficient for chat avatars.
+async function prepareProfilePictureThumbnail(file) {
+  if (!file || !String(file.type || '').startsWith('image/')) return file;
+  return new Promise((resolve) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    const finish = (blob) => {
+      URL.revokeObjectURL(url);
+      resolve(blob || file);
+    };
+    img.onload = () => {
+      const max = 256;
+      let width = img.naturalWidth || max;
+      let height = img.naturalHeight || max;
+      if (width > max || height > max) {
+        if (width > height) {
+          height = Math.max(1, Math.round(height * max / width));
+          width = max;
+        } else {
+          width = Math.max(1, Math.round(width * max / height));
+          height = max;
+        }
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext('2d', { alpha: true });
+      if (!context) {
+        finish(null);
+        return;
+      }
+      context.drawImage(img, 0, 0, width, height);
+      canvas.toBlob((webp) => {
+        if (webp && webp.size > 0) {
+          finish(webp);
+          return;
+        }
+        canvas.toBlob((jpeg) => finish(jpeg), 'image/jpeg', 0.82);
+      }, 'image/webp', 0.82);
+    };
+    img.onerror = () => finish(null);
+    img.src = url;
+  });
+}
+
 function readFileAsDataUrl(file, callbacks = {}) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -484,6 +531,7 @@ const WALLPAPER_SAVE_SUCCESS_MSG = 'Wallpaper saved';
 const WALLPAPER_RESET_SUCCESS_MSG = 'Wallpaper reset';
 const MAX_WALLPAPER_BYTES = 10 * 1024 * 1024;
 const MAX_PROFILE_PICTURE_BYTES = 2 * 1024 * 1024;
+let pendingProfilePictureThumbnail = null;
 const MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024;
 const MAX_TEXT_MESSAGE_BYTES = 64 * 1024;
 // v1.4: the Ask-AI agent loop bounds (mirror of the server-side caps).
@@ -1212,6 +1260,7 @@ async function clearBrowserRuntimeCaches({ includeLocalData = false } = {}) {
   clearAllMessageVisibilityTimers();
   groupDataCache.clear();
   groupPreloadPromises.clear();
+  groupMemberPromises.clear();
   hiddenDisappearingMessageIds = new Set();
 }
 
@@ -1426,10 +1475,19 @@ function renderAvatarElement(target, userLike = {}) {
   if (!target) return;
   target.replaceChildren();
   const username = userLike.username || userLike.senderName || '?';
-  if (userLike.profilePicture) {
+  const profilePictureSrc = userLike.profilePictureUrl || userLike.profilePicture;
+  if (profilePictureSrc) {
     target.style.background = 'none';
     target.textContent = '';
-    target.appendChild(createAvatarImage(userLike.profilePicture));
+    const image = createAvatarImage(profilePictureSrc);
+    image.addEventListener('error', () => {
+      renderAvatarElement(target, {
+        ...userLike,
+        profilePicture: null,
+        profilePictureUrl: null,
+      });
+    }, { once: true });
+    target.appendChild(image);
     return;
   }
   target.style.background = userLike.iconColor || userLike.senderColor || '#4A90D9';
@@ -1736,7 +1794,10 @@ function normalizeManagedUserSummary(value) {
       id: user.id,
       username: String(user.username || 'Unknown'),
       iconColor: user.iconColor || '#4A90D9',
-      profilePicture: user.profilePicture || null,
+      profilePicture: null,
+      profilePictureUrl: user.profilePictureUrl || null,
+      hasProfilePicture: !!user.hasProfilePicture,
+      profilePictureVersion: user.profilePictureVersion || null,
       aiDailyTokenLimit: Math.max(0, Math.round(Number(user.aiDailyTokenLimit) || 0)),
       aiTokensUsedToday: roundAiTokenAmount(user.aiTokensUsedToday),
       aiLimitExceeded: !!user.aiLimitExceeded,
@@ -3387,6 +3448,9 @@ function pinMessagesToBottom(skipAnimation = true) {
 function createAvatarImage(src) {
   const img = document.createElement('img');
   img.src = src;
+  img.loading = 'lazy';
+  img.decoding = 'async';
+  img.referrerPolicy = 'same-origin';
   if (src === GLOBAL_GROUP_ICON_SRC) {
     // v1.3.12: the global icon art is white — light mode inverts it (smoothly
     // via the CSS filter transition) so it reads as a dark mark.
@@ -3404,11 +3468,13 @@ function clearProfilePictureSelection({ keepSavedPreview = false } = {}) {
   const preview = $('profile-picture-preview');
   const img = $('profile-picture-preview-img');
   const nameEl = $('profile-picture-file-name');
+  pendingProfilePictureThumbnail = null;
   if (input) input.value = '';
-  if (preview) preview.hidden = !(keepSavedPreview && !!currentUser?.profilePicture);
+  const savedPicture = currentUser?.profilePictureUrl || currentUser?.profilePicture;
+  if (preview) preview.hidden = !(keepSavedPreview && !!savedPicture);
   if (img) {
-    if (keepSavedPreview && currentUser?.profilePicture) {
-      img.src = currentUser.profilePicture;
+    if (keepSavedPreview && savedPicture) {
+      img.src = savedPicture;
       img.alt = 'Current avatar preview';
     } else {
       img.removeAttribute('src');
@@ -3424,7 +3490,7 @@ function updateProfileRemoveButton() {
   const removeBtn = $('profile-remove-picture');
   if (!removeBtn) return;
   // Only relevant in image mode when the user already has a saved picture
-  const hasSaved = !!(currentUser && currentUser.profilePicture);
+  const hasSaved = !!(currentUser && (currentUser.hasProfilePicture || currentUser.profilePictureUrl || currentUser.profilePicture));
   removeBtn.hidden = !hasSaved;
 }
 
@@ -3460,7 +3526,7 @@ function setProfilePictureMode(mode) {
 }
 
 function syncProfilePictureModeUI() {
-  setProfilePictureMode(currentUser && currentUser.profilePicture ? 'image' : 'color');
+  setProfilePictureMode(currentUser && (currentUser.hasProfilePicture || currentUser.profilePictureUrl || currentUser.profilePicture) ? 'image' : 'color');
 }
 
 function setUploadProgress(containerId, labelId, { visible, label }) {
@@ -3510,6 +3576,7 @@ let pendingReadMessageIds = new Set();
 let pendingDisappearingStartMessageIds = new Set();
 const groupDataCache = new Map();
 const groupPreloadPromises = new Map();
+const groupMemberPromises = new Map();
 const pendingAttachmentRows = new Map();
 let hiddenDisappearingMessageIds = new Set();
 const disappearingMessageTimers = new Map();
@@ -3884,7 +3951,7 @@ function renderGroupFromCache(groupId, { restoreScroll = true } = {}) {
   renderWhisperPicker();
   renderTagFilters();
   // Always paint only the active channel stream (independent history).
-  void renderActiveChannelStream({ restoreScroll });
+  return renderActiveChannelStream({ restoreScroll });
 }
 
 // v1.3.8: background-group caches must stay bounded now that every group room
@@ -4412,16 +4479,10 @@ async function ensureGroupDataPreloaded(groupId) {
   const cache = ensureGroupCacheEntry(groupId);
 
   const preload = (async () => {
-    if (cache.serverWindowLoaded && cache.members) {
-      return ensureGroupCacheEntry(groupId);
-    }
-    const pending = [];
-    if (!cache.serverWindowLoaded) pending.push(loadMessages(groupId));
-    if (!cache.members) pending.push(loadMembers(groupId));
-    const results = await Promise.allSettled(pending);
-    for (const result of results) {
-      if (result.status === 'rejected') console.error('Group preload failed:', groupId, result.reason);
-    }
+    // Member metadata is secondary to the transcript. Start it immediately,
+    // but never make the first message paint wait on this endpoint.
+    if (!cache.members) void ensureMembersLoaded(groupId);
+    if (!cache.serverWindowLoaded) await loadMessages(groupId);
     return ensureGroupCacheEntry(groupId);
   })();
 
@@ -5106,10 +5167,16 @@ function selectTagChannel(topic, { focusComposer = true } = {}) {
   // A delta can contain one live row for a channel whose baseline page has not
   // been loaded. Keep the previous channel painted until that bounded page
   // arrives; otherwise the partial projection can hide older server history.
-  const cache = ensureGroupCacheEntry(currentGroupId);
-  const renderPromise = cache.loadedChannels.has(next)
-    ? renderActiveChannelStream().then(() => loadMessages(currentGroupId))
-    : loadMessages(currentGroupId);
+  const switchGroupId = String(currentGroupId);
+  const cache = ensureGroupCacheEntry(switchGroupId);
+  const hasCachedChannel = cache.loadedChannels.has(next);
+  setMessageLoadingState(!hasCachedChannel, `Loading ${formatHashtagLabel(next)}…`);
+  const renderPromise = hasCachedChannel
+    ? renderActiveChannelStream().then(() => {
+      if (String(currentGroupId) === switchGroupId) setMessageLoadingState(false);
+      return loadMessages(switchGroupId);
+    })
+    : loadMessages(switchGroupId);
   void renderPromise.then(() => {
     updateKeyState();
     if (focusComposer) {
@@ -5582,6 +5649,37 @@ function applyDisappearingStateUpdate({ groupId, messageId, startedAt, expiresAt
 }
 
 const messagesArea = () => $('messages-area');
+
+function setMessageLoadingState(loading, label = 'Loading messages…') {
+  const area = messagesArea();
+  const viewport = $('messages-viewport');
+  const overlay = $('message-loading-overlay');
+  const labelEl = $('message-loading-label');
+  const isLoading = !!loading;
+  if (labelEl && label) labelEl.textContent = label;
+  if (area) {
+    area.classList.toggle('is-loading', isLoading);
+    area.setAttribute('aria-busy', String(isLoading));
+  }
+  if (viewport) viewport.setAttribute('aria-busy', String(isLoading));
+  if (overlay) {
+    overlay.hidden = !isLoading;
+    overlay.setAttribute('aria-busy', String(isLoading));
+  }
+}
+
+function ensureMembersLoaded(groupId) {
+  const cache = ensureGroupCacheEntry(groupId);
+  if (cache.members) return Promise.resolve(cache);
+  if (groupMemberPromises.has(groupId)) return groupMemberPromises.get(groupId);
+  const request = loadMembers(groupId)
+    .catch((err) => console.error('Group members preload failed:', groupId, err))
+    .then(() => ensureGroupCacheEntry(groupId))
+    .finally(() => groupMemberPromises.delete(groupId));
+  groupMemberPromises.set(groupId, request);
+  return request;
+}
+
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 const ICON_SPECS = {
@@ -6971,6 +7069,7 @@ async function selectGroup(groupId) {
   $('chat-empty').hidden = true;
   $('chat-active').hidden = false;
   $('reply-preview-bar').hidden = true;
+  setMessageLoadingState(true, `Loading ${formatHashtagLabel(getActiveTagTopic())}…`);
 
   // Set header
   $('chat-group-name').textContent = currentGroupData ? currentGroupData.name : '';
@@ -7025,17 +7124,27 @@ async function selectGroup(groupId) {
     cache.messages = mergeMessagesIntoCache(normalizedGroupId, window, { persist: false });
     cache.rowsDirty = true;
   }
+  if (currentGroupId !== normalizedGroupId) return;
   const hadCompleteCache = !!(cache.serverWindowLoaded && cache.members);
-  if (!cache.serverWindowLoaded || !cache.members) {
-    if (!cache.messages) messagesArea().replaceChildren(createChannelLoadingIndicator());
+  if (!cache.members) {
     members = [];
     renderMembersList();
     renderWhisperPicker();
     $('chat-member-count').textContent = 'Loading…';
+  } else {
+    members = cache.members;
+    renderMembersList();
+    renderWhisperPicker();
+    $('chat-member-count').textContent = members.length + ' member' + (members.length !== 1 ? 's' : '');
+  }
+  void ensureMembersLoaded(normalizedGroupId);
+  if (!cache.serverWindowLoaded) {
+    if (!cache.messages) messagesArea().replaceChildren(createChannelLoadingIndicator());
     await ensureGroupDataPreloaded(normalizedGroupId);
     if (currentGroupId !== normalizedGroupId) return;
   }
-  renderGroupFromCache(normalizedGroupId);
+  await renderGroupFromCache(normalizedGroupId);
+  if (currentGroupId === normalizedGroupId) setMessageLoadingState(false);
   // v1.3.12: unread is server-authoritative — mark the open channel read
   // (cursor = newest channel message, broadcast to all devices) and fetch
   // fresh per-channel counts for the chips. (Scroll restoration happens inside
@@ -7085,15 +7194,21 @@ async function loadMessages(groupId, before) {
   const capturedGeneration = viewGeneration;
   const capturedGroupId = String(groupId);
   const capturedTopic = capturedGroupId === String(currentGroupId) ? getActiveTagTopic() : DEFAULT_TAG_TOPIC;
-  const tagIndex = capturedTopic === DEFAULT_TAG_TOPIC ? null : await channelTagIndex(capturedTopic, capturedGroupId);
-  if (capturedTopic !== DEFAULT_TAG_TOPIC && !tagIndex) return;
-  const channelKey = tagIndex || DEFAULT_TAG_TOPIC;
-  const signal = capturedGroupId === String(currentGroupId) ? viewAbortController?.signal : undefined;
   const isCapturedView = () => (
     capturedGeneration === viewGeneration
     && capturedGroupId === String(currentGroupId)
     && capturedTopic === getActiveTagTopic()
   );
+  const tagIndex = capturedTopic === DEFAULT_TAG_TOPIC ? null : await channelTagIndex(capturedTopic, capturedGroupId);
+  if (capturedTopic !== DEFAULT_TAG_TOPIC && !tagIndex) {
+    if (!before && isCapturedView()) setMessageLoadingState(false);
+    return;
+  }
+  const channelKey = tagIndex || DEFAULT_TAG_TOPIC;
+  const signal = capturedGroupId === String(currentGroupId) ? viewAbortController?.signal : undefined;
+  const cacheAtStart = ensureGroupCacheEntry(capturedGroupId);
+  const showMessageLoading = !before && isCapturedView() && !cacheAtStart.loadedChannels.has(capturedTopic);
+  if (showMessageLoading) setMessageLoadingState(true, `Loading ${formatHashtagLabel(capturedTopic)}…`);
   // Guard: prevent the scroll handler from triggering loadOlderMessages while
   // the initial (non-paginated) load is still in flight (#2).
   if (!before && groupId === currentGroupId) loadingOlder = true;
@@ -7190,17 +7305,51 @@ async function loadMessages(groupId, before) {
       applyActiveTagFilterToRenderedMessages();
     }
   } catch(err) { if (err?.name !== 'AbortError') console.error('loadMessages error:', err); }
-  finally { if (!before && groupId === currentGroupId) loadingOlder = false; }
+  finally {
+    if (!before && capturedGroupId === String(currentGroupId)) loadingOlder = false;
+    if (showMessageLoading && isCapturedView()) setMessageLoadingState(false);
+  }
 }
 
 // ── Load members ──────────────────────────────────────────────────────────────
+function refreshVisibleMemberAvatars(groupId) {
+  if (String(groupId) !== String(currentGroupId)) return;
+  const cache = ensureGroupCacheEntry(groupId);
+  const memberById = new Map((cache.members || []).map((member) => [String(member.id), member]));
+  const area = messagesArea();
+  if (!area) return;
+  area.querySelectorAll('.msg-row[data-sender-id]').forEach((row) => {
+    const member = memberById.get(String(row.dataset.senderId));
+    if (!member) return;
+    const avatar = row.querySelector('.msg-avatar-identity');
+    if (avatar) {
+      renderAvatarElement(avatar, member);
+      avatar.hidden = !row.querySelector('.msg-header:not([hidden])');
+    }
+    const name = row.querySelector('.msg-sender-name');
+    if (name) {
+      name.textContent = member.username || 'Unknown';
+      if (member.iconColor) name.style.color = member.iconColor;
+    }
+  });
+}
+
 async function loadMembers(groupId) {
   try {
     const res = await fetch(`/api/groups/${groupId}/members`);
     if (!res.ok) return;
     const cache = ensureGroupCacheEntry(groupId);
-    cache.members = await res.json();
+    const loadedMembers = await res.json();
+    if (!Array.isArray(loadedMembers)) return;
+    cache.members = loadedMembers;
     writeLocalGroupCache(groupId, cache);
+    if (String(groupId) !== String(currentGroupId)) return;
+    members = cache.members;
+    renderMembersList();
+    renderWhisperPicker();
+    $('chat-member-count').textContent = members.length + ' member' + (members.length !== 1 ? 's' : '');
+    refreshVisibleMemberAvatars(groupId);
+    refreshVisibleDeliveryTicks();
   } catch(err) { console.error('loadMembers error:', err); }
 }
 
@@ -7370,6 +7519,9 @@ const isReadByMe = isOwn || isMessageReadByCursor(msg, groupId, resolveMessageTa
     profilePicture: isAiAssistant
       ? getAiAssistantProfilePicture(msg.aiMeta?.model)
       : (memberProfile?.profilePicture || msg.profilePicture || null),
+    profilePictureUrl: isAiAssistant
+      ? null
+      : (memberProfile?.profilePictureUrl || msg.profilePictureUrl || null),
   });
   const continuationTime = document.createElement('time');
   continuationTime.className = 'msg-continuation-time';
@@ -8758,6 +8910,7 @@ function ensurePendingAttachmentRow(payload) {
     // else's upload — a member without a profile picture used to render with
     // the viewer's own avatar.
     profilePicture: memberProfile?.profilePicture || payload.senderProfilePicture || null,
+    profilePictureUrl: memberProfile?.profilePictureUrl || payload.senderProfilePictureUrl || null,
   });
 
   const content = document.createElement('div');
@@ -9747,11 +9900,20 @@ function initSocket() {
     renderGroupList();
   });
 
-  socket.on('member_joined', ({ userId, username, iconColor, profilePicture, groupId }) => {
+  socket.on('member_joined', ({ userId, username, iconColor, profilePictureUrl, hasProfilePicture, profilePictureVersion, groupId }) => {
     const cache = ensureGroupCacheEntry(groupId);
     const isNewMember = !!(cache.members && !cache.members.find(m => m.id === userId));
     if (isNewMember) {
-      cache.members.push({ id: userId, username, iconColor, profilePicture: profilePicture || null, isAdministrator: false });
+      cache.members.push({
+        id: userId,
+        username,
+        iconColor,
+        profilePicture: null,
+        profilePictureUrl: profilePictureUrl || null,
+        hasProfilePicture: !!hasProfilePicture,
+        profilePictureVersion: profilePictureVersion || null,
+        isAdministrator: false,
+      });
       writeLocalGroupCache(groupId, cache);
     }
     // v1.3.12: ticks are live member-count driven (members - 1) — joining
@@ -9926,7 +10088,10 @@ function initSocket() {
       if (cachedMember) {
         cachedMember.username = user.username;
         cachedMember.iconColor = user.iconColor;
-        cachedMember.profilePicture = user.profilePicture || null;
+        cachedMember.profilePicture = null;
+        cachedMember.profilePictureUrl = user.profilePictureUrl || null;
+        cachedMember.hasProfilePicture = !!user.hasProfilePicture;
+        cachedMember.profilePictureVersion = user.profilePictureVersion || null;
       }
       const cachedMessageUsers = cache.messages || [];
       for (const message of cachedMessageUsers) {
@@ -9940,7 +10105,10 @@ function initSocket() {
     if (m) {
       m.username = user.username;
       m.iconColor = user.iconColor;
-      m.profilePicture = user.profilePicture || null;
+      m.profilePicture = null;
+      m.profilePictureUrl = user.profilePictureUrl || null;
+      m.hasProfilePicture = !!user.hasProfilePicture;
+      m.profilePictureVersion = user.profilePictureVersion || null;
       renderMembersList();
     }
     if (user.id === currentUser.id) {
@@ -11542,11 +11710,12 @@ function setupEventListeners() {
   });
 
   // Preview appears ONLY after the user chooses a file — never empty placeholder
-  $('profile-picture-input')?.addEventListener('change', (e) => {
+  $('profile-picture-input')?.addEventListener('change', async (e) => {
     const file = e.target.files && e.target.files[0];
     const nameEl = $('profile-picture-file-name');
     const preview = $('profile-picture-preview');
     const img = $('profile-picture-preview-img');
+    pendingProfilePictureThumbnail = null;
 
     if (!file) {
       if (nameEl) nameEl.textContent = 'Max 2MB';
@@ -11574,36 +11743,38 @@ function setupEventListeners() {
     $('profile-error').textContent = '';
     setUploadProgress('profile-picture-progress', 'profile-picture-progress-label', {
       visible: true,
-      label: 'Preparing preview…',
+      label: 'Preparing 256px thumbnail…',
     });
-    const reader = new FileReader();
-    reader.onerror = () => {
-      $('profile-error').textContent = 'Failed to read the selected image. Please try a different file.';
-      if (preview) preview.hidden = true;
-      $('profile-save-picture').disabled = true;
-      setUploadProgress('profile-picture-progress', 'profile-picture-progress-label', { visible: false });
-    };
-    reader.onload = (ev) => {
+    try {
+      const thumbnail = await prepareProfilePictureThumbnail(file);
+      pendingProfilePictureThumbnail = thumbnail;
+      const previewData = await readFileAsDataUrl(thumbnail);
       if (!img || !preview) return;
-      img.src = ev.target.result;
+      img.src = previewData;
       preview.hidden = false;
       $('profile-save-picture').disabled = false;
       setUploadProgress('profile-picture-progress', 'profile-picture-progress-label', { visible: false });
-    };
-    reader.readAsDataURL(file);
+    } catch {
+      pendingProfilePictureThumbnail = null;
+      $('profile-error').textContent = 'Failed to prepare the selected image. Please try a different file.';
+      if (preview) preview.hidden = true;
+      $('profile-save-picture').disabled = true;
+      setUploadProgress('profile-picture-progress', 'profile-picture-progress-label', { visible: false });
+    }
   });
 
   // Save profile picture
   $('profile-save-picture').addEventListener('click', async () => {
     const saveButton = $('profile-save-picture');
     if (saveButton.disabled) return;
-    const file = $('profile-picture-input').files[0];
-    if (!file) { $('profile-error').textContent = 'Please select an image'; return; }
-    if (!isAllowedUploadImageType(file.type)) {
+    const sourceFile = $('profile-picture-input').files[0];
+    const file = pendingProfilePictureThumbnail || sourceFile;
+    if (!sourceFile || !file) { $('profile-error').textContent = 'Please select an image'; return; }
+    if (!isAllowedUploadImageType(sourceFile.type)) {
       $('profile-error').textContent = 'Only JPEG, PNG, GIF, and WebP images are supported';
       return;
     }
-    if (file.size > MAX_PROFILE_PICTURE_BYTES) {
+    if (sourceFile.size > MAX_PROFILE_PICTURE_BYTES) {
       $('profile-error').textContent = PROFILE_PICTURE_TOO_LARGE_MSG;
       return;
     }
@@ -11614,7 +11785,7 @@ function setupEventListeners() {
       label: 'Uploading image…',
     });
     try {
-      const profilePicture = await readFileAsDataURL(file);
+      const profilePicture = await readFileAsDataUrl(file);
       const res = await fetch('/api/auth/profile', {
         method: 'PATCH', headers: apiHeaders(),
         body: JSON.stringify({ profilePicture }),

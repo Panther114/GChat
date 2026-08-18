@@ -23,6 +23,10 @@
   <canvas class="auth-wave-canvas" id="auth-wave-canvas" aria-hidden="true"></canvas>
   <button class="auth-theme-toggle" id="auth-theme-toggle" type="button" aria-label="Switch to light mode" title="Switch to light mode">☀</button>
   <div class="auth-card">
+    <div class="auth-loading-overlay" id="auth-loading-overlay" hidden role="status" aria-live="polite" aria-busy="false">
+      <span class="message-loading-spinner" aria-hidden="true"></span>
+      <span id="auth-loading-label">Signing in…</span>
+    </div>
     <!-- Logo / Brand -->
     <div class="auth-logo">
       <img class="auth-logo-icon" src="/gchat_icon.png?v=20260813-v145" data-dark-src="/gchat_icon.png?v=20260813-v145" data-light-src="/gchat_icon_light.png" alt="GChat logo" />
