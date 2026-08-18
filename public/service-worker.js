@@ -185,8 +185,3 @@ self.addEventListener('notificationclick', (event) => {
     }
   })());
 });
-
-self.addEventListener('notificationclose', (event) => {
-  const totalUnreadCount = Math.max(0, Number(event.notification?.data?.totalUnreadCount) || 0);
-  event.waitUntil(updateWorkerAppBadge(totalUnreadCount));
-});

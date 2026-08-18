@@ -19,9 +19,10 @@ test('PWA updates wait for explicit user approval and preserve full request cach
   assert.match(worker, /event\.data\?\.type === 'SKIP_WAITING'/);
   assert.match(worker, /cacheResponse\(request, response\)/);
   assert.doesNotMatch(worker, /cacheResponse\(url\.pathname/);
+  assert.doesNotMatch(worker, /notificationclose/);
 });
 
-test('v1.4 production config enables AI only via the AI_ENABLED flag and uses the stable session secret as the join-code pepper', () => {
+test('temporary AI shutdown overrides the AI_ENABLED flag and uses the stable session secret as the join-code pepper', () => {
   const sessionSecret = 's'.repeat(32);
   const config = readConfig({
     NODE_ENV: 'production',
@@ -29,7 +30,7 @@ test('v1.4 production config enables AI only via the AI_ENABLED flag and uses th
     AI_ENABLED: '1',
     GROUP_KEY_ESCROW_MASTER_KEY: Buffer.alloc(32, 7).toString('base64url'),
   });
-  assert.equal(config.aiEnabled, true);
+  assert.equal(config.aiEnabled, false);
   assert.equal(config.groupCodePepper, sessionSecret);
   assert.equal(
     readConfig({

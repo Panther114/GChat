@@ -718,10 +718,20 @@ function persistReadCursors() {
 // A stale cursor event (viewport reads re-fired after a reload, an older
 // broadcast from another device) must never regress the local cursor — that
 // made already-read messages look unread again (badge, chips, .unseen bar).
-function isCursorNewerThan(at, id, otherAt, otherId) {
+function compareReadCursorPositions(at, id, otherAt, otherId) {
+  const leftTime = parseMessageDate(at).getTime();
+  const rightTime = parseMessageDate(otherAt).getTime();
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+    return leftTime > rightTime ? 1 : -1;
+  }
   const cmp = String(at || '').localeCompare(String(otherAt || ''));
-  if (cmp !== 0) return cmp > 0;
-  return String(id || '') > String(otherId || '');
+  if (cmp !== 0) return cmp > 0 ? 1 : -1;
+  const idCmp = String(id || '').localeCompare(String(otherId || ''));
+  return idCmp === 0 ? 0 : (idCmp > 0 ? 1 : -1);
+}
+
+function isCursorNewerThan(at, id, otherAt, otherId) {
+  return compareReadCursorPositions(at, id, otherAt, otherId) > 0;
 }
 
 function setLocalReadCursor(groupId, topic, cursor) {
@@ -748,9 +758,7 @@ function isMessageReadByCursor(msg, groupId, channel) {
   if (String(msg.senderId) === String(currentUser?.id)) return true;
   const cursor = getLocalReadCursor(groupId, channel || resolveMessageTagTopic(msg));
   if (!cursor || !cursor.at) return false;
-  const cmp = String(msg.createdAt || '').localeCompare(String(cursor.at));
-  if (cmp !== 0) return cmp < 0;
-  return String(msg.id) <= String(cursor.id);
+  return compareReadCursorPositions(msg.createdAt, msg.id, cursor.at, cursor.id) <= 0;
 }
 
 // v1.3.12: blind-index a channel topic for the server ('' = #main).
@@ -1260,7 +1268,11 @@ async function clearBrowserRuntimeCaches({ includeLocalData = false } = {}) {
   clearAllMessageVisibilityTimers();
   groupDataCache.clear();
   groupPreloadPromises.clear();
+  groupChannelPreloadPromises.clear();
   groupMemberPromises.clear();
+  for (const timer of groupUnreadReconcileTimers.values()) clearTimeout(timer);
+  groupUnreadReconcileTimers.clear();
+  groupUnreadReconcileLastAt.clear();
   hiddenDisappearingMessageIds = new Set();
 }
 
@@ -3576,6 +3588,7 @@ let pendingReadMessageIds = new Set();
 let pendingDisappearingStartMessageIds = new Set();
 const groupDataCache = new Map();
 const groupPreloadPromises = new Map();
+const groupChannelPreloadPromises = new Map();
 const groupMemberPromises = new Map();
 const pendingAttachmentRows = new Map();
 let hiddenDisappearingMessageIds = new Set();
@@ -3687,8 +3700,10 @@ function rememberChannel(groupId, topic) {
   if (!groupId) return;
   const normalized = normalizeHashtagTopic(topic) || DEFAULT_TAG_TOPIC;
   const known = getKnownChannels(groupId);
+  const wasKnown = known.has(normalized);
   known.add(normalized);
   writeKnownChannels(groupId, [...known]);
+  if (!wasKnown) ensureGroupCacheEntry(groupId).backgroundPreloadComplete = false;
 }
 
 function forgetChannel(groupId, topic) {
@@ -3780,6 +3795,7 @@ function ensureGroupCacheEntry(groupId) {
       channelCursors: local?.channelCursors || {},
       loadedChannels: new Set(),
       knownChannels: new Set(readKnownChannels(groupId)),
+      backgroundPreloadComplete: false,
     });
   }
   const entry = groupDataCache.get(groupId);
@@ -3787,6 +3803,7 @@ function ensureGroupCacheEntry(groupId) {
     entry.knownChannels = new Set(readKnownChannels(groupId));
   }
   if (!(entry.loadedChannels instanceof Set)) entry.loadedChannels = new Set();
+  if (typeof entry.backgroundPreloadComplete !== 'boolean') entry.backgroundPreloadComplete = false;
   return entry;
 }
 
@@ -3971,12 +3988,51 @@ function trimBackgroundGroupCache(cache) {
   cache.oldestMessageId = cache.messages.length ? cache.messages[0].id : null;
 }
 
+// Background preload is deliberately bounded: one recent page per discovered
+// channel, at most 50 channels per group (matching the server discovery cap),
+// and two groups/two channels in flight. Older history remains paginated.
+const MAX_BACKGROUND_PRELOAD_GROUPS = 2;
+const MAX_BACKGROUND_PRELOAD_CHANNELS = 2;
+const MAX_BACKGROUND_PRELOAD_CHANNELS_PER_GROUP = 50;
+
+function preloadGroupChannel(groupId, topic) {
+  const normalizedTopic = normalizeHashtagTopic(topic) || DEFAULT_TAG_TOPIC;
+  const cache = ensureGroupCacheEntry(groupId);
+  if (cache.loadedChannels.has(normalizedTopic)) return Promise.resolve(cache);
+  const key = `${String(groupId)}\0${normalizedTopic}`;
+  if (groupChannelPreloadPromises.has(key)) return groupChannelPreloadPromises.get(key);
+  const request = loadMessages(groupId, undefined, { topic: normalizedTopic, background: true })
+    .catch((err) => console.error('Background channel preload failed:', groupId, normalizedTopic, err))
+    .then(() => ensureGroupCacheEntry(groupId))
+    .finally(() => groupChannelPreloadPromises.delete(key));
+  groupChannelPreloadPromises.set(key, request);
+  return request;
+}
+
+async function preloadGroupHistory(groupId) {
+  const cache = ensureGroupCacheEntry(groupId);
+  if (cache.backgroundPreloadComplete) return;
+  await ensureGroupDataPreloaded(groupId);
+  await syncServerChannels(groupId);
+  const allTopics = [...getKnownChannels(groupId)];
+  const topics = allTopics.slice(0, MAX_BACKGROUND_PRELOAD_CHANNELS_PER_GROUP);
+  await mapWithConcurrency(topics, MAX_BACKGROUND_PRELOAD_CHANNELS, (topic) => preloadGroupChannel(groupId, topic));
+  const refreshed = ensureGroupCacheEntry(groupId);
+  refreshed.backgroundPreloadComplete = allTopics.length <= MAX_BACKGROUND_PRELOAD_CHANNELS_PER_GROUP
+    && topics.every((topic) => refreshed.loadedChannels.has(topic));
+}
+
 function preloadAllGroups() {
-  for (const group of groups) {
-    void ensureGroupDataPreloaded(group.id).catch((err) => {
-      console.error('Background preload failed:', group.id, err);
-    });
-  }
+  const pendingGroups = groups
+    .filter((group) => !ensureGroupCacheEntry(group.id).backgroundPreloadComplete)
+    .map((group) => group.id);
+  void mapWithConcurrency(pendingGroups, MAX_BACKGROUND_PRELOAD_GROUPS, async (groupId) => {
+    try {
+      await preloadGroupHistory(groupId);
+    } catch (err) {
+      console.error('Background preload failed:', groupId, err);
+    }
+  });
 }
 
 // v1.3.8: join every group room so realtime delivery, unread badges, previews,
@@ -4151,6 +4207,14 @@ async function applySocketUnreadEvent(event) {
   }
 
   const groupId = String(event.groupId);
+  await hydrateMessageChannel(event.message, groupId);
+  const eventTopic = resolveMessageTagTopic(event.message);
+  // Sync envelopes may be replayed after a reconnect. If the cursor already
+  // covers this message, it is history reconciliation, not a new unread.
+  if (isMessageReadByCursor(event.message, groupId, eventTopic)) {
+    event.message.hasRead = true;
+    return;
+  }
   unreadCounts[groupId] = Math.max(0, Number(unreadCounts[groupId]) || 0) + 1;
   updateUnreadBadge(groupId, unreadCounts[groupId]);
   if (groupId !== String(currentGroupId)) {
@@ -4158,8 +4222,6 @@ async function applySocketUnreadEvent(event) {
     return;
   }
 
-  await hydrateMessageChannel(event.message, groupId);
-  const eventTopic = resolveMessageTagTopic(event.message);
   const isVisibleAndPinned = eventTopic === getActiveTagTopic() && isNearBottom();
   if (isVisibleAndPinned) return;
   if (channelUnreadLoadedForGroup !== groupId) {
@@ -6293,7 +6355,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     navigator.serviceWorker.addEventListener('message', (event) => {
       if (event.data?.type !== 'push-unread-count') return;
       pushStatus.totalUnreadCount = Math.max(0, Number(event.data.totalUnreadCount) || 0);
-      syncUnreadIndicators(pushStatus.totalUnreadCount);
+      // Push payloads can be delayed. Once bootstrap has populated local
+      // group counts, never let an older push overwrite the authoritative
+      // read state and recreate an app badge.
+      if (groups.length) syncUnreadIndicators();
     });
   }
   syncProfilePictureModeUI();
@@ -6405,6 +6470,9 @@ async function loadGroups() {
     joinAllGroupRooms();
     void refreshGroupPreviewsFromCache(groups.map((group) => group.id));
     syncUnreadIndicators();
+    // Start after the shell and sidebar are usable so the selected transcript
+    // remains the first-priority request while other channels warm in memory.
+    setTimeout(preloadAllGroups, 0);
     // v1.3.12: after any server reconciliation (boot/reconnect/focus) refresh
     // the open group's per-channel counts and re-mark its active channel read —
     // the server responds with the authoritative numbers for every device.
@@ -6882,6 +6950,59 @@ function updateUnreadBadge(groupId, count) {
   pushStatus.totalUnreadCount = syncUnreadIndicators();
 }
 
+function applyReadCursorUpdate(payload, { topicOverride = null } = {}) {
+  const { groupId, tagIndex, createdAt, messageId, channelUnreadCount, groupUnreadCount } = payload || {};
+  if (!groupId) return;
+  const groupKey = String(groupId);
+  const tagKey = tagIndex == null || tagIndex === '' ? '' : String(tagIndex);
+  const topic = topicOverride || (tagKey === '' ? DEFAULT_TAG_TOPIC : (channelUnreadTopicByTagIndex.get(tagKey) || null));
+  if (createdAt && topic) setLocalReadCursor(groupKey, topic, { at: createdAt, id: messageId || '' });
+  unreadCounts[groupKey] = Math.max(0, Number(groupUnreadCount) || 0);
+  updateUnreadBadge(groupKey, unreadCounts[groupKey]);
+  if (String(currentGroupId) === groupKey && channelUnreadLoadedForGroup === groupKey) {
+    channelUnreadStateVersion += 1;
+    channelUnreadCounts[tagKey] = Math.max(0, Number(channelUnreadCount) || 0);
+    renderTagFilters();
+  }
+  if (String(currentGroupId) === groupKey) {
+    refreshUnseenRowClasses();
+    updateFirstUnreadButton();
+  }
+}
+
+// Sync hints are intentionally reconciled against the server instead of
+// adding an optimistic count. Hints can be replayed after a cursor was
+// advanced, which used to recreate a ghost sidebar badge for old messages.
+const groupUnreadReconcileTimers = new Map();
+const groupUnreadReconcileLastAt = new Map();
+const GROUP_UNREAD_RECONCILE_DELAY_MS = 180;
+const GROUP_UNREAD_RECONCILE_MIN_INTERVAL_MS = 1000;
+
+function scheduleGroupUnreadReconciliation(groupId) {
+  const groupKey = String(groupId || '');
+  if (!groupKey) return;
+  const existingTimer = groupUnreadReconcileTimers.get(groupKey);
+  if (existingTimer) clearTimeout(existingTimer);
+  const elapsed = Date.now() - (groupUnreadReconcileLastAt.get(groupKey) || 0);
+  const delay = Math.max(GROUP_UNREAD_RECONCILE_DELAY_MS, GROUP_UNREAD_RECONCILE_MIN_INTERVAL_MS - elapsed);
+  const timer = setTimeout(async () => {
+    groupUnreadReconcileTimers.delete(groupKey);
+    groupUnreadReconcileLastAt.set(groupKey, Date.now());
+    try {
+      const res = await fetch(`/api/groups/${encodeURIComponent(groupKey)}/unread`, { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json().catch(() => ({}));
+      if (data.groupUnreadCount == null) return;
+      unreadCounts[groupKey] = Math.min(999, Math.max(0, Number(data.groupUnreadCount) || 0));
+      updateUnreadBadge(groupKey, unreadCounts[groupKey]);
+      if (String(currentGroupId) === groupKey) void fetchChannelUnreadCounts(groupKey);
+    } catch (err) {
+      console.warn('group unread reconciliation failed:', err);
+    }
+  }, delay);
+  groupUnreadReconcileTimers.set(groupKey, timer);
+}
+
 // ── v1.3.12: server-authoritative unread (per-channel cursors) ───────────────
 // Unread counts are computed server-side from per-channel read cursors. The
 // client displays server values (loadGroups, /unread, read_cursor_updated
@@ -6934,7 +7055,9 @@ async function fetchChannelUnreadCounts(groupId) {
     if (channelUnreadStateVersion === stateVersionAtStart) {
       channelUnreadCounts = data.counts || {};
     }
-    channelUnreadTagIndexByTopic = topicByTagIndex;
+    channelUnreadTagIndexByTopic = new Map(
+      [...topicByTagIndex].map(([tagIndex, topic]) => [topic, String(tagIndex)])
+    );
     channelUnreadTopicByTagIndex = new Map([...topicByTagIndex].map(([tagIndex, topic]) => [String(tagIndex), topic]));
     channelUnreadLoadedForGroup = String(groupId);
     renderTagFilters();
@@ -6961,18 +7084,21 @@ function markChannelReadAt(groupId, msg) {
   if (current && current.at && !isCursorNewerThan(msg.createdAt, msg.id, current.at, current.id)) {
     return;
   }
-  setLocalReadCursor(groupId, topic, { at: msg.createdAt, id: msg.id });
+  setLocalReadCursor(groupId, topic, { at: normalizeIsoTime(msg.createdAt), id: msg.id });
   // v1.3.13: rows painted before this cursor advance must lose the unread
   // highlight immediately (the accent bar used to linger on them).
   if (String(groupId) === String(currentGroupId)) refreshUnseenRowClasses();
   void (async () => {
     const tagIndex = await channelTagIndex(topic, groupId);
     if (String(groupId) !== String(currentGroupId) || topic !== getActiveTagTopic()) return;
-    socket.emit('mark_channel_read', {
+    const cursorPayload = {
       groupId: String(groupId),
       tagIndex,
-      createdAt: msg.createdAt,
+      createdAt: normalizeIsoTime(msg.createdAt),
       messageId: msg.id,
+    };
+    socket.emit('mark_channel_read', cursorPayload, (ack) => {
+      if (ack?.ok) applyReadCursorUpdate(ack, { topicOverride: topic });
     });
   })();
 }
@@ -7017,12 +7143,18 @@ function scheduleChannelCursorAdvance(groupId, msg) {
 // non-own channel message). Server broadcasts fresh counts to every device.
 async function markChannelReadOnOpen(groupId) {
   if (!groupId || !socket || !currentUser) return;
+  const capturedGeneration = viewGeneration;
   const cache = ensureGroupCacheEntry(groupId);
   const channel = getActiveTagTopic();
+  const isCurrentView = () => capturedGeneration === viewGeneration
+    && String(groupId) === String(currentGroupId)
+    && channel === getActiveTagTopic();
   const all = cache.messages || [];
   for (let i = all.length - 1; i >= 0; i -= 1) {
+    if (!isCurrentView()) return;
     const msg = all[i];
     await hydrateMessageChannel(msg, groupId);
+    if (!isCurrentView()) return;
     if (resolveMessageTagTopic(msg) !== channel) continue;
     if (String(msg.senderId) !== String(currentUser.id)) {
       markChannelReadAt(groupId, msg);
@@ -7190,10 +7322,12 @@ function updateKeyState() {
 }
 
 // ── Load messages ─────────────────────────────────────────────────────────────
-async function loadMessages(groupId, before) {
+async function loadMessages(groupId, before, options = {}) {
   const capturedGeneration = viewGeneration;
   const capturedGroupId = String(groupId);
-  const capturedTopic = capturedGroupId === String(currentGroupId) ? getActiveTagTopic() : DEFAULT_TAG_TOPIC;
+  const isBackgroundLoad = options.background === true;
+  const requestedTopic = options.topic ? (normalizeHashtagTopic(options.topic) || DEFAULT_TAG_TOPIC) : null;
+  const capturedTopic = requestedTopic || (capturedGroupId === String(currentGroupId) ? getActiveTagTopic() : DEFAULT_TAG_TOPIC);
   const isCapturedView = () => (
     capturedGeneration === viewGeneration
     && capturedGroupId === String(currentGroupId)
@@ -7205,13 +7339,14 @@ async function loadMessages(groupId, before) {
     return;
   }
   const channelKey = tagIndex || DEFAULT_TAG_TOPIC;
-  const signal = capturedGroupId === String(currentGroupId) ? viewAbortController?.signal : undefined;
+  const signal = capturedGroupId === String(currentGroupId) && !requestedTopic ? viewAbortController?.signal : undefined;
   const cacheAtStart = ensureGroupCacheEntry(capturedGroupId);
-  const showMessageLoading = !before && isCapturedView() && !cacheAtStart.loadedChannels.has(capturedTopic);
+  const showMessageLoading = !before && !isBackgroundLoad && isCapturedView()
+    && !cacheAtStart.loadedChannels.has(capturedTopic);
   if (showMessageLoading) setMessageLoadingState(true, `Loading ${formatHashtagLabel(capturedTopic)}…`);
   // Guard: prevent the scroll handler from triggering loadOlderMessages while
   // the initial (non-paginated) load is still in flight (#2).
-  if (!before && groupId === currentGroupId) loadingOlder = true;
+  if (!before && groupId === currentGroupId && !requestedTopic && !isBackgroundLoad) loadingOlder = true;
   try {
     const params = new URLSearchParams({ channel: channelKey, limit: '50' });
     if (before) params.set('before', before);
@@ -7297,7 +7432,7 @@ async function loadMessages(groupId, before) {
     if (!before && isCapturedView()) {
       oldestMessageId = page.nextCursor || null;
     }
-    if (!before && isCapturedView()) {
+    if (!before && !isBackgroundLoad && isCapturedView()) {
       await renderActiveChannelStream({ restoreScroll: true });
       void markChannelReadOnOpen(groupId);
     } else if (isCapturedView()) {
@@ -7306,7 +7441,7 @@ async function loadMessages(groupId, before) {
     }
   } catch(err) { if (err?.name !== 'AbortError') console.error('loadMessages error:', err); }
   finally {
-    if (!before && capturedGroupId === String(currentGroupId)) loadingOlder = false;
+    if (!before && capturedGroupId === String(currentGroupId) && !requestedTopic) loadingOlder = false;
     if (showMessageLoading && isCapturedView()) setMessageLoadingState(false);
   }
 }
@@ -9540,6 +9675,10 @@ function initSocket() {
 
     if (msg.groupId !== currentGroupId) {
       applyCurrentUserReadState(msg);
+      await hydrateMessageChannel(msg, msg.groupId);
+      const incomingTopic = resolveMessageTagTopic(msg);
+      const incomingIsRead = isMessageReadByCursor(msg, msg.groupId, incomingTopic);
+      if (incomingIsRead) msg.hasRead = true;
       const cache = ensureGroupCacheEntry(msg.groupId);
       if (cache.messages) {
         mergeMessagesIntoCache(msg.groupId, [msg]);
@@ -9555,9 +9694,9 @@ function initSocket() {
           cache.messageRows.push(row);
         }
       }
-      if (msg.senderId !== currentUser.id) {
-        // v1.3.12: server-authoritative unread — optimistic increment only;
-        // the server recomputes the exact count on the next cursor update.
+      if (msg.senderId !== currentUser.id && !incomingIsRead) {
+        // New live messages are optimistic for responsiveness; replayed
+        // messages covered by the local read cursor never recreate a badge.
         unreadCounts[msg.groupId] = Math.max(0, (unreadCounts[msg.groupId] || 0) + 1);
         updateUnreadBadge(msg.groupId, unreadCounts[msg.groupId]);
         playNotifSound();
@@ -9566,7 +9705,7 @@ function initSocket() {
       const preview = await getMessagePreviewText(msg, msg.groupId);
       updateGroupPreview(msg.groupId, preview, msg.createdAt);
       // Send native OS notification when a message arrives in a background group.
-      if (msg.senderId !== currentUser.id) {
+      if (msg.senderId !== currentUser.id && !incomingIsRead) {
         const totalUnread = getTotalUnreadCount();
         pushStatus.totalUnreadCount = totalUnread;
         sendNativeNotification(totalUnread, msg.groupId, { senderName: msg.senderName, preview });
@@ -9577,11 +9716,13 @@ function initSocket() {
     applyCurrentUserReadState(msg);
     await hydrateMessageChannel(msg, msg.groupId);
     const incomingTopic = resolveMessageTagTopic(msg);
+    const incomingIsRead = isMessageReadByCursor(msg, msg.groupId, incomingTopic);
+    if (incomingIsRead) msg.hasRead = true;
     const incomingIsActiveChannel = incomingTopic === getActiveTagTopic();
     const activeChannelWasPinned = incomingIsActiveChannel && isNearBottom();
     await appendMessageBubble(msg, true, msg.groupId);
     if (msg.clientUploadId) removePendingAttachment(msg.clientUploadId);
-    if (msg.senderId !== currentUser.id) {
+    if (msg.senderId !== currentUser.id && !incomingIsRead) {
       observeCurrentGroupRowsForRead();
       // v1.3.12: a live message the user is looking at (near the bottom)
       // advances the read cursor; otherwise it counts as unread (badge + chip)
@@ -9608,7 +9749,7 @@ function initSocket() {
     updateGroupPreview(msg.groupId, preview2, msg.createdAt);
     // Desktop notifications are shown for every incoming message, including
     // the active group. The native app decides how the popup is presented.
-    if (msg.senderId !== currentUser.id) {
+    if (msg.senderId !== currentUser.id && !incomingIsRead) {
       const totalUnread = getTotalUnreadCount();
       pushStatus.totalUnreadCount = totalUnread;
       sendNativeNotification(totalUnread, msg.groupId, { senderName: msg.senderName, preview: preview2 });
@@ -9627,29 +9768,7 @@ function initSocket() {
   // user's devices the fresh per-channel + per-group unread counts after a
   // cursor advance, so badges and chips stay in sync across devices without
   // any per-message read-flag bookkeeping on the client.
-  socket.on('read_cursor_updated', (payload) => {
-    const { groupId, tagIndex, createdAt, messageId, channelUnreadCount, groupUnreadCount } = payload || {};
-    if (!groupId) return;
-    const groupKey = String(groupId);
-    const tagKey = tagIndex == null || tagIndex === '' ? '' : String(tagIndex);
-    if (createdAt && (tagKey === '' || (String(currentGroupId) === groupKey && channelUnreadLoadedForGroup === groupKey))) {
-      const topic = tagKey === '' ? DEFAULT_TAG_TOPIC : (channelUnreadTopicByTagIndex.get(tagKey) || null);
-      if (topic) setLocalReadCursor(groupKey, topic, { at: createdAt, id: messageId || '' });
-    }
-    unreadCounts[groupKey] = Math.max(0, Number(groupUnreadCount) || 0);
-    updateUnreadBadge(groupKey, unreadCounts[groupKey]);
-    if (String(currentGroupId) === groupKey && channelUnreadLoadedForGroup === groupKey) {
-      channelUnreadStateVersion += 1;
-      channelUnreadCounts[tagKey] = Math.max(0, Number(channelUnreadCount) || 0);
-      renderTagFilters();
-    }
-    if (String(currentGroupId) === groupKey) {
-      // v1.3.13: a cursor broadcast from ANOTHER device must also clear the
-      // unread highlight on rows rendered before it arrived.
-      refreshUnseenRowClasses();
-      updateFirstUnreadButton();
-    }
-  });
+  socket.on('read_cursor_updated', (payload) => applyReadCursorUpdate(payload));
 
   socket.on('disappearing_state_updated', (payload) => {
     applyDisappearingStateUpdate(payload || {});
@@ -10583,17 +10702,23 @@ async function searchMessages(term, { pageBatch = SEARCH_AUTO_PAGE_BATCH } = {})
   syncSearchHistoryStatus('Searching cached and older messages…');
 
   const cache = ensureGroupCacheEntry(groupId);
-  let cursor = cache.messages?.length ? cache.messages[0].id : null;
+  const channelKey = channel === DEFAULT_TAG_TOPIC
+    ? DEFAULT_TAG_TOPIC
+    : await channelTagIndex(channel, groupId);
+  let cursor = Object.prototype.hasOwnProperty.call(cache.channelCursors || {}, channel)
+    ? cache.channelCursors[channel]
+    : null;
   let fetchedRows = 0;
   let requests = 0;
   try {
     while (cursor && requests < pageBatch && !controller.signal.aborted) {
       const res = await fetch(
-        `/api/groups/${groupId}/messages?before=${encodeURIComponent(cursor)}&limit=${SEARCH_PAGE_LIMIT}`,
+        `/api/groups/${groupId}/messages?channel=${encodeURIComponent(channelKey || DEFAULT_TAG_TOPIC)}&before=${encodeURIComponent(cursor)}&limit=${SEARCH_PAGE_LIMIT}`,
         { cache: 'no-store', signal: controller.signal }
       );
       if (!res.ok) throw new Error(`Search history request failed (${res.status})`);
-      const raw = await res.json();
+      const payload = await res.json();
+      const raw = Array.isArray(payload?.messages) ? payload.messages : [];
       requests += 1;
       fetchedRows += raw.length;
       if (!raw.length) {
@@ -10603,8 +10728,11 @@ async function searchMessages(term, { pageBatch = SEARCH_AUTO_PAGE_BATCH } = {})
       const visible = filterMessagesVisibleToCurrentUser(raw);
       await mapWithConcurrency(visible, 12, (msg) => hydrateMessageChannel(msg, groupId));
       mergeMessagesIntoCache(groupId, visible);
-      cursor = raw[0].id;
-      if (raw.length < SEARCH_PAGE_LIMIT) searchHistoryExhausted = true;
+      cursor = payload.nextCursor || null;
+      cache.channelCursors = cache.channelCursors || {};
+      cache.channelCursors[channel] = cursor;
+      writeLocalGroupCache(groupId, cache);
+      if (!cursor || raw.length < SEARCH_PAGE_LIMIT) searchHistoryExhausted = true;
     }
     if (!cursor) searchHistoryExhausted = true;
     if (sessionId !== searchSessionId || controller.signal.aborted) return;
@@ -12642,33 +12770,7 @@ function setupEventListeners() {
       group.epoch = Number(hint.epoch) || group.epoch;
       group.latestSeq = Math.max(Number(group.latestSeq) || 0, Number(hint.latestSeq) || 0);
     }
-    if (String(hint.groupId) !== String(currentGroupId)) {
-      unreadCounts[hint.groupId] = Math.max(0, Number(unreadCounts[hint.groupId]) || 0) + Math.max(0, Number(hint.unreadDelta) || 0);
-      updateUnreadBadge(hint.groupId, unreadCounts[hint.groupId]);
-    } else if (Number(hint.unreadDelta) > 0 && hint.channelKey) {
-      // A hint reaches every device room even if its group-room subscription
-      // briefly races a reconnect. Give the richer sync event first chance to
-      // apply, then use the hint exactly once as a bounded unread fallback.
-      const eventKey = `${hint.groupId}:${hint.epoch}:${hint.latestSeq}`;
-      const tagKey = hint.channelKey === DEFAULT_TAG_TOPIC ? '' : String(hint.channelKey);
-      const countAtHint = Math.max(0, Number(channelUnreadCounts[tagKey]) || 0);
-      setTimeout(() => {
-        if (Math.max(0, Number(channelUnreadCounts[tagKey]) || 0) > countAtHint) return;
-        appliedSocketUnreadEvents.add(eventKey);
-        channelUnreadStateVersion += 1;
-        channelUnreadCounts[tagKey] = countAtHint + 1;
-        channelUnreadLoadedForGroup = String(hint.groupId);
-        renderTagFilters();
-        const topic = tagKey === '' ? DEFAULT_TAG_TOPIC : channelUnreadTopicByTagIndex.get(tagKey);
-        if (topic) {
-          const chip = $('chat-tag-filters')?.querySelector(`[data-tag-topic="${CSS.escape(topic)}"]`);
-          if (chip) {
-            chip.classList.add('has-unread');
-            chip.title = `${formatHashtagLabel(topic)} — ${channelUnreadCounts[tagKey]} unread`;
-          }
-        }
-      }, 100);
-    }
+    if (Number(hint.unreadDelta) > 0) scheduleGroupUnreadReconciliation(hint.groupId);
   });
 
   socket.on('sync_event', (event = {}) => {

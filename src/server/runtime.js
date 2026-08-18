@@ -60,6 +60,18 @@ const IV_BYTES = 12;
 const SAFE_IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const APP_VERSION = packageJson.version || '0.0.0';
 
+// Read cursors can arrive from a client-side history cache created before the
+// server standardized timestamps. Canonicalize both ISO and SQLite's legacy
+// space-separated form before comparing or storing the cursor.
+function normalizeReadCursorTimestamp(value) {
+  const raw = String(value || '').trim().slice(0, 64);
+  if (!raw) return '';
+  const candidate = raw.replace(' ', 'T');
+  const withZone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(candidate) ? candidate : `${candidate}Z`;
+  const parsed = new Date(withZone);
+  return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : raw;
+}
+
 // v1.3.13: build fingerprint — a content hash of the shipped web bundle + server
 // sources, computed once at boot. It changes whenever ANY shipped code changes
 // (even without a version bump), so clients can auto-reset their cache after
@@ -3960,7 +3972,9 @@ app.get('/api/groups/:groupId/unread', (req, res) => {
   };
   const counts = { '': readChannelCount(null) };
   for (const tag of tags) counts[tag] = readChannelCount(tag);
-  res.json({ counts });
+  const groupRow = stmts.getGroupUnreadCount.get({ groupId, viewerId: userId });
+  const groupUnreadCount = Math.min(999, Math.max(0, Number(groupRow?.count) || 0));
+  res.json({ counts, groupUnreadCount });
 });
 
 // DELETE /api/groups/:groupId/messages — clear all messages (owner, or members if allowed)
@@ -5831,24 +5845,49 @@ io.on('connection', (socket) => {
   // bounded per-channel and per-group unread counts, and broadcasts them to
   // every one of the user's devices (badges and channel chips stay in sync
   // across devices without any local per-message read flags).
-  socket.on('mark_channel_read', ({ groupId, tagIndex, createdAt, messageId }) => {
+  socket.on('mark_channel_read', ({ groupId, tagIndex, createdAt, messageId } = {}, ack) => {
     try {
       if (!groupId || !createdAt) return;
       const normalizedGroupId = String(groupId).slice(0, 64);
       const member = stmts.isMember.get(normalizedGroupId, socket.userId);
       if (!member) return;
       const normalizedTag = (tagIndex && typeof tagIndex === 'string') ? tagIndex.slice(0, 64) : null;
-      const normalizedAt = String(createdAt).slice(0, 64);
+      const normalizedAt = normalizeReadCursorTimestamp(createdAt);
+      if (!normalizedAt) return;
       const normalizedId = String(messageId || '').slice(0, 64);
-      // v1.3.14: H1 — a cursor event older than the current cursor is a stale
-      // replay (e.g. viewport reads re-fired after a reload) — skip it
-      // entirely so unread counts can never regress (no recompute, no
-      // broadcast). The upserts below also carry a monotonic WHERE as a
-      // second line of defense.
+      const buildReadCursorUpdate = (cursorAt, cursorId) => {
+        const channelRow = stmts.getChannelUnreadCount.get({
+          groupId: normalizedGroupId,
+          viewerId: socket.userId,
+          tagIndex: normalizedTag,
+        });
+        const groupRow = stmts.getGroupUnreadCount.get({
+          groupId: normalizedGroupId,
+          viewerId: socket.userId,
+        });
+        return {
+          ok: true,
+          groupId: normalizedGroupId,
+          tagIndex: normalizedTag,
+          createdAt: cursorAt,
+          messageId: cursorId,
+          channelUnreadCount: Math.min(999, Math.max(0, Number(channelRow?.count) || 0)),
+          groupUnreadCount: Math.min(999, Math.max(0, Number(groupRow?.count) || 0)),
+        };
+      };
+
+      // A cursor event older than the current cursor is a stale replay. Keep
+      // the monotonic cursor, but still acknowledge the authoritative counts
+      // so the sender can clear a ghost badge instead of waiting for another
+      // broadcast.
       const existing = stmts.getChannelReadCursor.get(normalizedGroupId, socket.userId, normalizedTag);
       if (existing && existing.last_read_created_at) {
-        const cmp = String(normalizedAt).localeCompare(String(existing.last_read_created_at));
-        if (cmp < 0 || (cmp === 0 && String(normalizedId) <= String(existing.last_read_id || ''))) return;
+        const existingAt = normalizeReadCursorTimestamp(existing.last_read_created_at);
+        const cmp = String(normalizedAt).localeCompare(existingAt);
+        if (cmp < 0 || (cmp === 0 && String(normalizedId) <= String(existing.last_read_id || ''))) {
+          if (typeof ack === 'function') ack(buildReadCursorUpdate(existingAt, String(existing.last_read_id || '')));
+          return;
+        }
       }
       const now = new Date().toISOString();
       if (normalizedTag === null) {
@@ -5856,23 +5895,9 @@ io.on('connection', (socket) => {
       } else {
         stmts.upsertChannelReadCursor.run(normalizedGroupId, socket.userId, normalizedTag, normalizedAt, normalizedId, now);
       }
-      const channelRow = stmts.getChannelUnreadCount.get({
-        groupId: normalizedGroupId,
-        viewerId: socket.userId,
-        tagIndex: normalizedTag,
-      });
-      const groupRow = stmts.getGroupUnreadCount.get({
-        groupId: normalizedGroupId,
-        viewerId: socket.userId,
-      });
-      io.to(`user:${socket.userId}`).emit('read_cursor_updated', {
-        groupId: normalizedGroupId,
-        tagIndex: normalizedTag,
-        createdAt: normalizedAt,
-        messageId: normalizedId,
-        channelUnreadCount: Math.min(999, Math.max(0, Number(channelRow?.count) || 0)),
-        groupUnreadCount: Math.min(999, Math.max(0, Number(groupRow?.count) || 0)),
-      });
+      const update = buildReadCursorUpdate(normalizedAt, normalizedId);
+      io.to(`user:${socket.userId}`).emit('read_cursor_updated', update);
+      if (typeof ack === 'function') ack(update);
     } catch (error) {
       console.error('mark_channel_read failed:', error.message);
     }

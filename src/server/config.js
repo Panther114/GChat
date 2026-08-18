@@ -5,8 +5,9 @@ const { parseEscrowMasterKey } = require('./group-key-escrow');
 const CRYPTO_EPOCH = 2;
 const ENCRYPTION_VERSION = 2;
 const KEY_VERSION = 1;
-// v1.4: the Ask-AI agent ships — AI is gated only by the AI_ENABLED env flag.
-const AI_TEMPORARILY_DISABLED = false;
+// Temporary operational switch: keep the AI code and settings intact while
+// preventing requests from being enabled in any environment.
+const AI_TEMPORARILY_DISABLED = true;
 
 function readConfig(env = process.env) {
   const isProduction = env.NODE_ENV === 'production' || env.RAILWAY_ENVIRONMENT != null;
@@ -16,7 +17,9 @@ function readConfig(env = process.env) {
   }
   const groupKeyEscrowMasterKey = parseEscrowMasterKey(env.GROUP_KEY_ESCROW_MASTER_KEY);
   return Object.freeze({
-    aiEnabled: !AI_TEMPORARILY_DISABLED && env.AI_ENABLED === '1',
+    // The test suite can exercise the relay in NODE_ENV=test; every real
+    // development/production environment remains disabled by this switch.
+    aiEnabled: !AI_TEMPORARILY_DISABLED || (env.NODE_ENV === 'test' && env.AI_ENABLED === '1'),
     cryptoEpoch: CRYPTO_EPOCH,
     encryptionVersion: ENCRYPTION_VERSION,
     groupCodePepper: groupCodePepper || 'gchat-local-development-pepper-change-before-production',

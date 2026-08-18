@@ -697,10 +697,19 @@
     } catch {
     }
   }
-  function isCursorNewerThan(at, id, otherAt, otherId) {
+  function compareReadCursorPositions(at, id, otherAt, otherId) {
+    const leftTime = parseMessageDate(at).getTime();
+    const rightTime = parseMessageDate(otherAt).getTime();
+    if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+      return leftTime > rightTime ? 1 : -1;
+    }
     const cmp = String(at || "").localeCompare(String(otherAt || ""));
-    if (cmp !== 0) return cmp > 0;
-    return String(id || "") > String(otherId || "");
+    if (cmp !== 0) return cmp > 0 ? 1 : -1;
+    const idCmp = String(id || "").localeCompare(String(otherId || ""));
+    return idCmp === 0 ? 0 : idCmp > 0 ? 1 : -1;
+  }
+  function isCursorNewerThan(at, id, otherAt, otherId) {
+    return compareReadCursorPositions(at, id, otherAt, otherId) > 0;
   }
   function setLocalReadCursor(groupId, topic, cursor) {
     const groupKey = String(groupId);
@@ -721,9 +730,7 @@
     if (String(msg.senderId) === String(currentUser?.id)) return true;
     const cursor = getLocalReadCursor(groupId, channel || resolveMessageTagTopic(msg));
     if (!cursor || !cursor.at) return false;
-    const cmp = String(msg.createdAt || "").localeCompare(String(cursor.at));
-    if (cmp !== 0) return cmp < 0;
-    return String(msg.id) <= String(cursor.id);
+    return compareReadCursorPositions(msg.createdAt, msg.id, cursor.at, cursor.id) <= 0;
   }
   async function channelTagIndex(topic, groupId) {
     if (!topic || topic === DEFAULT_TAG_TOPIC) return null;
@@ -1172,7 +1179,11 @@
     clearAllMessageVisibilityTimers();
     groupDataCache.clear();
     groupPreloadPromises.clear();
+    groupChannelPreloadPromises.clear();
     groupMemberPromises.clear();
+    for (const timer of groupUnreadReconcileTimers.values()) clearTimeout(timer);
+    groupUnreadReconcileTimers.clear();
+    groupUnreadReconcileLastAt.clear();
     hiddenDisappearingMessageIds = /* @__PURE__ */ new Set();
   }
   function buildReloadUrl() {
@@ -2985,6 +2996,7 @@
   var pendingDisappearingStartMessageIds = /* @__PURE__ */ new Set();
   var groupDataCache = /* @__PURE__ */ new Map();
   var groupPreloadPromises = /* @__PURE__ */ new Map();
+  var groupChannelPreloadPromises = /* @__PURE__ */ new Map();
   var groupMemberPromises = /* @__PURE__ */ new Map();
   var pendingAttachmentRows = /* @__PURE__ */ new Map();
   var hiddenDisappearingMessageIds = /* @__PURE__ */ new Set();
@@ -3087,8 +3099,10 @@
     if (!groupId) return;
     const normalized = normalizeHashtagTopic(topic) || DEFAULT_TAG_TOPIC;
     const known = getKnownChannels(groupId);
+    const wasKnown = known.has(normalized);
     known.add(normalized);
     writeKnownChannels(groupId, [...known]);
+    if (!wasKnown) ensureGroupCacheEntry(groupId).backgroundPreloadComplete = false;
   }
   function forgetChannel(groupId, topic) {
     if (!groupId) return;
@@ -3173,7 +3187,8 @@
         rowsDirty: false,
         channelCursors: local?.channelCursors || {},
         loadedChannels: /* @__PURE__ */ new Set(),
-        knownChannels: new Set(readKnownChannels(groupId))
+        knownChannels: new Set(readKnownChannels(groupId)),
+        backgroundPreloadComplete: false
       });
     }
     const entry = groupDataCache.get(groupId);
@@ -3181,6 +3196,7 @@
       entry.knownChannels = new Set(readKnownChannels(groupId));
     }
     if (!(entry.loadedChannels instanceof Set)) entry.loadedChannels = /* @__PURE__ */ new Set();
+    if (typeof entry.backgroundPreloadComplete !== "boolean") entry.backgroundPreloadComplete = false;
     return entry;
   }
   function getMemberProfile(groupId, userId) {
@@ -3325,6 +3341,40 @@
     cache.rowsDirty = true;
     cache.oldestMessageId = cache.messages.length ? cache.messages[0].id : null;
   }
+  var MAX_BACKGROUND_PRELOAD_GROUPS = 2;
+  var MAX_BACKGROUND_PRELOAD_CHANNELS = 2;
+  var MAX_BACKGROUND_PRELOAD_CHANNELS_PER_GROUP = 50;
+  function preloadGroupChannel(groupId, topic) {
+    const normalizedTopic = normalizeHashtagTopic(topic) || DEFAULT_TAG_TOPIC;
+    const cache = ensureGroupCacheEntry(groupId);
+    if (cache.loadedChannels.has(normalizedTopic)) return Promise.resolve(cache);
+    const key = `${String(groupId)}\0${normalizedTopic}`;
+    if (groupChannelPreloadPromises.has(key)) return groupChannelPreloadPromises.get(key);
+    const request = loadMessages(groupId, void 0, { topic: normalizedTopic, background: true }).catch((err) => console.error("Background channel preload failed:", groupId, normalizedTopic, err)).then(() => ensureGroupCacheEntry(groupId)).finally(() => groupChannelPreloadPromises.delete(key));
+    groupChannelPreloadPromises.set(key, request);
+    return request;
+  }
+  async function preloadGroupHistory(groupId) {
+    const cache = ensureGroupCacheEntry(groupId);
+    if (cache.backgroundPreloadComplete) return;
+    await ensureGroupDataPreloaded(groupId);
+    await syncServerChannels(groupId);
+    const allTopics = [...getKnownChannels(groupId)];
+    const topics = allTopics.slice(0, MAX_BACKGROUND_PRELOAD_CHANNELS_PER_GROUP);
+    await mapWithConcurrency(topics, MAX_BACKGROUND_PRELOAD_CHANNELS, (topic) => preloadGroupChannel(groupId, topic));
+    const refreshed = ensureGroupCacheEntry(groupId);
+    refreshed.backgroundPreloadComplete = allTopics.length <= MAX_BACKGROUND_PRELOAD_CHANNELS_PER_GROUP && topics.every((topic) => refreshed.loadedChannels.has(topic));
+  }
+  function preloadAllGroups() {
+    const pendingGroups = groups.filter((group) => !ensureGroupCacheEntry(group.id).backgroundPreloadComplete).map((group) => group.id);
+    void mapWithConcurrency(pendingGroups, MAX_BACKGROUND_PRELOAD_GROUPS, async (groupId) => {
+      try {
+        await preloadGroupHistory(groupId);
+      } catch (err) {
+        console.error("Background preload failed:", groupId, err);
+      }
+    });
+  }
   function joinAllGroupRooms() {
     if (socket && currentGroupId) socket.emit("join_room", String(currentGroupId));
   }
@@ -3467,14 +3517,18 @@
       appliedSocketUnreadEvents.delete(appliedSocketUnreadEvents.values().next().value);
     }
     const groupId = String(event.groupId);
+    await hydrateMessageChannel(event.message, groupId);
+    const eventTopic = resolveMessageTagTopic(event.message);
+    if (isMessageReadByCursor(event.message, groupId, eventTopic)) {
+      event.message.hasRead = true;
+      return;
+    }
     unreadCounts[groupId] = Math.max(0, Number(unreadCounts[groupId]) || 0) + 1;
     updateUnreadBadge(groupId, unreadCounts[groupId]);
     if (groupId !== String(currentGroupId)) {
       playNotifSound();
       return;
     }
-    await hydrateMessageChannel(event.message, groupId);
-    const eventTopic = resolveMessageTagTopic(event.message);
     const isVisibleAndPinned = eventTopic === getActiveTagTopic() && isNearBottom();
     if (isVisibleAndPinned) return;
     if (channelUnreadLoadedForGroup !== groupId) {
@@ -5080,7 +5134,7 @@
       navigator.serviceWorker.addEventListener("message", (event) => {
         if (event.data?.type !== "push-unread-count") return;
         pushStatus.totalUnreadCount = Math.max(0, Number(event.data.totalUnreadCount) || 0);
-        syncUnreadIndicators(pushStatus.totalUnreadCount);
+        if (groups.length) syncUnreadIndicators();
       });
     }
     syncProfilePictureModeUI();
@@ -5182,6 +5236,7 @@
       joinAllGroupRooms();
       void refreshGroupPreviewsFromCache(groups.map((group) => group.id));
       syncUnreadIndicators();
+      setTimeout(preloadAllGroups, 0);
       if (currentGroupId) {
         void fetchChannelUnreadCounts(currentGroupId);
         void markChannelReadOnOpen(currentGroupId);
@@ -5578,6 +5633,53 @@
     }
     pushStatus.totalUnreadCount = syncUnreadIndicators();
   }
+  function applyReadCursorUpdate(payload, { topicOverride = null } = {}) {
+    const { groupId, tagIndex, createdAt, messageId, channelUnreadCount, groupUnreadCount } = payload || {};
+    if (!groupId) return;
+    const groupKey = String(groupId);
+    const tagKey = tagIndex == null || tagIndex === "" ? "" : String(tagIndex);
+    const topic = topicOverride || (tagKey === "" ? DEFAULT_TAG_TOPIC : channelUnreadTopicByTagIndex.get(tagKey) || null);
+    if (createdAt && topic) setLocalReadCursor(groupKey, topic, { at: createdAt, id: messageId || "" });
+    unreadCounts[groupKey] = Math.max(0, Number(groupUnreadCount) || 0);
+    updateUnreadBadge(groupKey, unreadCounts[groupKey]);
+    if (String(currentGroupId) === groupKey && channelUnreadLoadedForGroup === groupKey) {
+      channelUnreadStateVersion += 1;
+      channelUnreadCounts[tagKey] = Math.max(0, Number(channelUnreadCount) || 0);
+      renderTagFilters();
+    }
+    if (String(currentGroupId) === groupKey) {
+      refreshUnseenRowClasses();
+      updateFirstUnreadButton();
+    }
+  }
+  var groupUnreadReconcileTimers = /* @__PURE__ */ new Map();
+  var groupUnreadReconcileLastAt = /* @__PURE__ */ new Map();
+  var GROUP_UNREAD_RECONCILE_DELAY_MS = 180;
+  var GROUP_UNREAD_RECONCILE_MIN_INTERVAL_MS = 1e3;
+  function scheduleGroupUnreadReconciliation(groupId) {
+    const groupKey = String(groupId || "");
+    if (!groupKey) return;
+    const existingTimer = groupUnreadReconcileTimers.get(groupKey);
+    if (existingTimer) clearTimeout(existingTimer);
+    const elapsed = Date.now() - (groupUnreadReconcileLastAt.get(groupKey) || 0);
+    const delay = Math.max(GROUP_UNREAD_RECONCILE_DELAY_MS, GROUP_UNREAD_RECONCILE_MIN_INTERVAL_MS - elapsed);
+    const timer = setTimeout(async () => {
+      groupUnreadReconcileTimers.delete(groupKey);
+      groupUnreadReconcileLastAt.set(groupKey, Date.now());
+      try {
+        const res = await fetch(`/api/groups/${encodeURIComponent(groupKey)}/unread`, { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json().catch(() => ({}));
+        if (data.groupUnreadCount == null) return;
+        unreadCounts[groupKey] = Math.min(999, Math.max(0, Number(data.groupUnreadCount) || 0));
+        updateUnreadBadge(groupKey, unreadCounts[groupKey]);
+        if (String(currentGroupId) === groupKey) void fetchChannelUnreadCounts(groupKey);
+      } catch (err) {
+        console.warn("group unread reconciliation failed:", err);
+      }
+    }, delay);
+    groupUnreadReconcileTimers.set(groupKey, timer);
+  }
   var channelUnreadCounts = {};
   var channelUnreadLoadedForGroup = null;
   var channelUnreadTagIndexByTopic = /* @__PURE__ */ new Map();
@@ -5617,7 +5719,9 @@
       if (channelUnreadStateVersion === stateVersionAtStart) {
         channelUnreadCounts = data.counts || {};
       }
-      channelUnreadTagIndexByTopic = topicByTagIndex;
+      channelUnreadTagIndexByTopic = new Map(
+        [...topicByTagIndex].map(([tagIndex, topic]) => [topic, String(tagIndex)])
+      );
       channelUnreadTopicByTagIndex = new Map([...topicByTagIndex].map(([tagIndex, topic]) => [String(tagIndex), topic]));
       channelUnreadLoadedForGroup = String(groupId);
       renderTagFilters();
@@ -5635,16 +5739,19 @@
     if (current && current.at && !isCursorNewerThan(msg.createdAt, msg.id, current.at, current.id)) {
       return;
     }
-    setLocalReadCursor(groupId, topic, { at: msg.createdAt, id: msg.id });
+    setLocalReadCursor(groupId, topic, { at: normalizeIsoTime(msg.createdAt), id: msg.id });
     if (String(groupId) === String(currentGroupId)) refreshUnseenRowClasses();
     void (async () => {
       const tagIndex = await channelTagIndex(topic, groupId);
       if (String(groupId) !== String(currentGroupId) || topic !== getActiveTagTopic()) return;
-      socket.emit("mark_channel_read", {
+      const cursorPayload = {
         groupId: String(groupId),
         tagIndex,
-        createdAt: msg.createdAt,
+        createdAt: normalizeIsoTime(msg.createdAt),
         messageId: msg.id
+      };
+      socket.emit("mark_channel_read", cursorPayload, (ack) => {
+        if (ack?.ok) applyReadCursorUpdate(ack, { topicOverride: topic });
       });
     })();
   }
@@ -5678,12 +5785,16 @@
   }
   async function markChannelReadOnOpen(groupId) {
     if (!groupId || !socket || !currentUser) return;
+    const capturedGeneration = viewGeneration;
     const cache = ensureGroupCacheEntry(groupId);
     const channel = getActiveTagTopic();
+    const isCurrentView = () => capturedGeneration === viewGeneration && String(groupId) === String(currentGroupId) && channel === getActiveTagTopic();
     const all = cache.messages || [];
     for (let i = all.length - 1; i >= 0; i -= 1) {
+      if (!isCurrentView()) return;
       const msg = all[i];
       await hydrateMessageChannel(msg, groupId);
+      if (!isCurrentView()) return;
       if (resolveMessageTagTopic(msg) !== channel) continue;
       if (String(msg.senderId) !== String(currentUser.id)) {
         markChannelReadAt(groupId, msg);
@@ -5808,10 +5919,12 @@
       blockedStatus.textContent = "";
     }
   }
-  async function loadMessages(groupId, before) {
+  async function loadMessages(groupId, before, options = {}) {
     const capturedGeneration = viewGeneration;
     const capturedGroupId = String(groupId);
-    const capturedTopic = capturedGroupId === String(currentGroupId) ? getActiveTagTopic() : DEFAULT_TAG_TOPIC;
+    const isBackgroundLoad = options.background === true;
+    const requestedTopic = options.topic ? normalizeHashtagTopic(options.topic) || DEFAULT_TAG_TOPIC : null;
+    const capturedTopic = requestedTopic || (capturedGroupId === String(currentGroupId) ? getActiveTagTopic() : DEFAULT_TAG_TOPIC);
     const isCapturedView = () => capturedGeneration === viewGeneration && capturedGroupId === String(currentGroupId) && capturedTopic === getActiveTagTopic();
     const tagIndex = capturedTopic === DEFAULT_TAG_TOPIC ? null : await channelTagIndex(capturedTopic, capturedGroupId);
     if (capturedTopic !== DEFAULT_TAG_TOPIC && !tagIndex) {
@@ -5819,11 +5932,11 @@
       return;
     }
     const channelKey = tagIndex || DEFAULT_TAG_TOPIC;
-    const signal = capturedGroupId === String(currentGroupId) ? viewAbortController?.signal : void 0;
+    const signal = capturedGroupId === String(currentGroupId) && !requestedTopic ? viewAbortController?.signal : void 0;
     const cacheAtStart = ensureGroupCacheEntry(capturedGroupId);
-    const showMessageLoading = !before && isCapturedView() && !cacheAtStart.loadedChannels.has(capturedTopic);
+    const showMessageLoading = !before && !isBackgroundLoad && isCapturedView() && !cacheAtStart.loadedChannels.has(capturedTopic);
     if (showMessageLoading) setMessageLoadingState(true, `Loading ${formatHashtagLabel(capturedTopic)}\u2026`);
-    if (!before && groupId === currentGroupId) loadingOlder = true;
+    if (!before && groupId === currentGroupId && !requestedTopic && !isBackgroundLoad) loadingOlder = true;
     try {
       const params = new URLSearchParams({ channel: channelKey, limit: "50" });
       if (before) params.set("before", before);
@@ -5894,7 +6007,7 @@
       if (!before && isCapturedView()) {
         oldestMessageId = page.nextCursor || null;
       }
-      if (!before && isCapturedView()) {
+      if (!before && !isBackgroundLoad && isCapturedView()) {
         await renderActiveChannelStream({ restoreScroll: true });
         void markChannelReadOnOpen(groupId);
       } else if (isCapturedView()) {
@@ -5904,7 +6017,7 @@
     } catch (err) {
       if (err?.name !== "AbortError") console.error("loadMessages error:", err);
     } finally {
-      if (!before && capturedGroupId === String(currentGroupId)) loadingOlder = false;
+      if (!before && capturedGroupId === String(currentGroupId) && !requestedTopic) loadingOlder = false;
       if (showMessageLoading && isCapturedView()) setMessageLoadingState(false);
     }
   }
@@ -7833,6 +7946,10 @@
       }
       if (msg.groupId !== currentGroupId) {
         applyCurrentUserReadState(msg);
+        await hydrateMessageChannel(msg, msg.groupId);
+        const incomingTopic2 = resolveMessageTagTopic(msg);
+        const incomingIsRead2 = isMessageReadByCursor(msg, msg.groupId, incomingTopic2);
+        if (incomingIsRead2) msg.hasRead = true;
         const cache = ensureGroupCacheEntry(msg.groupId);
         if (cache.messages) {
           mergeMessagesIntoCache(msg.groupId, [msg]);
@@ -7848,14 +7965,14 @@
             cache.messageRows.push(row);
           }
         }
-        if (msg.senderId !== currentUser.id) {
+        if (msg.senderId !== currentUser.id && !incomingIsRead2) {
           unreadCounts[msg.groupId] = Math.max(0, (unreadCounts[msg.groupId] || 0) + 1);
           updateUnreadBadge(msg.groupId, unreadCounts[msg.groupId]);
           playNotifSound();
         }
         const preview = await getMessagePreviewText(msg, msg.groupId);
         updateGroupPreview(msg.groupId, preview, msg.createdAt);
-        if (msg.senderId !== currentUser.id) {
+        if (msg.senderId !== currentUser.id && !incomingIsRead2) {
           const totalUnread = getTotalUnreadCount();
           pushStatus.totalUnreadCount = totalUnread;
           sendNativeNotification(totalUnread, msg.groupId, { senderName: msg.senderName, preview });
@@ -7866,11 +7983,13 @@
       applyCurrentUserReadState(msg);
       await hydrateMessageChannel(msg, msg.groupId);
       const incomingTopic = resolveMessageTagTopic(msg);
+      const incomingIsRead = isMessageReadByCursor(msg, msg.groupId, incomingTopic);
+      if (incomingIsRead) msg.hasRead = true;
       const incomingIsActiveChannel = incomingTopic === getActiveTagTopic();
       const activeChannelWasPinned = incomingIsActiveChannel && isNearBottom();
       await appendMessageBubble(msg, true, msg.groupId);
       if (msg.clientUploadId) removePendingAttachment(msg.clientUploadId);
-      if (msg.senderId !== currentUser.id) {
+      if (msg.senderId !== currentUser.id && !incomingIsRead) {
         observeCurrentGroupRowsForRead();
         if (incomingIsActiveChannel && activeChannelWasPinned) {
           markChannelReadAt(msg.groupId, msg);
@@ -7891,7 +8010,7 @@
       }
       const preview2 = await getMessagePreviewText(msg, msg.groupId);
       updateGroupPreview(msg.groupId, preview2, msg.createdAt);
-      if (msg.senderId !== currentUser.id) {
+      if (msg.senderId !== currentUser.id && !incomingIsRead) {
         const totalUnread = getTotalUnreadCount();
         pushStatus.totalUnreadCount = totalUnread;
         sendNativeNotification(totalUnread, msg.groupId, { senderName: msg.senderName, preview: preview2 });
@@ -7904,27 +8023,7 @@
       const stored = allMessages.find((m) => m.id === messageId);
       if (stored) stored.readCount = Math.max(0, Number(readCount) || 0);
     });
-    socket.on("read_cursor_updated", (payload) => {
-      const { groupId, tagIndex, createdAt, messageId, channelUnreadCount, groupUnreadCount } = payload || {};
-      if (!groupId) return;
-      const groupKey = String(groupId);
-      const tagKey = tagIndex == null || tagIndex === "" ? "" : String(tagIndex);
-      if (createdAt && (tagKey === "" || String(currentGroupId) === groupKey && channelUnreadLoadedForGroup === groupKey)) {
-        const topic = tagKey === "" ? DEFAULT_TAG_TOPIC : channelUnreadTopicByTagIndex.get(tagKey) || null;
-        if (topic) setLocalReadCursor(groupKey, topic, { at: createdAt, id: messageId || "" });
-      }
-      unreadCounts[groupKey] = Math.max(0, Number(groupUnreadCount) || 0);
-      updateUnreadBadge(groupKey, unreadCounts[groupKey]);
-      if (String(currentGroupId) === groupKey && channelUnreadLoadedForGroup === groupKey) {
-        channelUnreadStateVersion += 1;
-        channelUnreadCounts[tagKey] = Math.max(0, Number(channelUnreadCount) || 0);
-        renderTagFilters();
-      }
-      if (String(currentGroupId) === groupKey) {
-        refreshUnseenRowClasses();
-        updateFirstUnreadButton();
-      }
-    });
+    socket.on("read_cursor_updated", (payload) => applyReadCursorUpdate(payload));
     socket.on("disappearing_state_updated", (payload) => {
       applyDisappearingStateUpdate(payload || {});
     });
@@ -8749,17 +8848,19 @@
     searchHistoryExhausted = false;
     syncSearchHistoryStatus("Searching cached and older messages\u2026");
     const cache = ensureGroupCacheEntry(groupId);
-    let cursor = cache.messages?.length ? cache.messages[0].id : null;
+    const channelKey = channel === DEFAULT_TAG_TOPIC ? DEFAULT_TAG_TOPIC : await channelTagIndex(channel, groupId);
+    let cursor = Object.prototype.hasOwnProperty.call(cache.channelCursors || {}, channel) ? cache.channelCursors[channel] : null;
     let fetchedRows = 0;
     let requests = 0;
     try {
       while (cursor && requests < pageBatch && !controller.signal.aborted) {
         const res = await fetch(
-          `/api/groups/${groupId}/messages?before=${encodeURIComponent(cursor)}&limit=${SEARCH_PAGE_LIMIT}`,
+          `/api/groups/${groupId}/messages?channel=${encodeURIComponent(channelKey || DEFAULT_TAG_TOPIC)}&before=${encodeURIComponent(cursor)}&limit=${SEARCH_PAGE_LIMIT}`,
           { cache: "no-store", signal: controller.signal }
         );
         if (!res.ok) throw new Error(`Search history request failed (${res.status})`);
-        const raw = await res.json();
+        const payload = await res.json();
+        const raw = Array.isArray(payload?.messages) ? payload.messages : [];
         requests += 1;
         fetchedRows += raw.length;
         if (!raw.length) {
@@ -8769,8 +8870,11 @@
         const visible = filterMessagesVisibleToCurrentUser(raw);
         await mapWithConcurrency(visible, 12, (msg) => hydrateMessageChannel(msg, groupId));
         mergeMessagesIntoCache(groupId, visible);
-        cursor = raw[0].id;
-        if (raw.length < SEARCH_PAGE_LIMIT) searchHistoryExhausted = true;
+        cursor = payload.nextCursor || null;
+        cache.channelCursors = cache.channelCursors || {};
+        cache.channelCursors[channel] = cursor;
+        writeLocalGroupCache(groupId, cache);
+        if (!cursor || raw.length < SEARCH_PAGE_LIMIT) searchHistoryExhausted = true;
       }
       if (!cursor) searchHistoryExhausted = true;
       if (sessionId !== searchSessionId || controller.signal.aborted) return;
@@ -10617,30 +10721,7 @@
         group.epoch = Number(hint.epoch) || group.epoch;
         group.latestSeq = Math.max(Number(group.latestSeq) || 0, Number(hint.latestSeq) || 0);
       }
-      if (String(hint.groupId) !== String(currentGroupId)) {
-        unreadCounts[hint.groupId] = Math.max(0, Number(unreadCounts[hint.groupId]) || 0) + Math.max(0, Number(hint.unreadDelta) || 0);
-        updateUnreadBadge(hint.groupId, unreadCounts[hint.groupId]);
-      } else if (Number(hint.unreadDelta) > 0 && hint.channelKey) {
-        const eventKey = `${hint.groupId}:${hint.epoch}:${hint.latestSeq}`;
-        const tagKey = hint.channelKey === DEFAULT_TAG_TOPIC ? "" : String(hint.channelKey);
-        const countAtHint = Math.max(0, Number(channelUnreadCounts[tagKey]) || 0);
-        setTimeout(() => {
-          if (Math.max(0, Number(channelUnreadCounts[tagKey]) || 0) > countAtHint) return;
-          appliedSocketUnreadEvents.add(eventKey);
-          channelUnreadStateVersion += 1;
-          channelUnreadCounts[tagKey] = countAtHint + 1;
-          channelUnreadLoadedForGroup = String(hint.groupId);
-          renderTagFilters();
-          const topic = tagKey === "" ? DEFAULT_TAG_TOPIC : channelUnreadTopicByTagIndex.get(tagKey);
-          if (topic) {
-            const chip = $("chat-tag-filters")?.querySelector(`[data-tag-topic="${CSS.escape(topic)}"]`);
-            if (chip) {
-              chip.classList.add("has-unread");
-              chip.title = `${formatHashtagLabel(topic)} \u2014 ${channelUnreadCounts[tagKey]} unread`;
-            }
-          }
-        }, 100);
-      }
+      if (Number(hint.unreadDelta) > 0) scheduleGroupUnreadReconciliation(hint.groupId);
     });
     socket.on("sync_event", (event = {}) => {
       void enqueueSyncEvent(event);

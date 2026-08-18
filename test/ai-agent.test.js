@@ -17,6 +17,7 @@ const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-ai-agent-'));
 process.env.DB_PATH = path.join(tempDir, 'test.db');
 process.env.SESSION_SECRET = 'ai-agent-test-session-secret-at-least-32';
 process.env.GROUP_CODE_PEPPER = 'ai-agent-test-group-code-pepper-32-chars';
+process.env.NODE_ENV = 'test';
 process.env.AI_ENABLED = '1';
 process.env.OPENCODE_ZEN_API_KEY = 'test-zen-key';
 delete process.env.DEEPSEEK_API_KEY;

@@ -1417,6 +1417,59 @@ test('C2 + H1: #main read cursors upsert (no duplicates) and never regress', asy
   sock.close();
 });
 
+test('read cursor acknowledgements canonicalize legacy timestamps and clear earlier messages', async () => {
+  const { io: socketClient } = require('socket.io-client');
+  const url = await ensureServerListening();
+  const agent = request.agent(app);
+  const response = await register(agent, 'cursor-legacy-time-test');
+  const csrfToken = await csrf(agent);
+  const secret = Buffer.alloc(32, 24).toString('base64url');
+  const commitment = crypto.createHash('sha256').update(Buffer.from(secret, 'base64url')).digest('base64url');
+  const created = await agent
+    .post('/api/groups/create')
+    .set('X-CSRF-Token', csrfToken)
+    .send({ name: 'Legacy cursor room', code: 'legac1', secret, keyCommitment: commitment })
+    .expect(201);
+  const groupId = created.body.id;
+  const viewerId = response.body.id;
+  const otherId = stmts.findUserByUsername.get('owner-test').id;
+  const earlierId = crypto.randomUUID();
+  const latestId = crypto.randomUUID();
+  stmts.insertV2Message.run(earlierId, groupId, otherId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null, null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null, '2026-05-01 00:00:00');
+  stmts.insertV2Message.run(latestId, groupId, otherId, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null, null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null, '2026-05-01 00:00:01');
+
+  const cookie = response.headers['set-cookie'][0].split(';')[0];
+  const sock = socketClient(url, { transports: ['polling'], extraHeaders: { Cookie: cookie } });
+  await new Promise((resolve) => sock.on('connect', resolve));
+  const ack = await new Promise((resolve) => {
+    sock.emit('mark_channel_read', {
+      groupId,
+      tagIndex: null,
+      createdAt: '2026-05-01 00:00:01',
+      messageId: latestId,
+    }, resolve);
+  });
+
+  assert.equal(ack.ok, true);
+  assert.equal(ack.channelUnreadCount, 0);
+  assert.equal(ack.groupUnreadCount, 0);
+  assert.equal(stmts.getChannelReadCursor.get(groupId, viewerId, null).last_read_created_at, '2026-05-01T00:00:01.000Z');
+  const unread = await agent.get(`/api/groups/${groupId}/unread`).expect(200);
+  assert.equal(unread.body.groupUnreadCount, 0);
+
+  const staleAck = await new Promise((resolve) => {
+    sock.emit('mark_channel_read', {
+      groupId,
+      tagIndex: null,
+      createdAt: '2026-05-01 00:00:00',
+      messageId: earlierId,
+    }, resolve);
+  });
+  assert.equal(staleAck.ok, true);
+  assert.equal(staleAck.groupUnreadCount, 0);
+  sock.close();
+});
+
 test('H4: negative message limit is clamped to a bounded page', async () => {
   const agent = request.agent(app);
   await register(agent, 'limit-clamp-test');

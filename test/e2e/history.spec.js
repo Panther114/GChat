@@ -63,6 +63,21 @@ test('initial chat startup issues exactly one bootstrap request', async ({ page 
   expect(bootstrapRequests).toBe(1);
 });
 
+test('background preload warms every discovered channel before it is opened', async ({ page }) => {
+  const nonMainHistoryRequests = [];
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (url.pathname.includes('/messages')
+      && url.searchParams.get('channel')
+      && url.searchParams.get('channel') !== 'main'
+      && !url.searchParams.has('before')) {
+      nonMainHistoryRequests.push(url.href);
+    }
+  });
+  await signInAsRoot(page);
+  await expect.poll(() => nonMainHistoryRequests.length, { timeout: 10_000 }).toBeGreaterThanOrEqual(2);
+});
+
 function transcriptState(page) {
   return page.evaluate(() => {
     const area = globalThis.document.getElementById('messages-area');
@@ -187,18 +202,17 @@ test('channel switches are instant and never blank the transcript', async ({ pag
 });
 
 test('delayed channel history shows a scoped loader while stale content stays covered', async ({ page }) => {
-  await signInAsRoot(page);
-  await openGroup(page);
-  await expect(page.locator('#messages-area .msg-row', { hasText: WELCOME_TEXT })).toBeVisible({ timeout: 10_000 });
-
-  let delayedRequest = true;
   await page.route('**/api/groups/*/messages*', async (route) => {
-    if (delayedRequest) {
-      delayedRequest = false;
+    const url = new URL(route.request().url());
+    const isInitialChannelPage = url.searchParams.has('channel') && !url.searchParams.has('before');
+    if (isInitialChannelPage && url.searchParams.get('channel') !== 'main') {
       await new Promise((resolve) => setTimeout(resolve, 650));
     }
     await route.continue();
   });
+
+  await signInAsRoot(page);
+  await expect(page.locator('#messages-area .msg-row', { hasText: WELCOME_TEXT })).toBeVisible({ timeout: 10_000 });
 
   await page.locator('.chat-tag-filter-btn', { hasText: '#visual-qa' }).click();
   await expect(page.locator('#message-loading-overlay')).toBeVisible({ timeout: 1_000 });

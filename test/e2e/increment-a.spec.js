@@ -165,6 +165,12 @@ test('local root account loads v2 fixtures and switches themes', async ({ page }
   expect(errors).toEqual([]);
 });
 
+test('temporarily disabled AI controls stay hidden in the web UI', async ({ page }) => {
+  await signInAsLocalRoot(page);
+  await clickGroup(page, 'Increment A Playground');
+  await expect(page.locator('#ai-mode-toggle')).toBeHidden();
+});
+
 test('message stream remains usable at a mobile viewport', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await signInAsLocalRoot(page);
@@ -288,6 +294,17 @@ test('image attachments reserve message-row space and open usable viewer actions
   });
   expect(shellSize.width).toBeGreaterThan(0);
   expect(shellSize.height).toBeGreaterThan(0);
+  const imageSizing = await shell.evaluate((element) => {
+    const imageElement = element.querySelector('.msg-image');
+    const shellStyle = globalThis.getComputedStyle(element);
+    const imageStyle = globalThis.getComputedStyle(imageElement);
+    return {
+      shellHeight: shellStyle.height,
+      imageObjectFit: imageStyle.objectFit,
+    };
+  });
+  expect(imageSizing.shellHeight).not.toBe('160px');
+  expect(imageSizing.imageObjectFit).toBe('contain');
   expect(await page.evaluate(() => globalThis.__attachmentContinuity.gap)).toBe(false);
   await page.evaluate(() => globalThis.__attachmentContinuityObserver.disconnect());
 
@@ -399,7 +416,7 @@ test('pasting multiple copied files sends all of them, one by one', async ({ pag
   }
 });
 
-test('startup fetches bounded group metadata without eager transcript hydration', async ({ page }) => {
+test('startup fetches bounded group metadata and starts background transcript hydration', async ({ page }) => {
   const apiPaths = [];
   page.on('request', (request) => {
     const url = new URL(request.url());
@@ -410,7 +427,10 @@ test('startup fetches bounded group metadata without eager transcript hydration'
   expect(apiPaths).toContain('/api/sync/bootstrap');
   expect(apiPaths).toContain('/api/groups/keys/resolve');
   expect(apiPaths).not.toContain('/api/groups/preload');
-  expect(apiPaths.some((path) => /\/messages$|\/members$/.test(path))).toBe(false);
+  await expect.poll(
+    () => apiPaths.filter((path) => /\/messages$/.test(path)).length,
+    { timeout: 10_000 }
+  ).toBeGreaterThan(0);
 });
 
 test('join flow accepts a six-character invite code', async ({ page }) => {

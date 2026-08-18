@@ -709,6 +709,10 @@ body.sidebar-narrow .sidebar-actions {
   cursor: pointer;
 }
 
+.right-panel .toggle-switch-row[data-ai-feature][hidden] {
+  display: none !important;
+}
+
 .right-panel .toggle-switch-row:hover {
   background: var(--chat-hover);
 }

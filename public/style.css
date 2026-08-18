@@ -1346,30 +1346,33 @@ img.gchat-global-icon {
   display: block;
 }
 .msg-image {
-  max-width: 220px;
-  max-height: 160px;
-  object-fit: cover;
+  max-width: min(360px, 100%);
+  max-height: 260px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
   border-radius: 8px;
   display: block;
   background: #111;
   -webkit-user-drag: none;
 }
 .msg-image-shell {
-  width: 220px;
-  height: 160px;
-  max-width: 100%;
+  width: fit-content;
+  height: fit-content;
+  max-width: min(360px, 100%);
+  max-height: 260px;
   overflow: hidden;
   border-radius: 8px;
   background: #111;
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
 }
 .msg-image-shell .msg-image {
-  width: 100%;
-  height: 100%;
-  max-width: none;
-  max-height: none;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 260px;
   margin: 0;
 }
 .msg-image-placeholder {
@@ -4072,12 +4075,12 @@ body.chat-body.mobile-layout .sidebar-overlay {
     flex: 1 1 100%;
   }
   .msg-image {
-    max-width: 200px;
-    max-height: 140px;
+    max-width: min(280px, 100%);
+    max-height: 220px;
   }
   .msg-image-shell {
-    width: 200px;
-    height: 140px;
+    max-width: min(280px, 100%);
+    max-height: 220px;
   }
   .msg-image-locked {
     width: 200px;
@@ -5051,6 +5054,9 @@ body.sidebar-narrow .sidebar-actions {
   font-size: 12px !important;
   color: var(--chat-text) !important;
   cursor: pointer;
+}
+.right-panel .toggle-switch-row[data-ai-feature][hidden] {
+  display: none !important;
 }
 .right-panel .toggle-switch-row:hover {
   background: var(--chat-hover);
@@ -7312,11 +7318,13 @@ button.is-loading {
   z-index: 2;
 }
 .msg-image-shell {
-  width: min(360px, 100%);
-  height: 260px;
+  width: fit-content;
+  height: fit-content;
+  max-width: min(360px, 100%);
+  max-height: 260px;
   overflow: hidden;
   border-radius: var(--radius-sm);
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
   margin-top: 4px;
@@ -7324,10 +7332,10 @@ button.is-loading {
   border: 1px solid var(--chat-border);
 }
 .msg-image-shell .msg-image {
-  width: 100%;
-  height: 100%;
-  max-width: none;
-  max-height: none;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 260px;
   margin: 0;
 }
 .msg-image-placeholder {
