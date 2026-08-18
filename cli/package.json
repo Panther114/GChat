@@ -14,9 +14,9 @@
   },
   "scripts": {
     "start": "node bin/gchat.js",
-    "test": "node --test test/crypto.test.js test/parser.test.js test/messages.test.js test/session.test.js test/tui.test.js test/integration.test.js",
-    "test:unit": "node --test test/crypto.test.js test/parser.test.js test/messages.test.js test/session.test.js test/tui.test.js",
-    "test:integration": "node --test test/integration.test.js"
+    "test": "node --test --test-force-exit test/crypto.test.js test/parser.test.js test/messages.test.js test/session.test.js test/tui.test.js test/integration.test.js",
+    "test:unit": "node --test --test-force-exit test/crypto.test.js test/parser.test.js test/messages.test.js test/session.test.js test/tui.test.js",
+    "test:integration": "node --test --test-force-exit test/integration.test.js"
   },
   "dependencies": {
     "socket.io-client": "^4.8.3"

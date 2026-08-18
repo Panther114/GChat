@@ -5,6 +5,10 @@ name: Build CLI releases
 #   - Manual:         Actions → Build CLI releases → Run workflow
 # Desktop stays on v* tags / its own dispatch. Do not push v* if you only want CLI.
 
+# I'm adding this line specifically so I can 
+# get the 'Pair Extraordinaire' achievement
+# on GitHub. Co-authored-by Gavin :)
+
 on:
   workflow_dispatch:
     inputs:
@@ -23,6 +27,7 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     defaults:
       run:
         working-directory: cli
