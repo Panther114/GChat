@@ -1130,6 +1130,51 @@ function clearGroupHistoryStore(groupId) {
   return Promise.all([messageClear, metaClear]).then(() => null);
 }
 
+function clearLocalFullHistoryProjection(groupId, { showNotice = false } = {}) {
+  const groupKey = String(groupId || '');
+  if (!groupKey) return false;
+  const cache = ensureGroupCacheEntry(groupKey);
+  const messages = [
+    ...(cache.messages || []),
+    ...(String(currentGroupId) === groupKey ? allMessages : []),
+  ];
+  const messageIds = new Set(messages.map((message) => String(message?.id || '')).filter(Boolean));
+  const hadMessages = messageIds.size > 0;
+  for (const messageId of messageIds) {
+    clearDisappearingTimer(messageId);
+    clearMessageVisibilityTimer(messageId);
+    pendingReadMessageIds.delete(messageId);
+    pendingDisappearingStartMessageIds.delete(messageId);
+    hiddenDisappearingMessageIds.delete(messageId);
+  }
+  persistHiddenDisappearingMessageIds();
+
+  cache.messages = [];
+  cache.messageRows = null;
+  cache.channelRows = null;
+  cache.channelAnchors = null;
+  cache.serverWindowLoaded = false;
+  cache.members = cache.members || [];
+  cache.oldestMessageId = null;
+  cache.rowsDirty = false;
+  cache.knownChannels = new Set([DEFAULT_TAG_TOPIC]);
+  writeKnownChannels(groupKey, [DEFAULT_TAG_TOPIC]);
+  writeLocalGroupCache(groupKey, cache);
+  if (historyDbSupported) void clearGroupHistoryStore(groupKey);
+  resetUnreadStateAfterFullHistoryClear(groupKey);
+
+  if (String(currentGroupId) !== groupKey) return hadMessages;
+  allMessages = [];
+  oldestMessageId = null;
+  scrollUnreadCount = 0;
+  resetReadTracking();
+  updateScrollBadge();
+  renderGroupFromCache(groupKey);
+  renderTagFilters();
+  if (showNotice && hadMessages) addSystemMessage('Chat history was cleared');
+  return hadMessages;
+}
+
 // v1.3.12: remove a single message from the durable history store when it is
 // deleted server-side — otherwise it would resurrect on the next open.
 function deleteHistoryMessage(groupId, messageId) {
@@ -1273,6 +1318,7 @@ async function clearBrowserRuntimeCaches({ includeLocalData = false } = {}) {
   for (const timer of groupUnreadReconcileTimers.values()) clearTimeout(timer);
   groupUnreadReconcileTimers.clear();
   groupUnreadReconcileLastAt.clear();
+  groupUnreadReconcileVersions.clear();
   hiddenDisappearingMessageIds = new Set();
 }
 
@@ -4116,7 +4162,9 @@ async function applySyncEvents(groupId, events, cursor, { render = true } = {}) 
   const cache = ensureGroupCacheEntry(groupId);
   let nextMessages = [...(cache.messages || [])];
   const affectedTopics = new Set();
+  const clearedChannelKeys = new Set();
   let allChannelsAffected = false;
+  let lastFullHistoryClearSeq = -1;
   for (const event of ordered) {
     if ((event.type === 'message.created' || event.type === 'message.edited') && event.message) {
       const existingCreated = event.type === 'message.created'
@@ -4144,7 +4192,9 @@ async function applySyncEvents(groupId, events, cursor, { render = true } = {}) 
       const channelKey = event.auxiliary?.channelKey || event.channelKey;
       if (channelKey === '*') {
         allChannelsAffected = true;
+        lastFullHistoryClearSeq = Number(event.seq) || lastFullHistoryClearSeq;
       } else {
+        clearedChannelKeys.add(String(channelKey || 'main'));
         const channelMessage = nextMessages.find((message) => (message.tagIndex || 'main') === channelKey);
         if (channelMessage) affectedTopics.add(resolveMessageTagTopic(channelMessage));
         if (channelKey === 'main') affectedTopics.add(DEFAULT_TAG_TOPIC);
@@ -4177,7 +4227,22 @@ async function applySyncEvents(groupId, events, cursor, { render = true } = {}) 
   cache.rowsDirty = allChannelsAffected || affectedTopics.size > 0;
   cache.messageRows = null;
   cache.oldestMessageId = nextMessages.length ? cache.oldestMessageId : null;
+  if (allChannelsAffected) cache.serverWindowLoaded = false;
   writeLocalGroupCache(groupId, cache);
+  if (allChannelsAffected) {
+    resetUnreadStateAfterFullHistoryClear(groupId);
+    const hasMessageAfterClear = ordered.some((event) => event.type === 'message.created'
+      && Number(event.seq) > lastFullHistoryClearSeq);
+    if (hasMessageAfterClear) scheduleGroupUnreadReconciliation(groupId);
+  } else if (clearedChannelKeys.size) {
+    if (String(currentGroupId) === String(groupId) && channelUnreadLoadedForGroup === String(groupId)) {
+      for (const channelKey of clearedChannelKeys) {
+        channelUnreadCounts[channelKey === 'main' ? '' : channelKey] = 0;
+      }
+      channelUnreadStateVersion += 1;
+    }
+    scheduleGroupUnreadReconciliation(groupId);
+  }
   if (render && String(currentGroupId) === String(groupId)) {
     allMessages = nextMessages;
     if (ordered.some((event) => String(event.type || '').startsWith('member.'))) {
@@ -6975,8 +7040,29 @@ function applyReadCursorUpdate(payload, { topicOverride = null } = {}) {
 // advanced, which used to recreate a ghost sidebar badge for old messages.
 const groupUnreadReconcileTimers = new Map();
 const groupUnreadReconcileLastAt = new Map();
+const groupUnreadReconcileVersions = new Map();
 const GROUP_UNREAD_RECONCILE_DELAY_MS = 180;
 const GROUP_UNREAD_RECONCILE_MIN_INTERVAL_MS = 1000;
+
+function resetUnreadStateAfterFullHistoryClear(groupId) {
+  const groupKey = String(groupId || '');
+  if (!groupKey) return;
+  const existingTimer = groupUnreadReconcileTimers.get(groupKey);
+  if (existingTimer) clearTimeout(existingTimer);
+  groupUnreadReconcileTimers.delete(groupKey);
+  groupUnreadReconcileVersions.set(groupKey, (groupUnreadReconcileVersions.get(groupKey) || 0) + 1);
+  unreadCounts[groupKey] = 0;
+  const group = groups.find((entry) => String(entry.id) === groupKey);
+  if (group) group.unreadCount = 0;
+  updateUnreadBadge(groupKey, 0);
+  if (String(currentGroupId) !== groupKey) return;
+  channelUnreadStateVersion += 1;
+  channelUnreadCounts = {};
+  channelUnreadLoadedForGroup = null;
+  channelUnreadTagIndexByTopic = new Map();
+  channelUnreadTopicByTagIndex = new Map();
+  updateFirstUnreadButton();
+}
 
 function scheduleGroupUnreadReconciliation(groupId) {
   const groupKey = String(groupId || '');
@@ -6985,14 +7071,17 @@ function scheduleGroupUnreadReconciliation(groupId) {
   if (existingTimer) clearTimeout(existingTimer);
   const elapsed = Date.now() - (groupUnreadReconcileLastAt.get(groupKey) || 0);
   const delay = Math.max(GROUP_UNREAD_RECONCILE_DELAY_MS, GROUP_UNREAD_RECONCILE_MIN_INTERVAL_MS - elapsed);
+  const reconcileVersion = groupUnreadReconcileVersions.get(groupKey) || 0;
   const timer = setTimeout(async () => {
     groupUnreadReconcileTimers.delete(groupKey);
     groupUnreadReconcileLastAt.set(groupKey, Date.now());
+    if ((groupUnreadReconcileVersions.get(groupKey) || 0) !== reconcileVersion) return;
     try {
       const res = await fetch(`/api/groups/${encodeURIComponent(groupKey)}/unread`, { cache: 'no-store' });
       if (!res.ok) return;
       const data = await res.json().catch(() => ({}));
       if (data.groupUnreadCount == null) return;
+      if ((groupUnreadReconcileVersions.get(groupKey) || 0) !== reconcileVersion) return;
       unreadCounts[groupKey] = Math.min(999, Math.max(0, Number(data.groupUnreadCount) || 0));
       updateUnreadBadge(groupKey, unreadCounts[groupKey]);
       if (String(currentGroupId) === groupKey) void fetchChannelUnreadCounts(groupKey);
@@ -9885,35 +9974,7 @@ function initSocket() {
   });
 
   socket.on('chat_cleared', ({ groupId }) => {
-    const cache = ensureGroupCacheEntry(groupId);
-    for (const msg of cache.messages || []) {
-      clearDisappearingTimer(msg.id);
-      clearMessageVisibilityTimer(msg.id);
-      hiddenDisappearingMessageIds.delete(String(msg.id));
-    }
-    persistHiddenDisappearingMessageIds();
-    cache.messages = [];
-    cache.messageRows = [];
-    cache.channelRows = null;
-    cache.channelAnchors = null;
-    cache.members = cache.members || [];
-    cache.oldestMessageId = null;
-    cache.rowsDirty = false;
-    // v1.3.12: history cleared → nothing can be unread.
-    unreadCounts[String(groupId)] = 0;
-    updateUnreadBadge(String(groupId), 0);
-    if (String(groupId) === String(currentGroupId)) {
-      channelUnreadCounts = {};
-      channelUnreadLoadedForGroup = null;
-      channelUnreadTagIndexByTopic = new Map();
-      channelUnreadTopicByTagIndex = new Map();
-    }
-    writeLocalGroupCache(groupId, cache);
-    if (historyDbSupported) void clearGroupHistoryStore(groupId);
-    if (groupId !== currentGroupId) return;
-    renderGroupFromCache(groupId);
-    renderTagFilters();
-    addSystemMessage('Chat history was cleared');
+    clearLocalFullHistoryProjection(groupId, { showNotice: true });
   });
 
   socket.on('tag_cleared', async ({ groupId, tagIndex }) => {
@@ -12220,12 +12281,25 @@ function setupEventListeners() {
       'Clear Chat History',
       'This will permanently delete all messages for everyone. Continue?',
       async () => {
-        const res = await fetch('/api/groups/' + currentGroupId + '/messages', {
+        const groupId = String(currentGroupId || '');
+        const res = await fetch('/api/groups/' + groupId + '/messages', {
           method: 'DELETE', headers: apiHeaders(),
         });
         if (!res.ok) {
           const d = await res.json().catch(() => ({}));
           showToast(d.error || 'Failed', 'error');
+          return;
+        }
+        const data = await res.json().catch(() => ({}));
+        clearLocalFullHistoryProjection(groupId, { showNotice: true });
+        if (data.epoch != null && data.seq != null) {
+          const cursor = { epoch: Number(data.epoch) || 1, seq: Number(data.seq) || 0 };
+          void writeHistoryCursor(groupId, cursor);
+          const group = groups.find((entry) => String(entry.id) === groupId);
+          if (group) {
+            group.epoch = cursor.epoch;
+            group.latestSeq = Math.max(Number(group.latestSeq) || 0, cursor.seq);
+          }
         }
       },
       { destructive: true }

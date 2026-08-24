@@ -1652,9 +1652,16 @@ const stmts = {
            FROM json_each(COALESCE(m.whisper_to, '[]')) AS whisper_recipient
            WHERE whisper_recipient.value = CAST(@viewerId AS TEXT)
          )
-       )
-       AND (m.sender_id = @viewerId OR m.is_disappearing = 0 OR dms.hidden_at IS NULL)
-     ORDER BY m.created_at DESC, m.id DESC
+        )
+        AND (m.sender_id = @viewerId OR m.is_disappearing = 0 OR dms.hidden_at IS NULL)
+        AND NOT EXISTS (
+          SELECT 1 FROM group_history_boundaries ghb
+          WHERE ghb.group_id = m.group_id
+            AND ghb.channel_key IN ('*', COALESCE(m.tag_index, 'main'))
+            AND ((m.created_seq > 0 AND m.created_seq <= ghb.cleared_seq)
+              OR (m.created_seq = 0 AND m.created_at <= ghb.cleared_at))
+        )
+      ORDER BY m.created_at DESC, m.id DESC
      LIMIT @limit
    `),
   // Channel discovery is served from the maintained summary table. Joining the
@@ -1715,9 +1722,16 @@ const stmts = {
            FROM json_each(COALESCE(m.whisper_to, '[]')) AS whisper_recipient
            WHERE whisper_recipient.value = CAST(@viewerId AS TEXT)
          )
-       )
-       AND (m.sender_id = @viewerId OR m.is_disappearing = 0 OR dms.hidden_at IS NULL)
-       AND (
+        )
+        AND (m.sender_id = @viewerId OR m.is_disappearing = 0 OR dms.hidden_at IS NULL)
+        AND NOT EXISTS (
+          SELECT 1 FROM group_history_boundaries ghb
+          WHERE ghb.group_id = m.group_id
+            AND ghb.channel_key IN ('*', COALESCE(m.tag_index, 'main'))
+            AND ((m.created_seq > 0 AND m.created_seq <= ghb.cleared_seq)
+              OR (m.created_seq = 0 AND m.created_at <= ghb.cleared_at))
+        )
+        AND (
        m.created_at < ref.created_at OR
       (m.created_at = ref.created_at AND m.id < ref.id)
     )
@@ -1762,9 +1776,16 @@ const stmts = {
            FROM json_each(COALESCE(m.whisper_to, '[]')) AS whisper_recipient
            WHERE whisper_recipient.value = CAST(@viewerId AS TEXT)
          )
-       )
-       AND (m.sender_id = @viewerId OR m.is_disappearing = 0 OR dms.hidden_at IS NULL)
-     ORDER BY m.created_at ASC, m.id ASC
+        )
+        AND (m.sender_id = @viewerId OR m.is_disappearing = 0 OR dms.hidden_at IS NULL)
+        AND NOT EXISTS (
+          SELECT 1 FROM group_history_boundaries ghb
+          WHERE ghb.group_id = m.group_id
+            AND ghb.channel_key IN ('*', COALESCE(m.tag_index, 'main'))
+            AND ((m.created_seq > 0 AND m.created_seq <= ghb.cleared_seq)
+              OR (m.created_seq = 0 AND m.created_at <= ghb.cleared_at))
+        )
+      ORDER BY m.created_at ASC, m.id ASC
      LIMIT @limit
   `),
   getSingleMessage: db.prepare(`
@@ -1803,6 +1824,13 @@ const stmts = {
         )
       )
       AND (m.sender_id = @viewerId OR m.is_disappearing = 0 OR dms.hidden_at IS NULL)
+      AND NOT EXISTS (
+        SELECT 1 FROM group_history_boundaries ghb
+        WHERE ghb.group_id = m.group_id
+          AND ghb.channel_key IN ('*', COALESCE(m.tag_index, 'main'))
+          AND ((m.created_seq > 0 AND m.created_seq <= ghb.cleared_seq)
+            OR (m.created_seq = 0 AND m.created_at <= ghb.cleared_at))
+      )
     LIMIT 1
   `),
   insertMessage: db.prepare(

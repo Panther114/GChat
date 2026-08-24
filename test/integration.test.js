@@ -1569,3 +1569,58 @@ test('H7: whisper recipient lists are bounded (no event-loop DoS)', async () => 
   assert.equal(stayedConnected, true, 'socket must survive an oversized whisper recipient list (H7)');
   assert.ok(errors.some((message) => /recipient/i.test(message)), 'oversized whisper lists are rejected cleanly');
 });
+
+test('clearing chat history creates a boundary that clears unread state for every member', async () => {
+  const ownerAgent = request.agent(app);
+  const ownerResponse = await register(ownerAgent, 'clear-history-owner');
+  const ownerCsrf = await csrf(ownerAgent);
+  const memberAgent = request.agent(app);
+  const memberResponse = await register(memberAgent, 'clear-history-member');
+  const memberCsrf = await csrf(memberAgent);
+  const secret = Buffer.alloc(32, 27).toString('base64url');
+  const commitment = crypto.createHash('sha256').update(Buffer.from(secret, 'base64url')).digest('base64url');
+  const created = await ownerAgent
+    .post('/api/groups/create')
+    .set('X-CSRF-Token', ownerCsrf)
+    .send({ name: 'Clear history room', code: 'clr001', secret, keyCommitment: commitment })
+    .expect(201);
+  const groupId = created.body.id;
+  await memberAgent
+    .post('/api/groups/join')
+    .set('X-CSRF-Token', memberCsrf)
+    .send({ code: 'clr001' })
+    .expect(200);
+  const unreadMessageId = crypto.randomUUID();
+  const ownMessageId = crypto.randomUUID();
+  const createdAt = '2026-01-01T00:00:00.000Z';
+  stmts.insertV2Message.run(
+    unreadMessageId, groupId, memberResponse.body.id, 'AAAA', 'AAAAAAAAAAAAAAAA', 'text', null,
+    null, 0, null, 1, 2, 1, 1, 'AAAA', 'AAAAAAAAAAAAAAAA', null, null, createdAt
+  );
+  stmts.insertV2Message.run(
+    ownMessageId, groupId, ownerResponse.body.id, 'BBBB', 'BBBBBBBBBBBBBBBB', 'text', null,
+    null, 0, null, 1, 2, 1, 1, 'BBBB', 'BBBBBBBBBBBBBBBB', null, null, createdAt
+  );
+
+  const before = await ownerAgent.get('/api/groups/mine').expect(200);
+  assert.equal(before.body.find((entry) => entry.id === groupId).unreadCount, 1);
+  assert.equal((await ownerAgent.get('/api/push/status').expect(200)).body.totalUnreadCount, 1);
+
+  const clearResponse = await ownerAgent
+    .delete(`/api/groups/${groupId}/messages`)
+    .set('X-CSRF-Token', ownerCsrf)
+    .expect(200);
+  assert.equal(clearResponse.body.ok, true);
+  assert.ok(clearResponse.body.epoch);
+  assert.ok(clearResponse.body.seq);
+  assert.equal(db.prepare('SELECT channel_key FROM group_history_boundaries WHERE group_id = ?')
+    .get(groupId).channel_key, '*');
+  assert.ok(stmts.findMessageById.get(unreadMessageId), 'encrypted history remains recoverable');
+  assert.deepEqual((await ownerAgent.get(`/api/groups/${groupId}/messages`).expect(200)).body, []);
+  assert.deepEqual((await memberAgent.get(`/api/groups/${groupId}/messages`).expect(200)).body, []);
+  assert.equal((await ownerAgent.get('/api/groups/mine').expect(200)).body
+    .find((entry) => entry.id === groupId).unreadCount, 0);
+  assert.equal((await memberAgent.get('/api/groups/mine').expect(200)).body
+    .find((entry) => entry.id === groupId).unreadCount, 0);
+  assert.equal((await ownerAgent.get('/api/push/status').expect(200)).body.totalUnreadCount, 0);
+});
