@@ -1162,6 +1162,7 @@ function clearLocalFullHistoryProjection(groupId, { showNotice = false } = {}) {
   writeLocalGroupCache(groupKey, cache);
   if (historyDbSupported) void clearGroupHistoryStore(groupKey);
   resetUnreadStateAfterFullHistoryClear(groupKey);
+  updateGroupPreview(groupKey, '', null);
 
   if (String(currentGroupId) !== groupKey) return hadMessages;
   allMessages = [];
@@ -5301,7 +5302,7 @@ function selectTagChannel(topic, { focusComposer = true } = {}) {
   const renderPromise = hasCachedChannel
     ? renderActiveChannelStream().then(() => {
       if (String(currentGroupId) === switchGroupId) setMessageLoadingState(false);
-      return loadMessages(switchGroupId);
+      return loadMessages(switchGroupId, undefined, { skipEmptyRender: true });
     })
     : loadMessages(switchGroupId);
   void renderPromise.then(() => {
@@ -7415,6 +7416,7 @@ async function loadMessages(groupId, before, options = {}) {
   const capturedGeneration = viewGeneration;
   const capturedGroupId = String(groupId);
   const isBackgroundLoad = options.background === true;
+  const skipEmptyRender = options.skipEmptyRender === true;
   const requestedTopic = options.topic ? (normalizeHashtagTopic(options.topic) || DEFAULT_TAG_TOPIC) : null;
   const capturedTopic = requestedTopic || (capturedGroupId === String(currentGroupId) ? getActiveTagTopic() : DEFAULT_TAG_TOPIC);
   const isCapturedView = () => (
@@ -7430,6 +7432,9 @@ async function loadMessages(groupId, before, options = {}) {
   const channelKey = tagIndex || DEFAULT_TAG_TOPIC;
   const signal = capturedGroupId === String(currentGroupId) && !requestedTopic ? viewAbortController?.signal : undefined;
   const cacheAtStart = ensureGroupCacheEntry(capturedGroupId);
+  const cachedTopicHasMessages = Array.isArray(cacheAtStart.messages)
+    ? cacheAtStart.messages.some((message) => resolveMessageTagTopic(message) === capturedTopic)
+    : null;
   const showMessageLoading = !before && !isBackgroundLoad && isCapturedView()
     && !cacheAtStart.loadedChannels.has(capturedTopic);
   if (showMessageLoading) setMessageLoadingState(true, `Loading ${formatHashtagLabel(capturedTopic)}…`);
@@ -7448,6 +7453,9 @@ async function loadMessages(groupId, before, options = {}) {
     const page = await res.json();
     const rawMsgs = Array.isArray(page?.messages) ? page.messages : [];
     const msgs = filterMessagesVisibleToCurrentUser(rawMsgs);
+    const skipCachedEmptyRender = skipEmptyRender
+      && cachedTopicHasMessages === false
+      && msgs.length === 0;
     if (!before) {
       const cache = ensureGroupCacheEntry(groupId);
       cache.loadedChannels.add(capturedTopic);
@@ -7522,7 +7530,7 @@ async function loadMessages(groupId, before, options = {}) {
       oldestMessageId = page.nextCursor || null;
     }
     if (!before && !isBackgroundLoad && isCapturedView()) {
-      await renderActiveChannelStream({ restoreScroll: true });
+      if (!skipCachedEmptyRender) await renderActiveChannelStream({ restoreScroll: true });
       void markChannelReadOnOpen(groupId);
     } else if (isCapturedView()) {
       renderTagFilters();
