@@ -35,7 +35,15 @@ function readJson(file, fallback) {
   try {
     if (!fs.existsSync(file)) return fallback;
     return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
+  } catch (err) {
+    // A corrupted store file must not silently empty the vault/config; say so.
+    try {
+      if (fs.existsSync(file) && fs.readFileSync(file, 'utf8').trim()) {
+        process.stderr.write(`gchat: warning: could not parse ${file} (${err.message}); ignoring its contents\n`);
+      }
+    } catch {
+      /* file vanished between the two reads */
+    }
     return fallback;
   }
 }

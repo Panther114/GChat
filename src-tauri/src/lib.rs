@@ -1,5 +1,5 @@
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
@@ -29,6 +29,8 @@ const MAX_CLIPBOARD_BYTES: usize = 16 * 1024 * 1024;
 const UPDATE_START_DELAY: Duration = Duration::from_secs(15);
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
+/// Attention requests fire at most once per second (v1.4.7).
+const ATTENTION_DEBOUNCE_MS: u64 = 1000;
 const GITHUB_RELEASES_URL: &str = "https://github.com/Panther114/GChat/releases/latest";
 
 /// Memory-oriented WebView2 flags (also applied via WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS).
@@ -53,9 +55,23 @@ struct DesktopState {
     pending_group_id: Mutex<Option<String>>,
     unread: Mutex<u32>,
     update_status: Mutex<UpdateStatus>,
-    timeout_active: AtomicBool,
+    /// v1.4.7: generation counter replacing `timeout_active`. Every successful
+    /// page load, retry, and reload bumps it; a monitor tick that was scheduled
+    /// for an older generation no-ops, so a fresh retry can never be killed by
+    /// a stale in-flight monitor.
+    connection_generation: AtomicU64,
+    /// v1.4.7: debounce taskbar/dock attention requests.
+    last_attention_at: AtomicU64,
     /// v1.3.9: debounce tray double-click (Windows fires Click+DoubleClick).
     last_toggle_at: AtomicU64,
+}
+
+impl DesktopState {
+    /// Bump the connection generation, cancelling any monitor scheduled for an
+    /// earlier generation. Returns the new generation.
+    fn bump_connection_generation(&self) -> u64 {
+        self.connection_generation.fetch_add(1, Ordering::AcqRel) + 1
+    }
 }
 
 fn now_unix_ms() -> u64 {
@@ -121,6 +137,22 @@ fn normalize_unread_count(value: f64) -> u32 {
     value.floor().min(MAX_UNREAD_COUNT as f64) as u32
 }
 
+/// v1.4.7: only flash the taskbar/dock when the unread count transitions
+/// 0→N while unfocused, and at most once per debounce window. This stops
+/// repeated attention requests on every unread-count change.
+fn should_request_attention(
+    previous: u32,
+    unread: u32,
+    focused: bool,
+    last_request_ms: u64,
+    now_ms: u64,
+) -> bool {
+    unread > 0
+        && previous == 0
+        && !focused
+        && now_ms.saturating_sub(last_request_ms) >= ATTENTION_DEBOUNCE_MS
+}
+
 fn is_official_url(url: &Url) -> bool {
     url.scheme() == "https"
         && url.host_str() == Some("gchat.up.railway.app")
@@ -152,23 +184,35 @@ fn valid_group_id(value: &str) -> bool {
 }
 
 fn clipboard_filename(value: Option<&str>) -> String {
-    let candidate = value
-        .and_then(|name| Path::new(name).file_name())
-        .and_then(|name| name.to_str())
-        .unwrap_or("attachment.bin");
-    let sanitized: String = candidate
+    // Take the final path segment regardless of host platform: reject both
+    // '/' and '\' so Windows-authored names cannot traverse on Unix either.
+    let base = value.unwrap_or("").rsplit(['/', '\\']).next().unwrap_or("");
+    let sanitized: String = base
         .chars()
         .filter(|character| {
-            character.is_ascii_alphanumeric()
-                || matches!(character, ' ' | '-' | '_' | '.' | '(' | ')')
+            !character.is_control()
+                && !matches!(
+                    character,
+                    '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+                )
         })
         .take(120)
         .collect();
-    if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
+    // Keep unicode letters/digits; only fall back when nothing usable remains.
+    if sanitized.is_empty() || sanitized == "." || sanitized == ".." || windows_reserved_name(&sanitized) {
         "attachment.bin".to_string()
     } else {
         sanitized
     }
+}
+
+fn windows_reserved_name(name: &str) -> bool {
+    const RESERVED: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+        "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    let stem = name.split('.').next().unwrap_or("");
+    RESERVED.iter().any(|reserved| reserved.eq_ignore_ascii_case(stem))
 }
 
 fn cleanup_clipboard_cache<R: Runtime>(app: &AppHandle<R>) {
@@ -293,12 +337,20 @@ async fn check_for_updates(app: AppHandle) -> Result<bool, String> {
     Ok(true)
 }
 
-fn schedule_updater(app: AppHandle) {
+fn schedule_updater(app: AppHandle, shutdown: Arc<AtomicBool>) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(UPDATE_START_DELAY).await;
         loop {
+            // v1.4.7: stop scheduling once a shutdown signal fires instead of
+            // cloning the AppHandle forever with no cancellation.
+            if shutdown.load(Ordering::Acquire) {
+                return;
+            }
             if let Err(error) = check_for_updates(app.clone()).await {
                 eprintln!("[updater] {error}");
+            }
+            if shutdown.load(Ordering::Acquire) {
+                return;
             }
             tokio::time::sleep(UPDATE_CHECK_INTERVAL).await;
         }
@@ -306,19 +358,18 @@ fn schedule_updater(app: AppHandle) {
 }
 
 fn schedule_connection_timeout(app: AppHandle, state: Arc<DesktopState>) {
-    if state
-        .timeout_active
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return;
-    }
+    // Capture the generation at scheduling time: if it changes (a newer retry,
+    // reload, or a successful page load), this monitor is stale and no-ops.
+    let generation = state.connection_generation.load(Ordering::Acquire);
     tauri::async_runtime::spawn(async move {
         const MAX_AUTO_RETRIES: u32 = 3;
         for attempt in 0..=MAX_AUTO_RETRIES {
             tokio::time::sleep(CONNECTION_TIMEOUT).await;
+            if state.connection_generation.load(Ordering::Acquire) != generation {
+                // Superseded by a newer attempt — do not bounce to offline.html.
+                return;
+            }
             if state.hosted_renderer_ready.load(Ordering::Acquire) {
-                state.timeout_active.store(false, Ordering::Release);
                 return;
             }
             if let Ok(mut error) = state.last_load_error.lock() {
@@ -342,12 +393,14 @@ fn schedule_connection_timeout(app: AppHandle, state: Arc<DesktopState>) {
                 }
             }
         }
-        state.timeout_active.store(false, Ordering::Release);
     });
 }
 
 #[tauri::command]
 fn desktop_renderer_ready(state: State<'_, Arc<DesktopState>>) {
+    // A successful page load: bump the generation so any in-flight timeout
+    // monitor becomes stale and exits on its next tick.
+    state.bump_connection_generation();
     state.hosted_renderer_ready.store(true, Ordering::Release);
     if let Ok(mut error) = state.last_load_error.lock() {
         *error = None;
@@ -368,6 +421,7 @@ fn set_unread_count(
     if *current == unread {
         return Ok(());
     }
+    let previous = *current;
     *current = unread;
     drop(current);
 
@@ -377,7 +431,11 @@ fn set_unread_count(
         } else {
             Some(unread as i64)
         });
-        if unread > 0 && !window.is_focused().unwrap_or(false) {
+        let focused = window.is_focused().unwrap_or(true);
+        let now_ms = now_unix_ms();
+        let last_request_ms = state.last_attention_at.load(Ordering::Acquire);
+        if should_request_attention(previous, unread, focused, last_request_ms, now_ms) {
+            state.last_attention_at.store(now_ms, Ordering::Release);
             let _ = window.request_user_attention(Some(UserAttentionType::Informational));
         }
     }
@@ -427,6 +485,9 @@ fn set_launch_at_startup(app: AppHandle, enabled: bool) -> Result<bool, String> 
 fn retry_connection(app: AppHandle, state: State<'_, Arc<DesktopState>>) -> Result<bool, String> {
     let window = main_window(&app).ok_or_else(|| "Main window unavailable".to_string())?;
     state.hosted_renderer_ready.store(false, Ordering::Release);
+    // A fresh retry cancels any in-flight monitor: bump the generation before
+    // scheduling a new one for this attempt.
+    state.bump_connection_generation();
     let url = Url::parse(OFFICIAL_SERVER_URL).map_err(|error| error.to_string())?;
     window.navigate(url).map_err(|error| error.to_string())?;
     schedule_connection_timeout(app, state.inner().clone());
@@ -446,7 +507,7 @@ fn get_connection_context(state: State<'_, Arc<DesktopState>>) -> ConnectionCont
 }
 
 #[tauri::command]
-fn copy_binary_to_clipboard(
+async fn copy_binary_to_clipboard(
     app: AppHandle,
     state: State<'_, Arc<DesktopState>>,
     payload: ClipboardPayload,
@@ -454,6 +515,22 @@ fn copy_binary_to_clipboard(
     if payload.base64.len() > (MAX_CLIPBOARD_BYTES * 4 / 3) + 8 {
         return Err("Clipboard payload is too large".to_string());
     }
+    // v1.4.7: base64 decode + image decode + clipboard writes are blocking and
+    // can reach 16 MiB — run them off the main thread so the event loop never
+    // freezes.
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        copy_binary_to_clipboard_blocking(app, &state, payload)
+    })
+    .await
+    .map_err(|error| format!("Clipboard task failed: {error}"))?
+}
+
+fn copy_binary_to_clipboard_blocking(
+    app: AppHandle,
+    state: &DesktopState,
+    payload: ClipboardPayload,
+) -> Result<bool, String> {
     let bytes = STANDARD
         .decode(payload.base64.as_bytes())
         .map_err(|_| "Invalid clipboard payload".to_string())?;
@@ -515,16 +592,22 @@ fn copy_binary_to_clipboard(
 }
 
 #[tauri::command]
-fn clear_cache_and_restart(app: AppHandle) -> Result<bool, String> {
+async fn clear_cache_and_restart(app: AppHandle) -> Result<bool, String> {
     if let Some(window) = main_window(&app) {
         window
             .clear_all_browsing_data()
             .map_err(|error| error.to_string())?;
     }
-    // The WebView2 profile clear completes asynchronously — restarting
-    // immediately cancels it, so the cache clear would silently no-op.
-    std::thread::sleep(std::time::Duration::from_millis(1500));
-    app.restart();
+    // v1.4.7: the 1500ms settle delay + relaunch must never block the async
+    // runtime — spawn a thread that sleeps, then relaunches and exits, so the
+    // reply returns to the SPA immediately (same semantics as before).
+    tauri::async_runtime::spawn_blocking(move || {
+        // The WebView2 profile clear completes asynchronously — restarting
+        // immediately cancels it, so the cache clear would silently no-op.
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        app.restart();
+    });
+    Ok(true)
 }
 
 #[tauri::command]
@@ -532,6 +615,8 @@ fn reload_hosted_app(app: AppHandle, state: State<'_, Arc<DesktopState>>) -> Res
     // Full reset (same as retry_connection): clear readiness + error so a
     // failed reload is caught by the connection-timeout monitor again.
     state.hosted_renderer_ready.store(false, Ordering::Release);
+    // Same as retry_connection: cancel any in-flight monitor for the old attempt.
+    state.bump_connection_generation();
     if let Ok(mut error) = state.last_load_error.lock() {
         *error = None;
     }
@@ -543,20 +628,49 @@ fn reload_hosted_app(app: AppHandle, state: State<'_, Arc<DesktopState>>) -> Res
 }
 
 
+/// Format unix seconds as RFC 3339 / ISO 8601 UTC ("2026-09-05T12:34:56Z")
+/// without adding a dependency (civil-from-days, Howard Hinnant's algorithm).
+fn format_rfc3339_utc(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (hour, minute, second) = (rem / 3_600, (rem % 3_600) / 60, rem % 60);
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = (z - era * 146_097) as u64; // [0, 146096]
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era as i64 + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let mp = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { year + 1 } else { year };
+    (year, month as u32, day as u32)
+}
+
 fn now_iso() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    format!("{secs}")
+    format_rfc3339_utc(secs)
 }
 
 fn read_update_status(state: &DesktopState) -> UpdateStatus {
-    state
-        .update_status
-        .lock()
-        .map(|g| g.clone())
-        .unwrap_or_default()
+    match state.update_status.lock() {
+        Ok(guard) => guard.clone(),
+        // v1.4.7: keep the non-panicking fallback but surface the poisoning —
+        // silently discarding update state made stale UI undiagnosable.
+        Err(poisoned) => {
+            eprintln!("[updater] update status lock poisoned; recovering last value");
+            poisoned.into_inner().clone()
+        }
+    }
 }
 
 fn publish_update_status<R: Runtime>(app: &AppHandle<R>, state: &DesktopState, status: UpdateStatus) {
@@ -729,6 +843,7 @@ fn create_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let url = Url::parse(OFFICIAL_SERVER_URL).map_err(|_| {
         std::io::Error::new(std::io::ErrorKind::InvalidData, "official server URL is invalid")
     })?;
+    let state_handle = app.clone();
     WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
         .title("Gchat")
         .inner_size(1100.0, 700.0)
@@ -737,8 +852,15 @@ fn create_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
         .additional_browser_args(WEBVIEW_MEMORY_BROWSER_ARGS)
         .initialization_script(include_str!("bridge.js"))
-        .on_navigation(|url| {
+        .on_navigation(move |url| {
             if is_allowed_navigation(url) {
+                if is_official_url(&url) {
+                    // v1.4.7: a navigation to the hosted app is the start of a
+                    // new page load — re-arm the offline monitor by clearing
+                    // readiness from any previous (possibly crashed) SPA.
+                    let state = state_handle.state::<Arc<DesktopState>>();
+                    state.hosted_renderer_ready.store(false, Ordering::Release);
+                }
                 true
             } else {
                 if is_safe_external_url(url) {
@@ -816,6 +938,10 @@ fn apply_webview_memory_env() {
 pub fn run() {
     apply_webview_memory_env();
     let state = Arc::new(DesktopState::default());
+    // v1.4.7: shared shutdown signal so the background updater task stops
+    // scheduling when the app exits or the window is destroyed.
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_for_setup = shutdown.clone();
     tauri::Builder::default()
         .manage(state.clone())
         .plugin(tauri_plugin_notification::init())
@@ -841,17 +967,23 @@ pub fn run() {
             open_latest_release,
         ])
         .setup(move |app| {
+            let setup_shutdown = shutdown_for_setup.clone();
             cleanup_clipboard_cache(app.handle());
             let window = create_window(app.handle())?;
             create_tray(app.handle())?;
             let app_handle = app.handle().clone();
             let focus_state = state.clone();
+            let window_shutdown = setup_shutdown.clone();
             window.on_window_event(move |event| match event {
                 WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
                     if let Some(window) = main_window(&app_handle) {
                         hide_to_tray(&window);
                     }
+                }
+                // v1.4.7: a destroyed window means the shell is going away.
+                WindowEvent::Destroyed => {
+                    window_shutdown.store(true, Ordering::Release);
                 }
                 // Minimize goes to tray (same behavior as close), not the taskbar.
                 WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
@@ -878,14 +1010,22 @@ pub fn run() {
                 }
                 _ => {}
             });
-            schedule_updater(app.handle().clone());
+            schedule_updater(app.handle().clone(), setup_shutdown.clone());
             schedule_connection_timeout(app.handle().clone(), state.clone());
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .unwrap_or_else(|error| {
             eprintln!("Gchat failed to start: {error}");
             std::process::exit(1);
+        })
+        .run(move |_app_handle, event| {
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                shutdown.store(true, Ordering::Release);
+            }
         });
 }
 
@@ -949,6 +1089,103 @@ mod tests {
         assert_eq!(clipboard_filename(Some("report?.pdf")), "report.pdf");
         assert_eq!(clipboard_filename(Some("..")), "attachment.bin");
         assert_eq!(clipboard_filename(None), "attachment.bin");
+    }
+
+    #[test]
+    fn clipboard_filenames_keep_unicode_but_reject_traversal_and_reserved_names() {
+        // Unicode letters/digits must survive sanitization (v1.4.7).
+        assert_eq!(clipboard_filename(Some("Отчёт-报告 (2).pdf")), "Отчёт-报告 (2).pdf");
+        assert_eq!(clipboard_filename(Some("résumé.docx")), "résumé.docx");
+        // Path separators (both flavours) and Windows reserved stems are rejected.
+        assert_eq!(clipboard_filename(Some("..\\secret.txt")), "secret.txt");
+        assert_eq!(clipboard_filename(Some("con.txt")), "attachment.bin");
+        assert_eq!(clipboard_filename(Some("COM1")), "attachment.bin");
+        assert_eq!(clipboard_filename(Some("lpt4.log")), "attachment.bin");
+        // Control characters are stripped, not turned into attachment.bin.
+        assert_eq!(clipboard_filename(Some("re\u{0}port.pdf")), "report.pdf");
+        // Names made only of separators fall back.
+        assert_eq!(clipboard_filename(Some("/")), "attachment.bin");
+        assert_eq!(clipboard_filename(Some("\\")), "attachment.bin");
+    }
+
+    #[test]
+    fn rfc3339_formatting_matches_known_timestamps() {
+        assert_eq!(format_rfc3339_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(format_rfc3339_utc(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(format_rfc3339_utc(1_709_164_800), "2024-02-29T00:00:00Z");
+        assert_eq!(format_rfc3339_utc(1_677_628_800), "2023-03-01T00:00:00Z");
+        assert_eq!(format_rfc3339_utc(1_234_567_890), "2009-02-13T23:31:30Z");
+        assert_eq!(format_rfc3339_utc(4_102_444_800), "2100-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn now_iso_emits_parseable_iso_8601() {
+        let stamp = now_iso();
+        assert_eq!(stamp.len(), 20);
+        assert!(stamp.ends_with('Z'));
+        assert_eq!(stamp.as_bytes()[4], b'-');
+        assert_eq!(stamp.as_bytes()[10], b'T');
+        assert_eq!(stamp.as_bytes()[13], b':');
+        assert_eq!(stamp.as_bytes()[16], b':');
+    }
+
+    #[test]
+    fn attention_requests_fire_once_on_the_zero_to_unread_transition() {
+        let now = 10_000;
+        // 0→N while unfocused: fire (first request, last_request_ms = 0).
+        assert!(should_request_attention(0, 3, false, 0, now));
+        // Already unread: never re-request.
+        assert!(!should_request_attention(3, 5, false, 0, now));
+        // Focused: never.
+        assert!(!should_request_attention(0, 3, true, 0, now));
+        // Debounce: within one second of the last request, do not fire again.
+        assert!(!should_request_attention(0, 3, false, now, now + 999));
+        // After the debounce window elapses, a new 0→N transition fires again.
+        assert!(should_request_attention(0, 3, false, now, now + ATTENTION_DEBOUNCE_MS));
+        // Back to zero then unread again while unfocused: fires.
+        assert!(should_request_attention(0, 1, false, 0, now));
+    }
+
+    #[test]
+    fn connection_generation_bumps_cancel_stale_monitors() {
+        let state = Arc::new(DesktopState::default());
+        assert_eq!(state.connection_generation.load(Ordering::Acquire), 0);
+        let scheduled = state.connection_generation.load(Ordering::Acquire);
+        // Simulate a retry: the generation moves past the scheduled monitor.
+        assert_eq!(state.bump_connection_generation(), 1);
+        assert_ne!(state.connection_generation.load(Ordering::Acquire), scheduled);
+        // A tick scheduled for the old generation must be detected as stale.
+        assert_ne!(
+            state.connection_generation.load(Ordering::Acquire),
+            scheduled
+        );
+        assert_eq!(state.bump_connection_generation(), 2);
+        assert_eq!(state.bump_connection_generation(), 3);
+    }
+
+    #[test]
+    fn poisoned_update_status_lock_recovers_last_value() {
+        let state = DesktopState::default();
+        *state
+            .update_status
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = UpdateStatus {
+            state: "available".to_string(),
+            current_version: Some("1.4.6".to_string()),
+            available_version: Some("1.5.0".to_string()),
+            percent: Some(0),
+            message: None,
+            error: None,
+            checked_at: None,
+        };
+        // Poison the lock: panic while a guard is held, then recover.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = state.update_status.lock().unwrap();
+            panic!("poison the update status lock");
+        }));
+        let recovered = read_update_status(&state);
+        assert_eq!(recovered.state, "available");
+        assert_eq!(recovered.available_version.as_deref(), Some("1.5.0"));
     }
 
     #[test]

@@ -50,11 +50,26 @@ jobs:
         run: choco install nsis -y --no-progress
       - name: Build thin Windows installer
         run: npm run build:win
+      - name: Sign thin Windows installer (minisign)
+        # The thin shell verifies a sibling <installer>.sig against the Tauri
+        # updater pubkey before executing updates. Sign with the same keypair
+        # the Tauri updater uses (tauri.conf.json "pubkey").
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { throw 'TAURI_SIGNING_PRIVATE_KEY secret is required to sign the thin-shell installer' }
+          $installer = Get-ChildItem src-desktop-win/target/release/bundle/Gchat_*_x64-setup.exe | Select-Object -First 1
+          if (-not $installer) { throw 'Installer not produced' }
+          npx --yes @tauri-apps/cli@2 signer sign $installer.FullName
+          if (-not (Test-Path "$($installer.FullName).sig")) { throw 'Signature file not produced' }
       - name: Stage artifacts
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force staging | Out-Null
           Copy-Item src-desktop-win/target/release/bundle/Gchat_*_x64-setup.exe staging/ -ErrorAction Stop
+          Copy-Item src-desktop-win/target/release/bundle/Gchat_*_x64-setup.exe.sig staging/ -ErrorAction Stop
       - name: Enforce artifact size budgets
         run: node scripts/check-desktop-artifact-budgets.js staging
       - uses: actions/upload-artifact@v4

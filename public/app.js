@@ -2780,7 +2780,8 @@
       window.electronAPI.showNotification({
         title: GENERIC_NOTIFICATION_TITLE,
         body,
-        groupId
+        groupId,
+        channelId: notification?.channelId || null
       });
       return;
     }
@@ -5204,9 +5205,12 @@
     syncResponsiveUiState();
     startHostedAppUpdatePolling();
     if (window.electronAPI) {
-      window.electronAPI.onFocusGroup((groupId) => {
-        const target = groups.find((g) => g.id === groupId);
-        if (target) selectGroup(target.id);
+      window.electronAPI.onFocusGroup((payload) => {
+        const hint = payload && typeof payload === "object" ? payload : { groupId: payload };
+        const target = groups.find((g) => String(g.id) === String(hint.groupId));
+        if (!target) return;
+        if (hint.channelId) writeStoredChannel(target.id, hint.channelId);
+        void selectGroup(target.id);
       });
     }
     window.addEventListener("focus", () => {
@@ -8063,7 +8067,7 @@
         if (msg.senderId !== currentUser.id && !incomingIsRead2) {
           const totalUnread = getTotalUnreadCount();
           pushStatus.totalUnreadCount = totalUnread;
-          sendNativeNotification(totalUnread, msg.groupId, { senderName: msg.senderName, preview });
+          sendNativeNotification(totalUnread, msg.groupId, { senderName: msg.senderName, preview, channelId: incomingTopic2 });
         }
         if (msg.clientUploadId) removePendingAttachment(msg.clientUploadId);
         return;
@@ -8101,7 +8105,7 @@
       if (msg.senderId !== currentUser.id && !incomingIsRead) {
         const totalUnread = getTotalUnreadCount();
         pushStatus.totalUnreadCount = totalUnread;
-        sendNativeNotification(totalUnread, msg.groupId, { senderName: msg.senderName, preview: preview2 });
+        sendNativeNotification(totalUnread, msg.groupId, { senderName: msg.senderName, preview: preview2, channelId: incomingTopic });
       }
     });
     socket.on("message_read_update", ({ messageId, readCount }) => {

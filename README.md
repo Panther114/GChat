@@ -4,7 +4,7 @@ Gchat is a client-side encrypted group chat application built with Node.js, Expr
 
 The hosted web app is the primary product. The desktop app is a native system-webview shell that loads the hosted Railway deployment.
 
-Current version: **v1.4.5** (local-first sync protocol v2; Windows: thin WebView2 shell; macOS: Tauri/WKWebView)
+Current version: **v1.4.6** (local-first sync protocol v2; Windows: thin WebView2 shell; macOS: Tauri/WKWebView)
 
 ---
 
@@ -455,6 +455,24 @@ Pushing a version tag builds Windows and universal macOS packages in parallel an
 ## Desktop Build Notes
 
 The desktop package contains only a compiled native shell and small recovery assets. Windows uses the shared Evergreen WebView2 runtime with memory-oriented browser flags; macOS uses the system WKWebView. Backend modules and the hosted frontend are not packaged. Railway continues to install production server dependencies and run `server.js`.
+
+---
+
+## Command-Line Client (gchat CLI)
+
+A terminal client for GChat in `cli/` — same encrypted protocol (sync-v2, AES-256-GCM + HKDF-SHA-256) as the web and desktop apps. Run one-shot commands or a full interactive TUI:
+
+```bash
+cd cli && npm install && npm link   # puts `gchat` on your PATH
+gchat login -u alice
+gchat groups create "my-team"
+gchat send "hello from the terminal"
+gchat                               # interactive TUI
+```
+
+Command groups: auth (`login`, `register`, `whoami`, `account`, `settings`), groups, channels, messaging (`send`, `reply`, `edit`, `delete`, `history`, `whisper`, `disappear`), members, files (`upload`, `file list|save|open`), search/export, vault/key recovery (`vault list|sync|export|import|forget`, `crypto selftest`), and admin. Global flags: `--server`, `--json`, `--yes`. Full reference: [`cli/README.md`](cli/README.md) (or `gchat help`).
+
+Prebuilt binaries for macOS and Windows are published to GitHub Releases on `cli-v*` tags; Linux users run from source (`npm link`). The TUI receives live messages over `sync_event`, converges channel lists with the server on group open, and keeps secrets in `vault.json` (0600 file mode).
 
 ---
 

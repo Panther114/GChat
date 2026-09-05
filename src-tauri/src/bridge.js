@@ -1,8 +1,20 @@
 (() => {
   'use strict';
 
-  const invoke = (command, args = {}) => window.__TAURI_INTERNALS__.invoke(command, args);
   const report = (label, error) => console.error(`[desktop:${label}]`, error);
+
+  // Guarded IPC access: if the Tauri internals are missing (injection order,
+  // stripped build), fail asynchronously with a report instead of throwing
+  // synchronously inside electronAPI methods.
+  const invoke = (command, args = {}) => {
+    const internals = window.__TAURI_INTERNALS__;
+    if (!internals || typeof internals.invoke !== 'function') {
+      const error = new Error(`Tauri IPC unavailable for "${command}"`);
+      report(command, error);
+      return Promise.reject(error);
+    }
+    return internals.invoke(command, args);
+  };
 
   const updateListeners = new Set();
 

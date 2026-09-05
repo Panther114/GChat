@@ -1236,7 +1236,7 @@ for (const sql of migrations) {
 const syncSchemaPresent = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'group_sync_state'").get();
 const isHostedProduction = process.env.NODE_ENV === 'production' || process.env.RAILWAY_ENVIRONMENT != null;
 if (isHostedProduction && !syncSchemaPresent) {
-  throw new Error('GChat v1.4.5 requires the explicit sync-v2 migration. Run npm run migrate:sync-v2 -- --apply during maintenance.');
+  throw new Error(`GChat v${APP_VERSION} requires the explicit sync-v2 migration. Run npm run migrate:sync-v2 -- --apply during maintenance.`);
 }
 const syncService = createSyncService(db, { install: !syncSchemaPresent });
 initializeSyncBaselines(db);

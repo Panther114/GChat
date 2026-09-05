@@ -283,6 +283,12 @@ input {
   align-items: center;
 }
 
+/* Was an inline style attribute on offline.html; CSP style-src 'self' forbids
+   inline styles, so the spacing lives here. */
+.retry-row {
+  margin-top: 28px;
+}
+
 .wizard-actions {
   justify-content: space-between;
   margin-top: 32px;

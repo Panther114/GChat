@@ -56,10 +56,36 @@ const {
   normalizeChannel,
   setChannelOrder,
 } = require('../store/prefs');
+const { SYNC_PROTOCOL_VERSION } = require('../version');
 
 const MAX_COMPOSER = 2000;
 const MEDIA_CACHE_MAX = 8;
 const MEDIA_DIR = path.join(os.tmpdir(), 'gchat-cli-media');
+/** One bounded history fetch per reconnect / throttled sync_hint, never polling. */
+const BACKFILL_MIN_INTERVAL_MS = 5000;
+
+/** Monotonic suffix so two pending rows created in the same millisecond never collide. */
+let pendingSeq = 0;
+function nextPendingId() {
+  pendingSeq += 1;
+  return `pending-${Date.now()}-${pendingSeq.toString(36)}`;
+}
+
+let mediaCleanupInstalled = false;
+/**
+ * Plaintext attachment temp files must never outlive the process. The
+ * bounded 8-file eviction still applies while running; this hook wipes the
+ * whole directory on exit or SIGINT.
+ */
+function installMediaDirCleanup() {
+  if (mediaCleanupInstalled) return;
+  mediaCleanupInstalled = true;
+  const clear = () => {
+    try { fs.rmSync(MEDIA_DIR, { recursive: true, force: true }); } catch { /* ignore */ }
+  };
+  process.once('exit', clear);
+  process.on('SIGINT', clear);
+}
 
 function defaultChatState(over = {}) {
   return { ...DEFAULT_CHAT, ...over };
@@ -97,8 +123,29 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
   let channelDrag = null;
   let typingTimer = null;
   let typingSent = false;
-  const markedRead = new Set();
   const mediaCache = new Map(); // messageId -> { path, filename, mimeType, size, bytes }
+  let lastCursorKey = '';
+  let everConnected = false;
+  let lastBackfillAt = 0;
+  installMediaDirCleanup();
+
+  function logError(where, err) {
+    try {
+      process.stderr.write(`gchat: ${where}: ${err?.message || String(err)}\n`);
+    } catch {
+      /* stderr unavailable */
+    }
+  }
+
+  /** Terminal bell for incoming messages (honors the `bell` config flag). */
+  function ringBell() {
+    try {
+      const enabled = paths ? loadConfig(paths).bell !== false : true;
+      if (enabled && stdout && typeof stdout.write === 'function') stdout.write('\x07');
+    } catch {
+      /* bell is best-effort */
+    }
+  }
 
   function size() {
     if (typeof getSize === 'function') return getSize();
@@ -123,6 +170,10 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       if (bytes) stdout.write(bytes);
     }
     if (typeof onDraw === 'function') onDraw(lastFrame);
+    // The read cursor follows what is actually on screen: any redraw that
+    // leaves a new tail message visible advances it. The cursor key guard in
+    // markVisibleRead bounds this to one emit per newly-visible tail message.
+    markVisibleRead();
     if (lastFrame.shouldLoadMore && !state.loadingMore) {
       loadOlderMessages().then(() => draw()).catch(() => draw());
     }
@@ -237,21 +288,33 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     }
   }
 
+  /**
+   * Advance the server's per-channel read cursor (mark_channel_read) to the
+   * last visible message instead of blindly re-marking the last 20 rows on
+   * every load. Bounded: at most one emit per newly-visible tail message.
+   */
   function markVisibleRead() {
-    if (!state.activeGroupId || typeof client.markRead !== 'function') return;
+    if (!state.activeGroupId || typeof client.markChannelRead !== 'function') return;
     const list = filterMessages(state.messages, state.activeChannel);
-    let n = 0;
-    for (let i = list.length - 1; i >= 0 && n < 20; i -= 1) {
+    let last = null;
+    for (let i = list.length - 1; i >= 0; i -= 1) {
       const item = list[i];
-      const id = item?.msg?.id;
-      if (!id || item.sending) continue;
-      if (state.userId && String(item.msg.senderId) === String(state.userId)) continue;
-      const key = String(id);
-      if (item.msg.hasRead || markedRead.has(key)) continue;
-      try { client.markRead(state.activeGroupId, id); } catch { /* ignore */ }
-      markedRead.add(key);
-      item.msg.hasRead = true;
-      n += 1;
+      if (item?.msg?.id && !item.sending) {
+        last = item;
+        break;
+      }
+    }
+    if (!last) return;
+    const key = `${state.activeGroupId}:${state.activeChannel}:${last.msg.id}`;
+    if (key === lastCursorKey) return;
+    lastCursorKey = key;
+    try {
+      Promise.resolve(client.markChannelRead(state.activeGroupId, state.activeChannel, {
+        createdAt: last.msg.createdAt,
+        messageId: last.msg.id,
+      })).catch(() => { /* cursor is best-effort */ });
+    } catch {
+      /* cursor is best-effort */
     }
   }
 
@@ -398,7 +461,6 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     state.memberCount = 0;
     state.scrollOffset = 0;
     state.loadingGroup = true;
-    markedRead.clear();
     client.setActiveGroup(group.id);
     const groupRef = state.groups.find((g) => String(g.id) === String(group.id));
     if (groupRef) groupRef.unreadCount = 0;
@@ -419,6 +481,22 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       const prefs = loadPrefs(paths);
       for (const item of decrypted) {
         if (item.channel) rememberChannel(group.id, item.channel, prefs);
+      }
+      // Converge with the server's channel list (single bounded fetch per
+      // group open). Server-derived channels always exist; local-only entries
+      // (freshly created, message-less channels announced live) are kept and
+      // the local active-channel choice is untouched.
+      if (typeof client.fetchChannels === 'function') {
+        try {
+          const serverChannels = await client.fetchChannels(group.id);
+          if (!stillCurrent()) return;
+          for (const row of serverChannels || []) {
+            const name = normalizeChannel(row?.name);
+            if (name) rememberChannel(group.id, name, prefs);
+          }
+        } catch {
+          /* keep the local list when discovery is unavailable */
+        }
       }
       savePrefs(prefs, paths);
       const nextChannels = listChannels(group.id, paths);
@@ -581,7 +659,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     state.userId = client.user?.id || state.userId;
     state.iconColor = client.user?.iconColor || state.iconColor;
     client.onEvent = (event, payload) => {
-      handleEvent(event, payload).catch(() => {});
+      handleEvent(event, payload).catch((err) => logError(`event ${event}`, err));
     };
     if (opts.birdFrom && Number.isFinite(opts.birdFrom.x) && Number.isFinite(opts.birdFrom.y)) {
       const dest = idleBirdOrigin(size().cols, size().rows, state);
@@ -661,11 +739,126 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     }
   }
 
+  /**
+   * One bounded history fetch for the active group after a reconnect or a
+   * throttled sync_hint. Never a polling loop.
+   */
+  async function backfillActiveGroup(reason) {
+    if (!running || !state.activeGroupId || state.loadingMore) return;
+    const now = Date.now();
+    if (reason === 'sync_hint' && now - lastBackfillAt < BACKFILL_MIN_INTERVAL_MS) return;
+    lastBackfillAt = now;
+    const groupId = String(state.activeGroupId);
+    try {
+      const page = await client.fetchMessages(state.activeGroupId, { limit: Math.min(HISTORY_PAGE, 100) });
+      if (!running || String(state.activeGroupId) !== groupId) return;
+      for (const msg of page || []) {
+        if (String(state.activeGroupId) !== groupId) return;
+        upsertMessage(await decorate(msg, groupId));
+      }
+      markVisibleRead();
+      draw();
+    } catch (err) {
+      logError('backfill', err);
+    }
+  }
+
+  /** Rename a still-pending optimistic row to the server id instead of duplicating it. */
+  function reconcilePendingEcho(item, raw) {
+    if (findMessage(raw.id)) return; // ack path already renamed the pending row
+    const pending = state.messages.find((m) => m.sending
+      && !isAttach(m)
+      && String(m.msg.senderId || '') === String(raw.senderId || item.msg.senderId || '')
+      && (m.channel || 'main') === (item.channel || 'main')
+      && String(m.text || '') === String(item.text || ''));
+    if (pending) pending.msg.id = item.msg.id;
+  }
+
+  /**
+   * Server v1.4.6 broadcasts every message lifecycle change as `sync_event`
+   * (protocol 2): message.created / message.edited / message.deleted /
+   * history.cleared. Semantics mirror the web client's processSyncEvent:
+   * dedupe by message id, never replay an older revision, filter by channel.
+   */
+  async function handleSyncEvent(payload) {
+    if (Number(payload.protocol) !== SYNC_PROTOCOL_VERSION || !payload.groupId) return;
+    const groupId = String(payload.groupId);
+    const type = String(payload.type || '');
+    if (type === 'history.cleared') {
+      if (groupId !== String(state.activeGroupId)) return;
+      const channelKey = String(payload.auxiliary?.channelKey || payload.channelKey || '*');
+      state.messages = channelKey === '*'
+        ? []
+        : state.messages.filter((m) => String(m.msg.tagIndex || '') !== channelKey);
+      draw();
+      return;
+    }
+    if (type === 'message.deleted') {
+      if (groupId !== String(state.activeGroupId)) return;
+      const id = String(payload.entityId || payload.message?.id || '');
+      if (!id) return;
+      state.messages = state.messages.filter((m) => String(m.msg.id) !== id);
+      if (String(state.hoverMessageId) === id) {
+        state.hoverMessageId = null;
+        state.hoverAction = null;
+      }
+      draw();
+      return;
+    }
+    if (type !== 'message.created' && type !== 'message.edited') return;
+    const raw = payload.message;
+    if (!raw) return;
+    if (groupId !== String(state.activeGroupId)) {
+      if (type === 'message.created') {
+        const other = state.groups.find((g) => String(g.id) === groupId);
+        if (other) other.unreadCount = (Number(other.unreadCount) || 0) + 1;
+        // Honor the `bell` config flag (previously written but never read):
+        // ring the terminal bell for incoming messages outside the open group.
+        if (String(raw?.senderId || '') !== String(state.userId || '')) ringBell();
+        draw();
+      }
+      return;
+    }
+    if (type === 'message.created') {
+      // Idempotent: a replayed create for a row we already hold is dropped.
+      const existing = findMessage(raw.id);
+      if (existing && !existing.sending) return;
+      const item = await decorate(raw, groupId);
+      item.sending = false;
+      if (item.channel) {
+        const prefs = loadPrefs(paths);
+        rememberChannel(groupId, item.channel, prefs);
+        savePrefs(prefs, paths);
+        state.channels = listChannels(groupId, paths);
+      }
+      // The server now echoes the sender's own message via sync_event; fold
+      // it into the pending optimistic row instead of duplicating it.
+      reconcilePendingEcho(item, raw);
+      upsertMessage(item);
+      markVisibleRead();
+      draw();
+      return;
+    }
+    // message.edited: replace the cached row unless the event is older.
+    const idx = state.messages.findIndex((m) => String(m.msg.id) === String(raw.id));
+    if (idx < 0) return;
+    const currentRev = Number(state.messages[idx].msg.revision) || 1;
+    const incomingRev = Number(raw.revision) || 1;
+    if (incomingRev < currentRev) return;
+    state.messages[idx] = await decorate(raw, groupId);
+    draw();
+  }
+
   async function handleEvent(event, payload) {
     if (!running) return;
     if (event === 'connect') {
+      const isReconnect = everConnected;
+      everConnected = true;
       state.connected = true;
       draw();
+      // Rooms are re-joined by the socket layer; pull one bounded page of
+      // anything missed while the link was down.
+      if (isReconnect && state.activeGroupId) await backfillActiveGroup('reconnect');
       return;
     }
     if (event === 'disconnect') {
@@ -680,24 +873,30 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       draw();
       return;
     }
-    if (event === 'new_message' && payload) {
-      if (String(payload.groupId) !== String(state.activeGroupId)) {
-        const other = state.groups.find((g) => String(g.id) === String(payload.groupId));
-        if (other) other.unreadCount = (Number(other.unreadCount) || 0) + 1;
+    if (event === 'sync_event' && payload) {
+      await handleSyncEvent(payload);
+      return;
+    }
+    if (event === 'sync_hint' && payload?.groupId) {
+      // Map the hint to the same bounded backfill (active group only).
+      if (String(payload.groupId) === String(state.activeGroupId)) {
+        await backfillActiveGroup('sync_hint');
+      }
+      return;
+    }
+    if (event === 'chat_cleared' && payload?.groupId) {
+      if (String(payload.groupId) === String(state.activeGroupId)) {
+        state.messages = [];
         draw();
-        return;
       }
-      const item = await decorate(payload, payload.groupId);
-      item.sending = false;
-      if (item.channel) {
-        const prefs = loadPrefs(paths);
-        rememberChannel(payload.groupId, item.channel, prefs);
-        savePrefs(prefs, paths);
-        state.channels = listChannels(payload.groupId, paths);
+      return;
+    }
+    if (event === 'tag_cleared' && payload?.groupId) {
+      if (String(payload.groupId) === String(state.activeGroupId)) {
+        const tag = payload.tagIndex ? String(payload.tagIndex) : null;
+        state.messages = state.messages.filter((m) => !tag || String(m.msg.tagIndex || '') !== tag);
+        draw();
       }
-      upsertMessage(item);
-      markVisibleRead();
-      draw();
       return;
     }
     if (event === 'message_read_update' && payload?.messageId) {
@@ -706,24 +905,6 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
         item.msg.readCount = Math.max(0, Number(payload.readCount) || 0);
         draw();
       }
-      return;
-    }
-    if (event === 'message_edited' && payload) {
-      const idx = state.messages.findIndex((m) => String(m.msg.id) === String(payload.id));
-      if (idx >= 0) {
-        const item = await decorate(payload, payload.groupId || state.activeGroupId);
-        state.messages[idx] = item;
-        draw();
-      }
-      return;
-    }
-    if (event === 'message_deleted' && payload) {
-      state.messages = state.messages.filter((m) => String(m.msg.id) !== String(payload.id || payload.messageId));
-      if (String(state.hoverMessageId) === String(payload.id || payload.messageId)) {
-        state.hoverMessageId = null;
-        state.hoverAction = null;
-      }
-      draw();
       return;
     }
     if ((event === 'channel_announced' || event === 'channel_announce') && payload?.channel && payload.groupId) {
@@ -1162,7 +1343,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
       setError('No chat open');
       return;
     }
-    const tempId = `pending-${Date.now()}`;
+    const tempId = nextPendingId();
     upsertMessage({
       msg: {
         id: tempId,
@@ -1300,7 +1481,7 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
         return;
       }
       const replyTo = state.replyTo;
-      const tempId = `pending-${Date.now()}`;
+      const tempId = nextPendingId();
       const pending = {
         msg: {
           id: tempId,
@@ -1476,6 +1657,15 @@ function createChatController({ client, paths, stdout, getSize, onDraw, onQuit, 
     }
     if (key === 'f' && state.activeGroupId && !state.overlay && !profileNavActive()) {
       toggleInputFocus();
+      draw();
+      return true;
+    }
+    // Ctrl+C while composing cancels the edit/reply and clears the composer
+    // instead of quitting the whole TUI. Ctrl+D still quits.
+    if (key === 'c' && (state.editingId || state.replyTo || state.composer)) {
+      cancelComposeMode();
+      state.composer = '';
+      state.composerCaret = 0;
       draw();
       return true;
     }

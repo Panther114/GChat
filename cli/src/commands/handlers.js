@@ -41,30 +41,66 @@ function print(ctx, data) {
   }
 }
 
-async function promptHidden(question) {
-  if (!input.isTTY) {
+/**
+ * Read a password without echo using raw-mode stdin directly. The previous
+ * implementation misused readline/promises (`rl.question('', cb)` treats the
+ * callback as options and the outer promise never resolved), freezing every
+ * login/register that reached the prompt.
+ */
+async function readHiddenLine({ input: inputStream = input, output: outStream = output } = {}) {
+  if (!inputStream.isTTY) {
     throw new Error('Password prompt requires an interactive TTY');
   }
   return new Promise((resolve, reject) => {
-    const rl = readline.createInterface({ input, output, terminal: true });
-    const onData = (char) => {
-      const c = char.toString();
-      if (c === '\n' || c === '\r' || c === '\u0004') {
-        input.removeListener('data', onData);
-      } else {
-        // mute
+    const wasRaw = inputStream.isRaw;
+    let value = '';
+    let settled = false;
+    const cleanup = () => {
+      inputStream.removeListener('data', onData);
+      try {
+        inputStream.setRawMode(!!wasRaw);
+      } catch {
+        /* stream may not support raw mode */
       }
     };
-    output.write(question);
-    input.on('data', onData);
-    rl.question('', (answer) => {
-      input.removeListener('data', onData);
-      rl.close();
-      output.write('\n');
-      resolve(answer);
-    });
-    rl.on('error', reject);
+    const settle = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      try { outStream.write('\n'); } catch { /* ignore */ }
+      fn(arg);
+    };
+    const onData = (chunk) => {
+      for (const ch of String(chunk)) {
+        if (ch === '\r' || ch === '\n') {
+          settle(resolve, value);
+          return;
+        }
+        if (ch === '\u0003' || ch === '\u0004') {
+          settle(reject, new Error('Aborted'));
+          return;
+        }
+        if (ch === '\u007f' || ch === '\b') {
+          value = value.slice(0, -1);
+          continue;
+        }
+        if (ch >= ' ') value += ch;
+      }
+    };
+    try {
+      inputStream.setRawMode(true);
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    inputStream.resume();
+    inputStream.on('data', onData);
   });
+}
+
+async function promptHidden(question, { input: inputStream = input, output: outStream = output } = {}) {
+  outStream.write(question);
+  return readHiddenLine({ input: inputStream, output: outStream });
 }
 
 async function promptLine(question) {
@@ -272,7 +308,10 @@ async function handleCommand(parsed, ctx) {
       const lines = [
         `Opened ${group.name} (#${channel})`,
         ...decrypted
-          .filter((d) => !channel || d.channel === channel || d.channel === 'main')
+          // Only include #main when the requested channel IS main or there is
+          // no channel filter — otherwise legacy untagged traffic leaks into
+          // every channel view.
+          .filter((d) => !channel || d.channel === channel)
           .slice(-30)
           .map((d) => formatMessageLine(d.msg, d)),
       ];
@@ -717,7 +756,7 @@ async function handleCommand(parsed, ctx) {
       if (!(await confirm(ctx, 'Export vault secrets to stdout/file? DANGEROUS'))) throw new Error('Aborted');
       const data = ctx.client.vaultExport();
       if (flags.o || flags.out) {
-        fs.writeFileSync(path.resolve(flags.o || flags.out), JSON.stringify(data, null, 2));
+        fs.writeFileSync(path.resolve(flags.o || flags.out), JSON.stringify(data, null, 2), { mode: 0o600 });
         return print(ctx, `Wrote vault to ${flags.o || flags.out}`);
       }
       return print(ctx, data);
@@ -794,7 +833,11 @@ async function handleCommand(parsed, ctx) {
 
 async function runParsed(parsed, options = {}) {
   const ctx = createContext(options);
-  return handleCommand(parsed, ctx);
+  try {
+    return await handleCommand(parsed, ctx);
+  } finally {
+    try { ctx.client.disconnectSocket(); } catch { /* ignore */ }
+  }
 }
 
 async function runArgv(argv, options = {}) {
@@ -807,12 +850,19 @@ async function runArgv(argv, options = {}) {
   if (parsed.name === 'tui') {
     return { __tui: true, ctx: createContext(options) };
   }
-  return handleCommand(parsed, createContext({
+  const ctx = createContext({
     ...options,
     json: options.json || !!parsed.flags.json,
     yes: options.yes || !!parsed.flags.yes,
     server: options.server || parsed.flags.server,
-  }));
+  });
+  try {
+    return await handleCommand(parsed, ctx);
+  } finally {
+    // One-shot commands must not leak a live socket: `gchat send "hi"` has to
+    // exit once the command settles.
+    try { ctx.client.disconnectSocket(); } catch { /* ignore */ }
+  }
 }
 
 module.exports = {
@@ -820,6 +870,7 @@ module.exports = {
   handleCommand,
   runParsed,
   runArgv,
+  promptHidden,
   COMMAND_AREAS,
   parseCommand,
   helpText,

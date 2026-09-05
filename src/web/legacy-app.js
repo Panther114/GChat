@@ -3335,10 +3335,14 @@ function sendNativeNotification(unreadCount, groupId, notification = null) {
   if (!isNativeNotificationEnabled()) return;
   const body = formatNotificationBody(unreadCount, notification);
   if (window.electronAPI) {
+    // channelId is an additive, optional hint: the desktop shell forwards it
+    // on notification click so the focus handler can open the message's
+    // channel (not just its group). Older shells ignore it.
     window.electronAPI.showNotification({
       title: GENERIC_NOTIFICATION_TITLE,
       body,
       groupId,
+      channelId: notification?.channelId || null,
     });
     return;
   }
@@ -6433,11 +6437,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   startHostedAppUpdatePolling();
 
   // When running in the Electron desktop app, listen for notification-click
-  // events from the main process so we can switch to the right group.
+  // events from the main process so we can switch to the right group — and,
+  // when the click payload carries a channel hint, to the message's channel.
   if (window.electronAPI) {
-    window.electronAPI.onFocusGroup((groupId) => {
-      const target = groups.find(g => g.id === groupId);
-      if (target) selectGroup(target.id);
+    window.electronAPI.onFocusGroup((payload) => {
+      const hint = payload && typeof payload === 'object' ? payload : { groupId: payload };
+      const target = groups.find(g => String(g.id) === String(hint.groupId));
+      if (!target) return;
+      // The channel hint (additive, optional) is persisted so selectGroup
+      // restores it — exactly like the user's own last-open channel.
+      if (hint.channelId) writeStoredChannel(target.id, hint.channelId);
+      void selectGroup(target.id);
     });
   }
 
@@ -9805,7 +9815,7 @@ function initSocket() {
       if (msg.senderId !== currentUser.id && !incomingIsRead) {
         const totalUnread = getTotalUnreadCount();
         pushStatus.totalUnreadCount = totalUnread;
-        sendNativeNotification(totalUnread, msg.groupId, { senderName: msg.senderName, preview });
+        sendNativeNotification(totalUnread, msg.groupId, { senderName: msg.senderName, preview, channelId: incomingTopic });
       }
       if (msg.clientUploadId) removePendingAttachment(msg.clientUploadId);
       return;
@@ -9849,7 +9859,7 @@ function initSocket() {
     if (msg.senderId !== currentUser.id && !incomingIsRead) {
       const totalUnread = getTotalUnreadCount();
       pushStatus.totalUnreadCount = totalUnread;
-      sendNativeNotification(totalUnread, msg.groupId, { senderName: msg.senderName, preview: preview2 });
+      sendNativeNotification(totalUnread, msg.groupId, { senderName: msg.senderName, preview: preview2, channelId: incomingTopic });
     }
   });
 

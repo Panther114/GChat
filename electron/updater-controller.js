@@ -19,6 +19,7 @@ function createUpdaterController(updater, {
   let interval = null;
   let started = false;
   let disposed = false;
+  let checkInFlight = false;
   let status = createUpdateStatus({ currentVersion });
 
   updater.autoDownload = true;
@@ -37,9 +38,9 @@ function createUpdaterController(updater, {
     return status;
   }
 
-  const handleChecking = () => {
-    publish({ type: 'check-start' });
-  };
+  // The shell only starts checks itself (manual publish at 'check-start' or a
+  // silent interval check); the updater's own 'checking-for-update' event
+  // would double-publish the same state, so it is intentionally not broadcast.
 
   const handleAvailable = (info) => {
     publish({
@@ -47,6 +48,17 @@ function createUpdaterController(updater, {
       availableVersion: info?.version || null,
       checkedAt: new Date().toISOString(),
     });
+    // autoDownload is forced on: the installer download starts immediately
+    // after 'update-available'. Expose 'downloading' right away so the
+    // renderer's Install button (shown at 'available', accepted only at
+    // 'ready') never sits on a dead 'available' state.
+    if (updater.autoDownload !== false) {
+      publish({
+        type: 'download-progress',
+        percent: 0,
+        availableVersion: status.availableVersion,
+      });
+    }
   };
 
   const handleNotAvailable = () => {
@@ -93,7 +105,6 @@ function createUpdaterController(updater, {
     onError(error);
   };
 
-  updater.on('checking-for-update', handleChecking);
   updater.on('update-available', handleAvailable);
   updater.on('update-not-available', handleNotAvailable);
   updater.on('download-progress', handleProgress);
@@ -112,13 +123,19 @@ function createUpdaterController(updater, {
       }
       return { ok: false, status: { ...status } };
     }
+    // A manual check colliding with an interval check must not error — report
+    // the current status and skip the redundant network round-trip.
+    if (checkInFlight) return { ok: true, skipped: true, status: { ...status } };
     if (!silent) publish({ type: 'check-start' });
+    checkInFlight = true;
     try {
       const result = await updater.checkForUpdatesAndNotify();
       return { ok: true, status: { ...status }, result: result || null };
     } catch (error) {
       handleError(error);
       return { ok: false, status: { ...status } };
+    } finally {
+      checkInFlight = false;
     }
   }
 
@@ -154,7 +171,6 @@ function createUpdaterController(updater, {
     disposed = true;
     if (interval) clearInterval(interval);
     interval = null;
-    updater.removeListener('checking-for-update', handleChecking);
     updater.removeListener('update-available', handleAvailable);
     updater.removeListener('update-not-available', handleNotAvailable);
     updater.removeListener('download-progress', handleProgress);

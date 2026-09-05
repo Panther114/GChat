@@ -16,7 +16,10 @@ const path = require('path');
 const { pathToFileURL } = require('url');
 const {
   badgeLabelForUnread,
+  buildFocusGroupPayload,
+  isAbortedLoadError,
   normalizeUnreadCount,
+  resolveIconPath,
 } = require('./runtime-helpers');
 
 const OFFICIAL_SERVER_URL = 'https://gchat.up.railway.app';
@@ -52,6 +55,10 @@ let trayIconCache = null;
 let updaterController = null;
 let updaterStartTimer = null;
 let lastUnreadCount = null;
+// Lightweight last-known updater status snapshot. Kept in the main process so
+// did-finish-load can repaint the renderer without lazy-loading the 257KB
+// updater bundle on every page load (cold start must stay off that path).
+let lastUpdateStatusSnapshot = null;
 // v1.3.9: connection monitor — mirrors the Rust shells' auto-retry so a
 // transient load failure retries instead of stranding the user on the offline
 // page with only a manual Retry button.
@@ -66,16 +73,14 @@ function getIconPath() {
   if (iconPathCache !== null) return iconPathCache;
   const candidates = [
     path.join(__dirname, '..', 'public', 'gchat_icon.png'),
-    path.join(process.resourcesPath, 'public', 'gchat_icon.png'),
+    path.join(process.resourcesPath || '', 'public', 'gchat_icon.png'),
+    // Fallback: the packaged build/app icon so the tray is never invisible.
+    path.join(__dirname, '..', 'build', 'icon.ico'),
   ];
-  iconPathCache = candidates.find((candidate) => {
-    try {
-      fs.accessSync(candidate);
-      return true;
-    } catch {
-      return false;
-    }
-  }) || '';
+  iconPathCache = resolveIconPath(candidates, (candidate) => {
+    fs.accessSync(candidate);
+    return true;
+  });
   return iconPathCache;
 }
 
@@ -162,6 +167,7 @@ function toggleOrShowMainWindow() {
 }
 
 function broadcastUpdateStatus(status) {
+  if (status) lastUpdateStatusSnapshot = status;
   if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.webContents.send('update-status', status);
 }
@@ -172,12 +178,20 @@ async function showOfflineScreen() {
   }
 }
 
+// Returns the REAL load result: true when the hosted app finished loading,
+// false on failure (recorded in lastLoadError) or on an aborted load (user or
+// a competing navigation — never recorded, never retried). The retry handler
+// and offline page depend on this outcome.
 async function loadHostedApp() {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
   try {
     // The persistent session keeps hosted login cookies and client-side keys between launches.
     await mainWindow.loadURL(OFFICIAL_SERVER_URL);
+    return true;
   } catch (error) {
+    // An aborted (-3) load is a navigation race, not an outage: do not
+    // overwrite lastLoadError nor re-schedule the connection monitor.
+    if (isAbortedLoadError(error)) return false;
     lastLoadError = {
       errorCode: 'LOAD_FAILED',
       errorDescription: error?.message || 'Unable to connect to the hosted app.',
@@ -186,6 +200,7 @@ async function loadHostedApp() {
     };
     // v1.3.9: no immediate offline screen — the monitor retries first.
     scheduleConnectionMonitor();
+    return false;
   }
 }
 
@@ -265,8 +280,9 @@ async function createWindow() {
       lastLoadError = null;
       cancelConnectionMonitor();
     }
-    const status = getUpdaterController().getStatus();
-    broadcastUpdateStatus(status);
+    // Repaint the last known status WITHOUT touching the updater bundle —
+    // lazily initializing it here would put 257KB on the cold-start path.
+    if (lastUpdateStatusSnapshot) broadcastUpdateStatus(lastUpdateStatusSnapshot);
   });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     // v1.3.14: H8 — only open safe https links externally; never hand file:/
@@ -361,18 +377,22 @@ ipcMain.on('set-unread-count', (event, count) => {
   updateTrayMenu(unread);
 });
 
-ipcMain.on('show-notification', (event, { title, body, groupId } = {}) => {
+ipcMain.on('show-notification', (event, payload = {}) => {
   if (!isTrustedSender(event)) return;
   if (!Notification.isSupported()) return;
+  const options = payload && typeof payload === 'object' ? payload : {};
+  // tag: identical notifications replace each other instead of stacking.
   const notification = new Notification({
-    title: title || 'Gchat',
-    body: body || 'New message',
+    title: options.title || 'Gchat',
+    body: options.body || 'New message',
+    tag: 'gchat-message',
     icon: getAppIcon(),
     urgency: 'normal',
   });
   notification.on('click', () => {
     showMainWindow();
-    if (groupId) mainWindow?.webContents.send('focus-group', groupId);
+    const focusPayload = buildFocusGroupPayload(options);
+    if (focusPayload) mainWindow?.webContents.send('focus-group', focusPayload);
   });
   notification.show();
 });
@@ -389,9 +409,13 @@ ipcMain.handle('set-launch-at-startup', (event, enabled) => {
 });
 ipcMain.handle('retry-connection', async (event) => {
   if (!isTrustedSender(event)) return false;
+  // The offline page's Retry button re-enables itself when this resolves
+  // false, so the outcome must be the REAL load result.
   try {
-    await loadHostedApp();
-    return true;
+    if (!mainWindow || mainWindow.isDestroyed()) return false;
+    cancelConnectionMonitor();
+    connectionMonitorAttempts = 0;
+    return (await loadHostedApp()) === true;
   } catch {
     return false;
   }
@@ -427,9 +451,11 @@ ipcMain.handle('copy-binary-to-clipboard', (event, payload = {}) => {
 ipcMain.handle('clear-cache-and-restart', async (event) => {
   if (!isTrustedSender(event)) return false;
   await mainWindow?.webContents.session.clearCache();
+  // app.quit() (not app.exit) so the before-quit handler runs and disposes
+  // the updater cleanly before the relaunch.
   isQuitting = true;
   app.relaunch();
-  app.exit(0);
+  app.quit();
   return true;
 });
 ipcMain.handle('reload-hosted-app', async (event) => {
@@ -448,7 +474,10 @@ ipcMain.handle('check-for-updates', async (event) => {
   const result = await getUpdaterController().checkForUpdates({ silent: false });
   return result.status;
 });
-ipcMain.handle('get-update-status', () => getUpdaterController().getStatus());
+ipcMain.handle('get-update-status', (event) => {
+  if (!isTrustedSender(event)) return null;
+  return getUpdaterController().getStatus();
+});
 ipcMain.handle('install-update', (event) => {
   if (!isTrustedSender(event)) return false;
   const installed = getUpdaterController().installUpdate();

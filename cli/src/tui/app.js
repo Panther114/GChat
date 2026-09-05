@@ -137,6 +137,14 @@ function redrawRequired(lastCols, lastRows, cols, rows) {
 }
 
 /**
+ * A failed session restore must return the UI to the landing form — never
+ * leave it frozen on the splash. Pure so it stays unit-testable.
+ */
+function screenAfterRestoreFailure(screen) {
+  return screen === 'splash' ? 'landing' : screen;
+}
+
+/**
  * Run the TUI.
  * @param {{ paths?: object, server?: string }} [options] kept for future use (chat TUI wiring)
  */
@@ -167,7 +175,9 @@ async function runTui(options = {}) {
   /** Apply one keystroke to the login form (inserts at the active caret). */
   function handleKey(ch) {
     if (ch === '\r' || ch === '\n') {
-      submit().catch(() => {});
+      submit().catch((err) => {
+        process.stderr.write(`gchat: ${err?.message || err}\n`);
+      });
       return;
     }
     if (ch === '\t') {
@@ -594,11 +604,13 @@ async function runTui(options = {}) {
         await api.me();
         startOnChat = true;
       } else {
+        screen = screenAfterRestoreFailure(screen);
         stopSplash();
       }
     }
   } catch {
     startOnChat = false;
+    screen = screenAfterRestoreFailure(screen);
     stopSplash();
   }
 
@@ -623,4 +635,5 @@ module.exports = {
   splashBirdOrigin,
   yieldPaint,
   redrawRequired,
+  screenAfterRestoreFailure,
 };

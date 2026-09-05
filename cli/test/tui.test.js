@@ -113,7 +113,7 @@ test('landing frame: contains title, option and hint with art glyphs intact', ()
   assert.equal(frame.height, tier.art.length + landing.LOGO_PADDING);
   assert.equal(frame.originX, Math.floor((100 - frame.width) / 2));
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r30/);
+  assert.ok(plain.includes(`Welcome to GChat CLI ${landing.TUI_VERSION}`));
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
   // The braille glyphs themselves must be preserved exactly.
@@ -203,7 +203,7 @@ test('composeFrame: writes full-width rows without eraseLine', () => {
 test('composeFrame: content is written on each line', () => {
   const out = app.composeFrame(80, 24, 0);
   const plain = ansi.stripAnsi(out.replace(/\u001b\[\d+;\d+H/g, ''));
-  assert.match(plain, /Welcome to GChat CLI 0\.1 r30/);
+  assert.ok(plain.includes(`Welcome to GChat CLI ${landing.TUI_VERSION}`));
   assert.match(plain, /\[x\] login via username/);
   assert.match(plain, /Press enter to continue/);
 });
@@ -223,7 +223,7 @@ test('splash screen paints a themed canvas with a loading label', () => {
   const lines = app.splashScreenLines(80, 24, 'dark', 'Loading', 0);
   assert.equal(lines.length, 24);
   const plain = lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r30'));
+  assert.ok(plain.includes(`GChat CLI ${landing.TUI_VERSION}`));
   assert.ok(!plain.includes('Loading'), 'no separate Loading line');
   assert.ok(lines.join('').includes(ansi.bg(theme.DARK.canvas)));
 });
@@ -234,7 +234,7 @@ test('splash shimmers the version title instead of a Loading line', () => {
   const plainA = a.map((l) => ansi.stripAnsi(l)).join('\n');
   const plainB = b.map((l) => ansi.stripAnsi(l)).join('\n');
   assert.equal(plainA, plainB, 'the version letters do not change');
-  assert.ok(plainA.includes('GChat CLI 0.1 r30'));
+  assert.ok(plainA.includes(`GChat CLI ${landing.TUI_VERSION}`));
   assert.notEqual(a.join('\n'), b.join('\n'), 'the version restyles as the shimmer moves');
 });
 
@@ -680,7 +680,7 @@ test('codePointIndex and stepCodePoint do not split emoji', () => {
 test('chat frame: sidebar, channels, composer, and messages', () => {
   const frame = chatLayout.buildChatFrame(80, 24, chatState());
   const plain = frame.lines.map((l) => ansi.stripAnsi(l)).join('\n');
-  assert.ok(plain.includes('GChat CLI 0.1 r30'), 'sidebar title is the CLI version');
+  assert.ok(plain.includes(`GChat CLI ${landing.TUI_VERSION}`), 'sidebar title is the CLI version');
   assert.ok(!plain.includes('chats\n') && !/^\s*chats\s*$/m.test(plain.split('\n')[0]), 'old "chats" label is gone');
   assert.ok(plain.includes('team'), 'active group in sidebar');
   assert.ok(!plain.includes('●'), 'groups are not indented with a bullet');

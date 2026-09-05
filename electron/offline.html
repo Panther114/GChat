@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:" />
   <title>Gchat Connection Required</title>
   <link rel="stylesheet" href="./desktop.css" />
 </head>
@@ -35,7 +36,7 @@
         <li>Use the retry button below to reload the hosted app.</li>
       </ul>
 
-      <div class="retry-row" style="margin-top: 28px;">
+      <div class="retry-row">
         <button class="btn-primary" id="retry-btn">Retry connection</button>
         <span class="footer-note">The web UI will open automatically as soon as the hosted app responds.</span>
       </div>

@@ -13,9 +13,10 @@
 
 const ansi = require('./ansi');
 const { PALETTE, DARK, runWithTheme } = require('./theme');
+const { CLI_VERSION } = require('../version');
 
-/** Display version for the landing page (intentionally separate from package version). */
-const TUI_VERSION = '0.1 r30';
+/** Display version for the landing page — one version string, from cli/package.json. */
+const TUI_VERSION = CLI_VERSION;
 /** Shared duration for login→loading and loading→idle bird hops. */
 const BIRD_FLIGHT_MS = 560;
 

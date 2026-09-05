@@ -10,6 +10,8 @@ const releaseDir = path.join(desk, 'target', 'release');
 const bundleDir = path.join(releaseDir, 'bundle');
 const exe = path.join(releaseDir, 'Gchat.exe');
 const nsi = path.join(root, 'scripts', 'nsis', 'gchat-thin.nsi');
+const appVersion = require(path.join(root, 'package.json')).version;
+const setupName = `Gchat_${appVersion}_x64-setup.exe`;
 
 console.log('Building thin Windows shell…');
 execFileSync('cargo', ['build', '--release'], {
@@ -34,7 +36,7 @@ if (!makensis) {
 }
 
 console.log('Packaging NSIS installer…');
-const result = spawnSync(makensis, ['/V2', nsi], {
+const result = spawnSync(makensis, [`/DAPP_VERSION=${appVersion}`, '/V2', nsi], {
   cwd: root,
   encoding: 'utf8',
   shell: false,
@@ -45,10 +47,10 @@ if (result.status !== 0) {
   throw new Error(`makensis failed with code ${result.status}`);
 }
 
-const setup = path.join(bundleDir, 'Gchat_1.4.5_x64-setup.exe');
+const setup = path.join(bundleDir, setupName);
 if (!fs.existsSync(setup)) {
   // NSIS OutFile is relative to the nsi file location
-  const alt = path.join(root, 'src-desktop-win', 'target', 'release', 'bundle', 'Gchat_1.4.5_x64-setup.exe');
+  const alt = path.join(root, 'src-desktop-win', 'target', 'release', 'bundle', setupName);
   if (fs.existsSync(alt)) {
     console.log(`Installer: ${alt} (${(fs.statSync(alt).size / 1024 / 1024).toFixed(2)} MiB)`);
   } else {

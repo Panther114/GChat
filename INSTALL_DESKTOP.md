@@ -7,11 +7,11 @@ Windows packages use a **non-Tauri thin native host** (`src-desktop-win`, wry/ta
 Key behaviors:
 
 - Loads only `https://gchat.up.railway.app`
-- Full `window.electronAPI` bridge (tray, notifications, badges, autostart, clipboard, offline retry, updates)
-- **Tray-hide unloads the SPA** into a tiny placeholder page to free WebView2/JS heap while the process stays in the tray
-- Restoring from tray reloads the hosted app (session cookies remain in the WebView2 profile)
-- Memory-oriented WebView2 flags (`max-old-space-size=192`, unused features disabled)
-- Installer ~1 MiB NSIS (`Gchat_1.4.5_x64-setup.exe`)
+- Full `window.electronAPI` bridge (tray, notifications, autostart, clipboard, offline retry, updates)
+- **Tray-hide keeps the SPA alive** for instant restore (no placeholder page; only minimize/close visibility changes)
+- Restoring from tray is instant (session cookies remain in the WebView2 profile)
+- Memory-oriented WebView2 flags (`max-old-space-size=384`, unused features disabled)
+- Installer ~1 MiB NSIS (`Gchat_1.4.6_x64-setup.exe`)
 
 ## macOS: Tauri / WKWebView fallback
 
@@ -19,9 +19,9 @@ macOS continues to use **Tauri 2 + WKWebView** (`npm run build:mac`). Same hoste
 
 ## Install
 
-Download the GitHub Release for **v1.4.5**:
+Download the GitHub Release for **v1.4.6**:
 
-- **Windows:** `Gchat_1.4.5_x64-setup.exe`
+- **Windows:** `Gchat_1.4.6_x64-setup.exe`
 - **macOS:** universal `.dmg` from the Tauri build path when published
 
 First launch may require SmartScreen / Privacy approval (unsigned packages).
@@ -37,7 +37,7 @@ npm run build:win
 
 Requires Rust stable and NSIS (`makensis`). Output:
 
-`src-desktop-win/target/release/bundle/Gchat_1.4.5_x64-setup.exe`
+`src-desktop-win/target/release/bundle/Gchat_1.4.6_x64-setup.exe`
 
 ### macOS (Tauri fallback)
 
@@ -56,7 +56,17 @@ npm run build:mac
 
 - Hosted production service only
 - Tray: left-click restore/hide; menu Open / Check for Updates / Quit
-- Close hides to tray (Windows thin shell also suspends SPA HTML)
+- Close hides to tray (SPA stays loaded for instant restore)
 - Settings → Updates in-app check UI
-- Single-instance lock
+- Single-instance lock (a second launch focuses the running window)
 - External links open in the default browser
+
+## Release signing (required)
+
+The thin shell's updater verifies a minisign signature before executing a
+downloaded installer: every GitHub release must ship
+`Gchat_<version>_x64-setup.exe` **together with** `Gchat_<version>_x64-setup.exe.sig`,
+signed with the same keypair as the Tauri updater (`src-tauri/tauri.conf.json`
+`pubkey`). `build-desktop.yml` does this automatically via
+`tauri signer sign` (needs the `TAURI_SIGNING_PRIVATE_KEY` secret). An update
+whose signature is missing or invalid is deleted and never executed.

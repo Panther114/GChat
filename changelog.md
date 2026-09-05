@@ -4,6 +4,16 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## v1.4.6 — Desktop hardening + CLI protocol repair
+
+- **CLI realtime receive repaired**: the TUI now consumes the server's `sync_event` / `sync_hint` protocol (message.created/edited/deleted, history.cleared) instead of the retired legacy socket events — incoming messages, edits, deletes, and clears arrive live again; rooms re-join and one bounded page backfills after reconnects.
+- **CLI reliability**: one-shot commands disconnect and exit cleanly; password prompt rewritten (no more login hang); failed session restore returns to the landing form; edits keep the original message channel; terminal bell rings on inactive-group messages; `image/jpg` MIME fixed; 15MB uploads rejected before reading into RAM; plaintext media temp dir wiped on exit; vault export written 0600; corrupted stores warn instead of silently emptying.
+- **CLI completeness**: server channel-list convergence on group open, per-channel read cursors (`mark_channel_read`), 29 regression tests incl. live crypto round-trips, and a full command reference in `cli/README.md`.
+- **Windows thin shell**: updater verifies a minisign signature (`<asset>.sig` in the release, Tauri pubkey) before executing installers; numeric semver comparison (no downgrade offers); asset-name validation; 1 MiB API cap; clipboard-cache cleanup; second launch focuses the running window; download progress reaches the UI; toasts use `-EncodedCommand`.
+- **Electron**: `retry-connection` reports real success/failure; all IPC handlers sender-gated; `ERR_ABORTED` filtered; CSP on the offline page; updater bundle stays off the cold-start path; channel-aware notification focus.
+- **Tauri**: connection-monitor generation counter (no more retry-kill races); renderer-ready reset on navigation; blocking clipboard/cache work off the main thread; unicode filenames preserved; ISO-8601 timestamps; cancellable updater probes.
+- **Hygiene**: single version source (`package.json` 1.4.6 read by build scripts/tests/NSIS); orphaned Electron packaging test added to `npm test`; stale bundles rebuilt.
+
 ## v1.4.5 — Local-first synchronization
 
 - Added SQLite-backed epoch/sequence synchronization with recoverable tombstones and clear boundaries.

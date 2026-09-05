@@ -56,6 +56,9 @@ jobs:
           - os: windows-latest
             target: bun-windows-x64
             outfile: gchat-windows-x64.exe
+          - os: ubuntu-latest
+            target: bun-linux-x64
+            outfile: gchat-linux-x64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

@@ -19,8 +19,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   onFocusGroup(callback) {
-    if (typeof callback !== 'function') return;
-    ipcRenderer.on('focus-group', (_event, groupId) => callback(groupId));
+    if (typeof callback !== 'function') return () => {};
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on('focus-group', handler);
+    return () => {
+      ipcRenderer.removeListener('focus-group', handler);
+    };
   },
 
   getLaunchAtStartup() {

@@ -7,6 +7,7 @@ const { HttpClient } = require('./http');
 const {
   encryptTextEnvelope,
   decryptServerMessage,
+  decryptAttachmentMeta,
   encryptAttachmentEnvelope,
   decryptAttachment,
   parseDurationToMs,
@@ -23,6 +24,15 @@ const {
 } = require('../store/prefs');
 const { loadConfig } = require('../store/config');
 const { clearSession } = require('../store/session');
+
+const MAX_UPLOAD_BYTES = 15 * 1024 * 1024; // server rejects attachments over 15MB
+const IMAGE_MIME_BY_EXT = {
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+};
 
 class GChatClient {
   constructor({ server, paths, onEvent } = {}) {
@@ -85,7 +95,8 @@ class GChatClient {
       result.crypto = `fail: ${err.message}`;
       result.errors.push(`crypto: ${err.message}`);
     }
-    result.ok = result.errors.length === 0 || (result.health && result.crypto === 'ok');
+    result.ok = result.errors.length === 0
+      || !!(result.health && result.crypto === 'ok' && result.me && result.me.id);
     return result;
   }
 
@@ -98,7 +109,9 @@ class GChatClient {
     this.http.session.user = body;
     this.http.persistSession();
     await this.http.ensureCsrf();
-    await this.syncKeys().catch(() => {});
+    await this.syncKeys().catch((err) => {
+      process.stderr.write(`gchat: key sync failed: ${err?.message || err}\n`);
+    });
     return body;
   }
 
@@ -353,8 +366,8 @@ class GChatClient {
         server: this.server,
         session: this.http.session,
         onEvent: (event, payload) => {
-          if (event === 'new_message' && payload?.groupId) {
-            this._cacheMessages(payload.groupId, [payload]);
+          if (event === 'sync_event' && payload?.message?.groupId) {
+            this._cacheMessages(payload.message.groupId, [payload.message]);
           }
           if (this.onEvent) this.onEvent(event, payload);
         },
@@ -443,7 +456,10 @@ class GChatClient {
       current = page.find((m) => String(m.id) === String(messageId));
     }
     if (!current) throw new Error(`Message not found in cache: ${messageId}`);
-    const channel = getActiveChannel(groupId, this.paths);
+    // Edits must reuse the ORIGINAL message's channel/tag metadata, never the
+    // caller's current active channel — otherwise the message migrates channels.
+    const dec = await decryptServerMessage(current, secret, groupId);
+    const channel = normalizeChannel(dec.channel) || DEFAULT_CHANNEL;
     const expectedRevision = Number(current.revision) || 1;
     const { envelope } = await encryptTextEnvelope({
       text: newText,
@@ -455,6 +471,7 @@ class GChatClient {
       messageId,
       revision: expectedRevision + 1,
       replyToId: current.replyToId || current.reply_to || null,
+      replyPreview: dec.metadata?.replyPreview || null,
     });
     await this.http.ensureCsrf();
     const { body } = await this.http.patch(`/api/groups/${groupId}/messages/${messageId}`, {
@@ -481,6 +498,52 @@ class GChatClient {
   markRead(groupId, messageId) {
     const sock = this.ensureSocket();
     sock.emit('mark_message_read', { groupId, messageId });
+  }
+
+  /**
+   * Per-channel read cursor (server `mark_channel_read`): everything up to
+   * (createdAt, messageId) in this channel counts as read. #main uses a null
+   * tag index; other channels use the blind tag index of the channel name.
+   */
+  async markChannelRead(groupId, channel, { createdAt, messageId } = {}) {
+    const secret = await this.ensureSecret(groupId);
+    const normalized = normalizeChannel(channel) || DEFAULT_CHANNEL;
+    const tagIndex = normalized === DEFAULT_CHANNEL
+      ? null
+      : await cryptoV2.blindIndex(normalized, secret, groupId, 'tag-index');
+    const sock = this.ensureSocket();
+    sock.emit('mark_channel_read', { groupId, tagIndex, createdAt, messageId });
+    return true;
+  }
+
+  /**
+   * Server-side channel discovery (GET /api/groups/:id/channels). Resolves
+   * each blind tagIndex back to its plaintext topic via the sample message.
+   * Bounded: a single GET per call.
+   */
+  async fetchChannels(groupId) {
+    const { body } = await this.http.get(`/api/groups/${groupId}/channels`);
+    const rows = Array.isArray(body?.channels) ? body.channels : [];
+    const secret = this.getSecret(groupId);
+    const out = [];
+    for (const row of rows.slice(0, 200)) {
+      const sample = row?.sampleMessage;
+      if (!sample || !secret) continue;
+      try {
+        let name = null;
+        if (sample.type === 'image' || sample.type === 'file') {
+          const meta = await decryptAttachmentMeta(sample, secret, groupId);
+          name = normalizeChannel(meta?.hashtag);
+        } else {
+          const dec = await decryptServerMessage(sample, secret, groupId);
+          name = dec.error ? null : (normalizeChannel(dec.channel) || null);
+        }
+        if (name) out.push({ name, tagIndex: row.tagIndex, messageCount: Number(row.messageCount) || 0 });
+      } catch {
+        /* skip unresolvable channel */
+      }
+    }
+    return out;
   }
 
   startDisappearingTimer(groupId, messageId) {
@@ -522,16 +585,22 @@ class GChatClient {
     const user = this.user || await this.me();
     const secret = await this.ensureSecret(groupId);
     const abs = path.resolve(filePath);
+    // Reject oversized files BEFORE reading them into memory.
+    const stat = fs.statSync(abs);
+    if (!stat.isFile()) throw new Error(`Not a file: ${filePath}`);
+    if (stat.size > MAX_UPLOAD_BYTES) {
+      throw new Error(`Attachment too large (max 15MB): ${path.basename(abs)}`);
+    }
     const buf = fs.readFileSync(abs);
     const filename = path.basename(abs);
     const ext = path.extname(filename).toLowerCase();
-    const isImage = type === 'image' || ['.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(ext);
+    const isImage = type === 'image' || Object.prototype.hasOwnProperty.call(IMAGE_MIME_BY_EXT, ext);
     const msgType = isImage ? 'image' : 'file';
     const channel = getActiveChannel(groupId, this.paths);
     const prepared = await encryptAttachmentEnvelope({
       buffer: buf,
       filename,
-      mimeType: isImage ? `image/${ext.replace('.', '')}` : 'application/octet-stream',
+      mimeType: isImage ? (IMAGE_MIME_BY_EXT[ext] || 'image/png') : 'application/octet-stream',
       secret,
       groupId,
       senderId: user.id,
@@ -643,4 +712,6 @@ class GChatClient {
 
 module.exports = {
   GChatClient,
+  IMAGE_MIME_BY_EXT,
+  MAX_UPLOAD_BYTES,
 };

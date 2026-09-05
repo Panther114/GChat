@@ -1,6 +1,6 @@
 'use strict';
 
-// Internal cache namespace only. The public app version remains v1.4.5, while
+// Internal cache namespace only. The public app version remains v1.4.6, while
 // a new namespace guarantees clients do not keep the pre-optimization bundle.
 const APP_CACHE = 'gchat-pwa-v145-loading-2';
 const APP_SHELL_ASSETS = [
