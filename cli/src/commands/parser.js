@@ -163,7 +163,7 @@ function parseCommand(input) {
   // Nested commands: groups open, members kick, channel list, etc.
   const nestedRoots = new Set([
     'config', 'account', 'settings', 'groups', 'members', 'channel',
-    'file', 'vault', 'admin', 'timer', 'upload', 'copy', 'crypto', 'ai',
+    'file', 'vault', 'admin', 'timer', 'copy', 'crypto', 'ai',
   ]);
 
   let commandName = name;

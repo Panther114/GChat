@@ -88,7 +88,7 @@ test('login → create group → send encrypted text → history decrypts to sam
   assert.ok(sent.messageId);
   assert.equal(sent.envelope.encryptionVersion, 2);
   assert.ok(sent.envelope.encryptedContent);
-  assert.ok(sent.envelope.tagIndex);
+  assert.equal(sent.envelope.tagIndex, null, '#main is stored with a NULL tag index');
 
   // Direct decrypt of outbound envelope
   const direct = await decryptServerMessage(sent.envelope, client.getSecret(group.id), group.id);
@@ -102,6 +102,44 @@ test('login → create group → send encrypted text → history decrypts to sam
   const decrypted = await client.decryptMessages(group.id, [found]);
   assert.equal(decrypted[0].text, plaintext);
   assert.equal(decrypted[0].channel, 'main');
+});
+
+test('a CLI #main message is cleared by the #main read cursor (no ghost unread)', async () => {
+  const suffix = Date.now().toString(36);
+  const sender = new GChatClient({ server: baseUrl, paths: configPaths(path.join(tempDir, 'unread-a')) });
+  const reader = new GChatClient({ server: baseUrl, paths: configPaths(path.join(tempDir, 'unread-b')) });
+  await sender.register(`usnd_${suffix}`, 'secure-password-123');
+  await reader.register(`urdr_${suffix}`, 'secure-password-123');
+  const { group, joinCode } = await sender.createGroup(`Unread ${suffix}`);
+  await reader.joinGroup(joinCode);
+  const sent = await sender.sendText({ groupId: group.id, text: 'ping', channel: 'main' });
+  const unread = async () => {
+    const { body } = await reader.http.get(`/api/groups/${group.id}/unread`);
+    return body.groupUnreadCount;
+  };
+  assert.equal(await unread(), 1);
+  const [row] = (await reader.fetchMessages(group.id, { limit: 5 })).filter((m) => m.id === sent.messageId);
+  const sock = await reader.connectSocket();
+  await new Promise((resolve) => sock.socket.emit('mark_channel_read',
+    { groupId: group.id, tagIndex: null, createdAt: row.createdAt, messageId: row.id }, resolve));
+  assert.equal(await unread(), 0);
+  sender.disconnectSocket();
+  reader.disconnectSocket();
+});
+
+test('attachments well over the 256 KB JSON limit upload and decrypt', async () => {
+  const suffix = Date.now().toString(36);
+  const c = new GChatClient({ server: baseUrl, paths: configPaths(path.join(tempDir, 'upload-big')) });
+  await c.register(`ubig_${suffix}`, 'secure-password-123');
+  const { group } = await c.createGroup(`Upload ${suffix}`);
+  const file = path.join(tempDir, 'big.bin');
+  fs.writeFileSync(file, Buffer.alloc(900 * 1024, 7));
+  const sent = await c.uploadFile(group.id, file);
+  assert.equal(sent.type, 'file');
+  const out = path.join(tempDir, 'big.out');
+  const saved = await c.saveAttachment(group.id, sent.messageId, out);
+  assert.equal(saved.bytes, 900 * 1024);
+  c.disconnectSocket();
 });
 
 test('join group recovers escrowed secret into vault', async () => {

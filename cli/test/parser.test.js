@@ -127,3 +127,9 @@ test('full inventory areas parse without throwing', () => {
     assert.ok(parsed.area, sample);
   }
 });
+
+test('upload takes a path argument and keeps its case', () => {
+  const cmd = parseCommand(['upload', 'C:/Pics/Cat.PNG']);
+  assert.equal(cmd.name, 'upload');
+  assert.deepEqual(cmd.args, ['C:/Pics/Cat.PNG']);
+});

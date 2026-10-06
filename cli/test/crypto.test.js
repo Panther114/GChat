@@ -57,6 +57,20 @@ test('encryptTextEnvelope → decryptServerMessage round-trips plaintext and cha
   assert.equal(dec.metadata.hashtag, 'design');
 });
 
+test('#main messages and attachments carry a null tag index; named channels do not', async () => {
+  const { encryptTextEnvelope, encryptAttachmentEnvelope } = require('../src/client/messages');
+  const secret = cryptoV2.generateGroupSecret();
+  const common = { messageId: 'm-main', groupId: 'g1', senderId: 'u1' };
+  const main = await encryptTextEnvelope({ ...common, text: 'hi', secret, channel: 'main' });
+  assert.equal(main.envelope.tagIndex, null, 'unread cursors match tag_index IS NULL for #main');
+  const named = await encryptTextEnvelope({ ...common, text: 'hi', secret, channel: 'design' });
+  assert.match(named.envelope.tagIndex, /^[A-Za-z0-9_-]{43}$/);
+  const file = await encryptAttachmentEnvelope({
+    messageId: 'm-file', groupId: 'g1', senderId: 'u1', secret, buffer: Buffer.from('x'), channel: 'main', filename: 'a.txt', mimeType: 'text/plain',
+  });
+  assert.equal(file.tagIndex, null);
+});
+
 test('tampered AAD fails decrypt', async () => {
   const secret = cryptoV2.generateGroupSecret();
   const groupId = cryptoV2.randomUuid();

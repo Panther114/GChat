@@ -76,8 +76,55 @@ function readMacClipboardPng() {
   }
 }
 
+function readWindowsClipboardPng() {
+  if (process.platform !== 'win32') return null;
+  const dest = path.join(os.tmpdir(), `gchat-clip-${process.pid}.png`);
+  const script = [
+    'Add-Type -AssemblyName System.Windows.Forms,System.Drawing',
+    '$img = [System.Windows.Forms.Clipboard]::GetImage()',
+    'if ($null -eq $img) { exit 3 }',
+    `$img.Save('${dest.replace(/'/g, "''")}', [System.Drawing.Imaging.ImageFormat]::Png)`,
+  ].join('; ');
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-STA', '-Command', script], {
+    timeout: 8000,
+    stdio: ['ignore', 'ignore', 'ignore'],
+    windowsHide: true,
+  });
+  return takeClipboardFile(result.status === 0 ? dest : null, dest);
+}
+
+function readLinuxClipboardPng() {
+  if (process.platform !== 'linux') return null;
+  const readers = [
+    ['wl-paste', ['--type', 'image/png']],
+    ['xclip', ['-selection', 'clipboard', '-t', 'image/png', '-o']],
+  ];
+  for (const [cmd, args] of readers) {
+    const result = spawnSync(cmd, args, { timeout: 4000, maxBuffer: 32 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
+    if (result.status === 0 && result.stdout && result.stdout.length > 8) {
+      return { bytes: result.stdout, filename: 'paste.png', mimeType: 'image/png' };
+    }
+  }
+  return null;
+}
+
+function takeClipboardFile(file, cleanup) {
+  try {
+    if (!file || !fs.existsSync(file)) return null;
+    const bytes = fs.readFileSync(file);
+    return bytes.length ? { bytes, filename: 'paste.png', mimeType: 'image/png' } : null;
+  } catch {
+    return null;
+  } finally {
+    try { fs.unlinkSync(cleanup); } catch { /* ignore */ }
+  }
+}
+
 async function readClipboardImage() {
-  return (await readBunClipboard()) || readMacClipboardPng();
+  return (await readBunClipboard())
+    || readMacClipboardPng()
+    || readWindowsClipboardPng()
+    || readLinuxClipboardPng();
 }
 
 module.exports = {

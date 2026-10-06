@@ -1293,11 +1293,12 @@ try {
 // everything was read. One-shot migration: NULL the "main" blind index on
 // every group's messages (bounded: one UPDATE per escrowed group, flagged in
 // _config). New sends no longer stamp #main with an index.
+// _v2: the CLI kept stamping #main until its 1.1.0 release, so the migration runs once more.
 try {
-  const mainIndexFlag = db.prepare("SELECT value FROM _config WHERE key = 'main_tag_index_nulled'").get();
+  const mainIndexFlag = db.prepare("SELECT value FROM _config WHERE key = 'main_tag_index_nulled_v2'").get();
   if (!mainIndexFlag) {
     const fixed = nullMainTagIndexes(db, APP_CONFIG.groupKeyEscrowMasterKey);
-    db.prepare("INSERT OR IGNORE INTO _config (key, value) VALUES ('main_tag_index_nulled', ?)").run(String(fixed));
+    db.prepare("INSERT OR IGNORE INTO _config (key, value) VALUES ('main_tag_index_nulled_v2', ?)").run(String(fixed));
     if (fixed > 0) console.log(`[migrate] Nulled ${fixed} #main tag_index rows (one-shot).`);
   }
 } catch (err) {

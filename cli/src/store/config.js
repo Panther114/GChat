@@ -10,6 +10,7 @@ const DEFAULT_CONFIG = {
   notify: false,
   adminSecret: null,
   scrollSensitivity: 1,
+  preview: 'auto',
 };
 
 const SCROLL_SENSITIVITY_MIN = 1;
@@ -46,6 +47,9 @@ function setConfigKey(key, value, paths) {
   }
   if (key === 'adminSecret' && (value === 'null' || value === 'clear' || value === '')) {
     parsed = null;
+  }
+  if (key === 'preview') {
+    parsed = String(value || '').trim().toLowerCase() === 'off' ? 'off' : 'auto';
   }
   if (key === 'theme') {
     parsed = String(value || '').trim().toLowerCase() === 'light' ? 'light' : 'dark';

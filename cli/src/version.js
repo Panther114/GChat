@@ -1,13 +1,10 @@
 'use strict';
 
-const path = require('node:path');
-const fs = require('node:fs');
-
+// Plain require so bundlers (bun compile) inline package.json; reading it with
+// fs would fail inside a standalone binary and report 0.0.0.
 function readCliVersion() {
   try {
-    const pkgPath = path.join(__dirname, '..', 'package.json');
-    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-    return String(pkg.version || '0.0.0');
+    return String(require('../package.json').version || '0.0.0');
   } catch {
     return '0.0.0';
   }

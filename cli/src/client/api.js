@@ -434,14 +434,12 @@ class GChatClient {
     const sock = await this.connectSocket();
     sock.joinRoom(groupId);
 
-    if (type === 'whisper') {
-      sock.emit('send_whisper', { ...envelope, whisperTo });
-      return { ok: true, messageId: envelope.id, envelope };
-    }
-
-    const ack = await sock.emitAck('send_message', envelope).catch(() => null);
+    // A missing ack (timeout) is a failed send, not a success: surface it.
+    const ack = type === 'whisper'
+      ? await sock.emitAck('send_whisper', { ...envelope, whisperTo })
+      : await sock.emitAck('send_message', envelope);
     if (ack && ack.ok === false) {
-      throw new Error(ack.error || 'send_message failed');
+      throw new Error(ack.error || 'send failed');
     }
     return { ok: true, messageId: envelope.id, envelope, ack };
   }
@@ -521,6 +519,24 @@ class GChatClient {
    * each blind tagIndex back to its plaintext topic via the sample message.
    * Bounded: a single GET per call.
    */
+  /**
+   * Server-authoritative unread counts for the group and each named channel.
+   * `counts` is keyed by channel name; #main is always present.
+   */
+  async fetchUnread(groupId, channels = []) {
+    const secret = this.getSecret(groupId);
+    const byIndex = new Map();
+    for (const name of channels.slice(0, 60)) {
+      if (!name || name === DEFAULT_CHANNEL || !secret) continue;
+      byIndex.set(await cryptoV2.blindIndex(name, secret, groupId, 'tag-index'), name);
+    }
+    const tags = encodeURIComponent([...byIndex.keys()].join(','));
+    const { body } = await this.http.get(`/api/groups/${groupId}/unread?tags=${tags}`);
+    const counts = { [DEFAULT_CHANNEL]: Number(body?.counts?.['']) || 0 };
+    for (const [index, name] of byIndex) counts[name] = Number(body?.counts?.[index]) || 0;
+    return { counts, groupUnreadCount: Number(body?.groupUnreadCount) || 0, tagIndexes: Object.fromEntries(byIndex) };
+  }
+
   async fetchChannels(groupId) {
     const { body } = await this.http.get(`/api/groups/${groupId}/channels`);
     const rows = Array.isArray(body?.channels) ? body.channels : [];
@@ -581,7 +597,7 @@ class GChatClient {
     return listChannels(groupId, this.paths);
   }
 
-  async uploadFile(groupId, filePath, { type } = {}) {
+  async uploadFile(groupId, filePath, { type, channel: channelOverride, replyToId } = {}) {
     const user = this.user || await this.me();
     const secret = await this.ensureSecret(groupId);
     const abs = path.resolve(filePath);
@@ -596,7 +612,7 @@ class GChatClient {
     const ext = path.extname(filename).toLowerCase();
     const isImage = type === 'image' || Object.prototype.hasOwnProperty.call(IMAGE_MIME_BY_EXT, ext);
     const msgType = isImage ? 'image' : 'file';
-    const channel = getActiveChannel(groupId, this.paths);
+    const channel = channelOverride || getActiveChannel(groupId, this.paths);
     const prepared = await encryptAttachmentEnvelope({
       buffer: buf,
       filename,
@@ -609,24 +625,24 @@ class GChatClient {
     });
 
     await this.http.ensureCsrf();
-    // Server accepts base64 JSON body as well as binary; use JSON path for simpler cookies/CSRF.
-    const encryptedContent = Buffer.from(prepared.encryptedBytes).toString('base64');
-    const { body } = await this.http.post(`/api/groups/${groupId}/upload`, {
-      encryptedContent,
-      iv: prepared.iv,
-      type: msgType,
-      messageId: prepared.identity.id,
-      encryptedMetadata: prepared.encryptedMetadata,
-      metadataIv: prepared.metadataIv,
-      tagIndex: prepared.tagIndex,
-      encryptionVersion: 2,
-      keyVersion: 1,
-      clientUploadId: prepared.identity.id,
-    }, {
-      headers: {
-        'X-Encryption-Version': '2',
-        'X-Key-Version': '1',
-      },
+    // Raw octet-stream upload, like the web client: the JSON body limit is only
+    // 256 KB, so a base64 JSON upload fails for anything but tiny files.
+    const headers = {
+      'Content-Type': 'application/octet-stream',
+      'X-Upload-IV': prepared.iv,
+      'X-Upload-Type': msgType,
+      'X-Message-Id': prepared.identity.id,
+      'X-Encrypted-Metadata': prepared.encryptedMetadata,
+      'X-Metadata-IV': prepared.metadataIv,
+      'X-Encryption-Version': '2',
+      'X-Key-Version': '1',
+      'X-Client-Upload-Id': prepared.identity.id,
+    };
+    if (prepared.tagIndex) headers['X-Tag-Index'] = prepared.tagIndex;
+    if (replyToId) headers['X-Reply-To-Id'] = String(replyToId);
+    const { body } = await this.http.post(`/api/groups/${groupId}/upload`, undefined, {
+      rawBody: Buffer.from(prepared.encryptedBytes),
+      headers,
     });
     return { messageId: body.messageId || prepared.identity.id, type: msgType, filename };
   }

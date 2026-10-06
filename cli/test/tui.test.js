@@ -2327,6 +2327,7 @@ test('active channel chip and selected message use a fill', () => {
 });
 
 test('edited tag sits dim next to the timestamp', () => {
+  const stamp = chatLayout.formatTime('2026-08-13T10:03:00.000Z'); // local time, so the test passes in any timezone
   const frame = chatLayout.buildChatFrame(80, 24, chatState({
     messages: [{
       ...chatState().messages[1],
@@ -2335,12 +2336,12 @@ test('edited tag sits dim next to the timestamp', () => {
   }));
   const row = frame.lines.find((l) => {
     const p = ansi.stripAnsi(l);
-    return p.includes('will') && p.includes('edited') && p.includes('10:03');
+    return p.includes('will') && p.includes('edited') && p.includes(stamp);
   });
   assert.ok(row, 'edited and the timestamp share the name row');
   const plain = ansi.stripAnsi(row);
   const editedAt = plain.indexOf('edited');
-  const timeAt = plain.indexOf('10:03');
+  const timeAt = plain.indexOf(stamp);
   assert.ok(editedAt < timeAt, 'edited sits to the left of the time');
   assert.ok(timeAt - editedAt <= 8, 'edited is right next to the timestamp');
   assert.ok(row.includes(ansi.dim()), 'edited is subtle');

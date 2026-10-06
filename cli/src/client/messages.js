@@ -7,6 +7,14 @@ const DEFAULT_CHANNEL = 'main';
 const MIN_DISAPPEARING_MS = 3000;
 const MAX_DISAPPEARING_MS = 22500;
 
+// #main is stored with a NULL tag_index (read cursors and unread counts match
+// on `tag_index IS NULL`); only named channels carry a blind index. Stamping
+// #main with one leaves every such message unread for everyone, forever.
+async function channelTagIndex(channel, secret, groupId) {
+  if (!channel || channel === DEFAULT_CHANNEL) return null;
+  return cryptoV2.blindIndex(channel, secret, groupId, 'tag-index');
+}
+
 function parseDurationToMs(input) {
   if (input == null || input === '') return null;
   if (typeof input === 'number' && Number.isFinite(input)) {
@@ -73,7 +81,7 @@ async function encryptTextEnvelope({
   const aad = cryptoV2.messageAad(identity);
   const content = await cryptoV2.encryptJson({ text }, secret, groupId, 'content', aad);
   const encMeta = await cryptoV2.encryptJson(metadata, secret, groupId, 'metadata', aad);
-  const tagIndex = await cryptoV2.blindIndex(hashtag, secret, groupId, 'tag-index');
+  const tagIndex = await channelTagIndex(hashtag, secret, groupId);
   const spamSignature = await cryptoV2.blindIndex(text, secret, groupId, 'spam-signature');
 
   const envelope = {
@@ -164,7 +172,7 @@ async function encryptAttachmentEnvelope({
     size: bytes.byteLength,
   };
   const encMeta = await cryptoV2.encryptJson(metadata, secret, groupId, 'metadata', aad);
-  const tagIndex = await cryptoV2.blindIndex(hashtag, secret, groupId, 'tag-index');
+  const tagIndex = await channelTagIndex(hashtag, secret, groupId);
   return {
     identity,
     encryptedBytes: encrypted.encryptedBytes,
@@ -260,6 +268,7 @@ module.exports = {
   MAX_DISAPPEARING_MS,
   parseDurationToMs,
   clampDisappearing,
+  channelTagIndex,
   buildMessageIdentity,
   encryptTextEnvelope,
   decryptServerMessage,

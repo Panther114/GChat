@@ -5,6 +5,14 @@ const esbuild = require('esbuild');
 
 const shared = { bundle: true, sourcemap: true };
 
+// Throwaway secrets so `npm run dev:web` boots on a fresh checkout. Real
+// values from the environment always win; these never apply to production.
+const DEV_SECRETS = {
+  SESSION_SECRET: 'dev-only-session-secret-0123456789abcdef',
+  GROUP_CODE_PEPPER: 'dev-only-group-code-pepper-0123456789',
+  GROUP_KEY_ESCROW_MASTER_KEY: Buffer.alloc(32, 9).toString('base64url'),
+};
+
 async function main() {
   const contexts = await Promise.all([
     esbuild.context({ ...shared, entryPoints: ['src/web/app-entry.js'], format: 'iife', platform: 'browser', target: ['es2022'], outfile: 'public/app.js' }),
@@ -18,7 +26,7 @@ async function main() {
   await Promise.all(contexts.map((context) => context.watch()));
   console.log('Watching modular web assets for changes.');
 
-  const child = spawn(process.execPath, ['server.js'], { env: process.env, stdio: 'inherit' });
+  const child = spawn(process.execPath, ['server.js'], { env: { ...DEV_SECRETS, ...process.env }, stdio: 'inherit' });
   const shutdown = async () => {
     if (!child.killed) child.kill();
     await Promise.all(contexts.map((context) => context.dispose()));
