@@ -115,12 +115,12 @@ jobs:
               --verify-tag \
               --generate-notes \
               --title "$TITLE" \
-              --latest
+              --latest=false
           else
             gh release create "$TAG" release/* \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
               --generate-notes \
               --title "$TITLE" \
-              --latest
+              --latest=false
           fi

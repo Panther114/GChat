@@ -45,9 +45,10 @@ function socketIoOptions(session) {
     ...(cookie ? { Cookie: cookie } : {}),
   };
   return {
-    // Prefer polling first so Node cookie headers apply reliably; upgrade optional.
-    transports: ['polling', 'websocket'],
-    withCredentials: true,
+    // WebSocket first saves the long-polling handshake round trips; socket.io
+    // falls back to polling by itself when the upgrade is blocked.
+    transports: ['websocket', 'polling'],
+    // No withCredentials: with the websocket transport it makes ws drop our Cookie header.
     autoConnect: true,
     reconnection: true,
     // Bounded backoff so a flaky link never hammers the server with retries.
@@ -114,7 +115,15 @@ class SocketClient {
         cleanup();
         resolve(this.socket);
       };
+      let authRetries = 0;
       const onError = (err) => {
+        // A session written a moment ago may not be visible to the handshake yet
+        // (middleware rejections are not retried by socket.io itself).
+        if (String(err?.message) === 'Not authenticated' && authRetries < 3) {
+          authRetries += 1;
+          setTimeout(() => { if (this.socket && !this.socket.connected) this.socket.connect(); }, 200 * authRetries);
+          return;
+        }
         cleanup();
         reject(err instanceof Error ? err : new Error(String(err?.message || err)));
       };

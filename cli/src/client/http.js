@@ -9,6 +9,14 @@ const {
 } = require('../store/session');
 const { SYNC_PROTOCOL_HEADER, SYNC_PROTOCOL_VERSION } = require('../version');
 
+function networkError(err, timeoutMs) {
+  if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
+    return new Error(`The server did not answer within ${Math.round(timeoutMs / 1000)}s. Check your connection and try again.`);
+  }
+  const cause = err?.cause?.code || err?.cause?.message || err?.message || String(err);
+  return new Error(`Could not reach the server (${cause}).`);
+}
+
 class HttpClient {
   constructor({ server, paths, session } = {}) {
     this.paths = paths || null;
@@ -27,7 +35,7 @@ class HttpClient {
     }
   }
 
-  async request(method, apiPath, { body, headers, rawBody, binaryResponse } = {}) {
+  async request(method, apiPath, { body, headers, rawBody, binaryResponse, timeout, csrfRetried } = {}) {
     if (!this.server) throw new Error('Server URL is not configured. Run: gchat config set server <url>');
     const url = `${this.server}${apiPath.startsWith('/') ? apiPath : `/${apiPath}`}`;
     const reqHeaders = {
@@ -37,8 +45,9 @@ class HttpClient {
     };
     const cookie = cookieHeader(this.session);
     if (cookie) reqHeaders.Cookie = cookie;
-    if (this.session.csrfToken && !['GET', 'HEAD'].includes(method.toUpperCase())) {
-      reqHeaders['X-CSRF-Token'] = this.session.csrfToken;
+    if (!['GET', 'HEAD'].includes(method.toUpperCase()) && !apiPath.startsWith('/api/auth/csrf')) {
+      if (!this.session.csrfToken && !/^\/?api\/auth\/(login|register)/.test(apiPath)) await this.ensureCsrf();
+      if (this.session.csrfToken) reqHeaders['X-CSRF-Token'] = this.session.csrfToken;
     }
 
     let payload = undefined;
@@ -52,12 +61,28 @@ class HttpClient {
       payload = JSON.stringify(body);
     }
 
-    const response = await fetch(url, {
+    const isRead = ['GET', 'HEAD'].includes(method.toUpperCase());
+    const timeoutMs = timeout ?? (rawBody != null ? 120000 : 20000);
+    const send = () => fetch(url, {
       method: method.toUpperCase(),
       headers: reqHeaders,
       body: payload,
       redirect: 'manual',
+      signal: AbortSignal.timeout(timeoutMs),
     });
+    let response;
+    try {
+      response = await send();
+    } catch (err) {
+      if (!isRead) throw networkError(err, timeoutMs);
+      // One quick retry for reads: a dropped keep-alive connection is common on flaky links.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      try {
+        response = await send();
+      } catch (retryErr) {
+        throw networkError(retryErr, timeoutMs);
+      }
+    }
 
     const setCookie = typeof response.headers.getSetCookie === 'function'
       ? response.headers.getSetCookie()
@@ -93,6 +118,11 @@ class HttpClient {
         const need = data?.requiredProtocol || SYNC_PROTOCOL_VERSION;
         message = `protocol_upgrade_required (need ${need}; CLI speaks ${SYNC_PROTOCOL_VERSION})`;
       }
+      // A stale CSRF token (session rotated elsewhere) is refreshed once, transparently.
+      if (response.status === 403 && /csrf/i.test(String(data?.error || '')) && !csrfRetried && !isRead) {
+        await this.ensureCsrf({ force: true });
+        return this.request(method, apiPath, { body, headers, rawBody, binaryResponse, timeout, csrfRetried: true });
+      }
       const err = new Error(message);
       err.status = response.status;
       err.body = data;
@@ -117,7 +147,8 @@ class HttpClient {
     return this.request('DELETE', path, { ...opts, body });
   }
 
-  async ensureCsrf() {
+  async ensureCsrf({ force = false } = {}) {
+    if (!force && this.session.csrfToken) return this.session.csrfToken;
     const { body } = await this.get('/api/auth/csrf');
     this.session.csrfToken = body.csrfToken;
     this.persistSession();

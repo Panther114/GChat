@@ -1,6 +1,6 @@
 {
   "name": "gchat-cli",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Command-line and TUI client for GChat (encrypted group chat)",
   "author": "Gchat",
   "license": "MIT",

@@ -213,7 +213,7 @@ async function decryptAttachmentMeta(msg, secret, groupId = msg.groupId) {
   }
 }
 
-async function decryptAttachment(msg, secret, groupId = msg.groupId) {
+async function decryptAttachment(msg, secret, groupId = msg.groupId, { cipherBytes: fetched = null } = {}) {
   const identity = {
     groupId: msg.groupId || groupId,
     id: msg.id,
@@ -223,16 +223,18 @@ async function decryptAttachment(msg, secret, groupId = msg.groupId) {
     revision: msg.revision || 1,
   };
   const aad = cryptoV2.messageAad(identity);
-  // Server stores standard base64 for binary uploads; try both encodings.
-  let cipherBytes;
-  try {
-    cipherBytes = cryptoV2.base64UrlToBytes(msg.encryptedContent);
-  } catch {
-    cipherBytes = new Uint8Array(Buffer.from(msg.encryptedContent, 'base64'));
-  }
-  // Server uses base64 (not base64url) for raw upload body.
-  if (!msg.encryptedContent.includes('-') && !msg.encryptedContent.includes('_')) {
-    cipherBytes = new Uint8Array(Buffer.from(msg.encryptedContent, 'base64'));
+  let cipherBytes = fetched;
+  if (!cipherBytes) {
+    if (!msg.encryptedContent) throw new Error('attachment content is not available');
+    // Inline uploads are standard base64; try base64url first, as the web client does.
+    try {
+      cipherBytes = cryptoV2.base64UrlToBytes(msg.encryptedContent);
+    } catch {
+      cipherBytes = new Uint8Array(Buffer.from(msg.encryptedContent, 'base64'));
+    }
+    if (!msg.encryptedContent.includes('-') && !msg.encryptedContent.includes('_')) {
+      cipherBytes = new Uint8Array(Buffer.from(msg.encryptedContent, 'base64'));
+    }
   }
   const plain = await cryptoV2.decryptBytes(cipherBytes, msg.iv, secret, groupId, aad);
   let metadata = {};

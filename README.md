@@ -10,10 +10,10 @@ There are three ways to use it, all talking to the same server:
 |---|---|
 | **Web / PWA** | The main app, served from `public/`. Installs to a phone home screen. |
 | **Desktop** | A thin native window around the hosted app, with a tray icon and notifications. Windows uses WebView2, macOS uses Tauri. See [INSTALL_DESKTOP.md](INSTALL_DESKTOP.md). |
-| **CLI** | `gchat` in a terminal, with a full chat UI in the style of Claude Code. See [cli/README.md](cli/README.md). |
+| **CLI** | `gchat` in a terminal: an animated home screen, then a full chat UI in the style of Claude Code, with mouse support and inline image previews. See [cli/README.md](cli/README.md). |
 
 <p>
-  <img src="docs/screenshots/cli-chat.png" width="55%" alt="GChat in the terminal">
+  <img src="docs/screenshots/cli-home.png" width="55%" alt="GChat in the terminal">
   <img src="docs/screenshots/web-mobile.png" width="22%" alt="GChat on a phone">
 </p>
 

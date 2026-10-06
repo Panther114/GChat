@@ -59,7 +59,7 @@ function parseCsi(params, final) {
   return null;
 }
 
-function createKeyParser({ onKey, onPaste, onFocus } = {}) {
+function createKeyParser({ onKey, onPaste, onFocus, onMouse, onCursor } = {}) {
   let pasting = false;
   let pasteBuf = '';
   let carry = '';
@@ -101,10 +101,10 @@ function createKeyParser({ onKey, onPaste, onFocus } = {}) {
           continue;
         }
         if (rest[1] === '[') {
-          const m = /^\u001b\[([0-9;?]*)([A-Za-z~])/.exec(rest);
+          const m = /^\u001b\[([0-9;?<]*)([A-Za-z~])/.exec(rest);
           if (!m) {
             // Incomplete sequence at the end of a chunk: wait for the rest.
-            if (/^\u001b\[[0-9;?]*$/.test(rest)) {
+            if (/^\u001b\[[0-9;?<]*$/.test(rest)) {
               carry = rest;
               return;
             }
@@ -114,6 +114,24 @@ function createKeyParser({ onKey, onPaste, onFocus } = {}) {
           }
           if (m[2] === 'I' || m[2] === 'O') {
             if (onFocus) onFocus(m[2] === 'I');
+          } else if ((m[2] === 'M' || m[2] === 'm') && m[1].startsWith('<')) {
+            // SGR mouse report: button;column;row (1-based), `m` marks the release.
+            const [button, x, y] = m[1].slice(1).split(';').map(Number);
+            if (onMouse && Number.isFinite(x) && Number.isFinite(y)) {
+              onMouse({
+                button: button & 3,
+                wheel: button & 64 ? (button & 1 ? 'down' : 'up') : null,
+                motion: !!(button & 32),
+                release: m[2] === 'm',
+                shift: !!(button & 4),
+                x,
+                y,
+              });
+            }
+          } else if (m[2] === 'R' && /^\d+;\d+$/.test(m[1])) {
+            // Cursor position report answering our ESC[6n.
+            const [row, col] = m[1].split(';').map(Number);
+            if (onCursor) onCursor(row, col);
           } else {
             emit(parseCsi(m[1], m[2]));
           }

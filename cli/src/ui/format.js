@@ -41,6 +41,23 @@ function getTheme() {
   return theme;
 }
 
+/**
+ * Strips terminal control sequences and control characters from text that
+ * came from other people (messages, names, file names). Without this, a
+ * message could carry escape codes that move the cursor, retitle the window
+ * or paint over the screen.
+ */
+function safe(text) {
+  return String(text ?? '')
+    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?/g, '') // OSC (titles, hyperlinks, images)
+    .replace(/\u001b[P^_X][^\u001b]*(?:\u001b\\)?/g, '') // DCS, PM, APC, SOS strings
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '') // CSI sequences
+    .replace(/\u009b[0-?]*[ -/]*[@-~]/g, '') // 8-bit CSI
+    .replace(/\u001b[@-Z\\-_]/g, '') // two-byte escapes
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '') // remaining C0/C1 controls (\n and \t stay)
+    .replace(/\u202e|\u2066|\u2067|\u2068|\u2069/g, ''); // bidi overrides that reorder text
+}
+
 const paint = (hex, text) => `${ansi.fg(hex)}${text}${ansi.reset()}`;
 const color = (key, text) => paint(theme[key], text);
 const bold = (text) => `${ansi.bold()}${text}${ansi.reset()}`;
@@ -86,11 +103,11 @@ function formatBytes(n) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function rule(label, cols) {
+function rule(label, cols, key = 'faint') {
   const text = label ? ` ${label} ` : '';
   const fill = Math.max(2, cols - ansi.width(text) - 4);
   const left = Math.floor(fill / 2);
-  return dim(`${'─'.repeat(left + 2)}${text}${'─'.repeat(fill - left + 2)}`);
+  return color(key, `${'─'.repeat(left + 2)}${text}${'─'.repeat(fill - left + 2)}`);
 }
 
 /** A rounded box around pre-styled content lines (each already <= inner width). */
@@ -109,9 +126,19 @@ function box(lines, cols, { title = '', borderKey = 'border' } = {}) {
 }
 
 function previewText(item, max = 80) {
-  if (item.attach) return `[${item.msg.type === 'image' ? 'image' : 'file'}] ${item.attach.filename || ''}`.trim();
-  const flat = String(item.text || '').replace(/\s+/g, ' ').trim();
+  if (item.attach) return `[${item.msg.type === 'image' ? 'image' : 'file'}] ${safe(item.attach.filename || '')}`.trim();
+  const flat = safe(item.text || '').replace(/\s+/g, ' ').trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/** Light markdown: `code`, **bold** and links. Applied per wrapped line. */
+function inlineStyle(line) {
+  if (!/[`*]|https?:/.test(line)) return line;
+  const styled = line
+    .replace(/(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])/g, (url) => `${ansi.underline()}${paint(theme.accent, url)}${ansi.reset()}`)
+    .replace(/`([^`\n]+)`/g, (_, code) => paint(theme.warn, code))
+    .replace(/\*\*([^*\n]+)\*\*/g, (_, text) => bold(text));
+  return `${styled}${ansi.reset()}`;
 }
 
 /**
@@ -122,7 +149,7 @@ function previewText(item, max = 80) {
 function messageLines(item, { cols, me, prev = null, attachmentLabel = null }) {
   const msg = item.msg;
   const mine = String(msg.senderId) === String(me);
-  const name = mine ? 'you' : (msg.senderName || msg.senderId || '?');
+  const name = mine ? 'you' : safe(msg.senderName || msg.senderId || '?');
   const tint = mine ? theme.accent : nameColor(msg.senderName || msg.senderId);
   const lines = [];
 
@@ -149,8 +176,8 @@ function messageLines(item, { cols, me, prev = null, attachmentLabel = null }) {
   }
 
   if (item.replyTo) {
-    const who = item.replyTo.name || 'message';
-    const quoted = ansi.truncate(`${who}: ${item.replyTo.preview || ''}`, cols - 6);
+    const who = safe(item.replyTo.name || 'message');
+    const quoted = ansi.truncate(`${who}: ${safe(item.replyTo.preview || '')}`, cols - 6);
     lines.push(`  ${dim('┃')} ${muted(quoted)}`);
   }
 
@@ -159,17 +186,19 @@ function messageLines(item, { cols, me, prev = null, attachmentLabel = null }) {
     const kind = msg.type === 'image' ? 'Image' : 'File';
     const label = attachmentLabel || kind;
     const size = item.attach.size ? ` · ${formatBytes(item.attach.size)}` : '';
-    lines.push(`  ${color('warn', `[${label}]`)} ${item.attach.filename || ''}${dim(size)}${item.sending ? dim('  uploading…') : ''}`);
+    lines.push(`  ${color('warn', `[${label}]`)} ${safe(item.attach.filename || '')}${dim(size)}${item.sending ? dim('  uploading…') : ''}`);
   } else if (item.error) {
-    lines.push(`  ${color('error', '[unable to decrypt]')} ${dim(String(item.error).slice(0, 60))}`);
+    lines.push(`  ${color('error', '[unable to decrypt]')} ${dim(safe(String(item.error).slice(0, 60)))}`);
   } else {
-    for (const line of wrapText(String(item.text ?? ''), bodyWidth)) lines.push(`  ${line}`);
+    for (const line of wrapText(safe(item.text ?? '').replace(/\t/g, '    '), bodyWidth)) lines.push(`  ${inlineStyle(line)}`);
   }
   if (samePerson && msg.editedAt) lines[lines.length - 1] += dim(' (edited)');
   return lines;
 }
 
 module.exports = {
+  safe,
+  inlineStyle,
   THEMES,
   setTheme,
   getTheme,

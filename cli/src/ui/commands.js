@@ -10,6 +10,7 @@
  */
 
 const COMMANDS = [
+  { name: 'home', aliases: ['h'], usage: '', desc: 'Back to the home screen', native: 'home' },
   { name: 'groups', aliases: ['g', 'switch'], usage: '', desc: 'Switch between groups', native: 'groups' },
   { name: 'channel', aliases: ['c', 'channels'], usage: '[name | new | delete]', desc: 'Switch, create or delete channels', native: 'channel' },
   { name: 'new', aliases: ['create'], usage: '[name]', desc: 'Create a group', native: 'newGroup' },
@@ -28,6 +29,7 @@ const COMMANDS = [
   { name: 'search', aliases: ['find'], usage: '<text>', desc: 'Search recent messages', native: 'search' },
   { name: 'whisper', aliases: ['w'], usage: '<user> <text>', desc: 'Send a private message', generic: true },
   { name: 'clear', aliases: ['cls'], usage: '', desc: 'Clear the screen', native: 'clearScreen' },
+  { name: 'mouse', aliases: [], usage: '[on|off]', desc: 'Turn mouse clicks on or off', native: 'mouse' },
   { name: 'theme', aliases: [], usage: '[dark|light]', desc: 'Switch the color theme', native: 'theme' },
   { name: 'status', aliases: [], usage: '', desc: 'Connection and account info', native: 'status' },
   { name: 'whoami', aliases: [], usage: '', desc: 'Show who you are signed in as', native: 'whoami' },

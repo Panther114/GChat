@@ -91,6 +91,7 @@ test('HttpClient sends X-GChat-Sync-Protocol on every request', async () => {
   const paths = configPaths(dir);
   setConfigKey('server', 'http://example.test', paths);
   const client = new HttpClient({ paths });
+  client.session.csrfToken = 'cached-token';
   const seen = [];
   const original = globalThis.fetch;
   globalThis.fetch = async (url, opts) => {
@@ -172,4 +173,79 @@ test('forgetChannel drops a topic and rememberChannel does not revive it', () =>
   rememberChannel('g1', 'design', forced, { force: true });
   savePrefs(forced, paths);
   assert.ok(listChannels('g1', paths).includes('design'));
+});
+
+function fakeResponse(status, body) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { getSetCookie: () => [], get: () => null },
+    text: async () => JSON.stringify(body),
+  };
+}
+
+test('HttpClient fetches a CSRF token once, then reuses it', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-csrf-'));
+  const paths = configPaths(dir);
+  setConfigKey('server', 'http://example.test', paths);
+  const client = new HttpClient({ paths });
+  const calls = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    calls.push(`${opts.method} ${new URL(url).pathname}`);
+    return new URL(url).pathname === '/api/auth/csrf' ? fakeResponse(200, { csrfToken: 'tok' }) : fakeResponse(200, { ok: true });
+  };
+  try {
+    await client.post('/api/groups/a', {});
+    await client.patch('/api/groups/b', {});
+  } finally {
+    globalThis.fetch = original;
+  }
+  assert.deepEqual(calls, ['GET /api/auth/csrf', 'POST /api/groups/a', 'PATCH /api/groups/b']);
+});
+
+test('HttpClient refreshes a stale CSRF token and retries the write once', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-csrf2-'));
+  const paths = configPaths(dir);
+  setConfigKey('server', 'http://example.test', paths);
+  const client = new HttpClient({ paths });
+  client.session.csrfToken = 'stale';
+  const sent = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    const pathname = new URL(url).pathname;
+    if (pathname === '/api/auth/csrf') return fakeResponse(200, { csrfToken: 'fresh' });
+    sent.push(opts.headers['X-CSRF-Token']);
+    return opts.headers['X-CSRF-Token'] === 'fresh' ? fakeResponse(200, { ok: true }) : fakeResponse(403, { error: 'Invalid CSRF token' });
+  };
+  try {
+    const { body } = await client.delete('/api/groups/x/messages/y', {});
+    assert.deepEqual(body, { ok: true });
+  } finally {
+    globalThis.fetch = original;
+  }
+  assert.deepEqual(sent, ['stale', 'fresh']);
+});
+
+test('HttpClient retries a dropped read once and reports unreachable servers plainly', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-cli-net-'));
+  const paths = configPaths(dir);
+  setConfigKey('server', 'http://example.test', paths);
+  const client = new HttpClient({ paths });
+  let attempts = 0;
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => {
+    attempts += 1;
+    if (attempts === 1) throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } });
+    return fakeResponse(200, { ok: true });
+  };
+  try {
+    await client.get('/api/groups/mine');
+    assert.equal(attempts, 2);
+    globalThis.fetch = async () => { throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } }); };
+    await assert.rejects(() => client.get('/api/groups/mine'), /Could not reach the server \(ECONNREFUSED\)/);
+    await assert.rejects(() => client.post('/api/auth/login', {}), /Could not reach the server/);
+  } finally {
+    globalThis.fetch = original;
+  }
 });

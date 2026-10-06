@@ -108,7 +108,7 @@ class GChatClient {
     });
     this.http.session.user = body;
     this.http.persistSession();
-    await this.http.ensureCsrf();
+    await this.http.ensureCsrf({ force: true });
     await this.syncKeys().catch((err) => {
       process.stderr.write(`gchat: key sync failed: ${err?.message || err}\n`);
     });
@@ -121,7 +121,7 @@ class GChatClient {
     const { body } = await this.http.post('/api/auth/register', payload);
     this.http.session.user = body;
     this.http.persistSession();
-    await this.http.ensureCsrf();
+    await this.http.ensureCsrf({ force: true });
     return body;
   }
 
@@ -391,15 +391,50 @@ class GChatClient {
     }
   }
 
-  async openGroup(nameOrId) {
-    const group = await this.resolveGroup(nameOrId);
+  /**
+   * Opens a group: secret, first page of history and the socket room are
+   * fetched concurrently. Pass `group` when the caller already has the list
+   * entry (saves a round trip); `waitSocket: false` returns as soon as the
+   * history is in, with `socketReady` resolving once the room is joined.
+   */
+  async openGroup(nameOrId, { group: known = null, limit = 40, waitSocket = true } = {}) {
+    const group = known || await this.resolveGroup(nameOrId);
     this.setActiveGroup(group.id);
-    await this.ensureSecret(group.id);
-    const sock = await this.connectSocket();
-    sock.joinRoom(group.id);
-    const messages = await this.fetchMessages(group.id, { limit: 50 });
+    const socketReady = this.connectSocket().then((sock) => {
+      sock.joinRoom(group.id);
+      return sock;
+    });
+    socketReady.catch(() => { /* reported through the socket events */ });
+    const [, messages] = await Promise.all([
+      this.ensureSecret(group.id),
+      this.fetchMessages(group.id, { limit }),
+    ]);
+    if (waitSocket) await socketReady;
     const channel = getActiveChannel(group.id, this.paths);
-    return { group, messages, channel };
+    return { group, messages, channel, socketReady };
+  }
+
+  /**
+   * Ciphertext of an attachment as plaintext bytes + metadata. Handles both
+   * inline uploads and bucket-stored ones (fetched through a short-lived
+   * presigned URL), which have no `encryptedContent` in the message list.
+   */
+  async loadAttachment(groupId, msg) {
+    const secret = await this.ensureSecret(groupId);
+    let cipherBytes = null;
+    if (!msg.encryptedContent && msg.attachment?.storage === 'bucket') {
+      const { body } = await this.http.get(`/api/groups/${groupId}/attachments/${encodeURIComponent(msg.id)}/url`);
+      if (body?.storage === 'bucket') {
+        const response = await fetch(body.url, { signal: AbortSignal.timeout(120000) });
+        if (!response.ok) throw new Error(`Attachment download failed (HTTP ${response.status})`);
+        cipherBytes = new Uint8Array(await response.arrayBuffer());
+      } else if (body?.storage === 'legacy') {
+        msg = { ...msg, encryptedContent: body.encryptedContent, iv: body.iv || msg.iv };
+      } else {
+        throw new Error('Attachment storage is unavailable');
+      }
+    }
+    return decryptAttachment(msg, secret, groupId, { cipherBytes });
   }
 
   async sendText({
@@ -656,7 +691,7 @@ class GChatClient {
     }
     if (!msg) throw new Error(`Message not found: ${messageId}`);
     if (!['file', 'image'].includes(msg.type)) throw new Error('Message is not an attachment');
-    const { bytes, metadata } = await decryptAttachment(msg, secret, groupId);
+    const { bytes, metadata } = await this.loadAttachment(groupId, msg);
     const target = path.resolve(outPath);
     fs.writeFileSync(target, bytes);
     return { path: target, filename: metadata.filename || path.basename(target), bytes: bytes.length };

@@ -326,7 +326,7 @@ function makeClient(over = {}) {
   return client;
 }
 
-async function makeApp(clientOver, { auth = false } = {}) {
+async function makeApp(clientOver, { auth = false, open = true } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gchat-ui-'));
   const paths = configPaths(dir);
   savePrefs({ activeGroupId: GROUP.id }, paths);
@@ -344,6 +344,7 @@ async function makeApp(clientOver, { auth = false } = {}) {
   app.screen.commit = (lines) => { committed.push(...lines.map(plain)); commit(lines); };
   await app.start();
   if (!auth) await app.bootPromise;
+  if (!auth && open) await app.openGroup(GROUP);
   await app.printChain;
   const type = (text) => stdin.emit('data', text);
   const live = () => app.screen.lines.map(plain);
@@ -351,10 +352,10 @@ async function makeApp(clientOver, { auth = false } = {}) {
   return { app, client, committed, exits, type, live, settle, stdout };
 }
 
-test('app boots into the remembered group and prints its history', async () => {
+test('opening a chat prints its history and shows the input placeholder', async () => {
   const { app, committed, live } = await makeApp();
+  assert.equal(app.view, 'chat');
   const joined = committed.join('\n');
-  assert.match(joined, /Welcome to GChat/);
   assert.match(joined, /Team · #main/);
   assert.match(joined, /bob/);
   assert.match(joined, /hello there/);
@@ -513,5 +514,216 @@ test('the password prompt masks what is typed', async () => {
   const shown = live().join('\n');
   assert.ok(shown.includes('••••••'));
   assert.ok(!shown.includes('secret'));
+  app.stop(0);
+});
+
+// ── home screen, mouse, speed ───────────────────────────────────────────────
+
+test('gchat starts on the home screen and does not open a chat by itself', async () => {
+  const { app, client, live, committed } = await makeApp(undefined, { open: false });
+  assert.equal(app.view, 'home');
+  assert.equal(app.group, null);
+  const shown = live().join('\n');
+  assert.match(shown, /Welcome back, me!/);
+  assert.match(shown, /Your chats/);
+  assert.match(shown, /Team/);
+  assert.match(shown, /\+ New group/);
+  assert.ok(!committed.join('\n').includes('hello there'), 'no history printed');
+  assert.equal(client.calls.sent.length, 0);
+  app.stop(0);
+});
+
+test('home: arrows move the highlight, Enter opens that chat', async () => {
+  const { app, type, live, settle } = await makeApp(undefined, { open: false });
+  assert.equal(app.homeIndex, 0, 'defaults to the last opened chat');
+  type('\u001b[B');
+  assert.equal(app.homeIndex, 1);
+  type('\u001b[A');
+  type('\r');
+  await settle();
+  await app.printChain;
+  assert.equal(app.view, 'chat');
+  assert.equal(app.group.id, 'g1');
+  assert.ok(live().some((l) => l.includes('Message #main')));
+  app.stop(0);
+});
+
+test('/home goes back and the old chat stops being treated as open', async () => {
+  const { app, type, live, settle } = await makeApp();
+  type('/home\r');
+  await settle();
+  assert.equal(app.view, 'home');
+  assert.equal(app.group, null);
+  assert.match(live().join('\n'), /Your chats/);
+  app.stop(0);
+});
+
+test('home animation: frames differ over time but keep a stable size', () => {
+  const { renderBird } = require('../src/ui/bird');
+  const a = renderBird({ width: 24, t: 0.2, truecolor: true });
+  const b = renderBird({ width: 24, t: 2.4, truecolor: true });
+  assert.equal(a.length, b.length);
+  assert.notDeepEqual(a, b);
+  for (const line of a) assert.equal(ansi.width(line), 24 + 10);
+  const arriving = renderBird({ width: 24, t: 0, enter: 0.1, truecolor: true });
+  assert.ok(arriving.join('').length < a.join('').length, 'the bird is mostly off-screen while flying in');
+});
+
+test('home layout adapts: narrow terminals get one column, short ones drop the bird', () => {
+  const { renderHome } = require('../src/ui/home');
+  const base = { t: 1, enter: 1, burst: -1, user: 'me', host: 'h', connected: true, groups: [GROUP, OTHER], selected: 0, lastId: 'g1', version: '1' };
+  const wide = renderHome({ ...base, cols: 100, rows: 40 });
+  const narrow = renderHome({ ...base, cols: 50, rows: 40 });
+  const short = renderHome({ ...base, cols: 100, rows: 18 });
+  for (const out of [wide, short]) for (const line of out.lines) assert.ok(ansi.width(line) <= 100);
+  assert.ok(wide.lines.some((l) => plain(l).includes('│') && plain(l).includes('Your chats')), 'two columns');
+  assert.ok(narrow.lines.length > 0 && narrow.lines.every((l) => ansi.width(l) <= 50));
+  assert.equal(short.birdBox, null, 'no room for the bird');
+  assert.notEqual(wide.birdBox, null);
+});
+
+function clickAt(app, type, x, row) {
+  app.screen.originTop = 1; // pretend the live region starts on the first terminal row
+  type(`\u001b[<0;${x};${row + 1}M\u001b[<0;${x};${row + 1}m`);
+}
+
+test('mouse: clicking a channel name in the footer switches channel', async () => {
+  const { app, type, settle } = await makeApp();
+  app.channels = ['main', 'design'];
+  app.refresh();
+  const chip = app.hits.find((h) => h.fn && h.x1 - h.x0 === '#design'.length);
+  assert.ok(chip, 'the #design chip is a click target');
+  clickAt(app, type, chip.x0 + 2, chip.row);
+  await settle();
+  assert.equal(app.channel, 'design');
+  app.stop(0);
+});
+
+test('mouse: clicking a chat on the home screen opens it', async () => {
+  const { app, type, settle } = await makeApp(undefined, { open: false });
+  const hit = app.hits.find((h) => h.x1 - h.x0 > 10);
+  assert.ok(hit);
+  clickAt(app, type, hit.x0 + 3, hit.row);
+  await settle();
+  await app.printChain;
+  assert.equal(app.view, 'chat');
+  app.stop(0);
+});
+
+test('mouse: clicking a menu option picks it, and clicks outside the live region are ignored', async () => {
+  const { app, type, settle } = await makeApp();
+  type('/groups\r');
+  await settle();
+  assert.ok(app.dialog, 'group picker is open');
+  const option = app.hits[1];
+  clickAt(app, type, option.x0 + 4, option.row);
+  await settle();
+  await app.printChain;
+  assert.equal(app.dialog, null);
+  type('\u001b[<0;5;200M');
+  app.stop(0);
+});
+
+test('the cursor-position reply sets the click origin; mouse off ignores clicks', async () => {
+  const { app, type } = await makeApp();
+  app.screen.pendingReports.length = 0;
+  app.screen.pendingReports.push({ caretRow: 2 });
+  type('\u001b[20;5R');
+  assert.equal(app.screen.originTop, 18);
+  app.setMouse(false);
+  const before = app.channel;
+  const hit = app.hits.find((h) => h.fn);
+  clickAt(app, type, hit.x0 + 1, hit.row);
+  assert.equal(app.mouseOn, false);
+  assert.equal(app.channel, before);
+  app.stop(0);
+});
+
+test('opening a chat sends the history and unread requests together (no serial round trips)', async () => {
+  const starts = [];
+  const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+  const { app } = await makeApp({
+    async openGroup() {
+      starts.push(Date.now());
+      await delay(60);
+      return { group: GROUP, channel: 'main', messages: [] };
+    },
+    async fetchUnread() {
+      starts.push(Date.now());
+      await delay(60);
+      return { counts: { main: 0 }, groupUnreadCount: 0, tagIndexes: {} };
+    },
+  }, { open: false });
+  const t0 = Date.now();
+  await app.openGroup(GROUP);
+  const elapsed = Date.now() - t0;
+  assert.ok(Math.abs(starts[0] - starts[1]) < 30, 'both requests start together');
+  assert.ok(elapsed < 150, `open took ${elapsed}ms`);
+  app.stop(0);
+});
+
+test('unread messages get a "new messages" rule above the first one', async () => {
+  const { app, committed } = await makeApp({
+    async fetchUnread() { return { counts: { main: 2 }, groupUnreadCount: 2, tagIndexes: {} }; },
+    async openGroup() {
+      return {
+        group: GROUP,
+        channel: 'main',
+        messages: [
+          await envelope({ id: 'a1', senderId: 'u2', senderName: 'bob', text: 'old news', createdAt: '2026-08-13T10:00:00.000Z' }),
+          await envelope({ id: 'a2', senderId: 'u2', senderName: 'bob', text: 'fresh one', createdAt: '2026-08-13T10:01:00.000Z' }),
+          await envelope({ id: 'a3', senderId: 'u2', senderName: 'bob', text: 'fresh two', createdAt: '2026-08-13T10:02:00.000Z' }),
+        ],
+      };
+    },
+  });
+  const text = committed.join('\n');
+  assert.ok(text.indexOf('new messages') > text.indexOf('old news'));
+  assert.ok(text.indexOf('new messages') < text.indexOf('fresh one'));
+  app.stop(0);
+});
+
+// ── safety and polish ───────────────────────────────────────────────────────
+
+test('safe() strips terminal escape sequences and control characters from other people\'s text', () => {
+  const evil = 'hi\u001b]0;pwned\u0007 there\u001b[2J\u001b[31mred\u0000 ‮evil\u009b1m';
+  const clean = fmt.safe(evil);
+  assert.equal(clean, 'hi therered evil');
+  assert.ok(!/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/.test(clean));
+  assert.equal(fmt.safe('line one\nline two\ttabbed'), 'line one\nline two\ttabbed');
+});
+
+test('a message carrying escape codes is printed without them', async () => {
+  const { app, committed, settle } = await makeApp();
+  const raw = await envelope({ id: 'x9', senderId: 'u2', senderName: 'bob\u001b]0;owned\u0007', text: 'click \u001b[2Jhere\u001b]8;;http://evil\u0007 now' });
+  await app.onClientEvent('sync_event', { protocol: 2, type: 'message.created', groupId: 'g1', seq: 9, epoch: 1, message: { ...raw, groupId: 'g1' } });
+  await settle();
+  const joined = committed.join('\n');
+  assert.match(joined, /click here now/);
+  assert.ok(!joined.includes('\u001b'), 'no raw escape reached the transcript');
+  app.stop(0);
+});
+
+test('inline styling: links are underlined, `code` and **bold** are styled, text stays intact', () => {
+  const styled = fmt.inlineStyle('see https://example.com/a?b=1, use `npm i` and **now**');
+  assert.equal(plain(styled), 'see https://example.com/a?b=1, use npm i and now');
+  assert.ok(styled.includes('\u001b[4m'), 'underlined link');
+  assert.equal(fmt.inlineStyle('plain text'), 'plain text');
+});
+
+test('the sign-in screen shows the bird and tagline above the menu', async () => {
+  const { app, live } = await makeApp({ http: { session: { user: null, cookies: {} }, setServer() {} } }, { auth: true });
+  app.stdout.rows = 40;
+  app.refresh();
+  const shown = live().join('\n');
+  assert.match(shown, /Encrypted group chat, in your terminal\./);
+  assert.match(shown, /Sign in to GChat/);
+  assert.ok(live().length > 14, 'bird rows are part of the live region');
+  app.stop(0);
+});
+
+test('the input box carries the channel name on its border', async () => {
+  const { app, live } = await makeApp();
+  assert.ok(live().some((l) => l.startsWith('╭') && l.includes('#main')));
   app.stop(0);
 });

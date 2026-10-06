@@ -17,6 +17,8 @@ const ansi = require('../tui/ansi');
 const { CLI_VERSION } = require('../version');
 const { LiveScreen, wrapText } = require('./screen');
 const { createKeyParser } = require('./keys');
+const { renderHome } = require('./home');
+const { renderBird } = require('./bird');
 const { Editor } = require('./editor');
 const fmt = require('./format');
 const image = require('./image');
@@ -81,6 +83,15 @@ class App {
     this.typingSentAt = 0;
     this.timers = new Set();
     this.pendingEcho = new Set();
+    this.view = 'home'; // 'home' | 'chat'
+    this.homeIndex = 0;
+    this.homeStart = Date.now();
+    this.burstAt = -1;
+    this.hits = [];
+    this.mouseOn = this.config.mouse !== 'off';
+    this.spinner = null;
+    this.thumbs = new Map();
+    this.lastLineCount = 0;
   }
 
   // ── lifecycle ──────────────────────────────────────────────────────────────
@@ -88,6 +99,7 @@ class App {
   async start() {
     this.running = true;
     this.stdout.write('\u001b[?2004h\u001b[?1004h');
+    this.setMouse(this.mouseOn);
     if (this.stdin.setRawMode) this.stdin.setRawMode(true);
     this.stdin.setEncoding('utf8');
     this.stdin.resume();
@@ -95,6 +107,8 @@ class App {
       onKey: (k) => this.onKey(k),
       onPaste: (t) => this.onPaste(t),
       onFocus: (focused) => this.onFocus(focused),
+      onMouse: (m) => this.onMouse(m),
+      onCursor: (row) => this.screen.handleCursorReport(row),
     });
     this.stdin.on('data', (chunk) => {
       try {
@@ -104,7 +118,6 @@ class App {
       }
     });
     this.stdout.on('resize', () => this.refresh());
-    this.printWelcome();
     this.refresh();
     // Boot runs in the background: sign-in dialogs can stay open indefinitely.
     this.bootPromise = this.boot().catch((err) => {
@@ -118,11 +131,13 @@ class App {
     this.running = false;
     for (const t of this.timers) clearTimeout(t);
     this.timers.clear();
+    this.stopAnim();
+    this.stopSpinner();
     try { this.client.disconnectSocket(); } catch { /* ignore */ }
     try { fs.rmSync(MEDIA_DIR, { recursive: true, force: true }); } catch { /* ignore */ }
     this.screen.render([], null);
     this.screen.release();
-    this.stdout.write('\u001b[?2004l\u001b[?1004l\u001b[0m');
+    this.stdout.write('\u001b[?1000l\u001b[?1006l\u001b[?2004l\u001b[?1004l\u001b[0m');
     try { if (this.stdin.setRawMode) this.stdin.setRawMode(false); } catch { /* ignore */ }
     this.stdin.pause();
     this.onExit(code);
@@ -139,54 +154,145 @@ class App {
 
   async boot() {
     const hasSession = this.client.http.session?.user || Object.keys(this.client.http.session?.cookies || {}).length;
+    let groupsEarly = null;
     if (hasSession) {
-      try {
-        this.user = await this.client.me();
-      } catch {
-        this.user = null;
-      }
+      // Session check and group list are independent: ask for both at once.
+      const [me, groups] = await Promise.all([
+        this.client.me().catch(() => null),
+        this.client.listGroups().catch(() => null),
+      ]);
+      this.user = me;
+      groupsEarly = me ? groups : null;
     }
-    if (!this.user) await this.authFlow();
+    if (!this.user) {
+      this.splash = true;
+      this.homeStart = Date.now();
+      this.startAnim();
+      await this.authFlow();
+      this.splash = false;
+    }
     if (!this.running) return;
-    await this.afterLogin();
+    await this.afterLogin(groupsEarly);
   }
 
-  async afterLogin() {
+  async afterLogin(groupsEarly = null) {
     this.client.onEvent = (event, payload) => {
       this.onClientEvent(event, payload).catch(() => { /* event handlers are best-effort */ });
     };
-    await this.refreshGroups();
+    // The socket connects while the group list loads; neither blocks the home screen.
     this.client.connectSocket()
       .then(() => { this.connected = true; this.everConnected = true; this.refresh(); })
       .catch((err) => { this.connected = false; this.flash(`offline: ${err.message || err}`, 'error'); });
-    const prefs = loadPrefs(this.paths);
-    const remembered = this.groups.find((g) => String(g.id) === String(prefs.activeGroupId));
-    if (remembered) {
-      await this.openGroup(remembered);
-    } else if (this.groups.length === 1) {
-      await this.openGroup(this.groups[0]);
-    } else {
-      this.printSystem(this.groups.length ? 'Pick a group to start chatting.' : 'You are not in any groups yet. Create one with /new or join with /join.');
-      if (this.groups.length) await this.pickGroup();
-    }
+    if (groupsEarly) this.groups = groupsEarly.map((g) => ({ ...g, name: fmt.safe(g.name) }));
+    else await this.refreshGroups();
+    this.view = 'home';
+    this.homeStart = Date.now();
+    this.homeIndex = this.defaultHomeIndex();
+    this.startAnim();
     this.refresh();
   }
 
-  // ── welcome / auth ─────────────────────────────────────────────────────────
-
-  printWelcome() {
-    const cols = Math.min(this.screen.cols(), 72);
-    const t = fmt.getTheme();
-    const lines = [
-      `${fmt.paint(t.accent, '✦')} ${fmt.bold('Welcome to GChat')}`,
-      '',
-      fmt.muted('End-to-end encrypted group chat, in your terminal.'),
-      '',
-      `${fmt.dim('server')}  ${hostOf(this.client.server)}`,
-      `${fmt.dim('tips  ')}  ${fmt.muted('/ for commands · /groups to switch chats')}`,
-    ];
-    this.screen.commit(['', ...fmt.box(lines, cols, { title: `GChat CLI v${CLI_VERSION}` }), '']);
+  /** Home selection: the chat you were last in, otherwise the first one. */
+  defaultHomeIndex() {
+    const prefs = loadPrefs(this.paths);
+    const at = this.groups.findIndex((g) => String(g.id) === String(prefs.activeGroupId));
+    return at >= 0 ? at : 0;
   }
+
+  // ── home screen ────────────────────────────────────────────────────────────
+
+  startAnim() {
+    if (this.animTimer || !this.running) return;
+    this.animTimer = setInterval(() => {
+      if (this.view !== 'home' || (this.dialog && !this.splash) || !this.focused) return;
+      this.refresh({ animate: true });
+    }, 100);
+  }
+
+  stopAnim() {
+    if (this.animTimer) clearInterval(this.animTimer);
+    this.animTimer = null;
+  }
+
+  goHome() {
+    if (this.view === 'home') return;
+    this.group = null;
+    this.items = [];
+    this.typing.clear();
+    this.replying = null;
+    this.editing = null;
+    this.view = 'home';
+    this.setTitle('GChat');
+    this.homeStart = Date.now();
+    this.homeIndex = this.defaultHomeIndex();
+    this.lastPrinted = null;
+    this.screen.commit(['', fmt.rule('home', Math.min(this.screen.cols(), 72))]);
+    this.refreshGroups().then(() => this.refresh()).catch(() => {});
+    this.startAnim();
+    this.refresh();
+  }
+
+  async activateHomeItem(index = this.homeIndex) {
+    const items = [...this.groups.map((g) => ({ kind: 'group', group: g })), { kind: 'new' }, { kind: 'join' }];
+    const item = items[Math.max(0, Math.min(index, items.length - 1))];
+    if (!item) return;
+    if (item.kind === 'group') await this.openGroup(item.group);
+    else if (item.kind === 'new') await this.cmd_newGroup('');
+    else await this.cmd_joinGroup('');
+  }
+
+  cmd_home() { this.goHome(); }
+
+  setTitle(text) {
+    this.stdout.write(`\u001b]0;${fmt.safe(text).replace(/\u0007/g, '')}\u0007`);
+  }
+
+  // ── mouse ──────────────────────────────────────────────────────────────────
+
+  setMouse(on) {
+    this.mouseOn = !!on;
+    this.screen.trackCursor = this.mouseOn;
+    this.stdout.write(this.mouseOn ? '\u001b[?1000h\u001b[?1006h' : '\u001b[?1000l\u001b[?1006l');
+  }
+
+  async cmd_mouse(arg) {
+    const next = arg ? /^(on|1|true)$/i.test(arg) : !this.mouseOn;
+    this.setMouse(next);
+    saveConfig({ ...loadConfig(this.paths), mouse: next ? 'on' : 'off' }, this.paths);
+    this.config = loadConfig(this.paths);
+    this.printSystem(next
+      ? 'Mouse on: click channels, chats and menu items. Hold Shift to select text.'
+      : 'Mouse off: the terminal handles selection and scrolling again.');
+  }
+
+  /** Left clicks only; the wheel and drags are ignored. */
+  onMouse(m) {
+    if (!this.mouseOn || m.release || m.wheel || m.motion || m.button !== 0) return;
+    const row = this.screen.regionRow(m.y);
+    if (row < 0) return;
+    const col = m.x - 1;
+    const hit = this.hits.find((h) => h.row === row && col >= h.x0 && col < h.x1);
+    if (!hit) return;
+    Promise.resolve(hit.fn()).catch((err) => this.flash(err.message || String(err), 'error')).finally(() => this.refresh());
+  }
+
+  startSpinner(text) {
+    this.spinner = { text, frame: 0 };
+    if (this.spinTimer) return;
+    this.spinTimer = setInterval(() => {
+      if (!this.spinner) return;
+      this.spinner.frame += 1;
+      this.refresh({ animate: true });
+    }, 80);
+  }
+
+  stopSpinner() {
+    this.spinner = null;
+    if (this.spinTimer) clearInterval(this.spinTimer);
+    this.spinTimer = null;
+  }
+
+  // ── welcome / auth ─────────────────────────────────────────────────────────
 
   async authFlow() {
     for (;;) {
@@ -250,9 +356,13 @@ class App {
     this.items = [];
     this.user = null;
     this.connected = false;
+    this.view = 'home';
     this.screen.clearAll();
-    this.printWelcome();
+    this.splash = true;
+    this.homeStart = Date.now();
+    this.startAnim();
     await this.authFlow();
+    this.splash = false;
     if (this.running) await this.afterLogin();
   }
 
@@ -273,6 +383,7 @@ class App {
           const lines = [fmt.bold(title)];
           if (body) lines.push(...wrapText(body, inner).map((l) => fmt.muted(l)));
           lines.push('');
+          const first = lines.length;
           options.forEach((opt, i) => {
             const active = i === state.index;
             const pointer = active ? fmt.color('accent', '❯') : ' ';
@@ -284,6 +395,7 @@ class App {
             lines.push(right ? `${row}${' '.repeat(gap)}${right}` : row);
           });
           lines.push('', fmt.dim('↑/↓ move · Enter select · Esc cancel'));
+          this.dialog.hits = options.map((opt, i) => ({ row: first + i + 1, x0: 0, x1: cols, fn: () => finish(opt.value) }));
           return fmt.box(lines, cols, { borderKey: 'borderActive' });
         },
         key: (k) => {
@@ -440,6 +552,25 @@ class App {
       return undefined;
     }
 
+    if (this.view === 'home' && !ed.text) {
+      const count = this.groups.length + 2;
+      let moved = true;
+      if (k.name === 'up') this.homeIndex = (this.homeIndex - 1 + count) % count;
+      else if (k.name === 'down' || (k.name === 'tab' && !k.shift)) this.homeIndex = (this.homeIndex + 1) % count;
+      else if (k.name === 'tab') this.homeIndex = (this.homeIndex - 1 + count) % count;
+      else if (k.name === 'home') this.homeIndex = 0;
+      else if (k.name === 'end') this.homeIndex = count - 1;
+      else moved = false;
+      if (moved) {
+        this.refresh();
+        return undefined;
+      }
+      if (k.name === 'enter' && !k.alt && !k.shift) {
+        this.activateHomeItem().catch((err) => this.flash(err.message || String(err), 'error')).finally(() => this.refresh());
+        return undefined;
+      }
+    }
+
     if (k.name === 'enter' && !k.alt && !k.shift) {
       if (menu.length && this.paletteActive()) return this.acceptPalette(menu);
       if (ed.text.endsWith('\\')) {
@@ -566,7 +697,7 @@ class App {
       return;
     }
     if (!this.group) {
-      this.flash('Open a group first (/groups)', 'error');
+      this.flash('Pick a chat first: press Enter on one above, or type /groups.', 'error');
       return;
     }
     const editing = this.editing;
@@ -808,7 +939,7 @@ class App {
 
   async refreshGroups() {
     try {
-      this.groups = await this.client.listGroups();
+      this.groups = (await this.client.listGroups()).map((g) => ({ ...g, name: fmt.safe(g.name) }));
     } catch (err) {
       this.flash(`Could not load groups: ${err.message || err}`, 'error');
     }
@@ -876,47 +1007,70 @@ class App {
 
   async openGroup(ref) {
     const seq = ++this.openSeq;
-    this.flash(`Opening ${ref.name}…`, 'info', 15000);
+    this.startSpinner(`Opening ${ref.name}\u2026`);
     this.refresh();
     try {
-      const opened = await this.client.openGroup(ref.id);
+      // History, key and unread counts are independent requests: send them together.
+      // The socket joins in the background and is not needed to show messages.
+      const known = listChannels(ref.id, this.paths);
+      const [opened, unread] = await Promise.all([
+        this.client.openGroup(ref.id, { group: ref, waitSocket: false }),
+        this.client.fetchUnread(ref.id, known).catch(() => null),
+      ]);
       if (seq !== this.openSeq) return;
-      const items = [];
-      for (const msg of opened.messages || []) items.push(await this.decorate(msg, ref.id));
+      const items = await Promise.all((opened.messages || []).map((msg) => this.decorate(msg, ref.id)));
       if (seq !== this.openSeq) return;
+      items.sort((a, b) => String(a.msg.createdAt || '').localeCompare(String(b.msg.createdAt || '')));
       this.group = opened.group || ref;
       this.items = items;
-      this.items.sort((a, b) => String(a.msg.createdAt || '').localeCompare(String(b.msg.createdAt || '')));
-      this.hasMore = (opened.messages || []).length >= HISTORY_PAGE;
+      for (const item of items) if (item.replyTo) item.replyTo = this.resolveReply(item.msg, item.metadata) || item.replyTo;
+      this.hasMore = (opened.messages || []).length >= 40;
       this.lastCursorKey = '';
       this.typing.clear();
       this.replying = null;
       this.editing = null;
+      this.view = 'chat';
+      this.setTitle(`${this.group.name} \u00b7 GChat`);
       const prefs = loadPrefs(this.paths);
       for (const item of items) if (item.channel) rememberChannel(ref.id, item.channel, prefs);
-      try {
-        for (const row of (await this.client.fetchChannels(ref.id)) || []) {
-          const name = normalizeChannel(row?.name);
-          if (name) rememberChannel(ref.id, name, prefs);
-        }
-      } catch { /* discovery is best-effort */ }
       savePrefs(prefs, this.paths);
       this.channels = listChannels(ref.id, this.paths);
       this.channel = getActiveChannel(ref.id, this.paths);
       if (!this.channels.includes(this.channel)) this.channel = 'main';
+      this.channelUnread = unread?.counts || {};
+      this.unreadTags = unread?.tagIndexes || {};
       this.memberCount = 0;
+      this.stopSpinner();
+      const unreadHere = Number(this.channelUnread[this.channel]) || 0;
+      await this.printChannelView({ reason: 'open', unread: unreadHere });
+      // Everything below only fills in details; the chat is already on screen.
+      this.refreshChannels(ref.id);
       this.client.listMembers(ref.id).then((m) => { this.memberCount = m.length; this.refresh(); }).catch(() => {});
-      this.flashState = null;
-      await this.printChannelView({ reason: 'open' });
-      this.refreshUnread();
       this.markReadSoon();
       const row = this.groups.find((g) => String(g.id) === String(ref.id));
-      if (row) row.unreadCount = 0;
+      if (row) row.unreadCount = Math.max(0, (Number(row.unreadCount) || 0) - unreadHere);
     } catch (err) {
-      this.flashState = null;
+      this.stopSpinner();
       this.printSystem(`Could not open ${ref.name}: ${err.message || err}`, 'error');
     }
     this.refresh();
+  }
+
+  /** Server-side channel discovery; adds channels nobody has posted in on this device yet. */
+  async refreshChannels(groupId) {
+    try {
+      const rows = (await this.client.fetchChannels(groupId)) || [];
+      if (String(this.group?.id) !== String(groupId)) return;
+      const prefs = loadPrefs(this.paths);
+      for (const row of rows) {
+        const name = normalizeChannel(row?.name);
+        if (name) rememberChannel(groupId, name, prefs);
+      }
+      savePrefs(prefs, this.paths);
+      this.channels = listChannels(groupId, this.paths);
+      this.refreshUnread();
+      this.refresh();
+    } catch { /* discovery is best-effort */ }
   }
 
   async switchChannel(name) {
@@ -940,21 +1094,30 @@ class App {
     this.switchChannel(next).catch((err) => this.flash(err.message, 'error')).finally(() => this.refresh());
   }
 
-  async printChannelView({ reason }) {
+  async printChannelView({ reason, unread = 0 }) {
     const cols = this.screen.cols();
     const title = reason === 'open'
-      ? `${this.group.name} · #${this.channel}`
+      ? `${this.group.name} \u00b7 #${this.channel}`
       : `#${this.channel}`;
     this.lastPrinted = null;
     this.attachments = [];
     const items = this.channelItems().slice(-OPEN_PRINT);
+    // A "new messages" rule goes above the first message you haven't read.
+    let dividerId = null;
+    if (unread > 0) {
+      const theirs = items.filter((m) => String(m.msg.senderId) !== String(this.user?.id));
+      const n = Math.min(unread, theirs.length);
+      if (n > 0) dividerId = theirs[theirs.length - n].msg.id;
+    }
+    // Decode the images we are about to show while the earlier messages print.
+    for (const item of items.filter((m) => m.attach && m.msg.type === 'image').slice(-2)) this.prefetchThumb(item);
     this.enqueue(async () => {
-      this.screen.commit(['', fmt.rule(title, Math.min(cols, 72))]);
+      this.screen.commit(['', fmt.rule(title, Math.min(cols, 72), 'accent')]);
       if (!items.length) {
         this.screen.commit([fmt.dim(`  No messages in #${this.channel} yet. Say hello.`)]);
         return;
       }
-      await this.printItems(items);
+      await this.printItems(items, { dividerId, thumbnailIds: new Set(items.filter((m) => m.attach && m.msg.type === 'image').slice(-2).map((m) => String(m.msg.id))) });
     });
     await this.printChain;
   }
@@ -1029,17 +1192,20 @@ class App {
     return at + 1;
   }
 
-  async printItems(items) {
+  async printItems(items, { dividerId = null, thumbnailIds = null } = {}) {
     const cols = this.screen.cols();
-    let thumbs = 0;
     for (const item of items) {
+      if (dividerId && String(item.msg.id) === String(dividerId)) {
+        this.screen.commit(['', fmt.rule('new messages', Math.min(cols, 60), 'error')]);
+        this.lastPrinted = null;
+      }
       let label = null;
       if (item.attach) label = `${item.msg.type === 'image' ? 'Image' : 'File'} #${this.attachmentNumber(item)}`;
       const lines = fmt.messageLines(item, { cols, me: this.user?.id, prev: this.lastPrinted, attachmentLabel: label });
       this.lastPrinted = item;
       this.screen.commit(lines);
-      if (item.attach && item.msg.type === 'image' && !item.sending && this.config.preview !== 'off' && thumbs < 3) {
-        thumbs += 1;
+      const wantThumb = !thumbnailIds || thumbnailIds.has(String(item.msg.id));
+      if (item.attach && item.msg.type === 'image' && !item.sending && this.config.preview !== 'off' && wantThumb) {
         await this.printImage(item, { thumbnail: true });
       }
     }
@@ -1048,32 +1214,57 @@ class App {
   async materialize(item) {
     const id = String(item.msg.id);
     if (this.mediaCache.has(id)) return this.mediaCache.get(id);
-    const secret = this.client.getSecret(this.group.id);
-    if (!secret) throw new Error('missing encryption key');
-    const { bytes, metadata } = await decryptAttachment(item.msg, secret, this.group.id);
+    const { bytes, metadata } = await this.client.loadAttachment(this.group.id, item.msg);
     const entry = { bytes, filename: path.basename(metadata.filename || 'file'), mimeType: metadata.mimeType || '' };
     this.mediaCache.set(id, entry);
     while (this.mediaCache.size > 8) this.mediaCache.delete(this.mediaCache.keys().next().value);
     return entry;
   }
 
-  async printImage(item, { thumbnail }) {
-    try {
-      const size = Number(item.attach?.size) || 0;
-      if (thumbnail && size > MAX_THUMB_BYTES) return;
+  /** Starts decrypting and rendering a thumbnail; the result is awaited when the message prints. */
+  prefetchThumb(item) {
+    const id = String(item.msg.id);
+    if (this.thumbs.has(id)) return this.thumbs.get(id);
+    const task = (async () => {
+      if ((Number(item.attach?.size) || 0) > MAX_THUMB_BYTES) return null;
       const entry = await this.materialize(item);
-      const cols = this.screen.cols();
-      const maxCols = thumbnail ? Math.min(40, cols - 6) : Math.min(100, cols - 4);
-      const maxRows = thumbnail ? 12 : Math.max(12, Math.min(34, (this.stdout.rows || 30) - 8));
-      if (image.supportsInlineProtocol()) {
-        this.screen.commitRaw(`  ${image.renderInline(entry.bytes, { maxCols, name: entry.filename })}\r\n`);
-        return;
+      return this.renderImageEntry(entry, { thumbnail: true });
+    })().catch((err) => ({ error: err.message || String(err) }));
+    this.thumbs.set(id, task);
+    while (this.thumbs.size > 12) this.thumbs.delete(this.thumbs.keys().next().value);
+    return task;
+  }
+
+  renderImageEntry(entry, { thumbnail }) {
+    const cols = this.screen.cols();
+    const maxCols = thumbnail ? Math.min(40, cols - 6) : Math.min(100, cols - 4);
+    const maxRows = thumbnail ? 12 : Math.max(12, Math.min(34, (this.stdout.rows || 30) - 8));
+    if (image.supportsInlineProtocol()) {
+      return { raw: `  ${image.renderInline(entry.bytes, { maxCols, name: entry.filename })}\r\n` };
+    }
+    const rendered = image.renderBlocks(entry.bytes, { maxCols, maxRows });
+    return { lines: rendered.lines.map((l) => `  ${l}`) };
+  }
+
+  async printImage(item, { thumbnail }) {
+    let result;
+    if (thumbnail) {
+      result = await this.prefetchThumb(item);
+    } else {
+      try {
+        result = this.renderImageEntry(await this.materialize(item), { thumbnail: false });
+      } catch (err) {
+        result = { error: err.message || String(err) };
       }
-      const rendered = image.renderBlocks(entry.bytes, { maxCols, maxRows });
-      this.screen.commit(rendered.lines.map((l) => `  ${l}`));
-    } catch (err) {
-      if (!thumbnail) throw err;
-      this.screen.commit([fmt.dim(`  (no preview: ${err.message})`)]);
+    }
+    if (!result) return;
+    if (result.error) {
+      if (!thumbnail) throw new Error(result.error);
+      this.screen.commit([fmt.dim(`  (no preview: ${result.error})`)]);
+    } else if (result.raw) {
+      this.screen.commitRaw(result.raw);
+    } else {
+      this.screen.commit(result.lines);
     }
   }
 
@@ -1479,37 +1670,86 @@ class App {
       const key = flash.kind === 'error' ? 'error' : 'muted';
       return `  ${fmt.color(key, ansi.truncate(flash.text, cols - 4))}`;
     }
-    if (this.attachment) {
-      return `  ${fmt.color('warn', `[${this.attachment.isImage ? 'Image' : 'File'}]`)} ${this.attachment.filename} ${fmt.dim(`· ${fmt.formatBytes(this.attachment.size)} · Enter to send · Esc to remove`)}`;
+    if (this.spinner) {
+      const frames = '\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f';
+      return `  ${fmt.color('accent', frames[this.spinner.frame % frames.length])} ${fmt.muted(this.spinner.text)}`;
     }
-    if (this.editing) return `  ${fmt.color('warn', 'Editing your message')} ${fmt.dim('· Enter to save · Esc to cancel')}`;
-    if (this.replying) return `  ${fmt.dim('↪ Replying to')} ${fmt.color('accent', this.replying.msg.senderName || 'message')}${fmt.dim(`: ${ansi.truncate(fmt.previewText(this.replying, 60), Math.max(10, cols - 40))}  · Esc to cancel`)}`;
+    if (this.attachment) {
+      return `  ${fmt.color('warn', `[${this.attachment.isImage ? 'Image' : 'File'}]`)} ${this.attachment.filename} ${fmt.dim(`\u00b7 ${fmt.formatBytes(this.attachment.size)} \u00b7 Enter to send \u00b7 Esc to remove`)}`;
+    }
+    if (this.editing) return `  ${fmt.color('warn', 'Editing your message')} ${fmt.dim('\u00b7 Enter to save \u00b7 Esc to cancel')}`;
+    if (this.replying) return `  ${fmt.dim('\u21aa Replying to')} ${fmt.color('accent', this.replying.msg.senderName || 'message')}${fmt.dim(`: ${ansi.truncate(fmt.previewText(this.replying, 60), Math.max(10, cols - 40))}  \u00b7 Esc to cancel`)}`;
     const names = [...this.typing].filter(([, until]) => until > Date.now()).map(([n]) => n);
-    if (names.length) return `  ${fmt.dim(names.length === 1 ? `${names[0]} is typing…` : `${names.slice(0, 2).join(' and ')} are typing…`)}`;
-    if (this.everConnected && !this.connected) return `  ${fmt.color('warn', 'Reconnecting…')}`;
+    if (names.length) {
+      const dots = '.'.repeat(1 + (Math.floor(Date.now() / 400) % 3));
+      return `  ${fmt.dim(names.length === 1 ? `${names[0]} is typing${dots}` : `${names.slice(0, 2).join(' and ')} are typing${dots}`)}`;
+    }
+    if (this.everConnected && !this.connected) return `  ${fmt.color('warn', 'Reconnecting\u2026')}`;
     if (this.missedWhileAway > 0) return `  ${fmt.dim(`${this.missedWhileAway} new while you were away`)}`;
     return null;
   }
 
-  footer(cols) {
-    if (!this.group) {
-      const hint = this.user ? '/groups to pick a chat · /help' : '';
-      return `  ${fmt.dim(hint)}`;
+  /**
+   * Lays styled segments out on one row (left group, right group) and records a
+   * click target for every segment that has a handler. Right segments are
+   * dropped from the left when the row is too narrow.
+   */
+  layoutRow(left, right, cols, row) {
+    const hits = [];
+    let x = 0;
+    let leftText = '';
+    for (const seg of left) {
+      const w = ansi.width(seg.text);
+      if (seg.fn) hits.push({ row, x0: x, x1: x + w, fn: seg.fn });
+      leftText += seg.text;
+      x += w;
     }
-    const channels = this.channels.map((c) => {
-      const n = this.channelUnread[c] > 0 && c !== this.channel ? fmt.color('error', `(${this.channelUnread[c]})`) : '';
-      return c === this.channel ? fmt.color('accent', `#${c}`) : fmt.dim(`#${c}`) + n;
-    }).join(' ');
-    const left = `  ${fmt.muted(this.group.name)} ${fmt.dim('·')} ${channels}`;
-    const others = this.groups
+    const rightSegs = right.slice();
+    const widthOf = (segs) => segs.reduce((n, seg) => n + ansi.width(seg.text), 0);
+    while (rightSegs.length && x + 1 + widthOf(rightSegs) > cols) rightSegs.shift();
+    let rightX = cols - widthOf(rightSegs);
+    let rightText = '';
+    for (const seg of rightSegs) {
+      const w = ansi.width(seg.text);
+      if (seg.fn) hits.push({ row, x0: rightX, x1: rightX + w, fn: seg.fn });
+      rightText += seg.text;
+      rightX += w;
+    }
+    const gap = Math.max(0, cols - x - widthOf(rightSegs));
+    return { line: ansi.truncate(`${leftText}${' '.repeat(gap)}${rightText}`, cols), hits };
+  }
+
+  footer(cols, row) {
+    const seg = (text, fn) => ({ text, fn });
+    const hint = seg(fmt.dim('/ for commands  '), () => { this.input.set('/'); });
+    if (this.view === 'home' || !this.group) {
+      const left = [seg(fmt.dim('  Enter opens the highlighted chat \u00b7 \u2191 \u2193 to move'))];
+      return this.layoutRow(left, [hint], cols, row);
+    }
+    const left = [
+      seg('  '),
+      seg(fmt.color('accent', '\u2302'), () => this.goHome()),
+      seg(' '),
+      seg(fmt.muted(this.group.name), () => this.pickGroup()),
+      seg(fmt.dim(' \u00b7 ')),
+    ];
+    this.channels.forEach((c, i) => {
+      if (i) left.push(seg(' '));
+      const count = this.channelUnread[c] > 0 && c !== this.channel ? fmt.color('error', `(${this.channelUnread[c]})`) : '';
+      const label = c === this.channel ? fmt.color('accent', fmt.bold(`#${c}`)) : `${fmt.muted(`#${c}`)}${count}`;
+      left.push(seg(label, c === this.channel ? undefined : () => this.switchChannel(c)));
+    });
+    left.push(seg(' '), seg(fmt.dim('+'), () => this.cmd_channel('', ['new'])));
+    const right = [];
+    this.groups
       .filter((g) => String(g.id) !== String(this.group.id) && Number(g.unreadCount) > 0)
       .slice(0, 2)
-      .map((g) => `${fmt.color('error', '●')} ${fmt.muted(ansi.truncate(g.name, 14))} ${fmt.dim(String(g.unreadCount))}`)
-      .join('  ');
-    const online = this.connected ? '' : fmt.color('warn', 'offline  ');
-    const right = `${online}${others}${others ? '  ' : ''}${fmt.dim('/ for commands')}  `;
-    const gap = cols - ansi.width(left) - ansi.width(right);
-    return gap >= 1 ? `${left}${' '.repeat(gap)}${right}` : ansi.truncate(left, cols);
+      .forEach((g) => {
+        right.push(seg(`${fmt.color('error', '\u25cf')} ${fmt.muted(ansi.truncate(g.name, 14))} ${fmt.dim(String(g.unreadCount))}  `, () => this.openGroup(g)));
+      });
+    if (!this.connected) right.push(seg(`${fmt.color('warn', 'offline')}  `));
+    right.push(hint);
+    return this.layoutRow(left, right, cols, row);
   }
 
   inputBox(cols) {
@@ -1533,41 +1773,107 @@ class App {
     } else {
       content = lines.map((l, i) => `${i === 0 ? fmt.paint(t.accent, '>') : ' '} ${l}`);
     }
-    const rendered = fmt.box(content, cols, { borderKey: 'borderActive' });
+    const title = this.group ? fmt.color('accent', `#${this.channel}`) : '';
+    const rendered = fmt.box(content, cols, { borderKey: 'borderActive', title });
     return { lines: rendered, caret: { row: 1 + caretRow, col: 4 + laid.caret.col } };
   }
 
-  paletteLines(menu, cols) {
+  /** The animated bird above the sign-in menu. */
+  splashLines(cols) {
+    const rows = this.screen.rows();
+    const age = (Date.now() - this.homeStart) / 1000;
+    const width = rows >= 34 ? 28 : (rows >= 28 ? 20 : 0);
+    const lines = [''];
+    if (width) {
+      const bird = renderBird({ width, t: age, enter: Math.min(1, age / 0.9), dark: fmt.getTheme() === fmt.THEMES.dark });
+      for (const line of bird) lines.push(`${' '.repeat(Math.max(0, Math.floor((cols - (width + 10)) / 2)))}${line}`);
+    }
+    const title = `${fmt.bold('GChat')}  ${fmt.dim(`v${CLI_VERSION}`)}`;
+    const tagline = fmt.muted('Encrypted group chat, in your terminal.');
+    const pad = (t) => ' '.repeat(Math.max(0, Math.floor((cols - ansi.width(t)) / 2)));
+    lines.push(`${pad(title)}${title}`, `${pad(tagline)}${tagline}`, '');
+    return lines;
+  }
+
+  paletteLines(menu, cols, firstRow) {
     const width = Math.max(...menu.map((c) => c.name.length + (c.usage ? c.usage.length + 1 : 0))) + 3;
-    return menu.map((cmd, i) => {
+    const hits = [];
+    const lines = menu.map((cmd, i) => {
       const active = i === Math.min(this.paletteIndex, menu.length - 1);
       const head = `/${cmd.name}${cmd.usage ? ` ${cmd.usage}` : ''}`;
       const pad = ' '.repeat(Math.max(1, width + 1 - head.length));
       const text = `  ${head}${pad}${cmd.desc}`;
       const clipped = ansi.truncate(text, cols - 1);
+      hits.push({ row: firstRow + i, x0: 0, x1: cols, fn: () => { this.paletteIndex = i; this.acceptPalette(menu); } });
       return active ? fmt.color('accent', clipped) : fmt.dim(clipped);
     });
+    return { lines, hits };
   }
 
-  refresh() {
+  refresh({ animate = false } = {}) {
     if (!this.running) return;
     const cols = this.screen.cols();
     if (this.dialog) {
+      const splash = this.splash ? this.splashLines(cols) : [];
       const out = this.dialog.render(cols);
-      if (Array.isArray(out)) this.screen.render(out, null);
-      else this.screen.render(out.lines, out.caret);
+      const shifted = (this.dialog.hits || []).map((h) => ({ ...h, row: h.row + splash.length }));
+      this.hits = shifted;
+      const track = !animate || splash.length + (Array.isArray(out) ? out.length : out.lines.length) !== this.lastLineCount;
+      this.lastLineCount = splash.length + (Array.isArray(out) ? out.length : out.lines.length);
+      if (Array.isArray(out)) this.screen.render([...splash, ...out], null, { track });
+      else this.screen.render([...splash, ...out.lines], { row: out.caret.row + splash.length, col: out.caret.col }, { track });
       return;
     }
     const lines = [];
+    const hits = [];
+    if (this.view === 'home') {
+      const age = (Date.now() - this.homeStart) / 1000;
+      const prefs = this.lastGroupId ? { activeGroupId: this.lastGroupId } : loadPrefs(this.paths);
+      this.lastGroupId = prefs.activeGroupId;
+      const home = renderHome({
+        cols,
+        rows: this.screen.rows(),
+        t: age,
+        enter: Math.min(1, age / 0.9),
+        burst: this.burstAt >= 0 ? (Date.now() - this.burstAt) / 1000 : -1,
+        user: this.user?.username,
+        host: hostOf(this.client.server),
+        connected: this.connected,
+        groups: this.groups,
+        selected: this.homeIndex,
+        lastId: prefs.activeGroupId,
+        version: CLI_VERSION,
+        dark: fmt.getTheme() === fmt.THEMES.dark,
+      });
+      lines.push(...home.lines);
+      for (const h of home.hits) {
+        hits.push({ row: h.row, x0: h.x0, x1: h.x1, fn: () => { this.homeIndex = h.index; return this.activateHomeItem(h.index); } });
+      }
+      if (home.birdBox) {
+        for (let r = 0; r < home.birdBox.rows; r += 1) {
+          hits.push({ row: home.birdBox.row + r, x0: home.birdBox.x0, x1: home.birdBox.x1, fn: () => { this.burstAt = Date.now(); } });
+        }
+      }
+    }
     const status = this.statusLine(cols);
     if (status) lines.push(status);
     const box = this.inputBox(cols);
     const caret = { row: lines.length + box.caret.row, col: box.caret.col };
     lines.push(...box.lines);
     const menu = this.paletteMatches();
-    if (menu.length) lines.push(...this.paletteLines(menu, cols));
-    else lines.push(this.footer(cols));
-    this.screen.render(lines, caret);
+    if (menu.length) {
+      const palette = this.paletteLines(menu, cols, lines.length);
+      lines.push(...palette.lines);
+      hits.push(...palette.hits);
+    } else {
+      const foot = this.footer(cols, lines.length);
+      lines.push(foot.line);
+      hits.push(...foot.hits);
+    }
+    this.hits = hits;
+    const track = !animate || lines.length !== this.lastLineCount;
+    this.lastLineCount = lines.length;
+    this.screen.render(lines, caret, { track });
   }
 }
 

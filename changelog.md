@@ -6,7 +6,9 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ## Unreleased
 
-**CLI 1.1.0: a new terminal UI.** `gchat` now opens a chat UI that runs inline in the terminal, in the style of Claude Code: scrollback stays native, the input box sits at the bottom, `/` opens a command menu, and sign-in, groups, channels, replies, edits, uploads and image previews all work inside it. The old full-screen UI is still there as `gchat --classic`. `gchat --server <url>` used to print help; it now opens the UI.
+**CLI 1.2.0: a new terminal UI.** `gchat` now opens a home screen with the animated GChat bird and your chats, and nothing opens until you pick it. From there it works like Claude Code: the UI runs inline in the terminal, `/` opens a command menu, and sign-in, groups, channels, replies, edits, uploads and image previews all work inside it. The mouse works for the footer, the home list and menus. The old full-screen UI is still there as `gchat --classic`. `gchat --server <url>` used to print help; it now opens the UI.
+
+**CLI is faster and steadier.** Starting takes one round trip instead of several and opening a chat takes one more. CSRF tokens are cached, requests time out instead of hanging, dropped reads are retried once, and the socket tries WebSocket first. A crash now restores the terminal. Text from other people is stripped of terminal escape codes before it is printed. Attachments stored in the Railway bucket can now be viewed and saved from the CLI.
 
 **Fixed: the red dot that never went away.** The CLI stamped `#main` messages with a channel tag, but the server tracks `#main` reads under no tag, so those messages could never be marked read. The CLI no longer does that, and the server clears the tag on existing rows the first time it starts (`main_tag_index_nulled_v2`).
 
@@ -19,6 +21,7 @@ Other fixes:
 - `npm ci` failed on machines that don't trust `registry.npmmirror.com`; both lockfiles now point at the npm registry.
 - `npm run dev:web` crashed on a fresh checkout without the three server secrets; it now supplies throwaway ones.
 - One CLI test depended on the machine's timezone.
+- The CLI release workflow no longer marks its release as "latest", which would have broken desktop auto-updates.
 - Docs rewritten: shorter README, `docs/operations.md`, current desktop and CLI guides with screenshots.
 
 ## v1.4.6 — Desktop hardening + CLI protocol repair

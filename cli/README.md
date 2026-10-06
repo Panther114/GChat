@@ -1,8 +1,8 @@
 # gchat
 
-GChat in your terminal. Type `gchat` and you get a chat UI that works like Claude Code: it runs inside your normal terminal (no full-screen takeover), messages scroll into your real scrollback, and a bordered input box sits at the bottom. Signing in, switching groups and channels, replying, editing, sending and viewing images all happen in there.
+GChat in your terminal. Type `gchat` and you land on a home screen with your chats; pick one and you're in. It runs inside your normal terminal like Claude Code does (no full-screen takeover), so messages scroll into your real scrollback and copy works. Signing in, switching chats and channels, replying, editing, sending and viewing images all happen in there.
 
-![gchat in a terminal](../docs/screenshots/cli-chat.png)
+![home screen](../docs/screenshots/cli-home.png)
 
 It speaks the same protocol as the web and desktop apps (sync v2, AES-256-GCM, HKDF-SHA-256, group key recovery included), so the same account works everywhere.
 
@@ -28,7 +28,13 @@ gchat config set server http://127.0.0.1:4400   # remember it
 
 ## Using it
 
-Run `gchat`. If you're not signed in you'll get a small menu: log in, create an account, change server, quit. After that it reopens the last group and channel you were in and prints the recent messages. Type to chat, press Enter to send.
+Run `gchat`. If you're not signed in you get a small menu (log in, create an account, change server, quit) under the bird.
+
+![sign-in](../docs/screenshots/cli-signin.png)
+
+After that you're on the home screen. Your last chat is highlighted, so Enter picks up where you left off; use the arrow keys or click to choose another, or create or join a group from the list. Click the bird if you like. Opening a chat prints the recent messages with a "new messages" line above anything you haven't read. Type to chat, press Enter to send, `/home` (or the ⌂ in the footer) to go back.
+
+![a chat](../docs/screenshots/cli-chat.png)
 
 Type `/` to open the command menu, narrow it by typing, and use the arrow keys, Tab and Enter.
 
@@ -40,6 +46,7 @@ Type `/` to open the command menu, narrow it by typing, and use the arrow keys, 
 | Alt+Enter, Ctrl+J, or `\` then Enter | New line |
 | Tab / Shift+Tab (empty input) | Next / previous channel |
 | Ctrl+G | Switch group |
+| Mouse click | Footer: ⌂ home, group name, channel names, `+` new channel, other-group dots. Also home-screen chats, menu rows and command-menu rows |
 | Ctrl+V, Alt+V | Attach the image on your clipboard |
 | Up / Down | Earlier messages you typed |
 | Esc | Cancel a reply, edit or attachment, or close the menu |
@@ -53,6 +60,7 @@ Pasting a file path, or dragging a file into the terminal, attaches it. Press En
 
 | Command | Does |
 |---|---|
+| `/home` (`/h`) | Back to the home screen |
 | `/groups` (`/g`) | Pick a group, or create or join one |
 | `/channel [name]` | Switch channel; `new <name>` and `delete <name>` also work |
 | `/new [name]`, `/join [code]`, `/invite` | Create a group, join with a code, show the invite code |
@@ -63,9 +71,14 @@ Pasting a file path, or dragging a file into the terminal, attaches it. Press En
 | `/save [n] [path]`, `/launch [n]` | Save an attachment, or open it in your default app |
 | `/history`, `/search <text>` | Load earlier messages; search what's loaded |
 | `/whisper <user> <text>` | Private message |
+| `/mouse [on|off]` | Turn click support on or off |
 | `/theme dark|light`, `/clear`, `/status`, `/whoami`, `/logout`, `/help`, `/quit` | Housekeeping |
 
 Anything else you can run as `gchat <command>` also works after a slash, for example `/members kick <user>` or `/groups settings`. Destructive ones ask for confirmation first.
+
+### Mouse
+
+Clicks work on the footer (channel names, the group name, the ⌂, the `+` for a new channel, dots for other groups with unread messages), on chats on the home screen, and on rows in menus. While mouse support is on, the terminal passes clicks to gchat instead of selecting text, so hold Shift (Option in some macOS terminals) to select, and use your terminal's scrollbar or Shift+PageUp to scroll back. `/mouse off` hands both back for good; `gchat config set mouse off` makes it the default.
 
 ### Images
 
@@ -98,7 +111,7 @@ Global flags: `--server <url>`, `--json`, `--yes`, `-h`, `-V`. Run `gchat help` 
 
 | File | Contents |
 |---|---|
-| `config.json` | server, theme, bell, preview |
+| `config.json` | server, theme, bell, preview, mouse |
 | `session.json` | session cookie and CSRF token |
 | `vault.json` | group encryption keys (mode 0600) |
 | `prefs.json` | last group and channel, muted groups |
@@ -113,4 +126,12 @@ npm test               # unit and integration tests
 npm run test:unit      # skips the in-process server tests
 ```
 
-The integration tests start their own local server and never touch the hosted one. The new UI lives in `src/ui/` (renderer, key parser, editor, image decoding, app); the shared client is in `src/client/`.
+The integration tests start their own local server and never touch the hosted one. The UI lives in `src/ui/` (renderer, key and mouse parser, editor, home screen and bird, image decoding, app); the shared client is in `src/client/`.
+
+### Speed
+
+Starting needs one round trip (session check and chat list together) and opening a chat needs one more (history and unread counts together; the socket and member list fill in behind it). CSRF tokens are cached, requests have timeouts, and WebSocket is tried before long polling. Images that are about to be shown are decoded while the text above them prints.
+
+## Releasing
+
+Standalone binaries are built by `.github/workflows/build-cli.yml` when a tag like `cli-v1.2.0` is pushed (or from the Actions tab). The workflow runs the unit tests, compiles with Bun for macOS (arm64 and x64), Windows and Linux, and attaches the files to a GitHub release. It deliberately does not mark that release as "latest", because the desktop updater reads `releases/latest`. The npm name `gchat-cli` belongs to someone else, so publishing to npm would need a scoped name first.

@@ -112,6 +112,22 @@ class LiveScreen {
     this.lines = [];
     this.caret = null; // { row, col } within the live region, or null to hide the cursor
     this.painted = null; // { lines, caretRow, cols } describing what is on screen
+    this.trackCursor = false; // ask the terminal where the region is (needed for mouse clicks)
+    this.pendingReports = [];
+    this.originTop = null; // 1-based terminal row of the live region's first line
+  }
+
+  /** Called with the terminal's answer to our cursor position request. */
+  handleCursorReport(row) {
+    const snapshot = this.pendingReports.shift();
+    if (snapshot) this.originTop = row - snapshot.caretRow;
+  }
+
+  /** Index into the live region for a 1-based terminal row, or -1 when outside it. */
+  regionRow(y) {
+    if (this.originTop == null || !this.painted) return -1;
+    const index = y - this.originTop;
+    return index >= 0 && index < this.painted.lines.length ? index : -1;
   }
 
   cols() {
@@ -153,13 +169,20 @@ class LiveScreen {
       if (this.caret.col > 0) seq += `\u001b[${Math.min(this.caret.col, cols - 1)}C`;
     }
     this.painted = { lines, caretRow, caretCol, cols };
-    return seq + (this.caret ? '\u001b[?25h' : '\u001b[?25l');
+    let query = '';
+    if (this.trackCursor && this.wantTrack) {
+      query = '\u001b[6n';
+      this.pendingReports.push({ caretRow });
+      if (this.pendingReports.length > 8) this.pendingReports.shift();
+    }
+    return seq + (this.caret ? '\u001b[?25h' : '\u001b[?25l') + query;
   }
 
   /** Replace the live region. */
-  render(lines, caret = null) {
+  render(lines, caret = null, { track = true } = {}) {
     this.lines = lines;
     this.caret = caret;
+    this.wantTrack = track;
     this.out.write(`${SYNC_ON}\u001b[?25l${this._erase()}${this._paintSeq()}${SYNC_OFF}`);
   }
 
@@ -172,6 +195,7 @@ class LiveScreen {
 
   /** Raw terminal output (image protocols etc.) above the live region. */
   commitRaw(data) {
+    this.wantTrack = true;
     this.out.write(`${SYNC_ON}\u001b[?25l${this._erase()}${data}${this._paintSeq()}${SYNC_OFF}`);
   }
 
