@@ -1,6 +1,6 @@
 {
   "name": "gchat-cli",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Command-line and TUI client for GChat (encrypted group chat)",
   "author": "Gchat",
   "license": "MIT",
@@ -14,11 +14,12 @@
   },
   "scripts": {
     "start": "node bin/gchat.js",
-    "test": "node --test --test-force-exit test/crypto.test.js test/parser.test.js test/messages.test.js test/session.test.js test/tui.test.js test/regressions.test.js test/integration.test.js",
-    "test:unit": "node --test --test-force-exit test/crypto.test.js test/parser.test.js test/messages.test.js test/session.test.js test/tui.test.js test/regressions.test.js",
+    "test": "node --test --test-force-exit test/crypto.test.js test/parser.test.js test/messages.test.js test/session.test.js test/tui.test.js test/ui.test.js test/regressions.test.js test/integration.test.js",
+    "test:unit": "node --test --test-force-exit test/crypto.test.js test/parser.test.js test/messages.test.js test/session.test.js test/tui.test.js test/ui.test.js test/regressions.test.js",
     "test:integration": "node --test --test-force-exit test/integration.test.js"
   },
   "dependencies": {
+    "jpeg-js": "^0.4.4",
     "socket.io-client": "^4.8.3"
   },
   "files": [
