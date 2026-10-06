@@ -1,72 +1,37 @@
-# Gchat Desktop for Windows and macOS
+# Desktop app
 
-## Windows production: thin WebView2 shell
+The desktop app is the hosted GChat web app in a native window, with a tray icon, notifications, launch at login and an in-app update check. It only ever loads `https://gchat.up.railway.app`; if the service or your connection is down you get a retry screen instead.
 
-Windows packages use a **non-Tauri thin native host** (`src-desktop-win`, wry/tao) over the system **WebView2** runtime. It is not Electron/Chromium and not the full Tauri plugin stack.
-
-Key behaviors:
-
-- Loads only `https://gchat.up.railway.app`
-- Full `window.electronAPI` bridge (tray, notifications, autostart, clipboard, offline retry, updates)
-- **Tray-hide keeps the SPA alive** for instant restore (no placeholder page; only minimize/close visibility changes)
-- Restoring from tray is instant (session cookies remain in the WebView2 profile)
-- Memory-oriented WebView2 flags (`max-old-space-size=384`, unused features disabled)
-- Installer ~1 MiB NSIS (`Gchat_1.4.6_x64-setup.exe`)
-
-## macOS: Tauri / WKWebView fallback
-
-macOS continues to use **Tauri 2 + WKWebView** (`npm run build:mac`). Same hosted UI and bridge contract.
+- **Windows** uses a thin WebView2 host (`src-desktop-win`, built on wry and tao). The installer is about 1 MB because it relies on the WebView2 runtime that ships with Windows 10 and 11.
+- **macOS** uses a Tauri 2 shell around WKWebView, as a fallback build. It's a universal `.dmg`.
 
 ## Install
 
-Download the GitHub Release for **v1.4.6**:
+Download the file for your system from the [latest release](https://github.com/Panther114/GChat/releases/latest):
 
-- **Windows:** `Gchat_1.4.6_x64-setup.exe`
-- **macOS:** universal `.dmg` from the Tauri build path when published
+- Windows: `Gchat_<version>_x64-setup.exe`
+- macOS: `Gchat_<version>_universal.dmg`
 
-First launch may require SmartScreen / Privacy approval (unsigned packages).
+The builds aren't code-signed, so Windows SmartScreen or macOS Gatekeeper will ask you to confirm the first launch. The Windows installer is per-user (no admin rights) and puts the app in `%LOCALAPPDATA%\Programs\Gchat`.
 
-## Build
+## Behavior worth knowing
 
-### Windows (production thin shell)
+- Closing or minimizing the window hides it to the tray. Left-click the tray icon to bring it back, right-click for Open, Check for Updates and Quit.
+- Starting the app a second time brings the running window to the front.
+- Sign-in data lives in the WebView2 profile next to the executable (`Gchat.exe.WebView2`), so install it somewhere your user can write to.
+- Most updates ship on the server side and only need a reload. You only need a new installer when the shell itself changes (tray, notifications, installer, icon).
+- Settings → Updates checks GitHub. The Windows updater verifies a minisign signature before running a downloaded installer, so every release must include `Gchat_<version>_x64-setup.exe.sig` next to the installer. `build-desktop.yml` creates it with `tauri signer sign`, using the `TAURI_SIGNING_PRIVATE_KEY` secret and the public key in `src-tauri/tauri.conf.json`. An installer with a missing or bad signature is deleted without being run.
 
-```bash
-npm ci --include=dev
-npm run build:win
-```
+## Build it yourself
 
-Requires Rust stable and NSIS (`makensis`). Output:
-
-`src-desktop-win/target/release/bundle/Gchat_1.4.6_x64-setup.exe`
-
-### macOS (Tauri fallback)
+You need Node 20+ and stable Rust. Build each target on its own OS.
 
 ```bash
 npm ci --include=dev
-rustup target add aarch64-apple-darwin x86_64-apple-darwin
-npm run build:mac
+npm run build:win     # needs NSIS (makensis); output in src-desktop-win/target/release/bundle/
+npm run build:mac     # needs the aarch64 and x86_64 Apple Rust targets
 ```
 
-### Optional paths (not production Windows)
+Pushing a `v*` tag builds both and publishes the installers and updater metadata to one GitHub release. `npm run build:win:tauri` and `npm run build:win:electron` are older Windows paths kept for comparison; the Electron one uses much more memory.
 
-- `npm run build:win:tauri` — prior Tauri NSIS path
-- `npm run build:win:electron` — Chromium (higher RAM; experimental only)
-
-## Desktop behavior
-
-- Hosted production service only
-- Tray: left-click restore/hide; menu Open / Check for Updates / Quit
-- Close hides to tray (SPA stays loaded for instant restore)
-- Settings → Updates in-app check UI
-- Single-instance lock (a second launch focuses the running window)
-- External links open in the default browser
-
-## Release signing (required)
-
-The thin shell's updater verifies a minisign signature before executing a
-downloaded installer: every GitHub release must ship
-`Gchat_<version>_x64-setup.exe` **together with** `Gchat_<version>_x64-setup.exe.sig`,
-signed with the same keypair as the Tauri updater (`src-tauri/tauri.conf.json`
-`pubkey`). `build-desktop.yml` does this automatically via
-`tauri signer sign` (needs the `TAURI_SIGNING_PRIVATE_KEY` secret). An update
-whose signature is missing or invalid is deleted and never executed.
+`npm run desktop` runs the Windows shell straight from the source tree.

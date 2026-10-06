@@ -1,105 +1,116 @@
-# gchat-cli
+# gchat
 
-Terminal client for [GChat](https://gchat.up.railway.app): encrypted group chat over the same HTTP + Socket.IO API as the web and desktop apps. Speaks sync protocol v2 (`X-GChat-Sync-Protocol: 2`), receives live traffic as `sync_event` / `sync_hint`, and uses the same AES-256-GCM + HKDF-SHA-256 message crypto (key escrow recovery included).
+GChat in your terminal. Type `gchat` and you get a chat UI that works like Claude Code: it runs inside your normal terminal (no full-screen takeover), messages scroll into your real scrollback, and a bordered input box sits at the bottom. Signing in, switching groups and channels, replying, editing, sending and viewing images all happen in there.
+
+![gchat in a terminal](../docs/screenshots/cli-chat.png)
+
+It speaks the same protocol as the web and desktop apps (sync v2, AES-256-GCM, HKDF-SHA-256, group key recovery included), so the same account works everywhere.
 
 ## Install
 
-From the monorepo:
+You need Node 18 or newer.
 
 ```bash
 cd cli
 npm install
-npm link          # puts `gchat` on your PATH
-# or
-node bin/gchat.js --help
+npm link        # puts `gchat` on your PATH
+gchat
 ```
 
-Prebuilt binaries (macOS arm64/x64, Windows x64, Linux x64) are published to GitHub Releases on `cli-v*` tags. Linux users can also run from source via `npm link`. Pack without publishing to npm:
+Without linking, `node cli/bin/gchat.js` does the same. Standalone binaries for macOS, Windows and Linux are attached to GitHub releases tagged `cli-v*`.
+
+The first run points at `https://gchat.up.railway.app`. To use another server:
 
 ```bash
-cd cli && npm pack
+gchat --server http://127.0.0.1:4400        # this run only
+gchat config set server http://127.0.0.1:4400   # remember it
 ```
 
-## Quick start
+## Using it
 
-```bash
-gchat config set server http://127.0.0.1:4400   # local dev
-gchat login -u alice
-gchat groups create "my-team"
-gchat send "hello from the terminal"
-gchat                                    # interactive TUI
-```
+Run `gchat`. If you're not signed in you'll get a small menu: log in, create an account, change server, quit. After that it reopens the last group and channel you were in and prints the recent messages. Type to chat, press Enter to send.
 
-Global flags: `--server <url>`, `--json`, `--yes`, `-h/--help`, `-V/--version`.
-Aliases: `q`/`exit`→`quit`, `ls`/`g`→`groups`, `m`→`members`, `c`→`channel`, `h`→`history`, `s`→`send`.
+Type `/` to open the command menu, narrow it by typing, and use the arrow keys, Tab and Enter.
 
-## Command reference
+![command menu](../docs/screenshots/cli-commands.png)
 
-Session: `help [command]`, `version`, `doctor`, `status`, `connect`, `disconnect`, `tui`, `quit`
-
-Config: `config get <key>`, `config set <key> <value>`, `config path`
-Keys: `server`, `theme` (dark|light), `bell` (on|off, terminal bell on new messages), `notify`, `scrollSensitivity` (1–20), `adminSecret`
-
-Auth & account: `login -u <user> [-p <pass>] [--remember]`, `register -u <user> [-p <pass>] [--color <hex>]`, `logout`, `whoami`, `account show`, `account rename <name>`, `account color <hex>`, `account avatar <path>`, `account delete`, `settings get`, `settings set <key> <value>`
-
-Groups: `groups` (`groups list`), `groups open <name|id>`, `open <name|id>`, `groups create <name> [--code <invite>]`, `groups join <code>` (`join`), `groups invite` (show code), `groups rename <name>`, `groups leave`, `groups disband`, `groups clear [--channel <name>]`, `groups settings`, `groups settings set <key> <value>`, `groups color <hex>`, `groups icon <path>`, `groups preload`, `groups keys sync` (`vault sync`, recover escrowed keys)
-
-Members: `members` (`members list`), `members kick <user>`, `members admin grant|revoke <user>`, `presence`
-
-Channels: `channel` (`channel list`), `channel switch <name>`, `channel main`, `channel create <name>`, `channel delete <name>`. On group open the CLI converges its channel list with the server's; messages are stamped with their channel (part of the encrypted identity) and edits never move a message between channels.
-
-Messaging: `send <text>`, `reply <messageId> <text>`, `edit <messageId> <text>` (revision-guarded), `delete <messageId>`, `history [--limit N] [--before <id>] [--channel <name>] [--group <id>]` (≤100 per page), `read <messageId>`, `typing [--stop]`, `whisper <user> <text>`, `disappear <messageId>`, `hide <messageId>`, `timer start <messageId>`
-
-Files: `upload <path> [--as image|file]`, `upload-image <path>`, `file list`, `file save <messageId> [path]`, `file open <messageId>`. Uploads over 15MB are rejected before reading into memory; `.jpg` maps to `image/jpeg`.
-
-Search & export: `search <query>`, `export [-o file]`, `copy invite`, `copy message <messageId>`. Search/export cover the latest 100 messages.
-
-Local prefs: `mute <group>`, `unmute <group>`, `notify on|off` (also toggles the terminal bell)
-
-Vault & crypto: `vault` (`vault list`), `vault export [--out file]` (0600 mode, contains secrets — treat like a password dump), `vault import <file>`, `vault forget <groupId>`, `crypto selftest` (`crypto`)
-
-Admin & AI: `admin users` (requires `adminSecret` in config); `admin user delete` is disabled; `ai` is unavailable in Increment A.
-
-## Interactive TUI
-
-`gchat` with no command (or `gchat tui`) opens the full-screen terminal UI: group sidebar with unread badges, per-channel transcript, multi-line composer, channel chips (create/delete/cycle with Tab), replies/edits/delete confirmations, typing indicators, file preview/open, clipboard copy, and image paste (clipboard-image paste is macOS-only; elsewhere paste a file path).
-
-Keys:
-
-- Hover outlines a message; click to select (click again to deselect). Then `r` reply, `e` edit, `d` delete, Esc clear, `p` preview, `c` copy
-- Up / down moves between messages while one is selected; left / right cycle channels when the transcript is focused (`ctrl+f` toggles focus)
-- Enter sends; Alt+Enter inserts a newline; Alt+Backspace deletes the current word
-- Tab / Shift+Tab cycles channels; `+ Create` adds a channel; click a selected channel chip again (or `d`) to delete it; drag chips to reorder with the mouse (`#main` stays first)
-- Ctrl+C cancels the current edit/reply/composer draft; Ctrl+C again copies the selected message or quits; Ctrl+D always quits; `:q` quits
-- `p` opens Quick Look on macOS; pasted images auto-upload
-- Composer slash commands: `:q` (quit), `:channel <name>`, `:open <group>`
-
-The bell rings on new messages in groups other than the open one (disable with `bell off`).
-
-## Config & data
-
-Stored under `~/.config/gchat` (Linux/macOS) or `%APPDATA%\gchat` (Windows), or `GCHAT_CONFIG_DIR`:
-
-| File | Purpose |
+| Key | Does |
 |---|---|
-| `config.json` | Server URL, bell, theme |
-| `session.json` | Session cookie + CSRF |
-| `vault.json` | Group encryption secrets (0600 on POSIX) |
-| `prefs.json` | Active group/channel, mutes |
+| Enter | Send |
+| Alt+Enter, Ctrl+J, or `\` then Enter | New line |
+| Tab / Shift+Tab (empty input) | Next / previous channel |
+| Ctrl+G | Switch group |
+| Ctrl+V, Alt+V | Attach the image on your clipboard |
+| Up / Down | Earlier messages you typed |
+| Esc | Cancel a reply, edit or attachment, or close the menu |
+| Ctrl+C | Clear the input; press twice on an empty input to quit |
+| Ctrl+D | Quit (empty input) |
+| Ctrl+L | Clear the screen |
 
-A non-empty store file that fails to parse produces a stderr warning and falls back to defaults (it is never silently discarded).
+Pasting a file path, or dragging a file into the terminal, attaches it. Press Enter to send it.
 
-## Safety
+### Commands
 
-- This client talks to the **same** GChat server as the browser; it does not start a local chat server.
-- Respect server load limits: message pages ≤100, single bounded backfill per reconnect (no polling, no unbounded reads), capped reconnection backoff, socket events only.
-- Vault export contains secrets — treat it like a password dump.
-- Decrypted attachment previews live in the OS temp dir only while the process runs and are wiped on exit.
+| Command | Does |
+|---|---|
+| `/groups` (`/g`) | Pick a group, or create or join one |
+| `/channel [name]` | Switch channel; `new <name>` and `delete <name>` also work |
+| `/new [name]`, `/join [code]`, `/invite` | Create a group, join with a code, show the invite code |
+| `/members` | List members |
+| `/reply`, `/edit`, `/delete` | Pick one of the recent messages and act on it |
+| `/upload <path>`, `/paste` | Send a file or image, or the clipboard image |
+| `/view [n]` | Show image number *n* at full size (latest image if you leave it out) |
+| `/save [n] [path]`, `/launch [n]` | Save an attachment, or open it in your default app |
+| `/history`, `/search <text>` | Load earlier messages; search what's loaded |
+| `/whisper <user> <text>` | Private message |
+| `/theme dark|light`, `/clear`, `/status`, `/whoami`, `/logout`, `/help`, `/quit` | Housekeeping |
 
-## Tests
+Anything else you can run as `gchat <command>` also works after a slash, for example `/members kick <user>` or `/groups settings`. Destructive ones ask for confirmation first.
+
+### Images
+
+Images show up as small previews right in the chat, each labelled `[Image #n]`. `/view n` draws one larger. PNG and JPEG are decoded in the terminal using half-block characters, which works everywhere. In iTerm2 and WezTerm the real image is shown instead. GIF and WebP can't be previewed; use `/launch n` to open them. Set `gchat config set preview off` to turn previews off.
+
+### Unread
+
+Opening a channel marks it read on the server, so the dots on the web and desktop apps clear too. If your terminal reports focus (most do), messages that arrive while you're in another window stay unread until you come back. The footer shows unread counts for other channels, and for other groups with a dot.
+
+## One-shot commands
+
+Everything is also available without the UI, which is handy for scripts:
 
 ```bash
-cd cli && npm test
+gchat login -u alice
+gchat groups
+gchat open "Design crew"
+gchat send "build is green"
+gchat upload ./screenshot.png
+gchat history --limit 20 --json
 ```
 
-Unit tests plus `test/regressions.test.js` (socket lifecycle, prompt, sync_event decrypt/render semantics, read cursors, channel convergence). Integration tests start an isolated in-process server (never Railway production).
+Global flags: `--server <url>`, `--json`, `--yes`, `-h`, `-V`. Run `gchat help` for the full list.
+
+`gchat --classic` starts the older full-screen UI.
+
+## Where things are stored
+
+`~/.config/gchat` on Linux and macOS, `%APPDATA%\gchat` on Windows, or the folder in `GCHAT_CONFIG_DIR`.
+
+| File | Contents |
+|---|---|
+| `config.json` | server, theme, bell, preview |
+| `session.json` | session cookie and CSRF token |
+| `vault.json` | group encryption keys (mode 0600) |
+| `prefs.json` | last group and channel, muted groups |
+
+`vault export` writes every group key in the clear, so treat the file like a password dump. Decrypted attachments for `/launch` live in the OS temp folder and are deleted when you quit.
+
+## Development
+
+```bash
+cd cli
+npm test               # unit and integration tests
+npm run test:unit      # skips the in-process server tests
+```
+
+The integration tests start their own local server and never touch the hosted one. The new UI lives in `src/ui/` (renderer, key parser, editor, image decoding, app); the shared client is in `src/client/`.

@@ -4,6 +4,23 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ---
 
+## Unreleased
+
+**CLI 1.1.0: a new terminal UI.** `gchat` now opens a chat UI that runs inline in the terminal, in the style of Claude Code: scrollback stays native, the input box sits at the bottom, `/` opens a command menu, and sign-in, groups, channels, replies, edits, uploads and image previews all work inside it. The old full-screen UI is still there as `gchat --classic`. `gchat --server <url>` used to print help; it now opens the UI.
+
+**Fixed: the red dot that never went away.** The CLI stamped `#main` messages with a channel tag, but the server tracks `#main` reads under no tag, so those messages could never be marked read. The CLI no longer does that, and the server clears the tag on existing rows the first time it starts (`main_tag_index_nulled_v2`).
+
+Other fixes:
+- CLI uploads over about 190 KB failed with a "max 15MB" error because they were sent as JSON; they now go up as raw bytes like the web app does.
+- A send that timed out was reported as sent. It now shows the error.
+- `gchat upload <path>` was parsed as a subcommand and lowercased the path.
+- The packaged CLI binary reported version 0.0.0.
+- Windows and Linux can now paste clipboard images in the CLI.
+- `npm ci` failed on machines that don't trust `registry.npmmirror.com`; both lockfiles now point at the npm registry.
+- `npm run dev:web` crashed on a fresh checkout without the three server secrets; it now supplies throwaway ones.
+- One CLI test depended on the machine's timezone.
+- Docs rewritten: shorter README, `docs/operations.md`, current desktop and CLI guides with screenshots.
+
 ## v1.4.6 — Desktop hardening + CLI protocol repair
 
 - **CLI realtime receive repaired**: the TUI now consumes the server's `sync_event` / `sync_hint` protocol (message.created/edited/deleted, history.cleared) instead of the retired legacy socket events — incoming messages, edits, deletes, and clears arrive live again; rooms re-join and one bounded page backfills after reconnects.
