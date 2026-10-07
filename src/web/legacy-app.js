@@ -540,20 +540,10 @@ const AI_CHANNEL_HISTORY_DEFAULT_LIMIT = 20;
 const AI_CHANNEL_HISTORY_MAX_LIMIT = 40;
 const AI_TOOL_RESULT_MAX_CHARS = 24000;
 const AI_CHANNEL_LIST_MAX_CHANNELS = 50;
-const AI_TONE_STORAGE_KEY = 'gchat:ai-tone';
 const AI_ASSISTANT_USER_ID = '__gchat_ai_grok__';
 const AI_ASSISTANT_NAME = 'GChat AI';
-const AI_ASSISTANT_COLOR = '#8d7bff';
-const AI_ASSISTANT_PROFILE_PICTURE = '/deepseek.webp';
-const AI_MODEL_PROFILE_PICTURES = {
-  'deepseek-v4-flash': '/deepseek.webp',
-};
-const AI_MODEL_TAGS = {
-  'deepseek-v4-flash': 'deepseek',
-};
-const AI_MODEL_ALIASES = {
-  'deepseek/deepseek-v4-flash': 'deepseek-v4-flash',
-};
+const AI_ASSISTANT_COLOR = '#e6e6e6';
+const AI_ASSISTANT_PROFILE_PICTURE = '/gchat-ai.svg';
 const APP_OWNER_USERNAME = 'Furina';
 const AI_RESET_TIME_LABEL = '4:00 AM Shanghai time';
 const AI_USAGE_RESET_LABEL = `Resets at ${AI_RESET_TIME_LABEL}`;
@@ -562,22 +552,12 @@ const AI_TOKEN_AMOUNT_DECIMALS = 4;
 const MIN_DISPLAYABLE_TOKEN_AMOUNT = 0.01;
 const MIN_CURRENCY_DISPLAY_THRESHOLD = 0.01;
 const SMALL_CURRENCY_PRECISION = 4;
-const AI_MODEL_OPTIONS = {
+// The assistant runs one model; older messages may still name the previous one.
+const AI_MODEL_LABELS = {
+  'mimo-v2.6-flash': 'MiMo V2.6 Flash',
   'deepseek-v4-flash': 'DeepSeek V4 Flash',
 };
-const DEFAULT_AI_MODEL = 'deepseek-v4-flash';
-const AI_MODE_LABELS = {
-  fast: 'Context-less',
-  thinking: 'Context',
-  agent: 'Agent',
-};
-const DEFAULT_AI_MODE = 'agent';
-let AI_TONE_LABELS = {
-  casual: 'Casual',
-  professional: 'Professional',
-  playful: 'Playful',
-};
-const DEFAULT_AI_TONE = 'casual';
+const DEFAULT_AI_MODEL = 'mimo-v2.6-flash';
 const ALLOWED_UPLOAD_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const wallpaperTheme = window.GChatWallpaperTheme || null;
 const localTimeFormatter = new Intl.DateTimeFormat(undefined, {
@@ -1586,53 +1566,28 @@ function formatAiTokenAmount(value) {
 
 function normalizeAiMeta(meta) {
   if (!meta || typeof meta !== 'object') return null;
-  const promptTokens = roundAiTokenAmount(meta.promptTokens);
-  const completionTokens = roundAiTokenAmount(meta.completionTokens);
-  const totalTokens = Math.max(
-    promptTokens + completionTokens,
-    roundAiTokenAmount(meta.totalTokens)
-  );
-  const rawPromptTokens = Math.max(0, Math.round(Number(meta.rawPromptTokens) || 0));
-  const rawCompletionTokens = Math.max(0, Math.round(Number(meta.rawCompletionTokens) || 0));
-  const rawTotalTokens = Math.max(
-    rawPromptTokens + rawCompletionTokens,
-    Math.max(0, Math.round(Number(meta.rawTotalTokens) || 0))
-  );
-  const estimatedCostUsdRaw = Number(meta.estimatedCostUsd);
-  const estimatedCostUsd = Number.isFinite(estimatedCostUsdRaw) && estimatedCostUsdRaw >= 0
-    ? estimatedCostUsdRaw
-    : null;
-  const estimatedCostRmbRaw = Number(meta.estimatedCostRmb);
-  const estimatedCostRmb = Number.isFinite(estimatedCostRmbRaw) && estimatedCostRmbRaw >= 0
-    ? estimatedCostRmbRaw
-    : (estimatedCostUsd != null ? estimatedCostUsd * USD_TO_RMB_RATE : null);
-  const modelKey = String(meta.model || '').trim();
-  const modeKey = String(meta.mode || '').trim().toLowerCase();
-  const toneKey = String(meta.tone || '').trim().toLowerCase();
-  const webSearchRequestsRaw = Number(meta.webSearchRequests ?? meta.web_search_requests);
-  const webSearchRequests = Number.isFinite(webSearchRequestsRaw) && webSearchRequestsRaw > 0
-    ? Math.max(0, Math.round(webSearchRequestsRaw))
-    : 0;
-  const toolCallsRaw = Number(meta.toolCalls ?? meta.tool_calls);
-  const toolCalls = Number.isFinite(toolCallsRaw) && toolCallsRaw > 0 ? Math.max(0, Math.round(toolCallsRaw)) : 0;
-  const toolRoundsRaw = Number(meta.toolRounds ?? meta.tool_rounds);
-  const toolRounds = Number.isFinite(toolRoundsRaw) && toolRoundsRaw > 0 ? Math.max(0, Math.round(toolRoundsRaw)) : 0;
+  const count = (value) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : 0;
+  };
+  const cost = (value) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  };
+  const promptTokens = count(meta.promptTokens);
+  const completionTokens = count(meta.completionTokens);
+  const estimatedCostUsd = cost(meta.estimatedCostUsd);
+  const explicitRmb = cost(meta.estimatedCostRmb);
   return {
-    model: AI_MODEL_ALIASES[modelKey] || modelKey || DEFAULT_AI_MODEL,
-    mode: AI_MODE_LABELS[modeKey] ? modeKey : DEFAULT_AI_MODE,
-    tone: AI_TONE_LABELS[toneKey] ? toneKey : DEFAULT_AI_TONE,
-    webSearchEnabled: meta.webSearchEnabled === true || meta.web_search_enabled === true,
-    webSearchRequests,
-    toolCalls,
-    toolRounds,
+    model: String(meta.model || '').trim() || DEFAULT_AI_MODEL,
+    webSearchRequests: count(meta.webSearchRequests ?? meta.web_search_requests),
+    toolCalls: count(meta.toolCalls ?? meta.tool_calls),
+    toolRounds: count(meta.toolRounds ?? meta.tool_rounds),
     promptTokens,
     completionTokens,
-    totalTokens,
-    rawPromptTokens,
-    rawCompletionTokens,
-    rawTotalTokens,
+    totalTokens: Math.max(promptTokens + completionTokens, count(meta.totalTokens)),
     estimatedCostUsd,
-    estimatedCostRmb,
+    estimatedCostRmb: explicitRmb != null ? explicitRmb : (estimatedCostUsd != null ? estimatedCostUsd * USD_TO_RMB_RATE : null),
   };
 }
 
@@ -1651,78 +1606,31 @@ function formatRmbCost(value) {
 
 function getAiModelLabel(model) {
   const key = String(model || '').trim();
-  const canonical = AI_MODEL_ALIASES[key] || key;
-  return AI_MODEL_OPTIONS[canonical] || canonical || AI_MODEL_OPTIONS[DEFAULT_AI_MODEL];
+  return AI_MODEL_LABELS[key] || key || AI_MODEL_LABELS[DEFAULT_AI_MODEL];
 }
 
-function slugifyAiTagPart(value, fallback = 'ai') {
-  const slug = String(value || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-  return slug || fallback;
+function getAiAssistantProfilePicture() {
+  return AI_ASSISTANT_PROFILE_PICTURE;
 }
 
-function getAiModelTag(model) {
-  const normalizedModel = String(model || '').trim();
-  if (AI_MODEL_TAGS[normalizedModel]) return AI_MODEL_TAGS[normalizedModel];
-  return slugifyAiTagPart(getAiModelLabel(normalizedModel));
-}
-
-function getAiModeLabel(mode) {
-  const normalizedMode = String(mode || '').trim().toLowerCase();
-  if (normalizedMode === 'context') return AI_MODE_LABELS.thinking;
-  return AI_MODE_LABELS[normalizedMode] || AI_MODE_LABELS[DEFAULT_AI_MODE];
-}
-
-function getAiModeTag(mode) {
-  const normalizedMode = String(mode || '').trim().toLowerCase();
-  if (normalizedMode === 'agent') return 'agent';
-  if (normalizedMode === 'thinking' || normalizedMode === 'context') return 'context';
-  return normalizedMode === 'fast' ? 'fast' : 'context';
-}
-
-function getAiToneLabel(tone) {
-  return AI_TONE_LABELS[String(tone || '').trim().toLowerCase()] || AI_TONE_LABELS[DEFAULT_AI_TONE];
-}
-
-function getAiAssistantProfilePicture(model) {
-  const key = String(model || '').trim();
-  const canonical = AI_MODEL_ALIASES[key] || key;
-  return AI_MODEL_PROFILE_PICTURES[canonical] || AI_ASSISTANT_PROFILE_PICTURE;
-}
-
-function buildAiMentionLabel(meta) {
-  const normalized = normalizeAiMeta(meta);
-  if (!normalized) return '@AI';
-  return `@${getAiModelTag(normalized.model)}-${getAiModeTag(normalized.mode)}-${normalized.tone}`;
+function buildAiMentionLabel() {
+  return '@AI';
 }
 
 function buildAiMetaDisplay(meta) {
   const normalized = normalizeAiMeta(meta);
   if (!normalized) return null;
-  const infoParts = [
-    getAiModelLabel(normalized.model),
-    getAiModeLabel(normalized.mode),
-    getAiToneLabel(normalized.tone),
-  ];
-  const statsParts = [];
-  if (normalized.totalTokens > 0) {
-    statsParts.push(`${formatAiTokenAmount(normalized.totalTokens)} tokens`);
-  }
-  const costText = formatRmbCost(normalized.estimatedCostRmb);
-  if (costText) statsParts.push(costText);
-  if (normalized.toolCalls > 0) {
-    statsParts.push(`${normalized.toolCalls} tool call${normalized.toolCalls === 1 ? '' : 's'}${normalized.toolRounds > 1 ? ` in ${normalized.toolRounds} rounds` : ''}`);
-  }
+  const stats = [];
+  if (normalized.totalTokens > 0) stats.push(`${integerFormatter.format(normalized.totalTokens)} tokens`);
   if (normalized.webSearchRequests > 0) {
-    statsParts.push(`${normalized.webSearchRequests} web search${normalized.webSearchRequests === 1 ? '' : 'es'}`);
-  } else if (normalized.webSearchEnabled) {
-    statsParts.push('web search enabled');
+    stats.push(`${normalized.webSearchRequests} web search${normalized.webSearchRequests === 1 ? '' : 'es'}`);
   }
+  if (normalized.toolCalls > 0) stats.push('read chat history');
+  const costText = formatRmbCost(normalized.estimatedCostRmb);
   return {
-    info: infoParts.join(', '),
-    stats: statsParts.join(' — '),
+    info: getAiModelLabel(normalized.model),
+    stats: stats.join(' · '),
+    title: costText ? `Estimated cost ${costText}` : '',
   };
 }
 
@@ -1744,6 +1652,7 @@ function createAiMetaElement(meta) {
   if (!display) return null;
   const el = document.createElement('div');
   el.className = 'msg-ai-meta';
+  if (display.title) el.title = display.title;
   const info = document.createElement('span');
   info.className = 'msg-ai-meta-info';
   info.textContent = display.info;
@@ -1822,6 +1731,117 @@ function renderProfileAiUsage() {
     { blockedMessage }
   );
   card.classList.toggle('is-blocked', !!blockedMessage);
+  renderAiPanel();
+}
+
+function normalizeAiConfig(data) {
+  if (!data || typeof data !== 'object') return null;
+  const search = data.webSearch && typeof data.webSearch === 'object' ? data.webSearch : {};
+  return {
+    configured: data.configured !== false,
+    model: {
+      id: String(data.model?.id || DEFAULT_AI_MODEL),
+      label: String(data.model?.label || getAiModelLabel(DEFAULT_AI_MODEL)),
+    },
+    effort: String(data.effort || 'low'),
+    replyTokenCap: Math.max(0, Math.round(Number(data.replyTokenCap) || 0)),
+    profile: {
+      text: String(data.profile?.text || ''),
+      maxChars: Math.max(1, Math.round(Number(data.profile?.maxChars) || 200)),
+    },
+    webSearch: {
+      available: !!search.available,
+      usedToday: Math.max(0, Math.round(Number(search.usedToday) || 0)),
+      dailyLimit: Math.max(0, Math.round(Number(search.dailyLimit) || 0)),
+    },
+  };
+}
+
+function updateAiProfileCounter() {
+  const input = $('ai-profile-input');
+  const counter = $('ai-profile-count');
+  if (!input || !counter) return;
+  const max = aiConfig?.profile?.maxChars || 200;
+  counter.textContent = `${[...input.value].length} / ${max}`;
+}
+
+// The AI card in the profile panel: the fixed model settings, today's limits
+// and the user's saved model profile (their custom system prompt).
+function renderAiPanel() {
+  const modelEl = $('ai-panel-model');
+  if (!modelEl) return;
+  const cfg = aiConfig;
+  modelEl.textContent = cfg?.model.label || getAiModelLabel(DEFAULT_AI_MODEL);
+  const effort = cfg?.effort || 'low';
+  $('ai-panel-effort').textContent = `${effort.charAt(0).toUpperCase()}${effort.slice(1)} effort`;
+  $('ai-panel-cap').textContent = cfg?.replyTokenCap ? `${integerFormatter.format(cfg.replyTokenCap)} tokens` : '—';
+  const search = cfg?.webSearch;
+  $('ai-panel-search').textContent = search?.available
+    ? `On · ${search.usedToday} / ${search.dailyLimit} today`
+    : 'Off';
+  const input = $('ai-profile-input');
+  if (input) {
+    input.maxLength = cfg?.profile?.maxChars || 200;
+    if (!aiProfileDirty && document.activeElement !== input) input.value = cfg?.profile?.text || '';
+    updateAiProfileCounter();
+  }
+  renderAiComposerHint();
+}
+
+function openAiSettings() {
+  openProfileModal();
+  const panel = $('profile-ai-panel');
+  if (panel) panel.scrollIntoView({ block: 'nearest' });
+}
+
+async function saveAiProfile(text) {
+  const errorEl = $('ai-profile-error');
+  if (errorEl) errorEl.textContent = '';
+  try {
+    const res = await fetch('/api/ai/profile', {
+      method: 'PUT',
+      headers: apiHeaders(),
+      body: JSON.stringify({ profile: text }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (errorEl) errorEl.textContent = String(data.error || 'Could not save the profile');
+      return;
+    }
+    aiConfig = normalizeAiConfig(data);
+    aiProfileDirty = false;
+    renderAiPanel();
+    showToast(aiConfig?.profile.text ? 'AI profile saved' : 'AI profile cleared', 'success');
+  } catch {
+    if (errorEl) errorEl.textContent = 'Could not save the profile';
+  }
+}
+
+// The slim status line above the composer: what the next AI message will use,
+// and what the assistant is doing while a request runs.
+function renderAiComposerHint() {
+  const el = $('ai-composer-hint');
+  if (!el) return;
+  const busy = aiRequestInFlight;
+  const armed = messageMode === 'ai';
+  el.hidden = !(busy || armed);
+  if (el.hidden) return;
+  el.classList.toggle('is-busy', busy);
+  const settings = $('ai-hint-settings');
+  if (settings) settings.hidden = busy;
+  const text = $('ai-hint-text');
+  if (!text) return;
+  if (busy) {
+    text.textContent = aiStatusText || 'GChat AI is thinking…';
+    return;
+  }
+  const cfg = aiConfig;
+  const parts = [
+    cfg?.model.label || getAiModelLabel(DEFAULT_AI_MODEL),
+    `${cfg?.effort || 'low'} effort`,
+    cfg?.webSearch?.available ? 'web search on' : 'no web search',
+  ];
+  text.textContent = parts.join(' · ');
 }
 
 function setAiUsageSummary(summary) {
@@ -1836,10 +1856,11 @@ function setAiUsageSummary(summary) {
 async function refreshAiUsageSummary() {
   if (!aiFeatureEnabled) return null;
   try {
-    const res = await fetch('/api/ai/usage');
+    const res = await fetch('/api/ai/config');
     if (!res.ok) return null;
     const data = await res.json();
-    setAiUsageSummary(data);
+    aiConfig = normalizeAiConfig(data);
+    setAiUsageSummary(data.usage);
     return aiUsageSummary;
   } catch {
     return null;
@@ -3667,8 +3688,10 @@ let desktopSidebarWidth = DESKTOP_DEFAULT_SIDEBAR_WIDTH;
 let desktopRightPanelExpanded = true;
 let activeTagFilter = DEFAULT_TAG_TOPIC;
 let aiRequestInFlight = false;
-let selectedAiTone = readStoredAiTone();
 let aiUsageSummary = null;
+let aiConfig = null;
+let aiProfileDirty = false;
+let aiStatusText = '';
 let userManagementSummary = null;
 let whisperPickerMode = null;
 let pendingWhisperCommandStart = null;
@@ -4856,7 +4879,7 @@ function updateAiControls() {
   updateMessageModeBtn();
 }
 
-// v1.4: reveal the AI-only UI (profile usage card, tone picker) when the
+// v1.4: reveal the AI-only UI (the profile AI card) when the
 // feature flag is on. The elements are marked with data-ai-feature + hidden.
 function syncAiFeatureVisibility() {
   const show = aiFeatureEnabled;
@@ -5994,15 +6017,6 @@ const ICON_SPECS = {
     ['circle', { cx: '12', cy: '12', r: '7.5' }],
     ['path', { d: 'M12 8.4l1 3.1 3.1 1-3.1 1-1 3.1-1-3.1-3.1-1 3.1-1 1-3.1z' }],
   ],
-  // v1.4.3: AI tone picker icons.
-  briefcase: [
-    ['rect', { x: '2', y: '7', width: '20', height: '14', rx: '2' }],
-    ['path', { d: 'M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16' }],
-  ],
-  crown: [
-    ['path', { d: 'M3 7l3.5 4L12 4l5.5 7L21 7v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1Z' }],
-    ['path', { d: 'M5 21h14' }],
-  ],
   reply: [
     ['polyline', { points: '9 17 4 12 9 7' }],
     ['path', { d: 'M20 18v-2a4 4 0 0 0-4-4H4' }],
@@ -6411,7 +6425,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   syncAiFeatureVisibility();
   if (aiFeatureEnabled) {
     void refreshAiUsageSummary();
-    void loadAndRenderAiTones();
   }
   // v1.3.12: restore the last-open group after a reload so the app lands where
   // the user was (part of "history never disappears"). Only when the user
@@ -8971,7 +8984,6 @@ async function startEditMessage(msg, currentPlaintext) {
 // ── Send message ──────────────────────────────────────────────────────────────
 async function doSend(text) {
   if (!currentGroupId || !socket) return;
-  if (aiTonePickOpen) return;
   const sendGroupId = String(currentGroupId);
   const sendReply = replyingTo ? { ...replyingTo } : null;
   const key = getGroupKey(sendGroupId);
@@ -8985,7 +8997,7 @@ async function doSend(text) {
     return;
   }
   if (parsedMessage.isAiPrompt) {
-    void sendAiPromptWithTonePicker(parsedMessage);
+    void sendAiPromptMessage(parsedMessage);
     return;
   }
   const messageText = parsedMessage.text;
@@ -10428,8 +10440,6 @@ function insertEmoji(em) {
 // ── Keyboard shortcuts ────────────────────────────────────────────────────────
 function setupKeyboardShortcuts() {
   document.addEventListener('keydown', (e) => {
-    // v1.4.3: while the AI tone picker is open, 1-4 / Enter / Escape drive it.
-    if (handleAiTonePickerKey(e)) return;
     if (e.key === 'Escape') {
       // Close modals
       document.querySelectorAll('.modal-overlay:not([hidden])').forEach((m) => {
@@ -10460,7 +10470,7 @@ function autoResizeTextarea(el) {
 
 // ── Whisper mode ──────────────────────────────────────────────────────────────
 // v1.4.3: the message-mode button cycles normal → whisper → disappearing →
-// AI. AI mode is BLUE (button + input text); the mode is also how the user
+// AI. AI mode uses the light accent (button + input text); it is also how the user
 // arms the Ask-AI agent — no token chip, no separate AI button.
 function updateMessageModeBtn() {
   const keepBottomPinned = isMessagesPinnedToBottom();
@@ -10492,6 +10502,7 @@ function updateMessageModeBtn() {
   composer?.classList.toggle('whisper-mode-active', whisperActive);
   composer?.classList.toggle('disappearing-mode-active', disappearingActive);
   composer?.classList.toggle('ai-mode-active', aiActive);
+  renderAiComposerHint();
   updateKeyState();
   syncWhisperPickerStatus();
   if (keepBottomPinned) pinMessagesToBottom();
@@ -10886,71 +10897,10 @@ async function exportChat() {
   URL.revokeObjectURL(url);
 }
 
-async function loadAndRenderAiTones() {
-  if (!aiFeatureEnabled) return;
-  try {
-    const res = await fetch('/api/ai/tones');
-    if (!res.ok) return;
-    const data = await res.json().catch(() => ({}));
-    if (!data.tones || typeof data.tones !== 'object') return;
-    const tones = data.tones;
-    const keys = Object.keys(tones);
-    if (!keys.length) return;
-    // Update AI_TONE_LABELS with fetched data
-    for (const key of keys) {
-      if (tones[key] && typeof tones[key].label === 'string') {
-        AI_TONE_LABELS[key] = tones[key].label;
-      }
-    }
-    // Remove old keys no longer in server tones
-    for (const key of Object.keys(AI_TONE_LABELS)) {
-      if (!tones[key]) delete AI_TONE_LABELS[key];
-    }
-    // v1.4: the tone picker lives in the profile panel — no Ask AI modal.
-    const select = $('ai-tone-select');
-    if (!select) return;
-    select.replaceChildren();
-    for (const key of keys) {
-      const label = (tones[key] && tones[key].label) || (key.charAt(0).toUpperCase() + key.slice(1));
-      const option = document.createElement('option');
-      option.value = key;
-      option.textContent = label;
-      select.appendChild(option);
-    }
-    select.value = getSelectedAiTone();
-  } catch {
-    // best effort — the default tone stays selected if the fetch fails
-  }
-}
-
-function readStoredAiTone() {
-  try {
-    const stored = String(localStorage.getItem(AI_TONE_STORAGE_KEY) || '').trim().toLowerCase();
-    return AI_TONE_LABELS[stored] ? stored : DEFAULT_AI_TONE;
-  } catch {
-    return DEFAULT_AI_TONE;
-  }
-}
-
-function writeStoredAiTone(tone) {
-  const normalized = String(tone || '').trim().toLowerCase();
-  if (!AI_TONE_LABELS[normalized]) return;
-  try {
-    localStorage.setItem(AI_TONE_STORAGE_KEY, normalized);
-  } catch {
-    /* ignore */
-  }
-}
-
-function getSelectedAiTone() {
-  const value = String(selectedAiTone || '').trim().toLowerCase();
-  return AI_TONE_LABELS[value] ? value : DEFAULT_AI_TONE;
-}
-
 // ── v1.4: Ask-AI composer toggle ─────────────────────────────────────────────
 // The AI entry point is the message-mode cycle: AI mode is a blue composer
 // state (button + input text). The NEXT message the user sends goes to the
-// GChat AI agent, with a tone picked right before sending.
+// GChat AI agent.
 
 // ── v1.4: agent tools (client-executed) ──────────────────────────────────────
 // Message content is E2E-encrypted and only the browser holds the keys, so the
@@ -11119,22 +11069,17 @@ async function executeAiToolCall(toolCall, options) {
 function accumulateAiMeta(acc, meta) {
   if (!meta) return acc;
   if (!acc) return { ...meta, toolCalls: 0, toolRounds: 0 };
-  const sum = (a, b) => roundAiTokenAmount((a || 0) + (b || 0));
+  const add = (a, b) => (a || 0) + (b || 0);
+  const addCost = (a, b) => (a != null && b != null ? a + b : null);
   return {
     ...acc,
     model: meta.model || acc.model,
-    promptTokens: sum(acc.promptTokens, meta.promptTokens),
-    completionTokens: sum(acc.completionTokens, meta.completionTokens),
-    totalTokens: sum(acc.totalTokens, meta.totalTokens),
-    rawPromptTokens: sum(acc.rawPromptTokens, meta.rawPromptTokens),
-    rawCompletionTokens: sum(acc.rawCompletionTokens, meta.rawCompletionTokens),
-    rawTotalTokens: sum(acc.rawTotalTokens, meta.rawTotalTokens),
-    estimatedCostUsd: acc.estimatedCostUsd != null && meta.estimatedCostUsd != null
-      ? sum(acc.estimatedCostUsd, meta.estimatedCostUsd)
-      : null,
-    estimatedCostRmb: acc.estimatedCostRmb != null && meta.estimatedCostRmb != null
-      ? sum(acc.estimatedCostRmb, meta.estimatedCostRmb)
-      : null,
+    promptTokens: add(acc.promptTokens, meta.promptTokens),
+    completionTokens: add(acc.completionTokens, meta.completionTokens),
+    totalTokens: add(acc.totalTokens, meta.totalTokens),
+    webSearchRequests: add(acc.webSearchRequests, meta.webSearchRequests),
+    estimatedCostUsd: addCost(acc.estimatedCostUsd, meta.estimatedCostUsd),
+    estimatedCostRmb: addCost(acc.estimatedCostRmb, meta.estimatedCostRmb),
     toolCalls: 0,
     toolRounds: 0,
   };
@@ -11319,43 +11264,39 @@ async function logoutCurrentUser() {
 // owned by the client (stateless relay) and bounded by the same caps the
 // server enforces (MAX_AI_TOOL_ROUNDS, 24 KB tool results, 96 KB transcript).
 async function requestAiResponse(groupId, options = {}) {
-  const tone = options.tone || getSelectedAiTone();
   const channel = normalizeHashtagTopic(options.channel) || DEFAULT_TAG_TOPIC;
   const groupName = String(options.groupName || '');
   const prompt = String(options.prompt || '').trim();
+  const onStatus = typeof options.onStatus === 'function' ? options.onStatus : () => {};
   if (!prompt) throw new Error('AI prompt is required');
 
   const transcript = [{ role: 'user', content: prompt }];
-  let toolRounds = 0;
+  let relays = 0;
   let toolCallsTotal = 0;
   let accumulated = null;
 
   for (;;) {
-    if (toolRounds > MAX_AI_TOOL_ROUNDS) {
-      throw new Error('AI needed too many steps to answer');
-    }
+    onStatus('GChat AI is thinking…');
     const res = await fetch(`/api/groups/${groupId}/ai/chat`, {
       method: 'POST',
       headers: apiHeaders(),
-      body: JSON.stringify({ groupName, prompt, tone, channel, transcript }),
+      body: JSON.stringify({ groupName, prompt, channel, transcript }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       const message = String(data.error || 'AI request failed');
-      if (/daily AI token limit/i.test(message) || /global daily AI token limit/i.test(message)) {
-        void refreshAiUsageSummary();
-      }
+      if (/daily AI token limit/i.test(message)) void refreshAiUsageSummary();
       throw new Error(message);
     }
     accumulated = accumulateAiMeta(accumulated, normalizeAiMeta(data.aiMeta));
 
     if (data.status === 'tool_calls' && Array.isArray(data.toolCalls) && data.toolCalls.length) {
-      toolRounds += 1;
+      relays += 1;
       toolCallsTotal += data.toolCalls.length;
-      if (toolRounds > MAX_AI_TOOL_ROUNDS) {
-        throw new Error('AI needed too many steps to answer');
-      }
-      transcript.push(data.assistantMessage || { role: 'assistant', content: null, tool_calls: [] });
+      if (relays > MAX_AI_TOOL_ROUNDS) throw new Error('AI needed too many steps to answer');
+      // The server may have run web searches for this step; its messages come back with the relay.
+      if (Array.isArray(data.transcriptAdditions)) transcript.push(...data.transcriptAdditions);
+      onStatus('GChat AI is reading the chat…');
       const toolOptions = { groupId, channel, key: getGroupKey(groupId) };
       for (const toolCall of data.toolCalls) {
         const output = await executeAiToolCall(toolCall, toolOptions);
@@ -11368,17 +11309,14 @@ async function requestAiResponse(groupId, options = {}) {
       continue;
     }
 
-    const answer = String(data.answer || '').trim();
+    const answer = String(data.answer || '').replace(/^\n+/, '').trim();
     if (!answer) throw new Error('AI returned an empty response');
-    // v1.4.3: some providers lead the answer with blank lines; never let a
-    // leading newline reach the bubble (renders as an empty first line).
-    const normalizedAnswer = answer.replace(/^\n+/, '');
     if (accumulated) {
       accumulated.toolCalls = toolCallsTotal;
-      accumulated.toolRounds = toolRounds;
+      accumulated.toolRounds = relays;
     }
     return {
-      answer: normalizedAnswer,
+      answer,
       model: String(data.model || DEFAULT_AI_MODEL),
       aiMeta: accumulated,
       aiUsage: data.aiUsage || null,
@@ -11389,16 +11327,23 @@ async function requestAiResponse(groupId, options = {}) {
 async function sendAiReplyInBackground(request) {
   if (aiRequestInFlight) return;
   aiRequestInFlight = true;
+  aiStatusText = '';
+  renderAiComposerHint();
   try {
     const result = await requestAiResponse(request.groupId, {
       groupName: request.groupName,
       prompt: request.prompt,
-      tone: request.tone,
       channel: request.channel,
-      skipBusyUi: true,
+      onStatus: (text) => {
+        aiStatusText = text;
+        renderAiComposerHint();
+      },
     });
-    if (!result.answer) throw new Error('AI returned an empty response');
     if (result.aiUsage) setAiUsageSummary(result.aiUsage);
+    if (aiConfig && result.aiMeta?.webSearchRequests) {
+      aiConfig.webSearch.usedToday += result.aiMeta.webSearchRequests;
+      renderAiPanel();
+    }
 
     const { encryptedContent, iv } = await encryptMessage(result.answer, request.key, request.groupId);
     if (estimateBase64Bytes(encryptedContent) > MAX_TEXT_MESSAGE_BYTES) {
@@ -11418,138 +11363,22 @@ async function sendAiReplyInBackground(request) {
       tagIndex,
       aiMeta: result.aiMeta,
     });
-    showToast('AI reply sent', 'success');
   } catch (err) {
     const message = String(err && err.message ? err.message : 'AI request failed');
-    if (/daily AI token limit/i.test(message) || /global daily AI token limit/i.test(message)) {
-      void refreshAiUsageSummary();
-    }
+    if (/daily AI token limit/i.test(message)) void refreshAiUsageSummary();
     showToast(message, 'error');
   } finally {
     aiRequestInFlight = false;
+    aiStatusText = '';
+    renderAiComposerHint();
   }
 }
 
-// v1.4: the armed-composer AI prompt. The user's next message is sent as a
-// normal v2 message stamped with aiMention + aiMeta (and the active channel),
-// then the agent runs in the background and its reply lands in the same
-// channel via the send_ai_message socket flow.
-// ── v1.4.3: AI tone picker ───────────────────────────────────────────────────
-// Sending a message to the AI agent pops a quick tone selector (four themed
-// boxes with icons + number keys). Press 1-4 or click a box to send with that
-// tone; Enter confirms the highlighted tone; Escape cancels the send (the
-// typed text stays in the composer).
-
-const AI_TONE_PICKER_TONES = [
-  { tone: 'casual', key: '1', icon: 'smile', label: 'Casual', className: 'tone-casual' },
-  { tone: 'professional', key: '2', icon: 'briefcase', label: 'Professional', className: 'tone-professional' },
-  { tone: 'playful', key: '3', icon: 'sparkles', label: 'Playful', className: 'tone-playful' },
-  { tone: 'playful_gangster', key: '4', icon: 'crown', label: 'Playful Gangster', className: 'tone-gangster' },
-];
-
-let aiTonePickOpen = false;
-let aiTonePickResolver = null;
-let aiTonePickHighlighted = null;
-
-function populateAiTonePicker() {
-  const grid = $('ai-tone-picker-grid');
-  if (!grid || grid.childNodes.length) return;
-  for (const entry of AI_TONE_PICKER_TONES) {
-    const label = AI_TONE_LABELS[entry.tone] || entry.label;
-    const box = document.createElement('button');
-    box.type = 'button';
-    box.className = `ai-tone-box ${entry.className}`;
-    box.dataset.tone = entry.tone;
-    box.dataset.key = entry.key;
-    box.title = `Send with ${label} tone (${entry.key})`;
-    const icon = document.createElement('span');
-    icon.className = 'ai-tone-box-icon';
-    icon.appendChild(createIcon(entry.icon));
-    const text = document.createElement('span');
-    text.className = 'ai-tone-box-label';
-    text.textContent = label;
-    const badge = document.createElement('span');
-    badge.className = 'ai-tone-box-key';
-    badge.textContent = entry.key;
-    box.append(icon, text, badge);
-    box.addEventListener('click', () => {
-      resolveAiTonePick(entry.tone);
-    });
-    grid.appendChild(box);
-  }
-}
-
-function resolveAiTonePick(tone) {
-  if (!aiTonePickOpen) return;
-  const resolver = aiTonePickResolver;
-  aiTonePickOpen = false;
-  aiTonePickResolver = null;
-  aiTonePickHighlighted = null;
-  const picker = $('ai-tone-picker');
-  if (picker) picker.hidden = true;
-  if (resolver) resolver(tone);
-}
-
-function cancelAiTonePick() {
-  resolveAiTonePick(null);
-}
-
-function showAiTonePicker() {
-  populateAiTonePicker();
-  const picker = $('ai-tone-picker');
-  if (!picker) return Promise.resolve(null);
-  const current = getSelectedAiTone();
-  aiTonePickHighlighted = AI_TONE_PICKER_TONES.some((entry) => entry.tone === current)
-    ? current
-    : AI_TONE_PICKER_TONES[0].tone;
-  for (const box of picker.querySelectorAll('.ai-tone-box')) {
-    box.classList.toggle('is-highlighted', box.dataset.tone === aiTonePickHighlighted);
-  }
-  picker.hidden = false;
-  aiTonePickOpen = true;
-  return new Promise((resolve) => {
-    aiTonePickResolver = resolve;
-  });
-}
-
-function handleAiTonePickerKey(event) {
-  if (!aiTonePickOpen) return false;
-  if (event.key === 'Escape') {
-    event.preventDefault();
-    event.stopPropagation();
-    cancelAiTonePick();
-    return true;
-  }
-  if (event.key === 'Enter') {
-    // v1.4.3: the Enter that OPENED the picker (send keypress, already
-    // preventDefault'ed by the composer) must not instantly confirm it — only
-    // a subsequent Enter confirms the highlighted tone.
-    if (event.defaultPrevented) return false;
-    event.preventDefault();
-    event.stopPropagation();
-    resolveAiTonePick(aiTonePickHighlighted || AI_TONE_PICKER_TONES[0].tone);
-    return true;
-  }
-  const entry = AI_TONE_PICKER_TONES.find(
-    (item) => item.key === event.key || item.tone === String(event.key || '').toLowerCase()
-  );
-  if (entry) {
-    event.preventDefault();
-    event.stopPropagation();
-    resolveAiTonePick(entry.tone);
-    return true;
-  }
-  return false;
-}
-
-async function sendAiPromptWithTonePicker(parsedMessage) {
-  if (aiTonePickOpen) return;
-  const tone = await showAiTonePicker();
-  if (!tone) return; // cancelled — the message text stays in the composer
-  await sendAiPromptMessage(parsedMessage, tone);
-}
-
-async function sendAiPromptMessage(parsedMessage, tone = getSelectedAiTone()) {
+// The armed-composer AI prompt: the user's message is sent as a normal v2
+// message stamped with aiMention + aiMeta (and the active channel), then the
+// agent runs in the background and its reply lands in the same channel via the
+// send_ai_message socket flow.
+async function sendAiPromptMessage(parsedMessage) {
   const groupId = currentGroupId;
   const groupName = currentGroupData?.name || '';
   const prompt = parsedMessage.text;
@@ -11610,17 +11439,15 @@ async function sendAiPromptMessage(parsedMessage, tone = getSelectedAiTone()) {
       isDisappearing: false,
       disappearingDurationMs: 0,
       aiMention: true,
-      aiMeta: { model: DEFAULT_AI_MODEL, mode: DEFAULT_AI_MODE, tone, webSearchEnabled: false },
+      aiMeta: { model: aiConfig?.model?.id || DEFAULT_AI_MODEL },
     });
 
     resetComposerAfterSend();
 
-    showToast('AI request sent', 'success');
     void sendAiReplyInBackground({
       groupId,
       groupName,
       prompt,
-      tone,
       channel,
       hashtag,
       replyToData,
@@ -12635,12 +12462,6 @@ function setupEventListeners() {
     if (!$('emoji-picker').contains(e.target) && e.target !== $('emoji-btn')) {
       $('emoji-picker').hidden = true;
     }
-    // v1.4.3: clicking outside the tone picker (and outside the composer bar,
-    // so the send button and input never self-cancel) abandons the pick.
-    const tonePicker = $('ai-tone-picker');
-    if (tonePicker && !tonePicker.hidden && !tonePicker.contains(e.target) && !e.target.closest('#message-input-bar')) {
-      cancelAiTonePick();
-    }
     if (!$('whisper-picker').contains(e.target) && !$('whisper-mode-btn').contains(e.target) && e.target !== $('message-input')) {
       cancelWhisperSelection();
     }
@@ -12677,15 +12498,22 @@ function setupEventListeners() {
     }, MOBILE_KEYBOARD_FOCUS_DELAY_MS);
   });
 
-  // v1.4.3: the AI entry point is the message-mode cycle (whisper-mode-btn);
-  // no separate AI button.
-  const aiToneSelect = $('ai-tone-select');
-  if (aiToneSelect) {
-    aiToneSelect.addEventListener('change', () => {
-      selectedAiTone = aiToneSelect.value;
-      writeStoredAiTone(selectedAiTone);
+  // The AI entry point is the message-mode cycle (whisper-mode-btn). Its
+  // settings and model profile live in the profile panel.
+  const aiProfileInput = $('ai-profile-input');
+  if (aiProfileInput) {
+    aiProfileInput.addEventListener('input', () => {
+      aiProfileDirty = true;
+      updateAiProfileCounter();
+    });
+    $('ai-profile-save').addEventListener('click', () => void saveAiProfile(aiProfileInput.value));
+    $('ai-profile-clear').addEventListener('click', () => {
+      aiProfileInput.value = '';
+      void saveAiProfile('');
     });
   }
+  const aiHintSettings = $('ai-hint-settings');
+  if (aiHintSettings) aiHintSettings.addEventListener('click', openAiSettings);
 
   msgInput.addEventListener('blur', () => {
     clearTimeout(window._myTypingTimer);
@@ -12700,10 +12528,6 @@ function setupEventListeners() {
       return;
     }
     if (e.key === 'Enter' && !e.shiftKey) {
-      // v1.4.3: while the AI tone picker is open, Enter confirms the
-      // highlighted tone via the document handler — don't re-trigger doSend
-      // and don't preventDefault (the picker needs defaultPrevented=false).
-      if (aiTonePickOpen) return;
       e.preventDefault();
       doSend(msgInput.value);
     }

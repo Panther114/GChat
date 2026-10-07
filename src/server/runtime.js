@@ -23,6 +23,10 @@ const { validateEditEnvelope, validateV2MessageEnvelope } = require('./message-c
 const { createSqliteSessionStore } = require('./sqlite-session-store');
 const { nullMainTagIndexes } = require('./main-tag-index-migration');
 const { createMediaStore } = require('./media-store');
+const { MODEL: AI_MODEL, PROFILE_MAX_CHARS: AI_PROFILE_MAX_CHARS, readAiConfig } = require('./ai/config');
+const { buildSystemPrompt: buildAiSystemPrompt, runAgentRound: runAiAgentRound } = require('./ai/agent');
+const { estimateCostUsd: estimateAiCostUsd } = require('./ai/provider');
+const { isSearchConfigured } = require('./ai/search');
 const {
   GROUP_CLEAR_CHANNEL,
   MAIN_CHANNEL,
@@ -110,70 +114,12 @@ const VAPID_PRIVATE_KEY = typeof process.env.VAPID_PRIVATE_KEY === 'string' ? pr
 const VAPID_SUBJECT = typeof process.env.VAPID_SUBJECT === 'string' ? process.env.VAPID_SUBJECT.trim() : '';
 const MIN_DISAPPEARING_DURATION_MS = 3000;
 const MAX_DISAPPEARING_DURATION_MS = 22500;
-// v1.4: the AI assistant is a single-model agent (DeepSeek V4 Flash) served by
-// v1.4.2: the OpenCode API key consumes the OpenCode GO subscription quota
-// (endpoint https://opencode.ai/zen/go/v1). The env var intentionally keeps
-// its original name (OPENCODE_ZEN_API_KEY) so existing Railway configs keep
-// working unchanged. The official DeepSeek API stays as the automatic
-// fallback provider.
-const OPENCODE_BASE_URL = 'https://opencode.ai/zen/go/v1';
-const OPENCODE_CHAT_COMPLETIONS_URL = `${OPENCODE_BASE_URL}/chat/completions`;
-const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
-const DEEPSEEK_CHAT_COMPLETIONS_URL = `${DEEPSEEK_BASE_URL}/chat/completions`;
-const AI_MODEL_OPTIONS = {
-  'deepseek-v4-flash': {
-    label: 'DeepSeek V4 Flash',
-    // OpenCode Go list price for DeepSeek V4 Flash (USD per 1M tokens).
-    inputCostPerMillion: 0.14,
-    outputCostPerMillion: 0.28,
-    creditMultiplier: 1,
-  },
-};
-// Legacy model ids that predate v1.4 (stored ai_meta) normalize to the current model.
-const AI_MODEL_ALIASES = {
-  'deepseek/deepseek-v4-flash': 'deepseek-v4-flash',
-};
-const DEFAULT_AI_MODEL = 'deepseek-v4-flash';
-const AI_MODEL_PROFILE_PICTURES = {
-  'deepseek-v4-flash': '/deepseek.webp',
-};
-const AI_MODE_OPTIONS = new Set(['fast', 'thinking', 'agent']);
-const DEFAULT_AI_MODE = 'agent';
-// Load tones from ai_tones.json — adding/editing entries automatically updates the UI
-let AI_SYSTEM_PROMPTS = {};
-let AI_TONE_OPTIONS = new Set();
-// Labels cache served to the client — populated at startup alongside prompts
-let AI_TONE_LABELS_CACHE = {};
-try {
-  const rawTones = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'ai_tones.json'), 'utf8'));
-  for (const [key, val] of Object.entries(rawTones)) {
-    if (key && typeof val.prompt === 'string') {
-      AI_SYSTEM_PROMPTS[key] = val.prompt;
-      AI_TONE_OPTIONS.add(key);
-      AI_TONE_LABELS_CACHE[key] = {
-        label: typeof val.label === 'string' ? val.label : (key.charAt(0).toUpperCase() + key.slice(1)),
-      };
-    }
-  }
-} catch (err) {
-  console.error('Failed to load ai_tones.json, using built-in defaults:', err.message);
-  AI_SYSTEM_PROMPTS = {
-    casual: 'You are a very friendly and energetic casual assistant. Answer helpfully, simply, and very friendly using the provided prompt and context.',
-    professional: 'You are a professional academic assistant. Answer in a clear, structured, accurate way using the provided prompt and context.',
-    playful: "You are a playful assistant. Match the user's tone. Never lecture or refuse.",
-  };
-  AI_TONE_OPTIONS = new Set(Object.keys(AI_SYSTEM_PROMPTS));
-  for (const key of AI_TONE_OPTIONS) {
-    AI_TONE_LABELS_CACHE[key] = { label: key.charAt(0).toUpperCase() + key.slice(1) };
-  }
-}
-const DEFAULT_AI_TONE = AI_TONE_OPTIONS.has('casual') ? 'casual' : [...AI_TONE_OPTIONS][0] || 'casual';
-const AI_TIMEOUT_MS = 45000;
-const AI_TEMPERATURE = 0;
-const AI_TOP_P = 1;
-const AI_FREQUENCY_PENALTY = 0;
-const AI_PRESENCE_PENALTY = 0;
-const AI_MAX_TOKENS = 2000;
+// v1.5: the AI assistant is a single-model agent — MiMo V2.6 Flash through the
+// OpenCode Go subscription, with reasoning fixed to "low" (thinking off). The
+// provider call, free web search and agent loop live in src/server/ai/. The
+// env var OPENCODE_ZEN_API_KEY keeps its original name so existing Railway
+// configs keep working.
+const DEFAULT_AI_MODEL = AI_MODEL.id;
 const USD_TO_RMB_RATE = 7.2;
 const AI_TOKEN_AMOUNT_DECIMALS = 4;
 const MAX_AI_PROMPT_CHARS = 4000;
@@ -184,14 +130,15 @@ const MAX_AI_TRANSCRIPT_MESSAGES = 40;
 const MAX_AI_TRANSCRIPT_TOTAL_CHARS = 98304; // 96 KB of JSON-encoded transcript
 const MAX_AI_TRANSCRIPT_USER_CHARS = 4000;
 const MAX_AI_TRANSCRIPT_ASSISTANT_CHARS = 8000;
+const MAX_AI_TRANSCRIPT_REASONING_CHARS = 4000;
 const MAX_AI_TOOL_CALLS_PER_MESSAGE = 8;
 const MAX_AI_TOOL_CALL_ARGS_CHARS = 8192;
 const MAX_AI_TOOL_RESULT_CHARS = 24576; // 24 KB per tool result
-const MAX_AI_TOOL_ROUNDS = 4;
+const MAX_AI_TOOL_ROUNDS = 12; // counts server-run search rounds too; the browser relays at most 4
 const AI_ASSISTANT_USER_ID = '__gchat_ai_grok__';
 const AI_ASSISTANT_NAME = 'GChat AI';
-const AI_ASSISTANT_COLOR = '#8d7bff';
-const AI_ASSISTANT_PROFILE_PICTURE = '/deepseek.webp';
+const AI_ASSISTANT_COLOR = '#e6e6e6';
+const AI_ASSISTANT_PROFILE_PICTURE = '/gchat-ai.svg';
 const APP_OWNER_USERNAME = 'Furina';
 const DEFAULT_USER_DAILY_AI_TOKEN_LIMIT = 20000;
 const DEFAULT_GLOBAL_DAILY_AI_TOKEN_LIMIT = 200000;
@@ -350,12 +297,6 @@ function sanitizeAiText(value, maxLength) {
   return normalized.slice(0, maxLength);
 }
 
-function normalizeAiTokenCount(value) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed < 0) return 0;
-  return Math.round(parsed);
-}
-
 function roundAiTokenAmount(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) return 0;
@@ -369,10 +310,6 @@ function normalizeAiCostUsd(value) {
   return parsed;
 }
 
-function normalizeAiBoolean(value) {
-  return value === true || value === 1 || value === '1' || value === 'true';
-}
-
 function convertUsdToRmb(value) {
   const usd = normalizeAiCostUsd(value);
   if (usd == null) return null;
@@ -380,22 +317,9 @@ function convertUsdToRmb(value) {
 }
 
 function normalizeAiModel(value) {
+  // Messages stored before v1.5 may name an older model; keep it for display.
   const model = sanitizeAiText(value, 80);
-  if (!model) return DEFAULT_AI_MODEL;
-  return AI_MODEL_OPTIONS[model] ? model : (AI_MODEL_ALIASES[model] || DEFAULT_AI_MODEL);
-}
-
-function normalizeAiMode(value) {
-  const mode = sanitizeAiText(value, 24)?.toLowerCase();
-  // Legacy UI sent "context"; the persisted metadata stays "thinking" for
-  // older messages. New v1.4 requests always run as "agent".
-  if (mode === 'context') return 'thinking';
-  return mode && AI_MODE_OPTIONS.has(mode) ? mode : DEFAULT_AI_MODE;
-}
-
-function normalizeAiTone(value) {
-  const tone = sanitizeAiText(value, 24)?.toLowerCase();
-  return tone && AI_TONE_OPTIONS.has(tone) ? tone : DEFAULT_AI_TONE;
+  return model && /^[A-Za-z0-9._/-]+$/.test(model) ? model : DEFAULT_AI_MODEL;
 }
 
 function normalizeAiWebSearchRequests(value) {
@@ -446,51 +370,24 @@ function sanitizeAiMessageMeta(value) {
     promptTokens + completionTokens,
     roundAiTokenAmount(value.totalTokens ?? value.total_tokens)
   );
-  const rawPromptTokens = normalizeAiTokenCount(value.rawPromptTokens ?? value.raw_prompt_tokens);
-  const rawCompletionTokens = normalizeAiTokenCount(value.rawCompletionTokens ?? value.raw_completion_tokens);
-  const rawTotalTokens = Math.max(
-    rawPromptTokens + rawCompletionTokens,
-    normalizeAiTokenCount(value.rawTotalTokens ?? value.raw_total_tokens ?? value.totalTokensRaw ?? value.total_tokens_raw)
-  );
   const estimatedCostUsd = normalizeAiCostUsd(value.estimatedCostUsd ?? value.estimated_cost_usd ?? value.costUsd);
   const explicitCostRmb = normalizeAiCostUsd(value.estimatedCostRmb ?? value.estimated_cost_rmb ?? value.costRmb);
-  const estimatedCostRmb = explicitCostRmb ?? convertUsdToRmb(estimatedCostUsd);
-  const model = normalizeAiModel(value.model);
-  const mode = normalizeAiMode(value.mode);
-  const tone = normalizeAiTone(value.tone);
-  const webSearchEnabled = normalizeAiBoolean(value.webSearchEnabled ?? value.web_search_enabled);
-  const webSearchRequests = normalizeAiWebSearchRequests(
-    value.webSearchRequests
-    ?? value.web_search_requests
-    ?? value.webSearchRequestCount
-    ?? value.web_search_request_count
-  );
-  const costSource = sanitizeAiText(value.costSource, 16) || (estimatedCostUsd != null ? 'estimated' : 'unknown');
-  const toolCalls = Math.max(0, Math.round(Number(value.toolCalls) || 0));
-  const toolRounds = Math.max(0, Math.round(Number(value.toolRounds) || 0));
   return {
-    model,
-    mode,
-    tone,
-    webSearchEnabled,
-    webSearchRequests,
-    toolCalls,
-    toolRounds,
+    model: normalizeAiModel(value.model),
+    webSearchRequests: normalizeAiWebSearchRequests(value.webSearchRequests ?? value.web_search_requests),
+    toolCalls: Math.max(0, Math.round(Number(value.toolCalls) || 0)),
+    toolRounds: Math.max(0, Math.round(Number(value.toolRounds) || 0)),
     promptTokens,
     completionTokens,
     totalTokens,
-    rawPromptTokens,
-    rawCompletionTokens,
-    rawTotalTokens,
     estimatedCostUsd,
-    estimatedCostRmb,
-    costSource,
+    estimatedCostRmb: explicitCostRmb ?? convertUsdToRmb(estimatedCostUsd),
+    costSource: sanitizeAiText(value.costSource, 16) || (estimatedCostUsd != null ? 'estimated' : 'unknown'),
   };
 }
 
-function getAiAssistantProfilePicture(model) {
-  const normalizedModel = normalizeAiModel(model);
-  return AI_MODEL_PROFILE_PICTURES[normalizedModel] || AI_ASSISTANT_PROFILE_PICTURE;
+function getAiAssistantProfilePicture() {
+  return AI_ASSISTANT_PROFILE_PICTURE;
 }
 
 function parseStoredAiMessageMeta(raw) {
@@ -539,6 +436,9 @@ function normalizeAiAgentTranscript(value) {
         ? null
         : sanitizeAiText(entry.content, MAX_AI_TRANSCRIPT_ASSISTANT_CHARS);
       clean.content = content;
+      // Some gateways require the reasoning text to be echoed back with tool calls.
+      const reasoning = sanitizeAiText(entry.reasoning_content, MAX_AI_TRANSCRIPT_REASONING_CHARS);
+      if (reasoning) clean.reasoning_content = reasoning;
       if (Array.isArray(entry.tool_calls) && entry.tool_calls.length) {
         if (entry.tool_calls.length > MAX_AI_TOOL_CALLS_PER_MESSAGE) {
           return { ok: false, error: 'Too many AI tool calls in one step' };
@@ -581,258 +481,6 @@ function normalizeAiAgentTranscript(value) {
     return { ok: false, error: 'AI transcript requires a user message' };
   }
   return { ok: true, value: normalized };
-}
-
-// Tool surface exposed to the agent. The server only relays the tool calls —
-// every tool executes client-side, where the decryption keys live.
-const AI_TOOL_DEFINITIONS = [
-  {
-    type: 'function',
-    function: {
-      name: 'get_channel_history',
-      description: 'Retrieve recent plaintext messages from a channel (sub-chat) of the current chat group. Use when a question references the conversation or anything said in this chat. Omit "channel" to read the channel where the question was asked. Pass the "before" message id returned as oldestMessageId by a previous call to load older messages.',
-      parameters: {
-        type: 'object',
-        properties: {
-          channel: {
-            type: 'string',
-            description: 'Channel topic without the leading # (e.g. "main", "general"). Omit to read the channel where the question was asked.',
-          },
-          limit: {
-            type: 'integer',
-            minimum: 1,
-            maximum: 40,
-            description: 'Maximum number of messages to return (default 20).',
-          },
-          before: {
-            type: 'string',
-            description: 'Message id returned as oldestMessageId by a previous get_channel_history call, to fetch older messages.',
-          },
-        },
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_channel_list',
-      description: 'List every channel (sub-chat) of the current chat group with message counts and latest activity. Use when a question may reference another channel of this chat.',
-      parameters: {
-        type: 'object',
-        properties: {},
-      },
-    },
-  },
-];
-
-function buildAiTranscriptAgent(tone, context = {}) {
-  const groupName = sanitizeAiText(context.groupName, 64) || 'the current chat';
-  const channel = normalizeHashtag(context.channel);
-  const policyLines = [
-    'Answer directly WITHOUT calling any tool when the question needs no conversation history (general questions, clarifications, calculations, creative writing, and so on).',
-    'If the question references the current conversation or anything said in this chat, call get_channel_history to retrieve the relevant history before answering.',
-    'If the needed messages are older than the first page, keep calling get_channel_history with the before cursor to fetch older messages.',
-    'If the question references another channel of this chat, use get_channel_list to discover channels and get_channel_history to read the channel the question references.',
-    `You can ONLY access channels inside the chat group "${groupName}"${channel ? `, where the question was asked in channel #${channel}` : ''}. You have no access to any other chats or groups. Never claim knowledge of other chats.`,
-    'Never invent or fabricate message content. If the history is unavailable or empty, say so honestly.',
-    'Answer in the language of the question.',
-  ];
-  return `${buildAiSystemPrompt(tone)}\n\n${policyLines.join('\n')}`;
-}
-
-function extractAiMessageText(content) {
-  if (typeof content === 'string') return content.trim();
-  if (!Array.isArray(content)) return '';
-  return content
-    .map((part) => {
-      if (typeof part === 'string') return part;
-      if (part && typeof part.text === 'string') return part.text;
-      return '';
-    })
-    .join('\n')
-    .trim();
-}
-
-function getAiUpstreamErrorMessage(payload, fallbackLabel = 'AI provider') {
-  const fallback = `${fallbackLabel} request failed`;
-  if (!payload || typeof payload !== 'object') return fallback;
-  const nested = payload.error && typeof payload.error === 'object'
-    ? sanitizeAiText(payload.error.message, 240)
-    : null;
-  return nested || fallback;
-}
-
-function extractAiUsage(payload) {
-  const usage = payload && typeof payload === 'object' && payload.usage && typeof payload.usage === 'object'
-    ? payload.usage
-    : {};
-  const promptTokens = normalizeAiTokenCount(usage.prompt_tokens ?? usage.promptTokens);
-  const completionTokens = normalizeAiTokenCount(usage.completion_tokens ?? usage.completionTokens);
-  const totalTokens = Math.max(
-    promptTokens + completionTokens,
-    normalizeAiTokenCount(usage.total_tokens ?? usage.totalTokens)
-  );
-  return {
-    promptTokens,
-    completionTokens,
-    totalTokens,
-  };
-}
-
-// Retained with dormant AI support for a future feature-flagged re-enable.
-// eslint-disable-next-line no-unused-vars
-function extractOpenRouterWebSearchRequests(payload) {
-  if (!payload || typeof payload !== 'object') return 0;
-  const candidates = [
-    payload?.usage?.server_tool_use?.web_search_requests,
-    payload?.usage?.server_tool_use?.webSearchRequests,
-    payload?.usage?.server_tool_use?.web_search_request_count,
-    payload?.usage?.server_tool_use?.webSearchRequestCount,
-    payload?.usage?.web_search_requests,
-    payload?.usage?.webSearchRequests,
-  ];
-  for (const candidate of candidates) {
-    const normalized = normalizeAiWebSearchRequests(candidate);
-    if (normalized > 0) return normalized;
-  }
-  return 0;
-}
-
-function convertModelUsageToStandardTokens(usage, model = DEFAULT_AI_MODEL) {
-  const normalizedModel = normalizeAiModel(model);
-  const pricing = AI_MODEL_OPTIONS[normalizedModel] || AI_MODEL_OPTIONS[DEFAULT_AI_MODEL];
-  const multiplier = pricing.creditMultiplier ?? 1;
-  const rawPromptTokens = normalizeAiTokenCount(usage?.promptTokens ?? usage?.prompt_tokens);
-  const rawCompletionTokens = normalizeAiTokenCount(usage?.completionTokens ?? usage?.completion_tokens);
-  const rawTotalTokens = Math.max(
-    rawPromptTokens + rawCompletionTokens,
-    normalizeAiTokenCount(usage?.totalTokens ?? usage?.total_tokens)
-  );
-  const promptTokens = roundAiTokenAmount(rawPromptTokens * multiplier);
-  const completionTokens = roundAiTokenAmount(rawCompletionTokens * multiplier);
-  return {
-    promptTokens,
-    completionTokens,
-    totalTokens: roundAiTokenAmount(promptTokens + completionTokens),
-    rawPromptTokens,
-    rawCompletionTokens,
-    rawTotalTokens,
-  };
-}
-
-function extractAiCostUsd(payload) {
-  if (!payload || typeof payload !== 'object') return null;
-  const candidates = [
-    payload?.usage?.cost,
-    payload?.usage?.estimated_cost,
-    // OpenRouter may expose the finalized USD amount here even when `cost`
-    // or `estimated_cost` are absent.
-    payload?.usage?.total_cost,
-    payload?.meta?.cost?.amount,
-    payload?.meta?.cost,
-    payload?.cost,
-  ];
-  for (const candidate of candidates) {
-    const normalized = normalizeAiCostUsd(candidate);
-    if (normalized != null) return normalized;
-  }
-  return null;
-}
-
-function estimateAiCostUsd(usage, model = DEFAULT_AI_MODEL) {
-  if (!usage) return null;
-  const promptTokens = normalizeAiTokenCount(usage.promptTokens);
-  const completionTokens = normalizeAiTokenCount(usage.completionTokens);
-  if (promptTokens === 0 && completionTokens === 0) return null;
-  const pricing = AI_MODEL_OPTIONS[normalizeAiModel(model)] || AI_MODEL_OPTIONS[DEFAULT_AI_MODEL];
-  return (
-    (promptTokens / 1000000) * pricing.inputCostPerMillion
-    + (completionTokens / 1000000) * pricing.outputCostPerMillion
-  );
-}
-
-function getAiResponseModel(payload, fallbackModel = DEFAULT_AI_MODEL) {
-  const directModel = sanitizeAiText(payload?.model, 80);
-  if (directModel && AI_MODEL_OPTIONS[directModel]) return directModel;
-  const metaModel = sanitizeAiText(payload?.meta?.model, 80);
-  if (metaModel && AI_MODEL_OPTIONS[metaModel]) return metaModel;
-  const providerModel = sanitizeAiText(payload?.provider, 80);
-  return providerModel && AI_MODEL_OPTIONS[providerModel] ? providerModel : normalizeAiModel(fallbackModel);
-}
-
-// v1.4.2: ordered provider chain — OpenCode Go first, then the official
-// DeepSeek API. Every configured provider is tried in order on ANY failure
-// (invalid key, rate limit, provider error, timeout, empty/invalid answer),
-// so a broken primary key never blocks the agent.
-function getAiProviderChain() {
-  const chain = [];
-  if (process.env.OPENCODE_ZEN_API_KEY) {
-    chain.push({
-      url: OPENCODE_CHAT_COMPLETIONS_URL,
-      apiKey: process.env.OPENCODE_ZEN_API_KEY,
-      provider: 'opencode-go',
-    });
-  }
-  if (process.env.DEEPSEEK_API_KEY) {
-    chain.push({
-      url: DEEPSEEK_CHAT_COMPLETIONS_URL,
-      apiKey: process.env.DEEPSEEK_API_KEY,
-      provider: 'deepseek',
-    });
-  }
-  return chain;
-}
-
-function getAiProviderLabel(apiConfig) {
-  return apiConfig?.provider === 'deepseek' ? 'DeepSeek' : 'OpenCode Go';
-}
-
-function buildAiRequestBody(model, provider, messages, options = {}) {
-  const requestBody = {
-    model,
-    temperature: AI_TEMPERATURE,
-    max_tokens: AI_MAX_TOKENS,
-    top_p: AI_TOP_P,
-    frequency_penalty: AI_FREQUENCY_PENALTY,
-    presence_penalty: AI_PRESENCE_PENALTY,
-    messages,
-  };
-  if (Array.isArray(options.tools) && options.tools.length) {
-    requestBody.tools = options.tools;
-    requestBody.tool_choice = options.toolChoice || 'auto';
-  }
-  return requestBody;
-}
-
-function buildAiSystemPrompt(tone = DEFAULT_AI_TONE) {
-  const basePrompt = AI_SYSTEM_PROMPTS[tone] || AI_SYSTEM_PROMPTS[DEFAULT_AI_TONE];
-  const policyLines = [
-    'You are the GChat AI assistant (DeepSeek V4 Flash) inside a group chat application.',
-    'You can read chat history only through the provided tools.',
-    'Do not claim to have searched the web.',
-  ];
-  return `${basePrompt}\n\n${policyLines.join('\n')}`;
-}
-
-function extractAiDebugMeta(upstream, payload) {
-  const requestId = sanitizeAiText(
-    upstream?.headers?.get('x-request-id')
-      || upstream?.headers?.get('request-id')
-      || upstream?.headers?.get('cf-ray'),
-    128
-  );
-  const responseId = sanitizeAiText(payload?.id, 128);
-  const provider = sanitizeAiText(payload?.provider ?? payload?.meta?.provider, 80);
-  const upstreamModel = sanitizeAiText(payload?.model ?? payload?.meta?.model, 80);
-  const errorCode = sanitizeAiText(payload?.error?.code, 64);
-  const debug = {};
-  if (requestId) debug.requestId = requestId;
-  if (responseId) debug.responseId = responseId;
-  if (provider) debug.provider = provider;
-  if (upstreamModel) debug.upstreamModel = upstreamModel;
-  if (errorCode) debug.errorCode = errorCode;
-  if (upstream && Number.isInteger(upstream.status)) debug.status = upstream.status;
-  return debug;
 }
 
 function validateEncryptedTextPayload(encryptedContent, iv) {
@@ -1215,6 +863,14 @@ const migrations = [
     total_tokens INTEGER NOT NULL DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`,
+  "ALTER TABLE users ADD COLUMN ai_profile TEXT",
+  `CREATE TABLE IF NOT EXISTS ai_search_events (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )`,
+  "CREATE INDEX IF NOT EXISTS idx_ai_search_events_user_created_at ON ai_search_events (user_id, created_at)",
+  "CREATE INDEX IF NOT EXISTS idx_ai_search_events_created_at ON ai_search_events (created_at)",
   "CREATE INDEX IF NOT EXISTS idx_disappearing_states_user_hidden ON disappearing_message_states (user_id, hidden_at, expires_at)",
   "CREATE INDEX IF NOT EXISTS idx_disappearing_states_message_user ON disappearing_message_states (message_id, user_id)",
   "CREATE INDEX IF NOT EXISTS idx_message_reads_message_id ON message_reads (message_id)",
@@ -1247,6 +903,13 @@ try {
     .run('global_ai_daily_token_limit', String(DEFAULT_GLOBAL_DAILY_AI_TOKEN_LIMIT));
 } catch (err) {
   console.error('Failed to initialize AI config defaults:', err);
+}
+try {
+  // Search events only matter for the current day's budget; keep a month.
+  db.prepare('DELETE FROM ai_search_events WHERE created_at < ?')
+    .run(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString());
+} catch (err) {
+  console.error('Failed to prune AI search events:', err);
 }
 try {
   db.prepare('INSERT OR IGNORE INTO _config (key, value) VALUES (?, ?)')
@@ -1387,6 +1050,12 @@ const stmts = {
   deleteUserMessageReads: db.prepare('DELETE FROM message_reads WHERE user_id = ?'),
   deleteUserDisappearingStates: db.prepare('DELETE FROM disappearing_message_states WHERE user_id = ?'),
   deleteUserAiUsageEvents: db.prepare('DELETE FROM ai_usage_events WHERE user_id = ?'),
+  deleteUserAiSearchEvents: db.prepare('DELETE FROM ai_search_events WHERE user_id = ?'),
+  getUserAiProfile: db.prepare('SELECT ai_profile FROM users WHERE id = ?'),
+  setUserAiProfile: db.prepare('UPDATE users SET ai_profile = ? WHERE id = ?'),
+  insertAiSearchEvent: db.prepare('INSERT INTO ai_search_events (id, user_id, created_at) VALUES (?, ?, ?)'),
+  countUserAiSearchesInWindow: db.prepare('SELECT COUNT(*) AS count FROM ai_search_events WHERE user_id = ? AND created_at >= ? AND created_at < ?'),
+  countGlobalAiSearchesInWindow: db.prepare('SELECT COUNT(*) AS count FROM ai_search_events WHERE created_at >= ? AND created_at < ?'),
   deleteUserPushSubscriptions: db.prepare('DELETE FROM push_subscriptions WHERE user_id = ?'),
 
   // Groups
@@ -2385,11 +2054,6 @@ app.use('/api/ai', (req, res, next) => {
   return res.status(404).json({ error: 'AI is unavailable' });
 });
 
-// ── AI tones metadata (served from startup cache) ─────────────────────────────
-app.get('/api/ai/tones', (_req, res) => {
-  res.json({ ok: true, tones: AI_TONE_LABELS_CACHE });
-});
-
 function buildHealthDiagnostics(req) {
   return {
     serverTime: new Date().toISOString(),
@@ -3096,6 +2760,7 @@ const deleteAccountTx = db.transaction((userId) => {
   stmts.deleteUserMessageReads.run(userId);
   stmts.deleteUserDisappearingStates.run(userId);
   stmts.deleteUserAiUsageEvents.run(userId);
+  stmts.deleteUserAiSearchEvents.run(userId);
   stmts.deleteUserPushSubscriptions.run(userId);
   stmts.deleteUserMemberships.run(userId);
   stmts.deleteUser.run(userId);
@@ -3201,6 +2866,7 @@ const adminDeleteUserTx = db.transaction((targetUserId, nextOwnerId) => {
   stmts.deleteUserMessageReads.run(targetUserId);
   stmts.deleteUserDisappearingStates.run(targetUserId);
   stmts.deleteUserAiUsageEvents.run(targetUserId);
+  stmts.deleteUserAiSearchEvents.run(targetUserId);
   stmts.deleteUserPushSubscriptions.run(targetUserId);
   stmts.deleteUserMemberships.run(targetUserId);
   stmts.deleteUser.run(targetUserId);
@@ -4768,21 +4434,22 @@ app.delete('/api/groups/:groupId', (req, res) => {
   res.json({ ok: true });
 });
 
-// v1.4: the Ask-AI endpoint is a stateless agent relay. The client owns the
-// transcript and the tool EXECUTION (the server cannot decrypt messages); this
-// endpoint validates the round, forwards it to the model with the agent tools,
-// and either returns the final answer or relays the model's tool calls back to
-// the client for execution.
-function recordAiUsageEvent(userId, groupId, aiMeta) {
-  if (!aiMeta || aiMeta.totalTokens <= 0) return;
+// ── AI assistant ──────────────────────────────────────────────────────────────
+// The Ask-AI endpoint is a stateless agent relay. The browser owns the
+// transcript and executes the history tools (the server cannot decrypt
+// messages); the server validates each round, runs the model and the optional
+// free web search, then either returns the final answer or relays the model's
+// history tool calls back to the browser.
+function recordAiUsageEvent(userId, groupId, usage) {
+  if (!usage || usage.totalTokens <= 0) return;
   try {
     stmts.insertAiUsageEvent.run(
       crypto.randomUUID(),
       userId,
       groupId,
-      aiMeta.promptTokens,
-      aiMeta.completionTokens,
-      aiMeta.totalTokens,
+      usage.promptTokens,
+      usage.completionTokens,
+      usage.totalTokens,
       new Date().toISOString()
     );
   } catch (recordErr) {
@@ -4790,106 +4457,63 @@ function recordAiUsageEvent(userId, groupId, aiMeta) {
   }
 }
 
-function buildAiRoundMeta(payload, selectedTone) {
-  const usage = extractAiUsage(payload);
-  const standardizedUsage = convertModelUsageToStandardTokens(usage, DEFAULT_AI_MODEL);
-  const directCostUsd = extractAiCostUsd(payload);
-  const estimatedCostUsd = directCostUsd ?? estimateAiCostUsd(usage, DEFAULT_AI_MODEL);
+function getAiSearchUsage(userId) {
+  const window = getAiUsageWindow();
   return {
-    meta: sanitizeAiMessageMeta({
-      model: getAiResponseModel(payload, DEFAULT_AI_MODEL),
-      mode: DEFAULT_AI_MODE,
-      tone: selectedTone,
-      webSearchEnabled: false,
-      webSearchRequests: 0,
-      promptTokens: standardizedUsage.promptTokens,
-      completionTokens: standardizedUsage.completionTokens,
-      totalTokens: standardizedUsage.totalTokens,
-      rawPromptTokens: standardizedUsage.rawPromptTokens,
-      rawCompletionTokens: standardizedUsage.rawCompletionTokens,
-      rawTotalTokens: standardizedUsage.rawTotalTokens,
-      estimatedCostUsd,
-      estimatedCostRmb: convertUsdToRmb(estimatedCostUsd),
-      costSource: directCostUsd != null ? 'upstream' : 'estimated',
-    }),
-    estimatedCostUsd,
+    user: stmts.countUserAiSearchesInWindow.get(userId, window.startIso, window.endIso)?.count || 0,
+    global: stmts.countGlobalAiSearchesInWindow.get(window.startIso, window.endIso)?.count || 0,
   };
 }
 
-function buildAiAssistantToolCalls(rawToolCalls) {
-  return rawToolCalls.map((call) => ({
-    id: sanitizeAiText(call?.id, 64),
-    type: 'function',
-    function: {
-      name: sanitizeAiText(call?.function?.name, 64),
-      arguments: typeof call?.function?.arguments === 'string'
-        ? call.function.arguments
-        : JSON.stringify(call?.function?.arguments ?? {}),
-    },
-  }));
+function isAiWebSearchEnabled(cfg) {
+  return isSearchConfigured(cfg.search) && cfg.search.userDailyLimit > 0 && cfg.search.globalDailyLimit > 0;
 }
 
-/**
- * One provider attempt for a round. Never throws — every outcome (HTTP error,
- * network failure, timeout) is returned as a structured failure so the caller
- * can fall through to the next provider in the chain.
- */
-async function attemptAiUpstream(apiConfig, bodyString, origin) {
-  const providerLabel = getAiProviderLabel(apiConfig);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
-  try {
-    const upstream = await fetch(apiConfig.url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiConfig.apiKey}`,
-        'X-Title': 'GChat',
-        ...(origin ? { 'HTTP-Referer': origin } : {}),
-      },
-      body: bodyString,
-      signal: controller.signal,
-    });
-    const payload = await upstream.json().catch(() => ({}));
-    const debug = extractAiDebugMeta(upstream, payload);
-    if (!upstream.ok) {
-      const errorMessage = getAiUpstreamErrorMessage(payload, providerLabel);
-      console.warn('AI upstream error:', {
-        ...debug,
-        providerLabel,
-        errorMessage,
-      });
-      return {
-        ok: false,
-        status: upstream.status === 429 ? 429 : 502,
-        error: errorMessage,
-        debug,
-        payload: null,
-        providerLabel,
-      };
-    }
-    return { ok: true, status: upstream.status, error: null, debug, payload, providerLabel };
-  } catch (err) {
-    if (err && err.name === 'AbortError') {
-      return { ok: false, status: 504, error: 'AI request timed out', debug: null, payload: null, providerLabel };
-    }
-    console.error('AI upstream request error:', {
-      name: err?.name || 'Error',
-      message: sanitizeAiText(err?.message, 240) || 'Unknown error',
-      code: sanitizeAiText(err?.code, 64),
-      providerLabel,
-    });
-    return { ok: false, status: 502, error: `Failed to contact ${providerLabel}`, debug: null, payload: null, providerLabel };
-  } finally {
-    clearTimeout(timeout);
-  }
+function buildAiPublicConfig(userId) {
+  const cfg = readAiConfig();
+  const searchUsage = getAiSearchUsage(userId);
+  const profile = stmts.getUserAiProfile.get(userId)?.ai_profile || '';
+  return {
+    ok: true,
+    configured: !!cfg.apiKey,
+    model: { id: cfg.model.id, label: cfg.model.label },
+    effort: cfg.effort,
+    replyTokenCap: cfg.maxOutputTokens,
+    profile: { text: profile, maxChars: AI_PROFILE_MAX_CHARS },
+    webSearch: {
+      available: isAiWebSearchEnabled(cfg),
+      usedToday: searchUsage.user,
+      dailyLimit: cfg.search.userDailyLimit,
+      globalUsedToday: searchUsage.global,
+      globalDailyLimit: cfg.search.globalDailyLimit,
+    },
+    usage: getAiUsageSnapshotForUser(userId),
+  };
 }
+
+app.get('/api/ai/config', (req, res) => {
+  res.json(buildAiPublicConfig(req.session.userId));
+});
+
+app.put('/api/ai/profile', (req, res) => {
+  const userId = req.session.userId;
+  const raw = req.body?.profile;
+  if (raw != null && typeof raw !== 'string') {
+    return res.status(400).json({ error: 'Profile must be text' });
+  }
+  const text = (raw || '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim();
+  if ([...text].length > AI_PROFILE_MAX_CHARS) {
+    return res.status(400).json({ error: `Keep the profile under ${AI_PROFILE_MAX_CHARS} characters` });
+  }
+  stmts.setUserAiProfile.run(text || null, userId);
+  res.json(buildAiPublicConfig(userId));
+});
 
 app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
   const { groupId } = req.params;
   const userId = req.session.userId;
-  const providerChain = getAiProviderChain();
-  if (!providerChain.length) {
+  const cfg = readAiConfig();
+  if (!cfg.apiKey) {
     return res.status(503).json({ error: 'AI assistant is not configured on this server' });
   }
 
@@ -4913,130 +4537,83 @@ app.post('/api/groups/:groupId/ai/chat', async (req, res) => {
     return res.status(429).json({ error: quotaError, aiUsage: quotaSummary });
   }
 
-  const selectedTone = normalizeAiTone(req.body.tone);
   const transcriptCheck = normalizeAiAgentTranscript(req.body.transcript);
   if (!transcriptCheck.ok) {
     return res.status(400).json({ error: transcriptCheck.error });
   }
 
-  const systemContent = buildAiTranscriptAgent(selectedTone, {
+  const searchEnabled = isAiWebSearchEnabled(cfg);
+  const system = buildAiSystemPrompt({
     groupName: sanitizeAiText(req.body.groupName, 64) || group.name,
-    channel: req.body.channel,
+    channel: normalizeHashtag(req.body.channel),
+    profile: stmts.getUserAiProfile.get(userId)?.ai_profile || '',
+    searchEnabled,
   });
-  const messages = [{ role: 'system', content: systemContent }];
+  const history = [{ role: 'system', content: system }];
   if (!transcriptCheck.value.some((entry) => entry.role === 'user')) {
-    messages.push({ role: 'user', content: prompt });
+    history.push({ role: 'user', content: prompt });
   }
-  messages.push(...transcriptCheck.value);
+  history.push(...transcriptCheck.value);
 
-  const bodyString = JSON.stringify(buildAiRequestBody(DEFAULT_AI_MODEL, providerChain[0].provider, messages, {
-    tools: AI_TOOL_DEFINITIONS,
-    toolChoice: 'auto',
-  }));
-  const origin = typeof req.headers.origin === 'string' && /^https?:\/\//.test(req.headers.origin)
-    ? req.headers.origin
-    : null;
-
-  // v1.4.2: try every configured provider on ANY failure — invalid key,
-  // rate limit, upstream error, timeout, empty or invalid answer — before
-  // giving up. A broken primary key can never block the agent.
-  let selected = null;
-  const failures = [];
-  for (const apiConfig of providerChain) {
-    const attempt = await attemptAiUpstream(apiConfig, bodyString, origin);
-    if (!attempt.ok || !attempt.payload) {
-      failures.push(attempt);
-      continue;
-    }
-    const message = attempt.payload?.choices?.[0]?.message || {};
-    const rawToolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
-    if (rawToolCalls.length) {
-      const hasValidCall = rawToolCalls.some(
-        (call) => sanitizeAiText(call?.id, 64) && sanitizeAiText(call?.function?.name, 64)
-      );
-      if (!hasValidCall) {
-        failures.push({ ...attempt, ok: false, status: 502, error: 'AI returned an invalid tool call', payload: null });
-        continue;
-      }
-    } else if (!extractAiMessageText(message.content)) {
-      failures.push({ ...attempt, ok: false, status: 502, error: 'AI returned an empty response', payload: null });
-      continue;
-    }
-    selected = { payload: attempt.payload, debug: attempt.debug, provider: apiConfig };
-    break;
-  }
-
-  if (!selected) {
-    const last = failures[failures.length - 1] || {};
-    console.warn('All AI providers failed for this round:', failures.map((f) => ({
-      provider: f.providerLabel,
-      status: f.status,
-      error: f.error,
-    })));
-    const status = Number.isInteger(last.status) ? last.status : 502;
-    return res.status(status).json({
-      error: last.error || 'AI request failed',
-      debug: {
-        ...(last.debug || {}),
-        providerFailures: failures.map((f) => ({ provider: f.providerLabel, status: f.status, error: f.error })),
-      },
-    });
-  }
-
-  const { payload, debug, provider } = selected;
-  const message = payload?.choices?.[0]?.message || {};
-  const rawToolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
-  debug.providerLabel = getAiProviderLabel(provider);
-
-  // Tool round: relay the calls back to the client for execution.
-  if (rawToolCalls.length) {
-    const toolCalls = [];
-    for (const call of rawToolCalls) {
-      const id = sanitizeAiText(call?.id, 64);
-      const name = sanitizeAiText(call?.function?.name, 64);
-      if (!id || !name) continue;
-      let input;
+  const totals = { promptTokens: 0, completionTokens: 0, cachedTokens: 0, totalTokens: 0 };
+  const searchGate = {
+    check() {
+      const used = getAiSearchUsage(userId);
+      return { ok: used.user < cfg.search.userDailyLimit && used.global < cfg.search.globalDailyLimit };
+    },
+    record() {
       try {
-        input = JSON.parse(call?.function?.arguments);
-      } catch {
-        input = call?.function?.arguments || {};
+        stmts.insertAiSearchEvent.run(crypto.randomUUID(), userId, new Date().toISOString());
+      } catch (recordErr) {
+        console.error('Failed to record AI search usage:', recordErr);
       }
-      toolCalls.push({ id, name, input });
-    }
+    },
+  };
 
-    const { meta: aiMeta } = buildAiRoundMeta(payload, selectedTone);
-    recordAiUsageEvent(userId, groupId, aiMeta);
+  const outcome = await runAiAgentRound({
+    cfg,
+    history,
+    searchEnabled,
+    searchGate,
+    onUsage(usage) {
+      for (const key of Object.keys(totals)) totals[key] += usage[key];
+      recordAiUsageEvent(userId, groupId, usage);
+    },
+  });
+  if (!outcome.ok) {
+    console.warn('AI request failed:', { status: outcome.status, error: outcome.error });
+    return res.status(outcome.status).json({ error: outcome.error, aiUsage: getAiUsageSnapshotForUser(userId) });
+  }
 
+  const estimatedCostUsd = estimateAiCostUsd(totals);
+  const aiMeta = sanitizeAiMessageMeta({
+    model: cfg.model.id,
+    webSearchRequests: outcome.searches,
+    promptTokens: totals.promptTokens,
+    completionTokens: totals.completionTokens,
+    totalTokens: totals.totalTokens,
+    estimatedCostUsd,
+    costSource: 'estimated',
+  });
+  const aiUsage = getAiUsageSnapshotForUser(userId);
+
+  if (outcome.status === 'tool_calls') {
     return res.json({
       ok: true,
       status: 'tool_calls',
-      toolCalls,
-      assistantMessage: {
-        role: 'assistant',
-        content: message.content == null
-          ? null
-          : sanitizeAiText(extractAiMessageText(message.content), MAX_AI_TRANSCRIPT_ASSISTANT_CHARS),
-        tool_calls: buildAiAssistantToolCalls(rawToolCalls),
-      },
+      toolCalls: outcome.toolCalls,
+      transcriptAdditions: outcome.additions,
       aiMeta,
-      aiUsage: getAiUsageSnapshotForUser(userId),
-      debug,
+      aiUsage,
     });
   }
-
-  const answer = extractAiMessageText(message.content);
-  const { meta: aiMeta } = buildAiRoundMeta(payload, selectedTone);
-  recordAiUsageEvent(userId, groupId, aiMeta);
-  const updatedUsage = getAiUsageSnapshotForUser(userId);
-
   res.json({
     ok: true,
     status: 'answer',
-    model: aiMeta?.model || DEFAULT_AI_MODEL,
-    answer,
+    model: cfg.model.id,
+    answer: outcome.answer,
     aiMeta,
-    aiUsage: updatedUsage,
-    debug,
+    aiUsage,
   });
 });
 

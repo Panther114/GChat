@@ -1271,7 +1271,7 @@ textarea::placeholder {
 #profile-modal .profile-modal-card {
   width: min(520px, calc(100vw - 24px)) !important;
   max-width: min(520px, calc(100vw - 24px)) !important;
-  max-height: min(86vh, 560px) !important;
+  max-height: min(86vh, 640px) !important;
   padding: 0 !important;
   overflow: hidden !important;
   display: flex !important;

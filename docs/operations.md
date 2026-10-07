@@ -73,9 +73,19 @@ curl https://<host>/api/admin/users -H "Authorization: Bearer <ADMIN_SECRET>"
 
 returns `id`, `username`, `iconColor` and `createdAt` for every account. No password hashes.
 
-## Ask-AI agent
+## Ask-AI assistant
 
-Off by default. With `AI_ENABLED=1` and a provider key, a message sent in AI mode goes to a DeepSeek V4 Flash agent through OpenCode Go (`OPENCODE_ZEN_API_KEY`), falling back to the DeepSeek API (`DEEPSEEK_API_KEY`). Because messages are encrypted, the agent's tools run in the browser: the server relays tool calls and the client answers from its decrypted cache. The agent can only read the chat it was asked in, at most four tool rounds, 40 messages and 24 KB per history fetch. Daily quotas default to 20,000 tokens per user and 200,000 overall, reset at 04:00 Shanghai time, and each group has its own `ai_enabled` switch.
+Off unless `AI_ENABLED=1`. A message sent in AI mode goes to one model, MiMo V2.6 Flash, through the OpenCode Go subscription (`OPENCODE_ZEN_API_KEY`). Reasoning is fixed to low (thinking off; MiMo has no effort levels) and replies are capped at 1,500 tokens (`AI_MAX_OUTPUT_TOKENS`, 256 to 4,000).
+
+![AI settings](screenshots/web-ai-settings.png)
+
+**Web search.** Set `LANGSEARCH_API_KEY` (free, no card) and the model can search the web when a question needs fresh facts. `TAVILY_API_KEY` (free plan) is an optional backup. Searches run on the server, are cached for ten minutes, and are limited to 25 per user and 120 overall per day (`AI_SEARCH_USER_DAILY_LIMIT`, `AI_SEARCH_GLOBAL_DAILY_LIMIT`). The search query is the only thing that leaves the encrypted chat. Without a key there is no search tool.
+
+**Profile.** Each user can save up to 200 characters of custom instructions in Settings. They are added to the system prompt for that user's questions only.
+
+**History tools.** Because messages are encrypted, the history tools run in the browser: the server relays the tool calls and the client answers from its decrypted cache. The assistant can only read the chat it was asked in, with at most four relayed tool rounds, 40 messages and 24 KB per history fetch.
+
+**Quotas.** Daily tokens default to 20,000 per user and 200,000 overall, reset at 04:00 Shanghai time, and each group has its own `ai_enabled` switch. `OPENCODE_BASE_URL`, `LANGSEARCH_BASE_URL` and `TAVILY_BASE_URL` exist for local testing against a mock.
 
 ## Scaling limits
 

@@ -6,6 +6,8 @@ This document tracks all changes to the Gchat project in a PR-based format.
 
 ## Unreleased
 
+**AI assistant rebuilt.** One model, MiMo V2.6 Flash through OpenCode Go, with reasoning fixed to low so replies are fast and cheap. DeepSeek, the provider fallback chain and the tone picker are gone (the old tones included explicit and abusive personas and were removed). New: free web search (LangSearch, optional Tavily) with per-user and global daily budgets, a saved 200-character model profile per user, a settings card showing the model, reply cap, search budget and daily tokens, and a status line above the composer. The backend moved out of runtime.js into src/server/ai/. `AI_ENABLED=1` now actually enables the feature; a hard-coded shutdown switch had made that impossible.
+
 **CLI 1.2.0: a new terminal UI.** `gchat` now opens a home screen with the animated GChat bird and your chats, and nothing opens until you pick it. From there it works like Claude Code: the UI runs inline in the terminal, `/` opens a command menu, and sign-in, groups, channels, replies, edits, uploads and image previews all work inside it. The mouse works for the footer, the home list and menus. The old full-screen UI is still there as `gchat --classic`. `gchat --server <url>` used to print help; it now opens the UI.
 
 **CLI is faster and steadier.** Starting takes one round trip instead of several and opening a chat takes one more. CSRF tokens are cached, requests time out instead of hanging, dropped reads are retried once, and the socket tries WebSocket first. A crash now restores the terminal. Text from other people is stripped of terminal escape codes before it is printed. Attachments stored in the Railway bucket can now be viewed and saved from the CLI.

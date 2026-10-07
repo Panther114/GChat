@@ -110,8 +110,8 @@
      `--chat-accent` mapping was white (#ffffff) on dark and black on light,
      so unread rows looked like a random "bolded white" left bar. */
   --chat-unread: #a78bfa;
-  /* v1.4.3: AI mode accent is BLUE (button + input text). */
-  --chat-ai: #60a5fa;
+  /* AI mode accent: the text colour itself, so the mode stays black and white. */
+  --chat-ai: #f5f5f5;
 
   /* Bridge legacy vars */
   --bg: var(--chat-surface-deep);
@@ -214,8 +214,8 @@
   --chat-scrim: var(--sx-scrim);
   /* v1.3.13: visible unread highlight in light mode too. */
   --chat-unread: #7c3aed;
-  /* v1.4.3: AI mode accent is BLUE (button + input text). */
-  --chat-ai: #2563eb;
+  /* AI mode accent: the text colour itself, so the mode stays black and white. */
+  --chat-ai: #0a0a0a;
 
   --bg: var(--chat-surface-deep);
   --sidebar-bg: var(--chat-surface);

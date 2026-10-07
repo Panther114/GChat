@@ -1,0 +1,218 @@
+/* GChat AI — black and white surfaces that follow the theme tokens. */
+
+/* ── Composer status line ─────────────────────────────────────────────────── */
+.ai-composer-hint {
+  position: absolute;
+  left: 12px;
+  bottom: calc(100% + 8px);
+  z-index: 26;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 24px);
+  padding: 5px 5px 5px 12px;
+  border: 1px solid var(--chat-border-strong);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--chat-floating) 92%, transparent);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.22);
+  color: var(--chat-muted);
+  font: 500 var(--type-xs) / 1.2 var(--font-ui);
+  animation: ai-hint-in 0.18s ease-out;
+}
+
+.ai-composer-hint[hidden] { display: none; }
+
+.ai-hint-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--chat-text-strong);
+}
+
+.ai-composer-hint.is-busy { padding-right: 12px; }
+.ai-composer-hint.is-busy .ai-hint-dot { animation: ai-hint-pulse 1s ease-in-out infinite; }
+
+.ai-hint-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-hint-link {
+  flex: none;
+  border: 0;
+  border-radius: 999px;
+  padding: 4px 10px;
+  background: var(--chat-hover);
+  color: var(--chat-text);
+  font: inherit;
+  cursor: pointer;
+  transition: background-color 0.18s ease-out, color 0.18s ease-out;
+}
+
+.ai-hint-link:hover { background: var(--chat-border-strong); }
+.ai-hint-link[hidden] { display: none; }
+
+.message-input-bar.ai-mode-active .message-composer-shell {
+  border-color: var(--chat-text-strong) !important;
+}
+
+@keyframes ai-hint-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes ai-hint-pulse {
+  0%, 100% { opacity: 0.25; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.15); }
+}
+
+/* ── AI messages ──────────────────────────────────────────────────────────── */
+.msg-ai-chip {
+  background: var(--chat-text-strong);
+  color: var(--chat-canvas);
+  border: 0;
+}
+
+.msg-ai-meta {
+  justify-content: flex-start;
+  gap: 6px;
+  color: var(--chat-faint) !important;
+  font-size: 11px;
+  letter-spacing: 0.01em;
+}
+
+.msg-ai-meta-info {
+  color: var(--chat-muted);
+  font-weight: 600;
+}
+
+.msg-ai-meta-stats:not(:empty)::before {
+  content: '·';
+  margin-right: 6px;
+}
+
+/* ── Profile panel: AI card ───────────────────────────────────────────────── */
+#profile-modal .ai-panel {
+  flex-direction: column !important;
+  flex-wrap: nowrap !important;
+  align-items: stretch !important;
+  gap: 12px !important;
+  width: 100%;
+}
+
+.ai-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ai-panel-model {
+  color: var(--chat-text-strong);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ai-panel-badge {
+  padding: 2px 9px;
+  border: 1px solid var(--chat-border-strong);
+  border-radius: 999px;
+  color: var(--chat-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.ai-panel-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.ai-panel-facts > div {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--chat-border);
+  border-radius: 10px;
+  background: var(--chat-input);
+}
+
+.ai-panel-facts dt {
+  color: var(--chat-faint);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.ai-panel-facts dd {
+  margin: 2px 0 0;
+  overflow: hidden;
+  color: var(--chat-text-strong);
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#profile-ai-usage-card.is-blocked .usage-bar-fill {
+  background: var(--chat-danger) !important;
+}
+
+.ai-panel-field {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  color: var(--chat-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.ai-panel-count {
+  color: var(--chat-faint);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.ai-profile-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 68px;
+  max-height: 160px;
+  padding: 9px 10px;
+  border: 1px solid var(--chat-border-strong);
+  border-radius: 10px;
+  background: var(--chat-input);
+  color: var(--chat-text);
+  font: 13px / 1.4 var(--font-ui);
+  resize: vertical;
+  transition: border-color 0.18s ease-out, box-shadow 0.18s ease-out;
+}
+
+.ai-profile-input:focus {
+  outline: none;
+  border-color: var(--chat-focus);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--chat-focus) 25%, transparent);
+}
+
+.ai-panel-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.ai-panel-actions .form-error {
+  min-height: 0;
+  margin: 0 auto 0 0;
+}
+
+/* The settings body scrolls; rows must keep their height instead of shrinking. */
+#profile-modal .profile-body > .profile-row {
+  flex-shrink: 0 !important;
+}

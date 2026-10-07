@@ -62,7 +62,7 @@ Load tests and anything that hammers the API must target a local or disposable s
 | `BUCKET_*`, `GCHAT_MEDIA_DIRECT` | for media | Railway bucket for encrypted attachments. See the ops guide before turning it on. |
 | `VAPID_*` | for push | `npx web-push generate-vapid-keys`. |
 | `ADMIN_SECRET` | no | Enables `GET /api/admin/users`. |
-| `AI_ENABLED`, `OPENCODE_ZEN_API_KEY`, `DEEPSEEK_API_KEY` | no | Ask-AI agent. |
+| `AI_ENABLED`, `OPENCODE_ZEN_API_KEY`, `LANGSEARCH_API_KEY` | no | Ask-AI assistant and its free web search. See the ops guide. |
 | `LOGTO_*` | no | Email verification through Logto. |
 
 Hard limits in production: 100 groups per user, 250 members per group, 100 messages per page, eight concurrent push deliveries. Nothing polls; chat data is loaded when you open a group.

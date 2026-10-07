@@ -141,12 +141,10 @@
             rows="1"
           ></textarea>
         </div>
-        <div class="ai-tone-picker" id="ai-tone-picker" hidden role="dialog" aria-label="Choose an AI tone">
-          <div class="ai-tone-picker-head">
-            <span>Choose a tone for GChat AI</span>
-            <span class="ai-tone-picker-hint">1-4 or click · Esc to cancel</span>
-          </div>
-          <div class="ai-tone-picker-grid" id="ai-tone-picker-grid"></div>
+        <div class="ai-composer-hint" id="ai-composer-hint" hidden role="status" aria-live="polite">
+          <span class="ai-hint-dot" aria-hidden="true"></span>
+          <span class="ai-hint-text" id="ai-hint-text"></span>
+          <button class="ai-hint-link" id="ai-hint-settings" type="button">Settings</button>
         </div>
         <button class="btn-send" id="send-btn" title="Send" aria-label="Send" data-icon="send" data-icon-only="true"></button>
         <div class="whisper-picker" id="whisper-picker" hidden>
@@ -368,26 +366,36 @@
 
         <div class="profile-row" data-ai-feature hidden>
           <div class="profile-row-label">AI</div>
-          <div class="profile-row-main profile-ai-stack" id="profile-ai-usage-card">
-            <div class="profile-ai-usage-header">
-              <span>Daily tokens</span>
-              <strong id="profile-ai-usage-value">0 / 0</strong>
+          <div class="profile-row-main ai-panel" id="profile-ai-panel">
+            <div class="ai-panel-head">
+              <span class="ai-panel-model" id="ai-panel-model">MiMo V2.6 Flash</span>
+              <span class="ai-panel-badge" id="ai-panel-effort">Low effort</span>
             </div>
-            <div class="usage-bar-track">
-              <div class="usage-bar-fill" id="profile-ai-usage-fill"></div>
+            <dl class="ai-panel-facts">
+              <div><dt>Reply cap</dt><dd id="ai-panel-cap">—</dd></div>
+              <div><dt>Web search</dt><dd id="ai-panel-search">Off</dd></div>
+            </dl>
+            <div class="profile-ai-stack" id="profile-ai-usage-card">
+              <div class="profile-ai-usage-header">
+                <span>Daily tokens</span>
+                <strong id="profile-ai-usage-value">0 / 0</strong>
+              </div>
+              <div class="usage-bar-track">
+                <div class="usage-bar-fill" id="profile-ai-usage-fill"></div>
+              </div>
+              <div class="profile-ai-usage-note" id="profile-ai-usage-note">Resets 4:00 AM Shanghai</div>
             </div>
-            <div class="profile-ai-usage-note" id="profile-ai-usage-note">Resets 4:00 AM Shanghai</div>
-          </div>
-        </div>
-
-        <div class="profile-row" data-ai-feature hidden>
-          <div class="profile-row-label">AI tone</div>
-          <div class="profile-row-main">
-            <select id="ai-tone-select" class="ai-tone-select" aria-label="AI tone">
-              <option value="casual">Casual</option>
-              <option value="professional">Professional</option>
-              <option value="playful">Playful</option>
-            </select>
+            <label class="ai-panel-field" for="ai-profile-input">
+              <span>Profile</span>
+              <span class="ai-panel-count" id="ai-profile-count">0 / 200</span>
+            </label>
+            <textarea id="ai-profile-input" class="ai-profile-input" rows="3" maxlength="200" spellcheck="true"
+              placeholder="How should GChat AI answer you? For example: short answers, no emoji."></textarea>
+            <div class="ai-panel-actions">
+              <p class="form-error" id="ai-profile-error" role="alert"></p>
+              <button class="btn-secondary btn-sm" id="ai-profile-clear" type="button">Clear</button>
+              <button class="btn-primary btn-sm" id="ai-profile-save" type="button">Save</button>
+            </div>
           </div>
         </div>
 

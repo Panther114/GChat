@@ -22,7 +22,7 @@ test('PWA updates wait for explicit user approval and preserve full request cach
   assert.doesNotMatch(worker, /notificationclose/);
 });
 
-test('temporary AI shutdown overrides the AI_ENABLED flag and uses the stable session secret as the join-code pepper', () => {
+test('the AI assistant is opt-in via AI_ENABLED and the stable session secret is the join-code pepper', () => {
   const sessionSecret = 's'.repeat(32);
   const config = readConfig({
     NODE_ENV: 'production',
@@ -30,13 +30,21 @@ test('temporary AI shutdown overrides the AI_ENABLED flag and uses the stable se
     AI_ENABLED: '1',
     GROUP_KEY_ESCROW_MASTER_KEY: Buffer.alloc(32, 7).toString('base64url'),
   });
-  assert.equal(config.aiEnabled, false);
+  assert.equal(config.aiEnabled, true);
   assert.equal(config.groupCodePepper, sessionSecret);
   assert.equal(
     readConfig({
       NODE_ENV: 'production',
       SESSION_SECRET: sessionSecret,
       AI_ENABLED: '0',
+      GROUP_KEY_ESCROW_MASTER_KEY: Buffer.alloc(32, 7).toString('base64url'),
+    }).aiEnabled,
+    false
+  );
+  assert.equal(
+    readConfig({
+      NODE_ENV: 'production',
+      SESSION_SECRET: sessionSecret,
       GROUP_KEY_ESCROW_MASTER_KEY: Buffer.alloc(32, 7).toString('base64url'),
     }).aiEnabled,
     false

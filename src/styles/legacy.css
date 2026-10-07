@@ -338,19 +338,6 @@ body.auth-body::after {
   background: linear-gradient(90deg, var(--accent) 0%, var(--accent2) 100%);
   transition: width .2s ease;
 }
-.profile-ai-usage-card {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 14px;
-  border-radius: 14px;
-  border: 1px solid rgba(108,99,255,.18);
-  background: rgba(108,99,255,.08);
-}
-.profile-ai-usage-card.is-blocked {
-  border-color: rgba(255,68,102,.25);
-  background: rgba(255,68,102,.08);
-}
 .profile-ai-usage-header {
   display: flex;
   align-items: baseline;
@@ -1372,20 +1359,6 @@ img.gchat-global-icon {
 /* Whisper mode button */
 .btn-whisper-mode { font-size: 16px; }
 .btn-whisper-mode.whisper-active { color: #a78bfa; }
-
-/* AI tone picker (profile panel) — follows the active theme (v1.4.1: the
-   hardcoded dark navy surface made the picker unreadable in light mode). */
-.ai-tone-select {
-  width: 100%;
-  min-height: 38px;
-  border-radius: 8px;
-  border: 1px solid var(--chat-border-strong);
-  background: var(--chat-input);
-  color: var(--chat-text);
-  font-size: 13px;
-  font-family: inherit;
-  padding: 8px 10px;
-}
 
 /* Emoji button */
 .btn-emoji .ui-icon,
